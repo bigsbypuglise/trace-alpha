@@ -69,10 +69,8 @@ jobs:
 
           & "$env:WINDEPLOYQT" --release --compiler-runtime (Join-Path $dist "Trace.exe")
 
-          Copy-Item (Join-Path $env:FFMPEG_BIN "avcodec-*.dll") $dist -Force
-          Copy-Item (Join-Path $env:FFMPEG_BIN "avformat-*.dll") $dist -Force
-          Copy-Item (Join-Path $env:FFMPEG_BIN "avutil-*.dll") $dist -Force
-          Copy-Item (Join-Path $env:FFMPEG_BIN "swscale-*.dll") $dist -Force
+          # Copy all vcpkg FFmpeg runtime dependencies to avoid startup DLL-missing failures.
+          Copy-Item (Join-Path $env:FFMPEG_BIN "*.dll") $dist -Force
 
           $zip = Join-Path $PWD "dist\trace-alpha-windows-x64.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
