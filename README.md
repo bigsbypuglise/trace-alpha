@@ -36,6 +36,14 @@ Use the focused Windows media validation checklist:
 
 - [`docs/windows-validation-checklist.md`](docs/windows-validation-checklist.md)
 
+## Windows portable build (GitHub Actions)
+
+This repo includes a Windows release workflow that builds and packages:
+
+- `trace-alpha-windows-x64.zip` (portable)
+
+Tag pushes matching `v*` create a prerelease with the zip attached.
+
 ## Known limitations
 
 - Build/test matrix is still being established

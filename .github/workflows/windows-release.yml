@@ -1,0 +1,78 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: "6.7.2"
+          modules: "qtimageformats"
+
+      - name: Configure (Release)
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build
+        run: cmake --build build --config Release --parallel
+
+      - name: Locate windeployqt
+        shell: pwsh
+        run: |
+          $windeployqt = Get-ChildItem "${env:Qt6_DIR}\..\..\bin\windeployqt.exe" -ErrorAction SilentlyContinue
+          if (-not $windeployqt) {
+            $windeployqt = Get-ChildItem "$env:RUNNER_WORKSPACE" -Recurse -Filter windeployqt.exe | Select-Object -First 1
+          }
+          if (-not $windeployqt) {
+            throw "windeployqt.exe not found"
+          }
+          "WINDEPLOYQT=$($windeployqt.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+
+      - name: Package portable folder
+        shell: pwsh
+        run: |
+          $exe = Join-Path $PWD "build\app\Release\Trace.exe"
+          if (-not (Test-Path $exe)) {
+            $exe = Get-ChildItem "$PWD\build" -Recurse -Filter Trace.exe | Select-Object -First 1 | ForEach-Object { $_.FullName }
+          }
+          if (-not $exe) {
+            throw "Trace.exe not found"
+          }
+
+          $dist = Join-Path $PWD "dist\trace-alpha-windows-x64"
+          New-Item -ItemType Directory -Path $dist -Force | Out-Null
+          Copy-Item $exe (Join-Path $dist "Trace.exe") -Force
+
+          & "$env:WINDEPLOYQT" --release --compiler-runtime (Join-Path $dist "Trace.exe")
+
+          $zipDir = Join-Path $PWD "dist"
+          $zip = Join-Path $zipDir "trace-alpha-windows-x64.zip"
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: trace-alpha-windows-x64
+          path: dist/trace-alpha-windows-x64.zip
+
+      - name: Attach zip to GitHub Release (tag builds only)
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/trace-alpha-windows-x64.zip
+          generate_release_notes: true
+          prerelease: true
