@@ -1,0 +1,5 @@
+<RCC>
+  <qresource prefix="/icons">
+    <file>../assets/icons/trace_icon_v001.png</file>
+  </qresource>
+</RCC>

@@ -1,5 +1,6 @@
 #include <QApplication>
 #include <QStyleFactory>
+#include <QIcon>
 #include "app/MainWindow.h"
 
 int main(int argc, char* argv[]) {
@@ -7,6 +8,8 @@ int main(int argc, char* argv[]) {
     app.setApplicationName("Trace");
     app.setOrganizationName("Trace Project");
     app.setStyle(QStyleFactory::create("Fusion"));
+    const QIcon appIcon(QStringLiteral(":/icons/trace_icon_v001.png"));
+    app.setWindowIcon(appIcon);
 
     QPalette p = app.palette();
     p.setColor(QPalette::Window, QColor(20, 20, 20));
@@ -18,6 +21,7 @@ int main(int argc, char* argv[]) {
     app.setPalette(p);
 
     trace::app::MainWindow win;
+    win.setWindowIcon(appIcon);
     win.resize(1280, 760);
     win.show();
     return app.exec();

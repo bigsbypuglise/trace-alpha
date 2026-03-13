@@ -44,6 +44,7 @@ add_executable(Trace
   ../src/core/FrameCache.cpp
   ../src/core/VideoDecoderFFmpeg.h
   ../src/core/VideoDecoderFFmpeg.cpp
+  resources.qrc
 )
 
 target_include_directories(Trace PRIVATE ../src)
