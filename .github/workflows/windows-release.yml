@@ -32,14 +32,14 @@ jobs:
       - name: Locate windeployqt
         shell: pwsh
         run: |
-          $windeployqt = Get-ChildItem "${env:Qt6_DIR}\..\..\bin\windeployqt.exe" -ErrorAction SilentlyContinue
-          if (-not $windeployqt) {
-            $windeployqt = Get-ChildItem "$env:RUNNER_WORKSPACE" -Recurse -Filter windeployqt.exe | Select-Object -First 1
+          $windeployqt = Join-Path $env:QT_ROOT_DIR "bin\windeployqt.exe"
+          if (-not (Test-Path $windeployqt)) {
+            $windeployqt = Get-ChildItem "$env:RUNNER_WORKSPACE" -Recurse -Filter windeployqt.exe | Select-Object -First 1 | ForEach-Object { $_.FullName }
           }
           if (-not $windeployqt) {
             throw "windeployqt.exe not found"
           }
-          "WINDEPLOYQT=$($windeployqt.FullName)" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "WINDEPLOYQT=$windeployqt" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Package portable folder
         shell: pwsh
