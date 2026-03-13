@@ -23,23 +23,36 @@ jobs:
           version: "6.7.2"
           modules: "qtimageformats"
 
+      - name: Setup vcpkg + FFmpeg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install ffmpeg:x64-windows
+          "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Configure (Release)
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
 
       - name: Build
         run: cmake --build build --config Release --parallel
 
-      - name: Locate windeployqt
+      - name: Locate tools and FFmpeg runtime
         shell: pwsh
         run: |
           $windeployqt = Join-Path $env:QT_ROOT_DIR "bin\windeployqt.exe"
           if (-not (Test-Path $windeployqt)) {
             $windeployqt = Get-ChildItem "$env:RUNNER_WORKSPACE" -Recurse -Filter windeployqt.exe | Select-Object -First 1 | ForEach-Object { $_.FullName }
           }
-          if (-not $windeployqt) {
-            throw "windeployqt.exe not found"
-          }
+          if (-not $windeployqt) { throw "windeployqt.exe not found" }
+
+          $ffmpegBin = Join-Path $env:VCPKG_ROOT "installed\x64-windows\bin"
+          if (-not (Test-Path $ffmpegBin)) { throw "FFmpeg runtime bin not found: $ffmpegBin" }
+
           "WINDEPLOYQT=$windeployqt" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "FFMPEG_BIN=$ffmpegBin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Package portable folder
         shell: pwsh
@@ -48,9 +61,7 @@ jobs:
           if (-not (Test-Path $exe)) {
             $exe = Get-ChildItem "$PWD\build" -Recurse -Filter Trace.exe | Select-Object -First 1 | ForEach-Object { $_.FullName }
           }
-          if (-not $exe) {
-            throw "Trace.exe not found"
-          }
+          if (-not $exe) { throw "Trace.exe not found" }
 
           $dist = Join-Path $PWD "dist\trace-alpha-windows-x64"
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
@@ -58,8 +69,12 @@ jobs:
 
           & "$env:WINDEPLOYQT" --release --compiler-runtime (Join-Path $dist "Trace.exe")
 
-          $zipDir = Join-Path $PWD "dist"
-          $zip = Join-Path $zipDir "trace-alpha-windows-x64.zip"
+          Copy-Item (Join-Path $env:FFMPEG_BIN "avcodec-*.dll") $dist -Force
+          Copy-Item (Join-Path $env:FFMPEG_BIN "avformat-*.dll") $dist -Force
+          Copy-Item (Join-Path $env:FFMPEG_BIN "avutil-*.dll") $dist -Force
+          Copy-Item (Join-Path $env:FFMPEG_BIN "swscale-*.dll") $dist -Force
+
+          $zip = Join-Path $PWD "dist\trace-alpha-windows-x64.zip"
           if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
 
