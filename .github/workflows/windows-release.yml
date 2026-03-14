@@ -23,12 +23,12 @@ jobs:
           version: "6.7.2"
           modules: "qtimageformats"
 
-      - name: Setup vcpkg + FFmpeg
+      - name: Setup vcpkg + media deps (FFmpeg + OpenImageIO)
         shell: pwsh
         run: |
           git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
-          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install ffmpeg:x64-windows
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install ffmpeg:x64-windows openimageio:x64-windows
           "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
 
       - name: Configure (Release)
