@@ -44,6 +44,11 @@ add_executable(Trace
   ../src/core/FrameCache.cpp
   ../src/core/VideoDecoderFFmpeg.h
   ../src/core/VideoDecoderFFmpeg.cpp
+  ../src/core/FrameSource.h
+  ../src/core/VideoFrameSource.h
+  ../src/core/VideoFrameSource.cpp
+  ../src/core/ImageSequenceFrameSource.h
+  ../src/core/ImageSequenceFrameSource.cpp
   resources.qrc
 )
 

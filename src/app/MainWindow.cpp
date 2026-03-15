@@ -9,6 +9,8 @@
 #include <QMenuBar>
 #include <QMimeData>
 #include <QStatusBar>
+#include <QToolBar>
+#include <QSlider>
 #include <QVBoxLayout>
 #include <QWidget>
 
@@ -19,6 +21,8 @@
 #include "ui/TransportOverlay.h"
 #include "core/SequenceParser.h"
 #include "core/TimeFormat.h"
+#include "core/VideoFrameSource.h"
+#include "core/ImageSequenceFrameSource.h"
 
 namespace trace::app {
 
@@ -31,11 +35,12 @@ MainWindow::MainWindow() {
     setAcceptDrops(true);
     setupUi();
     setupMenus();
+    setupDeveloperTransportBar();
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
-        if (!isVideo_) return;
+        if (!frameSource_ || !frameSource_->canPlay()) return;
 
-        const double fps = std::max(1.0, videoDecoder_.metadata().fps);
+        const double fps = std::max(1.0, frameSource_->fps());
         const double frameDurationMs = 1000.0 / fps;
 
         if (!playbackClock_.isValid()) {
@@ -50,6 +55,7 @@ MainWindow::MainWindow() {
         playbackAccumulatorMs_ -= steps * frameDurationMs;
         if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
 
+        const long long beforeFrame = playback_.state().currentFrame;
         for (int i = 0; i < steps; ++i) playback_.stepForward();
 
         QString error;
@@ -59,6 +65,16 @@ MainWindow::MainWindow() {
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
             if (!error.isEmpty()) statusBar()->showMessage(error, 2000);
+        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+            prefetchNeighbors();
+        }
+
+        const auto st = playback_.state();
+        if (st.currentFrame == beforeFrame && st.maxFrame >= 0 && st.currentFrame >= st.maxFrame) {
+            playTimer_.stop();
+            playback_.pause();
+            playbackClock_.invalidate();
+            playbackAccumulatorMs_ = 0.0;
         }
         refreshHud("Play");
     });
@@ -105,6 +121,102 @@ void MainWindow::setupMenus() {
     fileMenu->addAction(quitAction);
 }
 
+void MainWindow::setupDeveloperTransportBar() {
+    devTransportBar_ = addToolBar("Developer Transport");
+    devTransportBar_->setMovable(false);
+
+    prevFrameAction_ = devTransportBar_->addAction("Previous Frame");
+    connect(prevFrameAction_, &QAction::triggered, this, [this]() {
+        playback_.stepBackward();
+        playback_.pause();
+        playTimer_.stop();
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+
+        QString error;
+        if (!loadCurrentFrame(error)) {
+            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+            playback_.stepForward();
+            loadCurrentFrame(error);
+        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+            prefetchNeighbors();
+        }
+        refreshHud("Prev Frame");
+    });
+
+    playPauseAction_ = devTransportBar_->addAction("Play");
+    connect(playPauseAction_, &QAction::triggered, this, [this]() {
+        togglePlayPause();
+        refreshHud("Play/Pause");
+    });
+
+    nextFrameAction_ = devTransportBar_->addAction("Next Frame");
+    connect(nextFrameAction_, &QAction::triggered, this, [this]() {
+        playback_.stepForward();
+        playback_.pause();
+        playTimer_.stop();
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+
+        QString error;
+        if (!loadCurrentFrame(error)) {
+            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+            playback_.stepBackward();
+            loadCurrentFrame(error);
+        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+            prefetchNeighbors();
+        }
+        refreshHud("Next Frame");
+    });
+
+    timelineSlider_ = new QSlider(Qt::Horizontal, devTransportBar_);
+    timelineSlider_->setMinimum(0);
+    timelineSlider_->setMaximum(0);
+    timelineSlider_->setValue(0);
+    timelineSlider_->setMinimumWidth(220);
+    connect(timelineSlider_, &QSlider::valueChanged, this, [this](int value) {
+        if (suppressSliderSignal_) return;
+        playback_.setCurrentFrame(static_cast<long long>(value));
+        playback_.pause();
+        playTimer_.stop();
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+
+        QString error;
+        if (!loadCurrentFrame(error)) {
+            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+            prefetchNeighbors();
+        }
+        refreshHud("Scrub");
+    });
+    devTransportBar_->addWidget(timelineSlider_);
+
+    syncTransportBar();
+}
+
+void MainWindow::syncTransportBar() {
+    if (!timelineSlider_ || !playPauseAction_) return;
+
+    const auto st = playback_.state();
+    const int maxFrame = static_cast<int>(std::max(0LL, st.maxFrame));
+
+    suppressSliderSignal_ = true;
+    timelineSlider_->setMaximum(maxFrame);
+    timelineSlider_->setValue(static_cast<int>(std::clamp(st.currentFrame, 0LL, st.maxFrame < 0 ? 0LL : st.maxFrame)));
+    suppressSliderSignal_ = false;
+
+    const bool hasPlayableRange = st.maxFrame > 0;
+    const bool hasAnyMedia = st.maxFrame >= 0;
+    const bool playing = st.mode == PlaybackMode::PlayingForward || st.mode == PlaybackMode::PlayingReverse;
+
+    timelineSlider_->setEnabled(hasAnyMedia);
+    prevFrameAction_->setEnabled(hasAnyMedia);
+    nextFrameAction_->setEnabled(hasAnyMedia);
+    playPauseAction_->setEnabled(hasPlayableRange);
+    playPauseAction_->setText(playing ? "Pause" : "Play");
+}
+
 void MainWindow::openFileDialog() {
     const QString filter = "Media (*.mp4 *.mov *.png *.jpg *.jpeg *.tif *.tiff *.exr);;All Files (*.*)";
     const QString path = QFileDialog::getOpenFileName(this, "Open Media", {}, filter);
@@ -116,7 +228,7 @@ void MainWindow::openPath(const QString& path) {
     playbackClock_.invalidate();
     playbackAccumulatorMs_ = 0.0;
     videoDecoder_.close();
-    isVideo_ = false;
+    frameSource_.reset();
 
     trace::core::MediaItem item;
     item.path = path.toStdString();
@@ -127,9 +239,9 @@ void MainWindow::openPath(const QString& path) {
     if (ext == "mp4" || ext == "mov") {
         QString err;
         if (videoDecoder_.open(path, err)) {
-            isVideo_ = true;
             item.kind = MediaKind::VideoFile;
             item.frameCount = videoDecoder_.metadata().frameCount;
+            frameSource_ = std::make_unique<trace::core::VideoFrameSource>(&videoDecoder_);
             playback_.resetForNewMedia(item.frameCount > 0 ? item.frameCount - 1 : -1);
             playback_.setCurrentFrame(0);
         } else {
@@ -137,14 +249,25 @@ void MainWindow::openPath(const QString& path) {
         }
     }
 
-    if (!isVideo_) {
+    if (!frameSource_) {
         const auto seq = trace::core::SequenceParser::detect(item.path);
         if (seq.has_value()) {
             item.kind = MediaKind::ImageSequence;
             item.sequence = seq;
             item.frameCount = static_cast<long long>(seq->frames.size());
-            playback_.resetForNewMedia(item.frameCount - 1);
 
+            QStringList framePaths;
+            framePaths.reserve(static_cast<int>(seq->frames.size()));
+            const QString dir = QString::fromStdString(seq->directory);
+            const QString prefix = QString::fromStdString(seq->prefix);
+            const QString suffix = QString::fromStdString(seq->suffix);
+            for (const int frameNumber : seq->frames) {
+                const QString framePadded = QString("%1").arg(frameNumber, seq->padWidth, 10, QChar('0'));
+                framePaths.push_back(dir + "/" + prefix + framePadded + suffix);
+            }
+            frameSource_ = std::make_unique<trace::core::ImageSequenceFrameSource>(&stillLoader_, framePaths, 24.0);
+
+            playback_.resetForNewMedia(item.frameCount - 1);
             const auto frameNum = trace::core::SequenceParser::extractFrameNumber(item.path);
             long long idx = 0;
             if (frameNum.has_value()) {
@@ -156,7 +279,9 @@ void MainWindow::openPath(const QString& path) {
         } else {
             item.kind = MediaKind::StillImage;
             item.frameCount = 1;
+            frameSource_ = std::make_unique<trace::core::ImageSequenceFrameSource>(&stillLoader_, QStringList{path}, 24.0);
             playback_.resetForNewMedia(0);
+            playback_.setCurrentFrame(0);
         }
     }
 
@@ -171,12 +296,10 @@ void MainWindow::openPath(const QString& path) {
         return;
     }
 
-    if (!isVideo_) prefetchNeighbors();
+    if (currentMedia_->kind == MediaKind::ImageSequence) prefetchNeighbors();
 
-    if (isVideo_) {
-        const auto fps = std::max(1.0, videoDecoder_.metadata().fps);
-        playTimer_.setInterval(static_cast<int>(std::round(1000.0 / fps)));
-    }
+    const auto fps = frameSource_ ? std::max(1.0, frameSource_->fps()) : 24.0;
+    playTimer_.setInterval(static_cast<int>(std::round(1000.0 / fps)));
 
     statusBar()->showMessage("Opened", 1200);
     refreshHud("Open file");
@@ -197,65 +320,63 @@ QString MainWindow::sequenceFramePath(long long frameIndex) const {
 
 bool MainWindow::loadCurrentFrame(QString& error) {
     error.clear();
-    if (!currentMedia_.has_value()) {
+    if (!currentMedia_.has_value() || !frameSource_) {
         error = "No media selected";
         return false;
     }
 
     const long long frameIndex = playback_.state().currentFrame;
+    frameSource_->setCurrentFrame(frameIndex);
 
-    if (isVideo_) {
-        QImage img;
-        if (!videoDecoder_.decodeFrameAt(frameIndex, img, error)) return false;
-
-        trace::core::LoadedImageInfo info;
-        info.filePath = QString::fromStdString(currentMedia_->path);
-        info.fileName = QFileInfo(info.filePath).fileName();
-        info.extension = QFileInfo(info.filePath).suffix().toLower();
-        info.width = img.width();
-        info.height = img.height();
-        info.channels = 3;
-        info.image = img;
-
-        currentImage_ = info;
-        viewer_->setImage(info.image);
-        return true;
+    if (currentMedia_->kind == MediaKind::ImageSequence) {
+        frameCache_.setWindowCenter(frameIndex);
+        if (const auto cached = frameCache_.get(frameIndex); cached.has_value()) {
+            trace::core::LoadedImageInfo info;
+            info.filePath = cached->path;
+            info.fileName = QFileInfo(cached->path).fileName();
+            info.extension = QFileInfo(cached->path).suffix().toLower();
+            info.width = cached->width;
+            info.height = cached->height;
+            info.channels = cached->channels;
+            info.image = cached->image;
+            currentImage_ = info;
+            viewer_->setImage(info.image);
+            syncTransportBar();
+            return true;
+        }
     }
 
-    frameCache_.setWindowCenter(frameIndex);
-    if (const auto cached = frameCache_.get(frameIndex); cached.has_value()) {
-        trace::core::LoadedImageInfo info;
-        info.filePath = cached->path;
-        info.fileName = QFileInfo(cached->path).fileName();
-        info.extension = QFileInfo(cached->path).suffix().toLower();
-        info.width = cached->width;
-        info.height = cached->height;
-        info.channels = cached->channels;
-        info.image = cached->image;
-        currentImage_ = info;
-        viewer_->setImage(info.image);
-        return true;
-    }
+    QImage img;
+    if (!frameSource_->frameAt(frameIndex, img, error)) return false;
 
-    QString path;
-    if (currentMedia_->kind == MediaKind::ImageSequence) path = sequenceFramePath(frameIndex);
-    else path = QString::fromStdString(currentMedia_->path);
+    const QString sourcePath = frameSource_->sourcePathForFrame(frameIndex).isEmpty()
+        ? QString::fromStdString(currentMedia_->path)
+        : frameSource_->sourcePathForFrame(frameIndex);
 
     trace::core::LoadedImageInfo info;
-    if (!stillLoader_.load(path, info, error)) return false;
+    info.filePath = sourcePath;
+    info.fileName = QFileInfo(sourcePath).fileName();
+    info.extension = QFileInfo(sourcePath).suffix().toLower();
+    info.width = img.width();
+    info.height = img.height();
+    info.channels = (currentMedia_->kind == MediaKind::VideoFile) ? 3 : 4;
+    info.image = img;
 
     currentImage_ = info;
     viewer_->setImage(info.image);
 
-    trace::core::CachedFrame cf;
-    cf.frameIndex = frameIndex;
-    cf.path = info.filePath;
-    cf.image = info.image;
-    cf.width = info.width;
-    cf.height = info.height;
-    cf.channels = info.channels;
-    frameCache_.put(cf);
+    if (currentMedia_->kind == MediaKind::ImageSequence) {
+        trace::core::CachedFrame cf;
+        cf.frameIndex = frameIndex;
+        cf.path = info.filePath;
+        cf.image = info.image;
+        cf.width = info.width;
+        cf.height = info.height;
+        cf.channels = info.channels;
+        frameCache_.put(cf);
+    }
 
+    syncTransportBar();
     return true;
 }
 
@@ -285,10 +406,10 @@ void MainWindow::prefetchNeighbors() {
     }
 }
 
-void MainWindow::togglePlayPauseVideo() {
-    if (!isVideo_) {
-        playback_.togglePlayPause();
+void MainWindow::togglePlayPause() {
+    if (!frameSource_ || !frameSource_->canPlay()) {
         playback_.pause();
+        syncTransportBar();
         return;
     }
 
@@ -303,6 +424,7 @@ void MainWindow::togglePlayPauseVideo() {
         playbackAccumulatorMs_ = 0.0;
         playTimer_.start();
     }
+    syncTransportBar();
 }
 
 void MainWindow::refreshHud(const QString& action) {
@@ -318,7 +440,7 @@ void MainWindow::refreshHud(const QString& action) {
     QString line = "No media loaded";
     QString primaryReadout;
 
-    const double fps = isVideo_ ? videoDecoder_.metadata().fps : 24.0;
+    const double fps = frameSource_ ? frameSource_->fps() : 24.0;
     const double sec = trace::core::TimeFormat::frameToSeconds(st.currentFrame, fps);
     const QString tc = trace::core::TimeFormat::frameToTimecode(st.currentFrame, fps);
 
@@ -327,7 +449,7 @@ void MainWindow::refreshHud(const QString& action) {
     else primaryReadout = QString("Timecode: %1").arg(tc);
 
     if (currentMedia_.has_value()) {
-        if (isVideo_) {
+        if (currentMedia_->kind == MediaKind::VideoFile) {
             const auto& vm = videoDecoder_.metadata();
             line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | Frame: %6")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
@@ -362,6 +484,7 @@ void MainWindow::refreshHud(const QString& action) {
 
     overlay_->setTransport(mode, st.currentFrame, st.speed, action.isEmpty() ? primaryReadout : action + " | " + primaryReadout);
     overlay_->setHudLine(line);
+    syncTransportBar();
 }
 
 void MainWindow::keyPressEvent(QKeyEvent* event) {
@@ -369,13 +492,13 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
 
     switch (event->key()) {
         case Qt::Key_Space:
-            togglePlayPauseVideo();
+            togglePlayPause();
             refreshHud("Space");
             return;
         case Qt::Key_Left:
             playback_.stepBackward();
             needsReload = true;
-            if (isVideo_) {
+            if (playTimer_.isActive()) {
                 playTimer_.stop();
                 playbackClock_.invalidate();
                 playbackAccumulatorMs_ = 0.0;
@@ -384,7 +507,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_Right:
             playback_.stepForward();
             needsReload = true;
-            if (isVideo_) {
+            if (playTimer_.isActive()) {
                 playTimer_.stop();
                 playbackClock_.invalidate();
                 playbackAccumulatorMs_ = 0.0;
@@ -393,7 +516,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_J: playback_.jogReverse(); playback_.pause(); refreshHud("J"); return;
         case Qt::Key_K:
             playback_.pause();
-            if (isVideo_) {
+            if (playTimer_.isActive()) {
                 playTimer_.stop();
                 playbackClock_.invalidate();
                 playbackAccumulatorMs_ = 0.0;
@@ -422,7 +545,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
             if (event->key() == Qt::Key_Left) playback_.stepForward();
             else playback_.stepBackward();
-        } else if (!isVideo_) {
+        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
         }
     }
