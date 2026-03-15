@@ -56,7 +56,7 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
     }
 
     std::vector<float> pixels(static_cast<size_t>(width) * static_cast<size_t>(height) * static_cast<size_t>(channels));
-    if (!in->read_image(oiio::TypeDesc::FLOAT, pixels.data())) {
+    if (!in->read_image(0, 0, 0, channels, oiio::TypeDesc::FLOAT, pixels.data())) {
         in->close();
         error = QString("Failed to decode EXR pixels: %1").arg(path);
         return false;
