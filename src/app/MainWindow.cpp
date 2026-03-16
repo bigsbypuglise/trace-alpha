@@ -46,42 +46,25 @@ MainWindow::MainWindow() {
         if (!playbackClock_.isValid()) {
             playbackClock_.start();
             playbackAccumulatorMs_ = 0.0;
-            requestPlaybackPrefetch();
-            refreshHud("Play");
-            return;
+        } else {
+            playbackAccumulatorMs_ += static_cast<double>(playbackClock_.restart());
         }
 
-        playbackAccumulatorMs_ += static_cast<double>(playbackClock_.restart());
-
-        // Lightweight timing governor:
-        // - wait if we're early
-        // - present one frame on time
-        // - skip late intermediate frames (count as dropped) to keep motion stable
-        constexpr int kMaxAdvancePerTick = 4;
-        const int dueFrames = static_cast<int>(std::floor(playbackAccumulatorMs_ / frameDurationMs));
-        if (dueFrames < 1) {
-            requestPlaybackPrefetch();
-            refreshHud("Play");
-            return;
-        }
-
-        const long long beforeFrame = playback_.state().currentFrame;
-        const int advanceFrames = std::clamp(dueFrames, 1, kMaxAdvancePerTick);
-        if (advanceFrames > 1) lateOrDroppedFrames_ += (advanceFrames - 1);
-
-        playback_.setCurrentFrame(beforeFrame + advanceFrames);
-
-        playbackAccumulatorMs_ -= static_cast<double>(advanceFrames) * frameDurationMs;
+        int steps = static_cast<int>(std::floor(playbackAccumulatorMs_ / frameDurationMs));
+        if (steps < 1) steps = 1;
+        playbackAccumulatorMs_ -= steps * frameDurationMs;
         if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
 
+        const long long beforeFrame = playback_.state().currentFrame;
+        for (int i = 0; i < steps; ++i) playback_.stepForward();
+
         QString error;
-        const bool framePresented = loadCurrentFrame(error);
-        if (!framePresented) {
+        if (!loadCurrentFrame(error)) {
+            // During active playback, prefer dropping/deferring late frames over UI-thread stalls.
             ++lateOrDroppedFrames_;
             if (!error.isEmpty()) statusBar()->showMessage(error, 1200);
         }
 
-        updateAdaptivePrefetch(framePresented);
         requestPlaybackPrefetch();
 
         const auto st = playback_.state();
@@ -243,11 +226,6 @@ void MainWindow::openPath(const QString& path) {
     playbackPrefetcher_.configureForSequence({});
     frameSource_.reset();
     lateOrDroppedFrames_ = 0;
-    consecutiveLateTicks_ = 0;
-    consecutiveOnTimeTicks_ = 0;
-    basePrefetchLookahead_ = 6;
-    prefetchLookahead_ = 6;
-    maxPrefetchLookahead_ = 14;
 
     trace::core::MediaItem item;
     item.path = path.toStdString();
@@ -263,11 +241,6 @@ void MainWindow::openPath(const QString& path) {
             frameSource_ = std::make_unique<trace::core::VideoFrameSource>(&videoDecoder_);
             playback_.resetForNewMedia(item.frameCount > 0 ? item.frameCount - 1 : -1);
             playback_.setCurrentFrame(0);
-
-            const QString codec = videoDecoder_.metadata().codecName.toLower();
-            basePrefetchLookahead_ = codec.contains("prores") ? 8 : 6;
-            prefetchLookahead_ = basePrefetchLookahead_;
-            maxPrefetchLookahead_ = 12;
 
             QString prefetchErr;
             if (!playbackPrefetcher_.configureForVideo(path, prefetchErr) && !prefetchErr.isEmpty()) {
@@ -297,12 +270,6 @@ void MainWindow::openPath(const QString& path) {
             frameSource_ = std::make_unique<trace::core::ImageSequenceFrameSource>(&stillLoader_, framePaths, 24.0);
             playbackPrefetcher_.configureForSequence(framePaths);
 
-            const QString sequenceSuffix = QString::fromStdString(seq->suffix).toLower();
-            const bool isExr = sequenceSuffix.endsWith(".exr");
-            basePrefetchLookahead_ = isExr ? 12 : 8;
-            prefetchLookahead_ = basePrefetchLookahead_;
-            maxPrefetchLookahead_ = isExr ? 20 : 14;
-
             playback_.resetForNewMedia(item.frameCount - 1);
             const auto frameNum = trace::core::SequenceParser::extractFrameNumber(item.path);
             long long idx = 0;
@@ -318,9 +285,6 @@ void MainWindow::openPath(const QString& path) {
             const QStringList stillPaths{path};
             frameSource_ = std::make_unique<trace::core::ImageSequenceFrameSource>(&stillLoader_, stillPaths, 24.0);
             playbackPrefetcher_.configureForSequence(stillPaths);
-            basePrefetchLookahead_ = 2;
-            prefetchLookahead_ = 2;
-            maxPrefetchLookahead_ = 4;
             playback_.resetForNewMedia(0);
             playback_.setCurrentFrame(0);
         }
@@ -448,36 +412,12 @@ void MainWindow::requestPlaybackPrefetch() {
 
     const long long current = playback_.state().currentFrame;
     const long long maxFrame = playback_.state().maxFrame;
+    constexpr long long kPrefetchAhead = 6;
 
-    for (long long i = 0; i <= prefetchLookahead_; ++i) {
+    for (long long i = 0; i <= kPrefetchAhead; ++i) {
         const long long idx = current + i;
         if (maxFrame >= 0 && idx > maxFrame) break;
         playbackPrefetcher_.request(idx);
-    }
-}
-
-void MainWindow::updateAdaptivePrefetch(bool framePresentedOnTime) {
-    if (!playTimer_.isActive()) return;
-
-    if (framePresentedOnTime) {
-        ++consecutiveOnTimeTicks_;
-        consecutiveLateTicks_ = 0;
-
-        // If we stay stable for a while, ease back toward baseline.
-        if (consecutiveOnTimeTicks_ >= 24 && prefetchLookahead_ > basePrefetchLookahead_) {
-            --prefetchLookahead_;
-            consecutiveOnTimeTicks_ = 0;
-        }
-        return;
-    }
-
-    ++consecutiveLateTicks_;
-    consecutiveOnTimeTicks_ = 0;
-
-    // If decode is repeatedly late, expand lookahead depth to absorb spikes.
-    if (consecutiveLateTicks_ >= 2 && prefetchLookahead_ < maxPrefetchLookahead_) {
-        ++prefetchLookahead_;
-        consecutiveLateTicks_ = 0;
     }
 }
 
@@ -558,7 +498,7 @@ void MainWindow::refreshHud(const QString& action) {
         }
     }
 
-    line += QString(" | q:%1 drop:%2 la:%3").arg(playbackPrefetcher_.queuedCount()).arg(lateOrDroppedFrames_).arg(prefetchLookahead_);
+    line += QString(" | q:%1 drop:%2").arg(playbackPrefetcher_.queuedCount()).arg(lateOrDroppedFrames_);
 
     overlay_->setTransport(mode, st.currentFrame, st.speed, action.isEmpty() ? primaryReadout : action + " | " + primaryReadout);
     overlay_->setHudLine(line);

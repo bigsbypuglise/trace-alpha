@@ -51,7 +51,6 @@ private:
     bool presentFrame(long long frameIndex, const QImage& image, const QString& sourcePath, int channels);
     QString sequenceFramePath(long long frameIndex) const;
     void requestPlaybackPrefetch();
-    void updateAdaptivePrefetch(bool framePresentedOnTime);
     void togglePlayPause();
     void refreshHud(const QString& action = {});
 
@@ -77,13 +76,6 @@ private:
 
     // Minimal playback diagnostics for tuning smoothness.
     long long lateOrDroppedFrames_ = 0;
-
-    // Playback timing governor + adaptive prefetch tuning.
-    int basePrefetchLookahead_ = 6;
-    int prefetchLookahead_ = 6;
-    int maxPrefetchLookahead_ = 14;
-    int consecutiveLateTicks_ = 0;
-    int consecutiveOnTimeTicks_ = 0;
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;
