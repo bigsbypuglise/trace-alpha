@@ -11,8 +11,9 @@ bool VideoFrameSource::frameAt(long long frameIndex, QImage& outImage, QString& 
         error = "Video source unavailable";
         return false;
     }
-    currentFrame_ = frameIndex;
-    return decoder_->decodeFrameAt(frameIndex, outImage, error);
+    if (!decoder_->decodeFrameAt(frameIndex, outImage, error)) return false;
+    currentFrame_ = decoder_->currentFrame();
+    return true;
 }
 
 double VideoFrameSource::fps() const {

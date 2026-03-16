@@ -12,6 +12,7 @@
 #include "core/FrameCache.h"
 #include "core/VideoDecoderFFmpeg.h"
 #include "core/FrameSource.h"
+#include "core/PlaybackPrefetcher.h"
 
 QT_BEGIN_NAMESPACE
 class QKeyEvent;
@@ -47,8 +48,9 @@ private:
     void openFileDialog();
     void openPath(const QString& path);
     bool loadCurrentFrame(QString& error);
+    bool presentFrame(long long frameIndex, const QImage& image, const QString& sourcePath, int channels);
     QString sequenceFramePath(long long frameIndex) const;
-    void prefetchNeighbors();
+    void requestPlaybackPrefetch();
     void togglePlayPause();
     void refreshHud(const QString& action = {});
 
@@ -65,11 +67,15 @@ private:
     trace::core::StillImageLoader stillLoader_;
     trace::core::FrameCache frameCache_{1};
     trace::core::VideoDecoderFFmpeg videoDecoder_;
+    trace::core::PlaybackPrefetcher playbackPrefetcher_;
     std::unique_ptr<trace::core::FrameSource> frameSource_;
     QTimer playTimer_;
     QElapsedTimer playbackClock_;
     double playbackAccumulatorMs_ = 0.0;
     bool suppressSliderSignal_ = false;
+
+    // Minimal playback diagnostics for tuning smoothness.
+    long long lateOrDroppedFrames_ = 0;
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;

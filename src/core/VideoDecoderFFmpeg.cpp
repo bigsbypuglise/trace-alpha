@@ -196,7 +196,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     auto frameFromPts = [&](int64_t pts) -> long long {
         if (pts == AV_NOPTS_VALUE) return impl_->lastDecodedFrame + 1;
         const int64_t relPts = pts - impl_->streamStartTs;
-        return av_rescale_q(relPts, impl_->streamTimeBase, frameTb);
+        return av_rescale_q_rnd(relPts, impl_->streamTimeBase, frameTb, static_cast<AVRounding>(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
     };
 
     auto convertCurrentFrame = [&]() {
@@ -234,13 +234,18 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                                         ? impl_->frame->best_effort_timestamp
                                         : impl_->frame->pts;
                 long long decodedFrame = frameFromPts(pts);
-                if (decodedFrame <= impl_->lastDecodedFrame) decodedFrame = impl_->lastDecodedFrame + 1;
-                impl_->lastDecodedFrame = decodedFrame;
+                if (decodedFrame < 0) decodedFrame = 0;
+                if (pts == AV_NOPTS_VALUE && decodedFrame <= impl_->lastDecodedFrame) {
+                    decodedFrame = impl_->lastDecodedFrame + 1;
+                }
+                impl_->lastDecodedFrame = std::max(impl_->lastDecodedFrame, decodedFrame);
 
                 if (decodedFrame < target) continue;
 
                 convertCurrentFrame();
-                currentFrame_ = target;
+                // Presentation uses decoded display-order frame ids; caller may request exact target,
+                // but decode responsibility is to deliver the first decodable frame at/after target.
+                currentFrame_ = decodedFrame;
                 return true;
             }
         }

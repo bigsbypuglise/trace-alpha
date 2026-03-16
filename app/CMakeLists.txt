@@ -49,6 +49,8 @@ add_executable(Trace
   ../src/core/VideoFrameSource.cpp
   ../src/core/ImageSequenceFrameSource.h
   ../src/core/ImageSequenceFrameSource.cpp
+  ../src/core/PlaybackPrefetcher.h
+  ../src/core/PlaybackPrefetcher.cpp
   resources.qrc
 )
 
