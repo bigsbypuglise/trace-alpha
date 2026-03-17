@@ -5,12 +5,10 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
-#include <libavutil/imgutils.h>
 }
 #endif
 
 #include <cmath>
-#include <cstring>
 #include <algorithm>
 
 namespace trace::core {
@@ -22,10 +20,8 @@ struct VideoDecoderFFmpeg::Impl {
     const AVCodec* codecDef = nullptr;
     SwsContext* sws = nullptr;
     AVFrame* frame = nullptr;
-    AVFrame* rgb = nullptr;
     AVPacket* pkt = nullptr;
     int streamIndex = -1;
-    uint8_t* rgbBuffer = nullptr;
 
     AVRational streamTimeBase{0, 1};
     AVRational fpsQ{24, 1};
@@ -53,10 +49,6 @@ void VideoDecoderFFmpeg::close() {
 #ifdef TRACE_WITH_FFMPEG
     if (!impl_) return;
 
-    if (impl_->rgbBuffer) av_free(impl_->rgbBuffer);
-    impl_->rgbBuffer = nullptr;
-
-    if (impl_->rgb) av_frame_free(&impl_->rgb);
     if (impl_->frame) av_frame_free(&impl_->frame);
     if (impl_->pkt) av_packet_free(&impl_->pkt);
 
@@ -127,9 +119,8 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     }
 
     impl_->frame = av_frame_alloc();
-    impl_->rgb = av_frame_alloc();
     impl_->pkt = av_packet_alloc();
-    if (!impl_->frame || !impl_->rgb || !impl_->pkt) {
+    if (!impl_->frame || !impl_->pkt) {
         error = "FFmpeg: frame/packet alloc failed";
         close();
         return false;
@@ -137,20 +128,11 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 
     const int w = impl_->codec->width;
     const int h = impl_->codec->height;
-    const int rgbSize = av_image_get_buffer_size(AV_PIX_FMT_RGB24, w, h, 1);
-    impl_->rgbBuffer = static_cast<uint8_t*>(av_malloc(rgbSize));
-    if (!impl_->rgbBuffer) {
-        error = "FFmpeg: rgb buffer alloc failed";
-        close();
-        return false;
-    }
-
-    av_image_fill_arrays(impl_->rgb->data, impl_->rgb->linesize, impl_->rgbBuffer, AV_PIX_FMT_RGB24, w, h, 1);
 
     impl_->sws = sws_getContext(
         w, h, impl_->codec->pix_fmt,
         w, h, AV_PIX_FMT_RGB24,
-        SWS_BILINEAR, nullptr, nullptr, nullptr);
+        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
 
     if (!impl_->sws) {
         error = "FFmpeg: swscale init failed";
@@ -200,20 +182,24 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     };
 
     auto convertCurrentFrame = [&]() {
+        const int w = impl_->codec->width;
+        const int h = impl_->codec->height;
+
+        if (outImage.format() != QImage::Format_RGB888 || outImage.width() != w || outImage.height() != h) {
+            outImage = QImage(w, h, QImage::Format_RGB888);
+        }
+
+        uint8_t* dstData[4] = { outImage.bits(), nullptr, nullptr, nullptr };
+        int dstLinesize[4] = { outImage.bytesPerLine(), 0, 0, 0 };
+
         sws_scale(
             impl_->sws,
             impl_->frame->data,
             impl_->frame->linesize,
             0,
-            impl_->codec->height,
-            impl_->rgb->data,
-            impl_->rgb->linesize);
-
-        QImage img(impl_->codec->width, impl_->codec->height, QImage::Format_RGB888);
-        for (int y = 0; y < impl_->codec->height; ++y) {
-            memcpy(img.scanLine(y), impl_->rgb->data[0] + y * impl_->rgb->linesize[0], static_cast<size_t>(impl_->codec->width * 3));
-        }
-        outImage = img;
+            h,
+            dstData,
+            dstLinesize);
     };
 
     auto decodeUntilTarget = [&](long long target) -> bool {

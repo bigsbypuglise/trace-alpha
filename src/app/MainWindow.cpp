@@ -89,6 +89,12 @@ MainWindow::MainWindow() {
         refreshHud("Play");
     });
 
+    scrubTimer_.setSingleShot(true);
+    scrubTimer_.setInterval(12);
+    connect(&scrubTimer_, &QTimer::timeout, this, [this]() {
+        flushVideoScrub(false);
+    });
+
     statusBar()->showMessage("Ready");
     refreshHud("Idle");
 }
@@ -184,13 +190,49 @@ void MainWindow::setupDeveloperTransportBar() {
     timelineSlider_->setMaximum(0);
     timelineSlider_->setValue(0);
     timelineSlider_->setMinimumWidth(220);
-    connect(timelineSlider_, &QSlider::valueChanged, this, [this](int value) {
+    connect(timelineSlider_, &QSlider::sliderPressed, this, [this]() {
         if (suppressSliderSignal_) return;
-        playback_.setCurrentFrame(static_cast<long long>(value));
+        scrubbing_ = true;
         playback_.pause();
         playTimer_.stop();
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
+    });
+
+    connect(timelineSlider_, &QSlider::sliderReleased, this, [this]() {
+        if (suppressSliderSignal_) return;
+        scrubbing_ = false;
+
+        if (isVideoScrubActive()) {
+            queueVideoScrubFrame(static_cast<long long>(timelineSlider_->value()));
+            flushVideoScrub(true);
+            refreshHud("Scrub Release");
+            return;
+        }
+
+        playback_.setCurrentFrame(static_cast<long long>(timelineSlider_->value()));
+        QString error;
+        if (!loadCurrentFrame(error)) {
+            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+            prefetchNeighbors();
+        }
+        refreshHud("Scrub");
+    });
+
+    connect(timelineSlider_, &QSlider::valueChanged, this, [this](int value) {
+        if (suppressSliderSignal_) return;
+        playback_.pause();
+        playTimer_.stop();
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+
+        if (isVideoScrubActive()) {
+            queueVideoScrubFrame(static_cast<long long>(value));
+            return;
+        }
+
+        playback_.setCurrentFrame(static_cast<long long>(value));
 
         QString error;
         if (!loadCurrentFrame(error)) {
@@ -235,6 +277,10 @@ void MainWindow::openFileDialog() {
 
 void MainWindow::openPath(const QString& path) {
     playTimer_.stop();
+    scrubTimer_.stop();
+    scrubbing_ = false;
+    pendingScrubFrame_ = -1;
+    activeScrubFrame_ = -1;
     playbackClock_.invalidate();
     playbackAccumulatorMs_ = 0.0;
     videoDecoder_.close();
@@ -435,6 +481,56 @@ void MainWindow::togglePlayPause() {
         playTimer_.start();
     }
     syncTransportBar();
+}
+
+bool MainWindow::isVideoScrubActive() const {
+    return currentMedia_.has_value() && currentMedia_->kind == MediaKind::VideoFile;
+}
+
+void MainWindow::queueVideoScrubFrame(long long frameIndex) {
+    pendingScrubFrame_ = frameIndex;
+    playback_.setCurrentFrame(frameIndex);
+
+    if (!scrubbing_) {
+        return;
+    }
+
+    if (!scrubTimer_.isActive()) {
+        scrubTimer_.start();
+    }
+}
+
+void MainWindow::flushVideoScrub(bool forceExact) {
+    scrubTimer_.stop();
+
+    if (!isVideoScrubActive()) {
+        pendingScrubFrame_ = -1;
+        activeScrubFrame_ = -1;
+        return;
+    }
+
+    if (pendingScrubFrame_ < 0) {
+        return;
+    }
+
+    const long long targetFrame = pendingScrubFrame_;
+    if (!forceExact && targetFrame == activeScrubFrame_) {
+        return;
+    }
+
+    activeScrubFrame_ = targetFrame;
+    playback_.setCurrentFrame(targetFrame);
+
+    QString error;
+    if (!loadCurrentFrame(error)) {
+        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+    }
+
+    if (forceExact || !scrubbing_) {
+        pendingScrubFrame_ = -1;
+    } else if (pendingScrubFrame_ != activeScrubFrame_) {
+        scrubTimer_.start();
+    }
 }
 
 void MainWindow::refreshHud(const QString& action) {

@@ -19,16 +19,16 @@ Recent work focused on:
 - deterministic frame-step behavior
 - stabilizing playback timing logic
 
-## Build
+## Build (local, optional)
 
 Trace uses CMake.
 
 ```bash
 cmake -S . -B build
-cmake --build build
+cmake --build build --config Release --target Trace
 ```
 
-> Note: FFmpeg support depends on your local environment and CMake configuration.
+> Note: FFmpeg support is optional and depends on your local environment/toolchain.
 
 ## Validation
 
@@ -38,11 +38,30 @@ Use the focused Windows media validation checklist:
 
 ## Windows portable build (GitHub Actions)
 
-This repo includes a Windows release workflow that builds and packages:
+GitHub Actions is the source of truth for Windows builds.
 
-- `trace-alpha-windows-x64.zip` (portable)
+Workflow behavior:
 
-Tag pushes matching `v*` create a prerelease with the zip attached.
+- **Every push/tag/manual run**: builds on **Windows Server 2022 (VS 2022)** with Qt6 + FFmpeg and uploads a workflow artifact:
+  - `trace-alpha-windows-x64.zip`
+- **Tag pushes matching `v*`**: also create/update a **GitHub prerelease** and attach:
+  - `trace-alpha-windows-x64.zip`
+
+### Download latest Windows build
+
+- **Tagged alpha builds**: GitHub **Releases** page (prerelease asset)
+- **Branch/commit validation builds**: workflow run artifacts in the **Actions** tab
+
+### Trigger a new alpha build/release
+
+Create and push a tag like:
+
+```bash
+git tag v0.1.0-alpha.1
+git push origin v0.1.0-alpha.1
+```
+
+That tag triggers the Windows build and publishes/updates the prerelease asset.
 
 ## Known limitations
 

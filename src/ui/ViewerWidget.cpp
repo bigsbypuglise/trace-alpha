@@ -34,7 +34,8 @@ void ViewerWidget::paintEvent(QPaintEvent* event) {
     if (hasImage_) {
         const QSize fitted = image_.size().scaled(size(), Qt::KeepAspectRatio);
         QRect target((width() - fitted.width()) / 2, (height() - fitted.height()) / 2, fitted.width(), fitted.height());
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        // Prioritize playback responsiveness for large frames (e.g. 4K ProRes).
+        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(target, image_);
         return;
     }

@@ -1,8 +1,10 @@
-name: Windows Release
+name: Windows CI + Alpha Release
 
 on:
   workflow_dispatch:
   push:
+    branches:
+      - "**"
     tags:
       - "v*"
 
@@ -11,81 +13,110 @@ permissions:
 
 jobs:
   build-windows:
-    runs-on: windows-latest
+    name: Build Windows (VS2022, Qt6, FFmpeg)
+    runs-on: windows-2022
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Setup Qt
+      - name: Install Qt 6 (Widgets + imageformats)
         uses: jurplel/install-qt-action@v4
         with:
           version: "6.7.2"
           modules: "qtimageformats"
 
-      - name: Setup vcpkg + media deps (FFmpeg + OpenImageIO)
+      - name: Install vcpkg + FFmpeg
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
-          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install ffmpeg:x64-windows openimageio:x64-windows
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install ffmpeg:x64-windows
           "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Configure (Release)
-        run: >
-          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
-
-      - name: Build
-        run: cmake --build build --config Release --parallel
-
-      - name: Locate tools and FFmpeg runtime
+      - name: Resolve build tools and dependency paths
         shell: pwsh
         run: |
-          $windeployqt = Join-Path $env:QT_ROOT_DIR "bin\windeployqt.exe"
-          if (-not (Test-Path $windeployqt)) {
-            $windeployqt = Get-ChildItem "$env:RUNNER_WORKSPACE" -Recurse -Filter windeployqt.exe | Select-Object -First 1 | ForEach-Object { $_.FullName }
+          $ErrorActionPreference = 'Stop'
+
+          $qtRoot = $env:QT_ROOT_DIR
+          if (-not $qtRoot -or -not (Test-Path $qtRoot)) {
+            throw "QT_ROOT_DIR is missing; Qt install did not complete correctly."
           }
-          if (-not $windeployqt) { throw "windeployqt.exe not found" }
+
+          $windeployqt = Join-Path $qtRoot "bin\windeployqt.exe"
+          if (-not (Test-Path $windeployqt)) {
+            throw "windeployqt.exe not found at expected path: $windeployqt"
+          }
 
           $ffmpegBin = Join-Path $env:VCPKG_ROOT "installed\x64-windows\bin"
-          if (-not (Test-Path $ffmpegBin)) { throw "FFmpeg runtime bin not found: $ffmpegBin" }
+          if (-not (Test-Path $ffmpegBin)) {
+            throw "FFmpeg runtime bin not found: $ffmpegBin"
+          }
 
           "WINDEPLOYQT=$windeployqt" | Out-File -FilePath $env:GITHUB_ENV -Append
           "FFMPEG_BIN=$ffmpegBin" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "CMAKE_PREFIX_PATH=$qtRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
 
-      - name: Package portable folder
+      - name: Configure CMake (Release, VS2022 x64)
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
+          cmake -S . -B build `
+            -G "Visual Studio 17 2022" `
+            -A x64 `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$env:CMAKE_PREFIX_PATH" `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+
+      - name: Build Trace target (Release)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          cmake --build build --config Release --target Trace --parallel
+
+      - name: Package portable ZIP (Trace + Qt + runtime DLLs)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
           $exe = Join-Path $PWD "build\app\Release\Trace.exe"
           if (-not (Test-Path $exe)) {
             $exe = Get-ChildItem "$PWD\build" -Recurse -Filter Trace.exe | Select-Object -First 1 | ForEach-Object { $_.FullName }
           }
-          if (-not $exe) { throw "Trace.exe not found" }
+          if (-not $exe) {
+            throw "Trace.exe not found after build."
+          }
 
-          $dist = Join-Path $PWD "dist\trace-alpha-windows-x64"
+          $distRoot = Join-Path $PWD "dist"
+          $dist = Join-Path $distRoot "trace-alpha-windows-x64"
+          $zip = Join-Path $distRoot "trace-alpha-windows-x64.zip"
+
+          if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
+          if (Test-Path $zip) { Remove-Item $zip -Force }
+
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
           Copy-Item $exe (Join-Path $dist "Trace.exe") -Force
 
           & "$env:WINDEPLOYQT" --release --compiler-runtime (Join-Path $dist "Trace.exe")
 
-          # Copy all vcpkg FFmpeg runtime dependencies to avoid startup DLL-missing failures.
+          # FFmpeg DLLs are required when TRACE_WITH_FFMPEG is enabled.
           Copy-Item (Join-Path $env:FFMPEG_BIN "*.dll") $dist -Force
 
-          $zip = Join-Path $PWD "dist\trace-alpha-windows-x64.zip"
-          if (Test-Path $zip) { Remove-Item $zip -Force }
           Compress-Archive -Path "$dist\*" -DestinationPath $zip
 
-      - name: Upload workflow artifact
+      - name: Upload workflow artifact (every push/tag)
         uses: actions/upload-artifact@v4
         with:
           name: trace-alpha-windows-x64
           path: dist/trace-alpha-windows-x64.zip
+          if-no-files-found: error
 
-      - name: Attach zip to GitHub Release (tag builds only)
+      - name: Publish/Update prerelease asset (tags v*)
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
-          files: dist/trace-alpha-windows-x64.zip
-          generate_release_notes: true
           prerelease: true
+          generate_release_notes: true
+          files: dist/trace-alpha-windows-x64.zip

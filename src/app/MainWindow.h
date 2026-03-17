@@ -51,6 +51,9 @@ private:
     void prefetchNeighbors();
     void togglePlayPause();
     void refreshHud(const QString& action = {});
+    bool isVideoScrubActive() const;
+    void queueVideoScrubFrame(long long frameIndex);
+    void flushVideoScrub(bool forceExact);
 
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
@@ -67,9 +70,13 @@ private:
     trace::core::VideoDecoderFFmpeg videoDecoder_;
     std::unique_ptr<trace::core::FrameSource> frameSource_;
     QTimer playTimer_;
+    QTimer scrubTimer_;
     QElapsedTimer playbackClock_;
     double playbackAccumulatorMs_ = 0.0;
     bool suppressSliderSignal_ = false;
+    bool scrubbing_ = false;
+    long long pendingScrubFrame_ = -1;
+    long long activeScrubFrame_ = -1;
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;
