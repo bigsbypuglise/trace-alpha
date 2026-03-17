@@ -52,8 +52,18 @@ MainWindow::MainWindow() {
 
         int steps = static_cast<int>(std::floor(playbackAccumulatorMs_ / frameDurationMs));
         if (steps < 1) steps = 1;
-        playbackAccumulatorMs_ -= steps * frameDurationMs;
-        if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
+
+        // Keep video playback frame ordering deterministic.
+        // For compressed codecs (notably MP4/H.264), jumping multiple logical
+        // frames in one UI tick can force non-sequential decoder access and
+        // lead to visible bounce-back/jitter. Clamp to single-frame advances.
+        if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::VideoFile) {
+            steps = 1;
+            playbackAccumulatorMs_ = 0.0;
+        } else {
+            playbackAccumulatorMs_ -= steps * frameDurationMs;
+            if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
+        }
 
         const long long beforeFrame = playback_.state().currentFrame;
         for (int i = 0; i < steps; ++i) playback_.stepForward();

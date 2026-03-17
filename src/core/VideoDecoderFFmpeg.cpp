@@ -196,7 +196,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     auto frameFromPts = [&](int64_t pts) -> long long {
         if (pts == AV_NOPTS_VALUE) return impl_->lastDecodedFrame + 1;
         const int64_t relPts = pts - impl_->streamStartTs;
-        return av_rescale_q(relPts, impl_->streamTimeBase, frameTb);
+        return av_rescale_q_rnd(relPts, impl_->streamTimeBase, frameTb, static_cast<AVRounding>(AV_ROUND_NEAR_INF | AV_ROUND_PASS_MINMAX));
     };
 
     auto convertCurrentFrame = [&]() {
@@ -234,13 +234,16 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                                         ? impl_->frame->best_effort_timestamp
                                         : impl_->frame->pts;
                 long long decodedFrame = frameFromPts(pts);
+                if (decodedFrame < 0) decodedFrame = 0;
+
+                // Maintain monotonic logical frame mapping during forward decode.
                 if (decodedFrame <= impl_->lastDecodedFrame) decodedFrame = impl_->lastDecodedFrame + 1;
                 impl_->lastDecodedFrame = decodedFrame;
 
                 if (decodedFrame < target) continue;
 
                 convertCurrentFrame();
-                currentFrame_ = target;
+                currentFrame_ = decodedFrame;
                 return true;
             }
         }
@@ -249,8 +252,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
 
     frameIndex = std::max<long long>(0, frameIndex);
 
-    const bool sequentialStep = (currentFrame_ >= 0 && frameIndex == currentFrame_ + 1);
-    if (!sequentialStep) {
+    // Only seek when moving backward or when decoder has no prior state.
+    // For forward playback, keep decode linear to preserve display order.
+    const bool needSeek = (currentFrame_ < 0) || (frameIndex <= currentFrame_);
+    if (needSeek) {
         const int64_t relTs = av_rescale_q(frameIndex, frameTb, impl_->streamTimeBase);
         const int64_t targetTs = impl_->streamStartTs + relTs;
 
