@@ -3,6 +3,7 @@
 #include <QMainWindow>
 #include <QTimer>
 #include <QElapsedTimer>
+#include <QImage>
 #include <optional>
 #include <memory>
 #include "core/MediaItem.h"
@@ -78,8 +79,13 @@ private:
     long long pendingScrubFrame_ = -1;
     long long activeScrubFrame_ = -1;
 
+    double lastFrameHandoffMs_ = 0.0;
+    double avgFrameHandoffMs_ = 0.0;
+    long long frameHandoffSamples_ = 0;
+
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;
+    QImage videoFrameBuffer_;
 };
 
 } // namespace trace::app

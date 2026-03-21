@@ -14,6 +14,18 @@ struct VideoMetadata {
     QString codecName;
 };
 
+struct VideoPerfStats {
+    double lastDecodeMs = 0.0;
+    double lastConvertMs = 0.0;
+    double lastTotalMs = 0.0;
+    double avgDecodeMs = 0.0;
+    double avgConvertMs = 0.0;
+    double avgTotalMs = 0.0;
+    long long samples = 0;
+    long long reverseCacheHits = 0;
+    long long reverseCacheLookups = 0;
+};
+
 class VideoDecoderFFmpeg {
 public:
     VideoDecoderFFmpeg();
@@ -27,11 +39,13 @@ public:
 
     long long currentFrame() const { return currentFrame_; }
     const VideoMetadata& metadata() const { return metadata_; }
+    const VideoPerfStats& perfStats() const { return perfStats_; }
 
 private:
     struct Impl;
     Impl* impl_ = nullptr;
     VideoMetadata metadata_;
+    VideoPerfStats perfStats_;
     long long currentFrame_ = -1;
 };
 

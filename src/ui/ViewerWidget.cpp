@@ -1,6 +1,7 @@
 #include "ui/ViewerWidget.h"
 
 #include <QPainter>
+#include <QElapsedTimer>
 
 namespace trace::ui {
 
@@ -28,20 +29,27 @@ void ViewerWidget::setCenterText(const QString& text) {
 void ViewerWidget::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
 
+    QElapsedTimer timer;
+    timer.start();
+
     QPainter p(this);
     p.fillRect(rect(), QColor(0, 0, 0));
 
     if (hasImage_) {
         const QSize fitted = image_.size().scaled(size(), Qt::KeepAspectRatio);
         QRect target((width() - fitted.width()) / 2, (height() - fitted.height()) / 2, fitted.width(), fitted.height());
-        // Prioritize playback responsiveness for large frames (e.g. 4K ProRes).
         p.setRenderHint(QPainter::SmoothPixmapTransform, false);
         p.drawImage(target, image_);
-        return;
+    } else {
+        p.setPen(QColor(150, 150, 150));
+        p.drawText(rect(), Qt::AlignCenter, centerText_);
     }
 
-    p.setPen(QColor(150, 150, 150));
-    p.drawText(rect(), Qt::AlignCenter, centerText_);
+    const double paintMs = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
+    perfStats_.lastPaintMs = paintMs;
+    ++perfStats_.samples;
+    const double n = static_cast<double>(perfStats_.samples);
+    perfStats_.avgPaintMs += (paintMs - perfStats_.avgPaintMs) / n;
 }
 
 } // namespace trace::ui

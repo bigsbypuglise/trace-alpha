@@ -40,8 +40,18 @@ MainWindow::MainWindow() {
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
         if (!frameSource_ || !frameSource_->canPlay()) return;
 
+        const auto playbackState = playback_.state();
+        if (playbackState.mode != PlaybackMode::PlayingForward && playbackState.mode != PlaybackMode::PlayingReverse) {
+            playTimer_.stop();
+            playbackClock_.invalidate();
+            playbackAccumulatorMs_ = 0.0;
+            return;
+        }
+
+        const int direction = playbackState.mode == PlaybackMode::PlayingReverse ? -1 : 1;
+        const double speed = std::max(1.0, std::abs(playbackState.speed));
         const double fps = std::max(1.0, frameSource_->fps());
-        const double frameDurationMs = 1000.0 / fps;
+        const double frameDurationMs = 1000.0 / (fps * speed);
 
         if (!playbackClock_.isValid()) {
             playbackClock_.start();
@@ -53,10 +63,6 @@ MainWindow::MainWindow() {
         int steps = static_cast<int>(std::floor(playbackAccumulatorMs_ / frameDurationMs));
         if (steps < 1) steps = 1;
 
-        // Keep video playback frame ordering deterministic.
-        // For compressed codecs (notably MP4/H.264), jumping multiple logical
-        // frames in one UI tick can force non-sequential decoder access and
-        // lead to visible bounce-back/jitter. Clamp to single-frame advances.
         if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::VideoFile) {
             steps = 1;
             playbackAccumulatorMs_ = 0.0;
@@ -65,11 +71,16 @@ MainWindow::MainWindow() {
             if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
         }
 
-        const long long beforeFrame = playback_.state().currentFrame;
-        for (int i = 0; i < steps; ++i) playback_.stepForward();
+        const long long beforeFrame = playbackState.currentFrame;
+        const long long unclampedTarget = beforeFrame + static_cast<long long>(direction) * steps;
+        const long long minFrame = 0;
+        const long long maxFrame = playbackState.maxFrame >= 0 ? playbackState.maxFrame : beforeFrame;
+        const long long targetFrame = std::clamp(unclampedTarget, minFrame, maxFrame);
+        playback_.setCurrentFrame(targetFrame);
 
         QString error;
         if (!loadCurrentFrame(error)) {
+            playback_.setCurrentFrame(beforeFrame);
             playTimer_.stop();
             playback_.pause();
             playbackClock_.invalidate();
@@ -79,14 +90,13 @@ MainWindow::MainWindow() {
             prefetchNeighbors();
         }
 
-        const auto st = playback_.state();
-        if (st.currentFrame == beforeFrame && st.maxFrame >= 0 && st.currentFrame >= st.maxFrame) {
+        if (targetFrame == beforeFrame || (direction > 0 && targetFrame >= maxFrame) || (direction < 0 && targetFrame <= minFrame)) {
             playTimer_.stop();
             playback_.pause();
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
         }
-        refreshHud("Play");
+        refreshHud(direction > 0 ? "Play" : "Reverse Play");
     });
 
     scrubTimer_.setSingleShot(true);
@@ -285,6 +295,10 @@ void MainWindow::openPath(const QString& path) {
     playbackAccumulatorMs_ = 0.0;
     videoDecoder_.close();
     frameSource_.reset();
+    videoFrameBuffer_ = QImage();
+    lastFrameHandoffMs_ = 0.0;
+    avgFrameHandoffMs_ = 0.0;
+    frameHandoffSamples_ = 0;
 
     trace::core::MediaItem item;
     item.path = path.toStdString();
@@ -402,24 +416,38 @@ bool MainWindow::loadCurrentFrame(QString& error) {
         }
     }
 
-    QImage img;
-    if (!frameSource_->frameAt(frameIndex, img, error)) return false;
+    QImage decodedImage;
+    QImage* targetImage = &decodedImage;
+
+    if (currentMedia_->kind == MediaKind::VideoFile) {
+        targetImage = &videoFrameBuffer_;
+    }
+
+    if (!frameSource_->frameAt(frameIndex, *targetImage, error)) return false;
 
     const QString sourcePath = frameSource_->sourcePathForFrame(frameIndex).isEmpty()
         ? QString::fromStdString(currentMedia_->path)
         : frameSource_->sourcePathForFrame(frameIndex);
 
+    QElapsedTimer handoffTimer;
+    handoffTimer.start();
+
     trace::core::LoadedImageInfo info;
     info.filePath = sourcePath;
     info.fileName = QFileInfo(sourcePath).fileName();
     info.extension = QFileInfo(sourcePath).suffix().toLower();
-    info.width = img.width();
-    info.height = img.height();
-    info.channels = (currentMedia_->kind == MediaKind::VideoFile) ? 3 : 4;
-    info.image = img;
+    info.width = targetImage->width();
+    info.height = targetImage->height();
+    info.channels = 4;
+    info.image = *targetImage;
 
     currentImage_ = info;
-    viewer_->setImage(info.image);
+    viewer_->setImage(*targetImage);
+
+    lastFrameHandoffMs_ = static_cast<double>(handoffTimer.nsecsElapsed()) / 1'000'000.0;
+    ++frameHandoffSamples_;
+    const double handoffN = static_cast<double>(frameHandoffSamples_);
+    avgFrameHandoffMs_ += (lastFrameHandoffMs_ - avgFrameHandoffMs_) / handoffN;
 
     if (currentMedia_->kind == MediaKind::ImageSequence) {
         trace::core::CachedFrame cf;
@@ -557,13 +585,30 @@ void MainWindow::refreshHud(const QString& action) {
     if (currentMedia_.has_value()) {
         if (currentMedia_->kind == MediaKind::VideoFile) {
             const auto& vm = videoDecoder_.metadata();
-            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | Frame: %6")
+            const auto& perf = videoDecoder_.perfStats();
+            const auto& drawPerf = viewer_->perfStats();
+            const double reverseHitRate = perf.reverseCacheLookups > 0
+                ? (100.0 * static_cast<double>(perf.reverseCacheHits) / static_cast<double>(perf.reverseCacheLookups))
+                : 0.0;
+
+            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | F:%6 | dec %7ms/%8 | cvt %9ms/%10 | handoff %11ms/%12 | draw %13ms/%14 | rev-hit %15%% (%16/%17)")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
                 .arg(vm.width)
                 .arg(vm.height)
                 .arg(QString::number(vm.fps, 'f', 3))
                 .arg(vm.codecName)
-                .arg(st.currentFrame);
+                .arg(st.currentFrame)
+                .arg(QString::number(perf.lastDecodeMs, 'f', 2))
+                .arg(QString::number(perf.avgDecodeMs, 'f', 2))
+                .arg(QString::number(perf.lastConvertMs, 'f', 2))
+                .arg(QString::number(perf.avgConvertMs, 'f', 2))
+                .arg(QString::number(lastFrameHandoffMs_, 'f', 2))
+                .arg(QString::number(avgFrameHandoffMs_, 'f', 2))
+                .arg(QString::number(drawPerf.lastPaintMs, 'f', 2))
+                .arg(QString::number(drawPerf.avgPaintMs, 'f', 2))
+                .arg(QString::number(reverseHitRate, 'f', 1))
+                .arg(perf.reverseCacheHits)
+                .arg(perf.reverseCacheLookups);
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")
@@ -619,7 +664,15 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
                 playbackAccumulatorMs_ = 0.0;
             }
             break;
-        case Qt::Key_J: playback_.jogReverse(); playback_.pause(); refreshHud("J"); return;
+        case Qt::Key_J:
+            if (frameSource_ && frameSource_->canPlay()) {
+                playback_.jogReverse();
+                playbackClock_.start();
+                playbackAccumulatorMs_ = 0.0;
+                if (!playTimer_.isActive()) playTimer_.start();
+            }
+            refreshHud("J");
+            return;
         case Qt::Key_K:
             playback_.pause();
             if (playTimer_.isActive()) {
@@ -629,7 +682,15 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             }
             refreshHud("K");
             return;
-        case Qt::Key_L: playback_.jogForward(); playback_.pause(); refreshHud("L"); return;
+        case Qt::Key_L:
+            if (frameSource_ && frameSource_->canPlay()) {
+                playback_.jogForward();
+                playbackClock_.start();
+                playbackAccumulatorMs_ = 0.0;
+                if (!playTimer_.isActive()) playTimer_.start();
+            }
+            refreshHud("L");
+            return;
         case Qt::Key_F: viewState_.readoutMode = PrimaryReadoutMode::Frame; refreshHud("Readout: Frame"); return;
         case Qt::Key_S: viewState_.readoutMode = PrimaryReadoutMode::Seconds; refreshHud("Readout: Seconds"); return;
         case Qt::Key_T: viewState_.readoutMode = PrimaryReadoutMode::Timecode; refreshHud("Readout: Timecode"); return;
