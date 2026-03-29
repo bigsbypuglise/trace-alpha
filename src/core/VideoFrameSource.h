@@ -16,10 +16,14 @@ public:
     long long maxFrame() const override;
     bool canPlay() const override;
     QString sourcePathForFrame(long long frameIndex) const override;
+    void setRequestMode(VideoDecoderFFmpeg::RequestMode mode) { requestMode_ = mode; }
+    void setPlaybackDirection(int direction) { if (decoder_) decoder_->setPlaybackDirection(direction); }
+    void clearPlaybackQueue() { if (decoder_) decoder_->clearForwardQueue(); }
 
 private:
     VideoDecoderFFmpeg* decoder_ = nullptr;
     long long currentFrame_ = 0;
+    VideoDecoderFFmpeg::RequestMode requestMode_ = VideoDecoderFFmpeg::RequestMode::Playback;
 };
 
 } // namespace trace::core

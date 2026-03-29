@@ -4,6 +4,7 @@
 #include <QTimer>
 #include <QElapsedTimer>
 #include <QImage>
+#include <QString>
 #include <optional>
 #include <memory>
 #include "core/MediaItem.h"
@@ -13,6 +14,7 @@
 #include "core/FrameCache.h"
 #include "core/VideoDecoderFFmpeg.h"
 #include "core/FrameSource.h"
+#include "core/VideoFrameSource.h"
 
 QT_BEGIN_NAMESPACE
 class QKeyEvent;
@@ -47,7 +49,7 @@ private:
     void syncTransportBar();
     void openFileDialog();
     void openPath(const QString& path);
-    bool loadCurrentFrame(QString& error);
+    bool loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpeg::RequestMode mode = trace::core::VideoDecoderFFmpeg::RequestMode::Playback);
     QString sequenceFramePath(long long frameIndex) const;
     void prefetchNeighbors();
     void togglePlayPause();
@@ -55,6 +57,8 @@ private:
     bool isVideoScrubActive() const;
     void queueVideoScrubFrame(long long frameIndex);
     void flushVideoScrub(bool forceExact);
+    trace::core::VideoFrameSource* videoFrameSource();
+    void prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction = 1, bool clearQueue = false);
 
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;

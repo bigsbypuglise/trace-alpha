@@ -78,8 +78,9 @@ MainWindow::MainWindow() {
         const long long targetFrame = std::clamp(unclampedTarget, minFrame, maxFrame);
         playback_.setCurrentFrame(targetFrame);
 
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction);
         QString error;
-        if (!loadCurrentFrame(error)) {
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Playback)) {
             playback_.setCurrentFrame(beforeFrame);
             playTimer_.stop();
             playback_.pause();
@@ -159,11 +160,12 @@ void MainWindow::setupDeveloperTransportBar() {
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
 
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
         QString error;
-        if (!loadCurrentFrame(error)) {
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
             if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
             playback_.stepForward();
-            loadCurrentFrame(error);
+            loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step);
         } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
         }
@@ -184,11 +186,12 @@ void MainWindow::setupDeveloperTransportBar() {
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
 
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         QString error;
-        if (!loadCurrentFrame(error)) {
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
             if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
             playback_.stepBackward();
-            loadCurrentFrame(error);
+            loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step);
         } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
         }
@@ -221,8 +224,9 @@ void MainWindow::setupDeveloperTransportBar() {
         }
 
         playback_.setCurrentFrame(static_cast<long long>(timelineSlider_->value()));
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         QString error;
-        if (!loadCurrentFrame(error)) {
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
             if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
@@ -244,8 +248,9 @@ void MainWindow::setupDeveloperTransportBar() {
 
         playback_.setCurrentFrame(static_cast<long long>(value));
 
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         QString error;
-        if (!loadCurrentFrame(error)) {
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
             if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
@@ -359,8 +364,9 @@ void MainWindow::openPath(const QString& path) {
     frameCache_.clear();
     frameCache_.setWindowCenter(playback_.state().currentFrame);
 
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
     QString error;
-    if (!loadCurrentFrame(error)) {
+    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         refreshHud("Open failed");
         return;
@@ -388,7 +394,7 @@ QString MainWindow::sequenceFramePath(long long frameIndex) const {
     return dir + "/" + prefix + framePadded + suffix;
 }
 
-bool MainWindow::loadCurrentFrame(QString& error) {
+bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpeg::RequestMode mode) {
     error.clear();
     if (!currentMedia_.has_value() || !frameSource_) {
         error = "No media selected";
@@ -397,6 +403,9 @@ bool MainWindow::loadCurrentFrame(QString& error) {
 
     const long long frameIndex = playback_.state().currentFrame;
     frameSource_->setCurrentFrame(frameIndex);
+    if (auto* videoSource = videoFrameSource()) {
+        videoSource->setRequestMode(mode);
+    }
 
     if (currentMedia_->kind == MediaKind::ImageSequence) {
         frameCache_.setWindowCenter(frameIndex);
@@ -504,6 +513,8 @@ void MainWindow::togglePlayPause() {
         playbackAccumulatorMs_ = 0.0;
     } else {
         playback_.togglePlayPause();
+        const int direction = playback_.state().mode == PlaybackMode::PlayingReverse ? -1 : 1;
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
         playbackClock_.start();
         playbackAccumulatorMs_ = 0.0;
         playTimer_.start();
@@ -549,8 +560,9 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     activeScrubFrame_ = targetFrame;
     playback_.setCurrentFrame(targetFrame);
 
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Scrub, 1, true);
     QString error;
-    if (!loadCurrentFrame(error)) {
+    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Scrub)) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
     }
 
@@ -591,24 +603,33 @@ void MainWindow::refreshHud(const QString& action) {
                 ? (100.0 * static_cast<double>(perf.reverseCacheHits) / static_cast<double>(perf.reverseCacheLookups))
                 : 0.0;
 
-            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | F:%6 | dec %7ms/%8 | cvt %9ms/%10 | handoff %11ms/%12 | draw %13ms/%14 | rev-hit %15%% (%16/%17)")
+            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | F:%6 | open %7ms | first %8ms | dec %9ms/%10 | cvt %11ms/%12 | seek %13ms/%14 | q %15/%16 hit %17/%18 | handoff %19ms/%20 | draw %21ms/%22 | rev-hit %23%% (%24/%25) | late %26")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
                 .arg(vm.width)
                 .arg(vm.height)
                 .arg(QString::number(vm.fps, 'f', 3))
                 .arg(vm.codecName)
                 .arg(st.currentFrame)
+                .arg(QString::number(perf.openMs, 'f', 2))
+                .arg(QString::number(perf.firstFrameMs, 'f', 2))
                 .arg(QString::number(perf.lastDecodeMs, 'f', 2))
                 .arg(QString::number(perf.avgDecodeMs, 'f', 2))
                 .arg(QString::number(perf.lastConvertMs, 'f', 2))
                 .arg(QString::number(perf.avgConvertMs, 'f', 2))
+                .arg(QString::number(perf.lastSeekMs, 'f', 2))
+                .arg(QString::number(perf.avgSeekMs, 'f', 2))
+                .arg(perf.forwardQueueDepth)
+                .arg(perf.forwardQueueCapacity)
+                .arg(perf.forwardQueueHits)
+                .arg(perf.forwardQueueMisses)
                 .arg(QString::number(lastFrameHandoffMs_, 'f', 2))
                 .arg(QString::number(avgFrameHandoffMs_, 'f', 2))
                 .arg(QString::number(drawPerf.lastPaintMs, 'f', 2))
                 .arg(QString::number(drawPerf.avgPaintMs, 'f', 2))
                 .arg(QString::number(reverseHitRate, 'f', 1))
                 .arg(perf.reverseCacheHits)
-                .arg(perf.reverseCacheLookups);
+                .arg(perf.reverseCacheLookups)
+                .arg(perf.lateFrames);
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")
@@ -649,6 +670,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_Left:
             playback_.stepBackward();
             needsReload = true;
+            prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
             if (playTimer_.isActive()) {
                 playTimer_.stop();
                 playbackClock_.invalidate();
@@ -658,6 +680,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_Right:
             playback_.stepForward();
             needsReload = true;
+            prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, false);
             if (playTimer_.isActive()) {
                 playTimer_.stop();
                 playbackClock_.invalidate();
@@ -667,6 +690,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_J:
             if (frameSource_ && frameSource_->canPlay()) {
                 playback_.jogReverse();
+                prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, -1, true);
                 playbackClock_.start();
                 playbackAccumulatorMs_ = 0.0;
                 if (!playTimer_.isActive()) playTimer_.start();
@@ -685,6 +709,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_L:
             if (frameSource_ && frameSource_->canPlay()) {
                 playback_.jogForward();
+                prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, 1, false);
                 playbackClock_.start();
                 playbackAccumulatorMs_ = 0.0;
                 if (!playTimer_.isActive()) playTimer_.start();
@@ -708,7 +733,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
 
     if (needsReload) {
         QString error;
-        if (!loadCurrentFrame(error)) {
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
             if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
             if (event->key() == Qt::Key_Left) playback_.stepForward();
             else playback_.stepBackward();
@@ -728,6 +753,20 @@ void MainWindow::dropEvent(QDropEvent* event) {
     if (urls.isEmpty()) return;
     const QString path = urls.first().toLocalFile();
     if (!path.isEmpty()) openPath(path);
+}
+
+trace::core::VideoFrameSource* MainWindow::videoFrameSource() {
+    return dynamic_cast<trace::core::VideoFrameSource*>(frameSource_.get());
+}
+
+void MainWindow::prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction, bool clearQueue) {
+    auto* videoSource = videoFrameSource();
+    if (!videoSource) return;
+    videoSource->setRequestMode(mode);
+    videoSource->setPlaybackDirection(direction);
+    if (clearQueue) {
+        videoSource->clearPlaybackQueue();
+    }
 }
 
 } // namespace trace::app

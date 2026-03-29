@@ -21,13 +21,29 @@ struct VideoPerfStats {
     double avgDecodeMs = 0.0;
     double avgConvertMs = 0.0;
     double avgTotalMs = 0.0;
+    double openMs = 0.0;
+    double firstFrameMs = 0.0;
+    double lastSeekMs = 0.0;
+    double avgSeekMs = 0.0;
+    long long seekSamples = 0;
     long long samples = 0;
     long long reverseCacheHits = 0;
     long long reverseCacheLookups = 0;
+    long long forwardQueueHits = 0;
+    long long forwardQueueMisses = 0;
+    int forwardQueueDepth = 0;
+    int forwardQueueCapacity = 0;
+    long long lateFrames = 0;
 };
 
 class VideoDecoderFFmpeg {
 public:
+    enum class RequestMode {
+        Playback,
+        Scrub,
+        Step
+    };
+
     VideoDecoderFFmpeg();
     ~VideoDecoderFFmpeg();
 
@@ -35,7 +51,9 @@ public:
     void close();
     bool isOpen() const;
 
-    bool decodeFrameAt(long long frameIndex, QImage& outImage, QString& error);
+    bool decodeFrameAt(long long frameIndex, QImage& outImage, QString& error, RequestMode mode = RequestMode::Playback);
+    void setPlaybackDirection(int direction);
+    void clearForwardQueue();
 
     long long currentFrame() const { return currentFrame_; }
     const VideoMetadata& metadata() const { return metadata_; }

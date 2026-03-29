@@ -12,7 +12,7 @@ bool VideoFrameSource::frameAt(long long frameIndex, QImage& outImage, QString& 
         return false;
     }
     currentFrame_ = frameIndex;
-    return decoder_->decodeFrameAt(frameIndex, outImage, error);
+    return decoder_->decodeFrameAt(frameIndex, outImage, error, requestMode_);
 }
 
 double VideoFrameSource::fps() const {
