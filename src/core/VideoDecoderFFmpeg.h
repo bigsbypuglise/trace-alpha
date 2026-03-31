@@ -25,6 +25,18 @@ struct VideoPerfStats {
     double firstFrameMs = 0.0;
     double lastSeekMs = 0.0;
     double avgSeekMs = 0.0;
+
+    double lastConvertAllocMs = 0.0;
+    double avgConvertAllocMs = 0.0;
+    double lastConvertWrapMs = 0.0;
+    double avgConvertWrapMs = 0.0;
+    double lastSwsScaleMs = 0.0;
+    double avgSwsScaleMs = 0.0;
+    double lastMemcpyMs = 0.0;
+    double avgMemcpyMs = 0.0;
+    double lastHandoffMs = 0.0;
+    double avgHandoffMs = 0.0;
+
     long long seekSamples = 0;
     long long samples = 0;
     long long reverseCacheHits = 0;
@@ -34,6 +46,13 @@ struct VideoPerfStats {
     int forwardQueueDepth = 0;
     int forwardQueueCapacity = 0;
     long long lateFrames = 0;
+
+    QString srcPixelFormat;
+    QString dstPixelFormat;
+    int srcBitDepth = 0;
+    bool swsContextReused = false;
+    int fullFrameCopiesPerFrame = 0;
+    bool experimentalFastPathEnabled = false;
 };
 
 class VideoDecoderFFmpeg {
@@ -54,6 +73,7 @@ public:
     bool decodeFrameAt(long long frameIndex, QImage& outImage, QString& error, RequestMode mode = RequestMode::Playback);
     void setPlaybackDirection(int direction);
     void clearForwardQueue();
+    void setHandoffTiming(double handoffMs);
 
     long long currentFrame() const { return currentFrame_; }
     const VideoMetadata& metadata() const { return metadata_; }

@@ -5,6 +5,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
+#include <libavutil/pixdesc.h>
 }
 #endif
 
@@ -13,6 +14,7 @@ extern "C" {
 #include <deque>
 
 #include <QElapsedTimer>
+#include <QByteArray>
 
 namespace trace::core {
 
@@ -25,6 +27,11 @@ struct VideoDecoderFFmpeg::Impl {
     AVFrame* frame = nullptr;
     AVPacket* pkt = nullptr;
     int streamIndex = -1;
+    int swsSrcW = 0;
+    int swsSrcH = 0;
+    AVPixelFormat swsSrcPixFmt = AV_PIX_FMT_NONE;
+    AVPixelFormat dstPixFmt = AV_PIX_FMT_BGRA;
+    bool experimentalFastPath = false;
 
     AVRational streamTimeBase{0, 1};
     AVRational fpsQ{24, 1};
@@ -80,6 +87,12 @@ void VideoDecoderFFmpeg::setPlaybackDirection(int direction) {
 #endif
 }
 
+void VideoDecoderFFmpeg::setHandoffTiming(double handoffMs) {
+    perfStats_.lastHandoffMs = handoffMs;
+    const double sampleCount = perfStats_.samples > 0 ? static_cast<double>(perfStats_.samples) : 1.0;
+    perfStats_.avgHandoffMs += (handoffMs - perfStats_.avgHandoffMs) / sampleCount;
+}
+
 void VideoDecoderFFmpeg::close() {
 #ifdef TRACE_WITH_FFMPEG
     if (!impl_) return;
@@ -94,6 +107,9 @@ void VideoDecoderFFmpeg::close() {
     if (impl_->fmt) avformat_close_input(&impl_->fmt);
 
     impl_->streamIndex = -1;
+    impl_->swsSrcW = 0;
+    impl_->swsSrcH = 0;
+    impl_->swsSrcPixFmt = AV_PIX_FMT_NONE;
     impl_->streamTimeBase = {0, 1};
     impl_->fpsQ = {24, 1};
     impl_->streamStartTs = 0;
@@ -174,10 +190,24 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     const int w = impl_->codec->width;
     const int h = impl_->codec->height;
 
-    impl_->sws = sws_getContext(
+    const QByteArray perfMode = qgetenv("TRACE_PERF_FAST_CONVERT");
+    impl_->experimentalFastPath = !perfMode.isEmpty() && perfMode != "0" && perfMode.compare("false", Qt::CaseInsensitive) != 0;
+    impl_->dstPixFmt = AV_PIX_FMT_BGRA;
+
+    impl_->swsSrcW = w;
+    impl_->swsSrcH = h;
+    impl_->swsSrcPixFmt = impl_->codec->pix_fmt;
+
+    const int swsFlags = impl_->experimentalFastPath
+        ? SWS_FAST_BILINEAR
+        : (SWS_FAST_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND);
+
+    impl_->sws = sws_getCachedContext(
+        nullptr,
         w, h, impl_->codec->pix_fmt,
-        w, h, AV_PIX_FMT_BGRA,
-        SWS_FAST_BILINEAR, nullptr, nullptr, nullptr);
+        w, h, impl_->dstPixFmt,
+        swsFlags,
+        nullptr, nullptr, nullptr);
 
     if (!impl_->sws) {
         error = "FFmpeg: swscale init failed";
@@ -188,6 +218,12 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     metadata_.width = w;
     metadata_.height = h;
     metadata_.codecName = impl_->codecDef->name ? impl_->codecDef->name : "unknown";
+
+    const AVPixFmtDescriptor* srcDesc = av_pix_fmt_desc_get(impl_->codec->pix_fmt);
+    perfStats_.srcPixelFormat = srcDesc && srcDesc->name ? QString::fromUtf8(srcDesc->name) : QStringLiteral("unknown");
+    perfStats_.srcBitDepth = srcDesc ? av_get_bits_per_pixel(srcDesc) : 0;
+    perfStats_.dstPixelFormat = QStringLiteral("BGRA");
+    perfStats_.experimentalFastPathEnabled = impl_->experimentalFastPath;
 
     AVRational fr = av_guess_frame_rate(impl_->fmt, stream, nullptr);
     if (fr.num <= 0 || fr.den <= 0) fr = AVRational{24, 1};
@@ -308,34 +344,98 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
 
     qint64 decodeNs = 0;
     qint64 convertNs = 0;
+    qint64 convertAllocNs = 0;
+    qint64 convertWrapNs = 0;
+    qint64 swsScaleNs = 0;
+    qint64 memcpyNs = 0;
 
     auto updatePerfStats = [&]() {
         const double decodeMs = static_cast<double>(decodeNs) / 1'000'000.0;
         const double convertMs = static_cast<double>(convertNs) / 1'000'000.0;
         const double totalMs = decodeMs + convertMs;
+        const double allocMs = static_cast<double>(convertAllocNs) / 1'000'000.0;
+        const double wrapMs = static_cast<double>(convertWrapNs) / 1'000'000.0;
+        const double swsMs = static_cast<double>(swsScaleNs) / 1'000'000.0;
+        const double memcpyMs = static_cast<double>(memcpyNs) / 1'000'000.0;
 
         perfStats_.lastDecodeMs = decodeMs;
         perfStats_.lastConvertMs = convertMs;
         perfStats_.lastTotalMs = totalMs;
+        perfStats_.lastConvertAllocMs = allocMs;
+        perfStats_.lastConvertWrapMs = wrapMs;
+        perfStats_.lastSwsScaleMs = swsMs;
+        perfStats_.lastMemcpyMs = memcpyMs;
 
         ++perfStats_.samples;
         const double n = static_cast<double>(perfStats_.samples);
         perfStats_.avgDecodeMs += (decodeMs - perfStats_.avgDecodeMs) / n;
         perfStats_.avgConvertMs += (convertMs - perfStats_.avgConvertMs) / n;
         perfStats_.avgTotalMs += (totalMs - perfStats_.avgTotalMs) / n;
+        perfStats_.avgConvertAllocMs += (allocMs - perfStats_.avgConvertAllocMs) / n;
+        perfStats_.avgConvertWrapMs += (wrapMs - perfStats_.avgConvertWrapMs) / n;
+        perfStats_.avgSwsScaleMs += (swsMs - perfStats_.avgSwsScaleMs) / n;
+        perfStats_.avgMemcpyMs += (memcpyMs - perfStats_.avgMemcpyMs) / n;
         updateForwardDepth();
     };
 
     auto convertCurrentFrame = [&](QImage& image) {
-        const int w = impl_->codec->width;
-        const int h = impl_->codec->height;
+        const int w = impl_->frame->width > 0 ? impl_->frame->width : impl_->codec->width;
+        const int h = impl_->frame->height > 0 ? impl_->frame->height : impl_->codec->height;
+        const AVPixelFormat srcPixFmt = static_cast<AVPixelFormat>(impl_->frame->format);
+        const AVPixFmtDescriptor* srcDesc = av_pix_fmt_desc_get(srcPixFmt);
+        perfStats_.srcPixelFormat = srcDesc && srcDesc->name ? QString::fromUtf8(srcDesc->name) : QStringLiteral("unknown");
+        perfStats_.srcBitDepth = srcDesc ? av_get_bits_per_pixel(srcDesc) : 0;
 
-        if (image.format() != QImage::Format_ARGB32 || image.width() != w || image.height() != h) {
-            image = QImage(w, h, QImage::Format_ARGB32);
+        bool recreatedSws = false;
+        if (!impl_->sws || impl_->swsSrcW != w || impl_->swsSrcH != h || impl_->swsSrcPixFmt != srcPixFmt) {
+            recreatedSws = true;
+            const int swsFlags = impl_->experimentalFastPath
+                ? SWS_FAST_BILINEAR
+                : (SWS_FAST_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND);
+
+            QElapsedTimer wrapTimer;
+            wrapTimer.start();
+            impl_->sws = sws_getCachedContext(
+                impl_->sws,
+                w, h, srcPixFmt,
+                w, h, impl_->dstPixFmt,
+                swsFlags,
+                nullptr, nullptr, nullptr);
+            convertWrapNs += wrapTimer.nsecsElapsed();
+            impl_->swsSrcW = w;
+            impl_->swsSrcH = h;
+            impl_->swsSrcPixFmt = srcPixFmt;
+        }
+        perfStats_.swsContextReused = !recreatedSws;
+
+        if (!impl_->sws) {
+            return;
         }
 
+#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
+        constexpr QImage::Format kDefaultFrameFormat = QImage::Format_BGRX8888;
+#else
+        constexpr QImage::Format kDefaultFrameFormat = QImage::Format_ARGB32;
+#endif
+        const QImage::Format kFrameFormat = impl_->experimentalFastPath ? QImage::Format_RGB32 : kDefaultFrameFormat;
+        perfStats_.dstPixelFormat = impl_->experimentalFastPath ? QStringLiteral("RGB32") : QStringLiteral("BGRX8888/BGRA");
+
+        if (image.format() != kFrameFormat || image.width() != w || image.height() != h || image.isNull()) {
+            QElapsedTimer allocTimer;
+            allocTimer.start();
+            image = QImage(w, h, kFrameFormat);
+            convertAllocNs += allocTimer.nsecsElapsed();
+        }
+
+        if (image.isNull()) {
+            return;
+        }
+
+        QElapsedTimer wrapTimer;
+        wrapTimer.start();
         uint8_t* dstData[4] = { image.bits(), nullptr, nullptr, nullptr };
         int dstLinesize[4] = { image.bytesPerLine(), 0, 0, 0 };
+        convertWrapNs += wrapTimer.nsecsElapsed();
 
         QElapsedTimer timer;
         timer.start();
@@ -347,7 +447,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             h,
             dstData,
             dstLinesize);
-        convertNs += timer.nsecsElapsed();
+        const qint64 swsNs = timer.nsecsElapsed();
+        swsScaleNs += swsNs;
+        convertNs += swsNs;
+
+        perfStats_.fullFrameCopiesPerFrame = 1;
     };
 
     auto decodeUntilTarget = [&](long long target, bool fillForwardQueue) -> bool {

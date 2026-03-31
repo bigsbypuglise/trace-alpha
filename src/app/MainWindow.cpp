@@ -448,12 +448,18 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     info.width = targetImage->width();
     info.height = targetImage->height();
     info.channels = 4;
-    info.image = *targetImage;
 
-    currentImage_ = info;
-    viewer_->setImage(*targetImage);
+    if (currentMedia_->kind == MediaKind::VideoFile) {
+        currentImage_ = info;
+        viewer_->setImage(*targetImage);
+    } else {
+        info.image = *targetImage;
+        currentImage_ = info;
+        viewer_->setImage(info.image);
+    }
 
     lastFrameHandoffMs_ = static_cast<double>(handoffTimer.nsecsElapsed()) / 1'000'000.0;
+    videoDecoder_.setHandoffTiming(lastFrameHandoffMs_);
     ++frameHandoffSamples_;
     const double handoffN = static_cast<double>(frameHandoffSamples_);
     avgFrameHandoffMs_ += (lastFrameHandoffMs_ - avgFrameHandoffMs_) / handoffN;
@@ -603,12 +609,17 @@ void MainWindow::refreshHud(const QString& action) {
                 ? (100.0 * static_cast<double>(perf.reverseCacheHits) / static_cast<double>(perf.reverseCacheLookups))
                 : 0.0;
 
-            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | F:%6 | open %7ms | first %8ms | dec %9ms/%10 | cvt %11ms/%12 | seek %13ms/%14 | q %15/%16 hit %17/%18 | handoff %19ms/%20 | draw %21ms/%22 | rev-hit %23%% (%24/%25) | late %26")
+            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | src %6 %7b -> dst %8 | sws %9 | copies %10 | F:%11 | open %12ms | first %13ms | dec %14/%15 | cvt %16/%17 | sws %18/%19 | alloc %20/%21 | wrap %22/%23 | memcpy %24/%25 | seek %26/%27 | q %28/%29 hit %30/%31 | handoff %32/%33 | draw %34/%35 | rev-hit %36%% (%37/%38) | late %39")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
                 .arg(vm.width)
                 .arg(vm.height)
                 .arg(QString::number(vm.fps, 'f', 3))
                 .arg(vm.codecName)
+                .arg(perf.srcPixelFormat)
+                .arg(perf.srcBitDepth)
+                .arg(perf.dstPixelFormat)
+                .arg(perf.swsContextReused ? "reuse" : "rebuild")
+                .arg(perf.fullFrameCopiesPerFrame)
                 .arg(st.currentFrame)
                 .arg(QString::number(perf.openMs, 'f', 2))
                 .arg(QString::number(perf.firstFrameMs, 'f', 2))
@@ -616,14 +627,22 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.avgDecodeMs, 'f', 2))
                 .arg(QString::number(perf.lastConvertMs, 'f', 2))
                 .arg(QString::number(perf.avgConvertMs, 'f', 2))
+                .arg(QString::number(perf.lastSwsScaleMs, 'f', 2))
+                .arg(QString::number(perf.avgSwsScaleMs, 'f', 2))
+                .arg(QString::number(perf.lastConvertAllocMs, 'f', 2))
+                .arg(QString::number(perf.avgConvertAllocMs, 'f', 2))
+                .arg(QString::number(perf.lastConvertWrapMs, 'f', 2))
+                .arg(QString::number(perf.avgConvertWrapMs, 'f', 2))
+                .arg(QString::number(perf.lastMemcpyMs, 'f', 2))
+                .arg(QString::number(perf.avgMemcpyMs, 'f', 2))
                 .arg(QString::number(perf.lastSeekMs, 'f', 2))
                 .arg(QString::number(perf.avgSeekMs, 'f', 2))
                 .arg(perf.forwardQueueDepth)
                 .arg(perf.forwardQueueCapacity)
                 .arg(perf.forwardQueueHits)
                 .arg(perf.forwardQueueMisses)
-                .arg(QString::number(lastFrameHandoffMs_, 'f', 2))
-                .arg(QString::number(avgFrameHandoffMs_, 'f', 2))
+                .arg(QString::number(perf.lastHandoffMs, 'f', 2))
+                .arg(QString::number(perf.avgHandoffMs, 'f', 2))
                 .arg(QString::number(drawPerf.lastPaintMs, 'f', 2))
                 .arg(QString::number(drawPerf.avgPaintMs, 'f', 2))
                 .arg(QString::number(reverseHitRate, 'f', 1))
