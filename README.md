@@ -36,21 +36,29 @@ Use the focused Windows media validation checklist:
 
 - [`docs/windows-validation-checklist.md`](docs/windows-validation-checklist.md)
 
-## Windows portable build (GitHub Actions)
+## Windows distribution (alpha): portable ZIP only
+
+For the current alpha stage, Trace ships as a **portable Windows ZIP** (no installer yet).
 
 GitHub Actions is the source of truth for Windows builds.
 
 Workflow behavior:
 
-- **Every push/tag/manual run**: builds on **Windows Server 2022 (VS 2022)** with Qt6 + FFmpeg and uploads a workflow artifact:
-  - `trace-alpha-windows-x64.zip`
-- **Tag pushes matching `v*`**: also create/update a **GitHub prerelease** and attach:
-  - `trace-alpha-windows-x64.zip`
+- **Every push/tag/manual run**: builds on **Windows Server 2022 (VS 2022)** with Qt6 + FFmpeg and uploads:
+  - workflow artifact: `trace-alpha-windows-x64.zip`
+- **Tag pushes matching `v*`**: also create/update a **GitHub prerelease** with:
+  - release asset: `trace-alpha-windows-x64.zip`
+
+Portable ZIP contents include:
+
+- `Trace.exe`
+- required Qt runtime files (via `windeployqt`)
+- required FFmpeg runtime DLLs
 
 ### Download latest Windows build
 
-- **Tagged alpha builds**: GitHub **Releases** page (prerelease asset)
-- **Branch/commit validation builds**: workflow run artifacts in the **Actions** tab
+- **Latest tagged alpha build**: GitHub **Releases** → download `trace-alpha-windows-x64.zip`
+- **Latest branch/commit validation build**: GitHub **Actions** → latest run → **Artifacts** → `trace-alpha-windows-x64`
 
 ### Trigger a new alpha build/release
 
@@ -61,10 +69,19 @@ git tag v0.1.0-alpha.1
 git push origin v0.1.0-alpha.1
 ```
 
-That tag triggers the Windows build and publishes/updates the prerelease asset.
+That tag triggers the Windows build and publishes/updates the prerelease ZIP asset.
+
+Release-note wording reference: [`docs/release-notes-alpha.md`](docs/release-notes-alpha.md)
+
+## Future installer note (not in current scope)
+
+Consider adding a Windows installer later when all are true:
+
+- packaging layout is stable
+- playback behavior is stable enough for broader testing
+- file associations / Start Menu shortcuts become important
 
 ## Known limitations
 
 - Build/test matrix is still being established
-- Public release packaging not finalized
 - Validation is in progress for H.264 MP4 and ProRes MOV edge cases
