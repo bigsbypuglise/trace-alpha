@@ -6,6 +6,7 @@ extern "C" {
 #include <libavcodec/avcodec.h>
 #include <libswscale/swscale.h>
 #include <libavutil/pixdesc.h>
+#include <libavutil/opt.h>
 }
 #endif
 
@@ -17,6 +18,51 @@ extern "C" {
 #include <QByteArray>
 
 namespace trace::core {
+
+#ifdef TRACE_WITH_FFMPEG
+namespace {
+
+int swsFlagsFor(bool fast) {
+    // Fast: cheapest conversion path for real-time playback/scrubbing.
+    // Accurate: full chroma interpolation + accurate rounding for paused
+    // frame inspection (Step mode), where exactness matters more than speed.
+    return fast ? SWS_FAST_BILINEAR
+                : (SWS_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND);
+}
+
+SwsContext* createSwsContext(int w, int h, AVPixelFormat srcFmt, AVPixelFormat dstFmt, bool fast) {
+    const int flags = swsFlagsFor(fast);
+
+#if LIBSWSCALE_VERSION_INT >= AV_VERSION_INT(6, 7, 100)
+    // FFmpeg 5.1+: slice-threaded swscale. threads=0 means auto (per CPU count).
+    SwsContext* ctx = sws_alloc_context();
+    if (ctx) {
+        av_opt_set_int(ctx, "srcw", w, 0);
+        av_opt_set_int(ctx, "srch", h, 0);
+        av_opt_set_int(ctx, "src_format", srcFmt, 0);
+        av_opt_set_int(ctx, "dstw", w, 0);
+        av_opt_set_int(ctx, "dsth", h, 0);
+        av_opt_set_int(ctx, "dst_format", dstFmt, 0);
+        av_opt_set_int(ctx, "sws_flags", flags, 0);
+        av_opt_set_int(ctx, "threads", 0, 0);
+        if (sws_init_context(ctx, nullptr, nullptr) < 0) {
+            sws_freeContext(ctx);
+            ctx = nullptr;
+        }
+        if (ctx) return ctx;
+    }
+#endif
+
+    return sws_getContext(w, h, srcFmt, w, h, dstFmt, flags, nullptr, nullptr, nullptr);
+}
+
+bool envFlagSet(const char* name) {
+    const QByteArray v = qgetenv(name);
+    return !v.isEmpty() && v != "0" && v.compare("false", Qt::CaseInsensitive) != 0;
+}
+
+} // namespace
+#endif
 
 struct VideoDecoderFFmpeg::Impl {
 #ifdef TRACE_WITH_FFMPEG
@@ -30,8 +76,13 @@ struct VideoDecoderFFmpeg::Impl {
     int swsSrcW = 0;
     int swsSrcH = 0;
     AVPixelFormat swsSrcPixFmt = AV_PIX_FMT_NONE;
+    bool swsIsFast = false;
     AVPixelFormat dstPixFmt = AV_PIX_FMT_BGRA;
-    bool experimentalFastPath = false;
+
+    // Env overrides for A/B testing; when neither is set, conversion quality
+    // is chosen per request mode (fast for Playback/Scrub, accurate for Step).
+    bool forceFastConvert = false;
+    bool forceAccurateConvert = false;
 
     AVRational streamTimeBase{0, 1};
     AVRational fpsQ{24, 1};
@@ -45,9 +96,6 @@ struct VideoDecoderFFmpeg::Impl {
     };
     std::deque<CachedFrame> reverseCache;
     int reverseCacheCapacity = 12;
-
-    std::deque<CachedFrame> forwardQueue;
-    int forwardQueueCapacity = 3;
 #endif
 };
 
@@ -67,21 +115,16 @@ bool VideoDecoderFFmpeg::isOpen() const {
 }
 
 void VideoDecoderFFmpeg::clearForwardQueue() {
-#ifdef TRACE_WITH_FFMPEG
-    if (!impl_) return;
-    impl_->forwardQueue.clear();
+    // The synchronous forward-fill queue was removed: it decoded several
+    // frames per timer tick in bursts, causing a rhythmic stutter on 4K
+    // ProRes. Playback now decodes exactly one frame per request.
     perfStats_.forwardQueueDepth = 0;
-#endif
 }
 
 void VideoDecoderFFmpeg::setPlaybackDirection(int direction) {
 #ifdef TRACE_WITH_FFMPEG
     if (!impl_) return;
-    const int normalized = direction < 0 ? -1 : 1;
-    if (impl_->playbackDirection != normalized) {
-        impl_->playbackDirection = normalized;
-        clearForwardQueue();
-    }
+    impl_->playbackDirection = direction < 0 ? -1 : 1;
 #else
     Q_UNUSED(direction);
 #endif
@@ -110,13 +153,13 @@ void VideoDecoderFFmpeg::close() {
     impl_->swsSrcW = 0;
     impl_->swsSrcH = 0;
     impl_->swsSrcPixFmt = AV_PIX_FMT_NONE;
+    impl_->swsIsFast = false;
     impl_->streamTimeBase = {0, 1};
     impl_->fpsQ = {24, 1};
     impl_->streamStartTs = 0;
     impl_->lastDecodedFrame = -1;
     impl_->playbackDirection = 1;
     impl_->reverseCache.clear();
-    impl_->forwardQueue.clear();
 #endif
     currentFrame_ = -1;
     metadata_ = {};
@@ -171,7 +214,7 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     }
 
     impl_->codec->thread_count = 0;
-    impl_->codec->thread_type = FF_THREAD_FRAME;
+    impl_->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
 
     if (avcodec_open2(impl_->codec, impl_->codecDef, nullptr) < 0) {
         error = "FFmpeg: codec open failed";
@@ -190,25 +233,16 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     const int w = impl_->codec->width;
     const int h = impl_->codec->height;
 
-    const QByteArray perfMode = qgetenv("TRACE_PERF_FAST_CONVERT");
-    impl_->experimentalFastPath = !perfMode.isEmpty() && perfMode != "0" && perfMode.compare("false", Qt::CaseInsensitive) != 0;
+    impl_->forceFastConvert = envFlagSet("TRACE_PERF_FAST_CONVERT");
+    impl_->forceAccurateConvert = envFlagSet("TRACE_PERF_ACCURATE_CONVERT");
     impl_->dstPixFmt = AV_PIX_FMT_BGRA;
 
     impl_->swsSrcW = w;
     impl_->swsSrcH = h;
     impl_->swsSrcPixFmt = impl_->codec->pix_fmt;
+    impl_->swsIsFast = false;
 
-    const int swsFlags = impl_->experimentalFastPath
-        ? SWS_FAST_BILINEAR
-        : (SWS_FAST_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND);
-
-    impl_->sws = sws_getCachedContext(
-        nullptr,
-        w, h, impl_->codec->pix_fmt,
-        w, h, impl_->dstPixFmt,
-        swsFlags,
-        nullptr, nullptr, nullptr);
-
+    impl_->sws = createSwsContext(w, h, impl_->codec->pix_fmt, impl_->dstPixFmt, impl_->swsIsFast);
     if (!impl_->sws) {
         error = "FFmpeg: swscale init failed";
         close();
@@ -222,8 +256,8 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     const AVPixFmtDescriptor* srcDesc = av_pix_fmt_desc_get(impl_->codec->pix_fmt);
     perfStats_.srcPixelFormat = srcDesc && srcDesc->name ? QString::fromUtf8(srcDesc->name) : QStringLiteral("unknown");
     perfStats_.srcBitDepth = srcDesc ? av_get_bits_per_pixel(srcDesc) : 0;
-    perfStats_.dstPixelFormat = QStringLiteral("BGRA");
-    perfStats_.experimentalFastPathEnabled = impl_->experimentalFastPath;
+    perfStats_.dstPixelFormat = QStringLiteral("BGRX8888");
+    perfStats_.experimentalFastPathEnabled = impl_->forceFastConvert;
 
     AVRational fr = av_guess_frame_rate(impl_->fmt, stream, nullptr);
     if (fr.num <= 0 || fr.den <= 0) fr = AVRational{24, 1};
@@ -239,7 +273,7 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     if (impl_->fmt->duration > 0) metadata_.durationSeconds = impl_->fmt->duration / static_cast<double>(AV_TIME_BASE);
 
     perfStats_.openMs = static_cast<double>(openTimer.nsecsElapsed()) / 1'000'000.0;
-    perfStats_.forwardQueueCapacity = impl_->forwardQueueCapacity;
+    perfStats_.forwardQueueCapacity = 0;
 
     error.clear();
     return true;
@@ -260,6 +294,13 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     const AVRational frameTb{impl_->fpsQ.den, impl_->fpsQ.num};
     frameIndex = std::max<long long>(0, frameIndex);
 
+    // Conversion quality per request: fast while frames are in motion
+    // (playback, scrubbing), accurate when the user is inspecting a frame
+    // (stepping / paused landing frame). Env vars override for A/B testing.
+    bool wantFastConvert = (mode != RequestMode::Step);
+    if (impl_->forceFastConvert) wantFastConvert = true;
+    if (impl_->forceAccurateConvert) wantFastConvert = false;
+
     auto pushReverseCache = [&](long long cachedFrame, const QImage& image) {
         if (cachedFrame < 0 || image.isNull()) return;
 
@@ -272,54 +313,6 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         while (static_cast<int>(impl_->reverseCache.size()) > impl_->reverseCacheCapacity) {
             impl_->reverseCache.pop_front();
         }
-    };
-
-    auto updateForwardDepth = [&]() {
-        perfStats_.forwardQueueDepth = static_cast<int>(impl_->forwardQueue.size());
-        perfStats_.forwardQueueCapacity = impl_->forwardQueueCapacity;
-    };
-
-    auto pruneForwardQueue = [&](long long keepFromFrame) {
-        while (!impl_->forwardQueue.empty() && impl_->forwardQueue.front().frame < keepFromFrame) {
-            impl_->forwardQueue.pop_front();
-        }
-        updateForwardDepth();
-    };
-
-    auto pushForwardQueue = [&](long long cachedFrame, const QImage& image) {
-        if (mode != RequestMode::Playback || impl_->playbackDirection < 0) return;
-        if (cachedFrame < 0 || image.isNull()) return;
-
-        if (!impl_->forwardQueue.empty() && impl_->forwardQueue.back().frame == cachedFrame) {
-            impl_->forwardQueue.back().image = image;
-            updateForwardDepth();
-            return;
-        }
-
-        impl_->forwardQueue.push_back({cachedFrame, image});
-        while (static_cast<int>(impl_->forwardQueue.size()) > impl_->forwardQueueCapacity) {
-            impl_->forwardQueue.pop_front();
-        }
-        updateForwardDepth();
-    };
-
-    auto tryForwardQueue = [&](long long wantedFrame) -> bool {
-        if (mode != RequestMode::Playback || impl_->playbackDirection < 0) return false;
-        pruneForwardQueue(wantedFrame);
-        for (auto it = impl_->forwardQueue.begin(); it != impl_->forwardQueue.end(); ++it) {
-            if (it->frame == wantedFrame) {
-                ++perfStats_.forwardQueueHits;
-                outImage = it->image;
-                currentFrame_ = wantedFrame;
-                impl_->lastDecodedFrame = std::max(impl_->lastDecodedFrame, wantedFrame);
-                impl_->forwardQueue.erase(it);
-                updateForwardDepth();
-                error.clear();
-                return true;
-            }
-        }
-        ++perfStats_.forwardQueueMisses;
-        return false;
     };
 
     auto tryReverseCache = [&](long long wantedFrame) -> bool {
@@ -375,7 +368,6 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.avgConvertWrapMs += (wrapMs - perfStats_.avgConvertWrapMs) / n;
         perfStats_.avgSwsScaleMs += (swsMs - perfStats_.avgSwsScaleMs) / n;
         perfStats_.avgMemcpyMs += (memcpyMs - perfStats_.avgMemcpyMs) / n;
-        updateForwardDepth();
     };
 
     auto convertCurrentFrame = [&](QImage& image) {
@@ -386,39 +378,35 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.srcPixelFormat = srcDesc && srcDesc->name ? QString::fromUtf8(srcDesc->name) : QStringLiteral("unknown");
         perfStats_.srcBitDepth = srcDesc ? av_get_bits_per_pixel(srcDesc) : 0;
 
-        bool recreatedSws = false;
-        if (!impl_->sws || impl_->swsSrcW != w || impl_->swsSrcH != h || impl_->swsSrcPixFmt != srcPixFmt) {
-            recreatedSws = true;
-            const int swsFlags = impl_->experimentalFastPath
-                ? SWS_FAST_BILINEAR
-                : (SWS_FAST_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND);
+        const bool needRebuild = !impl_->sws
+            || impl_->swsSrcW != w
+            || impl_->swsSrcH != h
+            || impl_->swsSrcPixFmt != srcPixFmt
+            || impl_->swsIsFast != wantFastConvert;
 
+        if (needRebuild) {
             QElapsedTimer wrapTimer;
             wrapTimer.start();
-            impl_->sws = sws_getCachedContext(
-                impl_->sws,
-                w, h, srcPixFmt,
-                w, h, impl_->dstPixFmt,
-                swsFlags,
-                nullptr, nullptr, nullptr);
+            if (impl_->sws) sws_freeContext(impl_->sws);
+            impl_->sws = createSwsContext(w, h, srcPixFmt, impl_->dstPixFmt, wantFastConvert);
             convertWrapNs += wrapTimer.nsecsElapsed();
             impl_->swsSrcW = w;
             impl_->swsSrcH = h;
             impl_->swsSrcPixFmt = srcPixFmt;
+            impl_->swsIsFast = wantFastConvert;
         }
-        perfStats_.swsContextReused = !recreatedSws;
+        perfStats_.swsContextReused = !needRebuild;
+        perfStats_.experimentalFastPathEnabled = wantFastConvert;
 
         if (!impl_->sws) {
             return;
         }
 
 #if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-        constexpr QImage::Format kDefaultFrameFormat = QImage::Format_BGRX8888;
+        constexpr QImage::Format kFrameFormat = QImage::Format_BGRX8888;
 #else
-        constexpr QImage::Format kDefaultFrameFormat = QImage::Format_ARGB32;
+        constexpr QImage::Format kFrameFormat = QImage::Format_ARGB32;
 #endif
-        const QImage::Format kFrameFormat = impl_->experimentalFastPath ? QImage::Format_RGB32 : kDefaultFrameFormat;
-        perfStats_.dstPixelFormat = impl_->experimentalFastPath ? QStringLiteral("RGB32") : QStringLiteral("BGRX8888/BGRA");
 
         if (image.format() != kFrameFormat || image.width() != w || image.height() != h || image.isNull()) {
             QElapsedTimer allocTimer;
@@ -454,7 +442,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.fullFrameCopiesPerFrame = 1;
     };
 
-    auto decodeUntilTarget = [&](long long target, bool fillForwardQueue) -> bool {
+    // Decode linearly until the target frame is produced. Exactly one output
+    // frame is converted per request (plus near-target frames cached for
+    // reverse stepping). No forward fill: steady per-tick cost avoids the
+    // burst stutter the old queue caused on heavy codecs (4K ProRes).
+    auto decodeUntilTarget = [&](long long target) -> bool {
         while (true) {
             QElapsedTimer readSendTimer;
             readSendTimer.start();
@@ -502,47 +494,23 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                     continue;
                 }
 
-                if (decodedFrame == target) {
-                    convertCurrentFrame(outImage);
-                    currentFrame_ = decodedFrame;
-                    pushReverseCache(decodedFrame, outImage);
-                    if (!fillForwardQueue) {
-                        return true;
-                    }
-                    continue;
-                }
-
-                if (fillForwardQueue && decodedFrame > target) {
-                    QImage queued;
-                    convertCurrentFrame(queued);
-                    pushForwardQueue(decodedFrame, queued);
-                    if (static_cast<int>(impl_->forwardQueue.size()) >= impl_->forwardQueueCapacity) {
-                        return !outImage.isNull();
-                    }
-                    continue;
-                }
-
-                if (decodedFrame > target && outImage.isNull()) {
-                    convertCurrentFrame(outImage);
-                    currentFrame_ = decodedFrame;
-                    pushReverseCache(decodedFrame, outImage);
-                    return true;
-                }
+                // decodedFrame >= target: convert and return it. Frames are
+                // emitted in presentation order, so an overshoot means the
+                // exact target does not exist in the stream; showing the
+                // first frame at/after the target keeps ordering stable.
+                convertCurrentFrame(outImage);
+                currentFrame_ = decodedFrame;
+                pushReverseCache(decodedFrame, outImage);
+                return true;
             }
         }
         return !outImage.isNull();
     };
 
     const bool requestIsBackward = currentFrame_ >= 0 && frameIndex < currentFrame_;
-    const bool requestIsSequentialForward = (mode == RequestMode::Playback && impl_->playbackDirection > 0 && currentFrame_ >= 0 && frameIndex == currentFrame_ + 1);
-
-    if (requestIsSequentialForward && tryForwardQueue(frameIndex)) {
-        updatePerfStats();
-        return true;
-    }
+    const bool requestIsSequentialForward = currentFrame_ >= 0 && frameIndex == currentFrame_ + 1;
 
     if (requestIsBackward && tryReverseCache(frameIndex)) {
-        clearForwardQueue();
         updatePerfStats();
         return true;
     }
@@ -555,8 +523,6 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         (!requestIsSequentialForward && frameIndex > currentFrame_ + 1);
 
     if (needSeek) {
-        clearForwardQueue();
-
         const int64_t relTs = av_rescale_q(frameIndex, frameTb, impl_->streamTimeBase);
         const int64_t targetTs = impl_->streamStartTs + relTs;
 
@@ -576,8 +542,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         impl_->lastDecodedFrame = frameIndex > 0 ? frameIndex - 1 : -1;
     }
 
-    const bool fillForwardQueue = (mode == RequestMode::Playback && impl_->playbackDirection > 0);
-    if (!decodeUntilTarget(frameIndex, fillForwardQueue)) {
+    if (!decodeUntilTarget(frameIndex)) {
         error = "No decodable frame at target position";
         return false;
     }
