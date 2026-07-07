@@ -203,6 +203,10 @@ void MainWindow::setupDeveloperTransportBar() {
     timelineSlider_->setMaximum(0);
     timelineSlider_->setValue(0);
     timelineSlider_->setMinimumWidth(220);
+    // Keyboard is reserved for transport (arrow-key stepping, J-K-L). If the
+    // slider kept focus after a drag, arrows would move the slider instead of
+    // stepping frames.
+    timelineSlider_->setFocusPolicy(Qt::NoFocus);
     connect(timelineSlider_, &QSlider::sliderPressed, this, [this]() {
         if (suppressSliderSignal_) return;
         scrubbing_ = true;
@@ -536,13 +540,13 @@ void MainWindow::queueVideoScrubFrame(long long frameIndex) {
     pendingScrubFrame_ = frameIndex;
     playback_.setCurrentFrame(frameIndex);
 
-    if (!scrubbing_) {
-        return;
-    }
-
-    if (!scrubTimer_.isActive()) {
-        scrubTimer_.start();
-    }
+    // If a coalescing window is open, the timer picks up the latest pending
+    // frame when it fires. Otherwise respond immediately (snappy first frame),
+    // then open a window so rapid slider moves coalesce instead of stacking
+    // one synchronous decode per event.
+    if (scrubTimer_.isActive()) return;
+    flushVideoScrub(false);
+    scrubTimer_.start();
 }
 
 void MainWindow::flushVideoScrub(bool forceExact) {
@@ -566,9 +570,15 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     activeScrubFrame_ = targetFrame;
     playback_.setCurrentFrame(targetFrame);
 
-    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Scrub, 1, true);
+    // Mid-drag frames use Scrub (fast, half-res preview at 4K). The landing
+    // frame — slider release or a jump while not dragging — uses Step so the
+    // frame being inspected is full-res and accurately converted.
+    const auto mode = (forceExact || !scrubbing_)
+        ? trace::core::VideoDecoderFFmpeg::RequestMode::Step
+        : trace::core::VideoDecoderFFmpeg::RequestMode::Scrub;
+    prepareVideoRequest(mode, 1, true);
     QString error;
-    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Scrub)) {
+    if (!loadCurrentFrame(error, mode)) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
     }
 

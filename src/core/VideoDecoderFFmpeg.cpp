@@ -30,18 +30,18 @@ int swsFlagsFor(bool fast) {
                 : (SWS_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND);
 }
 
-SwsContext* createSwsContext(int w, int h, AVPixelFormat srcFmt, AVPixelFormat dstFmt, bool fast) {
+SwsContext* createSwsContext(int srcW, int srcH, AVPixelFormat srcFmt, int dstW, int dstH, AVPixelFormat dstFmt, bool fast) {
     const int flags = swsFlagsFor(fast);
 
 #if LIBSWSCALE_VERSION_INT >= AV_VERSION_INT(6, 7, 100)
     // FFmpeg 5.1+: slice-threaded swscale. threads=0 means auto (per CPU count).
     SwsContext* ctx = sws_alloc_context();
     if (ctx) {
-        av_opt_set_int(ctx, "srcw", w, 0);
-        av_opt_set_int(ctx, "srch", h, 0);
+        av_opt_set_int(ctx, "srcw", srcW, 0);
+        av_opt_set_int(ctx, "srch", srcH, 0);
         av_opt_set_int(ctx, "src_format", srcFmt, 0);
-        av_opt_set_int(ctx, "dstw", w, 0);
-        av_opt_set_int(ctx, "dsth", h, 0);
+        av_opt_set_int(ctx, "dstw", dstW, 0);
+        av_opt_set_int(ctx, "dsth", dstH, 0);
         av_opt_set_int(ctx, "dst_format", dstFmt, 0);
         av_opt_set_int(ctx, "sws_flags", flags, 0);
         av_opt_set_int(ctx, "threads", 0, 0);
@@ -53,7 +53,7 @@ SwsContext* createSwsContext(int w, int h, AVPixelFormat srcFmt, AVPixelFormat d
     }
 #endif
 
-    return sws_getContext(w, h, srcFmt, w, h, dstFmt, flags, nullptr, nullptr, nullptr);
+    return sws_getContext(srcW, srcH, srcFmt, dstW, dstH, dstFmt, flags, nullptr, nullptr, nullptr);
 }
 
 bool envFlagSet(const char* name) {
@@ -75,6 +75,8 @@ struct VideoDecoderFFmpeg::Impl {
     int streamIndex = -1;
     int swsSrcW = 0;
     int swsSrcH = 0;
+    int swsDstW = 0;
+    int swsDstH = 0;
     AVPixelFormat swsSrcPixFmt = AV_PIX_FMT_NONE;
     bool swsIsFast = false;
     AVPixelFormat dstPixFmt = AV_PIX_FMT_BGRA;
@@ -239,10 +241,12 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 
     impl_->swsSrcW = w;
     impl_->swsSrcH = h;
+    impl_->swsDstW = w;
+    impl_->swsDstH = h;
     impl_->swsSrcPixFmt = impl_->codec->pix_fmt;
     impl_->swsIsFast = false;
 
-    impl_->sws = createSwsContext(w, h, impl_->codec->pix_fmt, impl_->dstPixFmt, impl_->swsIsFast);
+    impl_->sws = createSwsContext(w, h, impl_->codec->pix_fmt, w, h, impl_->dstPixFmt, impl_->swsIsFast);
     if (!impl_->sws) {
         error = "FFmpeg: swscale init failed";
         close();
@@ -378,9 +382,22 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.srcPixelFormat = srcDesc && srcDesc->name ? QString::fromUtf8(srcDesc->name) : QStringLiteral("unknown");
         perfStats_.srcBitDepth = srcDesc ? av_get_bits_per_pixel(srcDesc) : 0;
 
+        // Scrub preview converts at half resolution for large sources: the
+        // sws conversion dominates per-frame cost at 4K and the viewer
+        // upscales to fit anyway. The landing frame (Step mode, sent on
+        // slider release) is always converted at full resolution.
+        int dstW = w;
+        int dstH = h;
+        if (mode == RequestMode::Scrub && w >= 1920) {
+            dstW = (w / 2) & ~1;
+            dstH = (h / 2) & ~1;
+        }
+
         const bool needRebuild = !impl_->sws
             || impl_->swsSrcW != w
             || impl_->swsSrcH != h
+            || impl_->swsDstW != dstW
+            || impl_->swsDstH != dstH
             || impl_->swsSrcPixFmt != srcPixFmt
             || impl_->swsIsFast != wantFastConvert;
 
@@ -388,10 +405,12 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             QElapsedTimer wrapTimer;
             wrapTimer.start();
             if (impl_->sws) sws_freeContext(impl_->sws);
-            impl_->sws = createSwsContext(w, h, srcPixFmt, impl_->dstPixFmt, wantFastConvert);
+            impl_->sws = createSwsContext(w, h, srcPixFmt, dstW, dstH, impl_->dstPixFmt, wantFastConvert);
             convertWrapNs += wrapTimer.nsecsElapsed();
             impl_->swsSrcW = w;
             impl_->swsSrcH = h;
+            impl_->swsDstW = dstW;
+            impl_->swsDstH = dstH;
             impl_->swsSrcPixFmt = srcPixFmt;
             impl_->swsIsFast = wantFastConvert;
         }
@@ -406,10 +425,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // exactly QImage::Format_RGB32's 0xffRRGGBB layout (alpha ignored).
         constexpr QImage::Format kFrameFormat = QImage::Format_RGB32;
 
-        if (image.format() != kFrameFormat || image.width() != w || image.height() != h || image.isNull()) {
+        if (image.format() != kFrameFormat || image.width() != dstW || image.height() != dstH || image.isNull()) {
             QElapsedTimer allocTimer;
             allocTimer.start();
-            image = QImage(w, h, kFrameFormat);
+            image = QImage(dstW, dstH, kFrameFormat);
             convertAllocNs += allocTimer.nsecsElapsed();
         }
 
@@ -438,6 +457,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         convertNs += swsNs;
 
         perfStats_.fullFrameCopiesPerFrame = 1;
+        perfStats_.dstPixelFormat = dstW != w ? QStringLiteral("RGB32/BGRA half") : QStringLiteral("RGB32/BGRA");
     };
 
     // Decode linearly until the target frame is produced. Exactly one output
@@ -483,8 +503,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 impl_->lastDecodedFrame = decodedFrame;
 
                 if (decodedFrame < target) {
+                    // Cache frames near the target for reverse stepping —
+                    // but never during Scrub: previews are half-res and the
+                    // extra conversions would drag scrub latency down.
                     const long long deltaToTarget = target - decodedFrame;
-                    if (deltaToTarget <= impl_->reverseCacheCapacity) {
+                    if (mode != RequestMode::Scrub && deltaToTarget <= impl_->reverseCacheCapacity) {
                         QImage cached;
                         convertCurrentFrame(cached);
                         pushReverseCache(decodedFrame, cached);
@@ -498,7 +521,9 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 // first frame at/after the target keeps ordering stable.
                 convertCurrentFrame(outImage);
                 currentFrame_ = decodedFrame;
-                pushReverseCache(decodedFrame, outImage);
+                // Half-res scrub previews must not enter the reverse cache:
+                // a later backward step would show a soft frame while paused.
+                if (mode != RequestMode::Scrub) pushReverseCache(decodedFrame, outImage);
                 return true;
             }
         }
@@ -518,6 +543,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         (frameIndex < currentFrame_) ||
         (mode == RequestMode::Scrub) ||
         (mode == RequestMode::Step && std::llabs(frameIndex - currentFrame_) > 1) ||
+        // Re-request of the currently shown frame outside playback: seek so
+        // the frame is re-decoded (e.g. full-res Step after a half-res
+        // scrub preview of the same frame) instead of decoding forward.
+        (mode != RequestMode::Playback && frameIndex == currentFrame_) ||
         (!requestIsSequentialForward && frameIndex > currentFrame_ + 1);
 
     if (needSeek) {

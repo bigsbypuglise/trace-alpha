@@ -50,10 +50,12 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 - **Seek lands on keyframe labeled as target** (from bounce fix 7a3fa95): after a seek, the first decoded frame is bumped to the requested index. Exact for all-intra codecs (ProRes); on long-GOP H.264 a scrub shows the nearest keyframe. This is a known accuracy gap, not accidental — fixing it means decoding forward from keyframe to true target without breaking scrub responsiveness.
 - Video playback never skips frames (timer clamps steps to 1 for video) — heavy files slow down rather than drop frames. Deliberate: ordering over rate, for now.
 - Windows ships as **portable ZIP only** — no installer until packaging/playback stabilize (`docs/release-notes-alpha.md`).
+- **Scrub shows a half-res preview at ≥1920px wide sources** (July 2026): sws conversion dominates 4K frame cost; the viewer upscales to fit. The landing frame (slider release) is always full-res accurate via Step mode, and half-res previews never enter the reverse cache. Don't "fix" scrub softness by removing this — fix it by making conversion faster.
+- **Transport widgets must not take keyboard focus** (`setFocusPolicy(Qt::NoFocus)` on the slider): keyboard belongs to frame stepping and J-K-L. If a new widget steals arrows/space, this is why.
 
 ## Roadmap (rough priority)
 
-1. Validate the July 2026 ProRes perf fix on real 4K media (Anj tests CI builds on his Windows box; HUD `dec/cvt/sws` timings tell the story)
+1. ~~Validate the July 2026 ProRes perf fix~~ **Validated 2026-07-06**: 4K ProRes plays smooth on the 4090 box (dec ~1ms, cvt ~14ms). Next: validate the scrub-responsiveness + arrow-key fixes, and test 4K H.264 MP4.
 2. Frame-exact scrub/step on long-GOP H.264 (see keyframe decision above)
 3. Reliable reverse playback beyond the 12-frame cache (ProRes is cheap — every frame is a keyframe; H.264 needs GOP-aware backward buffering)
 4. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`)
