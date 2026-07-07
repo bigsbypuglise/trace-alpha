@@ -256,7 +256,7 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     const AVPixFmtDescriptor* srcDesc = av_pix_fmt_desc_get(impl_->codec->pix_fmt);
     perfStats_.srcPixelFormat = srcDesc && srcDesc->name ? QString::fromUtf8(srcDesc->name) : QStringLiteral("unknown");
     perfStats_.srcBitDepth = srcDesc ? av_get_bits_per_pixel(srcDesc) : 0;
-    perfStats_.dstPixelFormat = QStringLiteral("BGRX8888");
+    perfStats_.dstPixelFormat = QStringLiteral("RGB32/BGRA");
     perfStats_.experimentalFastPathEnabled = impl_->forceFastConvert;
 
     AVRational fr = av_guess_frame_rate(impl_->fmt, stream, nullptr);
@@ -402,11 +402,9 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             return;
         }
 
-#if QT_VERSION >= QT_VERSION_CHECK(5, 14, 0)
-        constexpr QImage::Format kFrameFormat = QImage::Format_BGRX8888;
-#else
-        constexpr QImage::Format kFrameFormat = QImage::Format_ARGB32;
-#endif
+        // AV_PIX_FMT_BGRA writes bytes B,G,R,A; on little-endian that is
+        // exactly QImage::Format_RGB32's 0xffRRGGBB layout (alpha ignored).
+        constexpr QImage::Format kFrameFormat = QImage::Format_RGB32;
 
         if (image.format() != kFrameFormat || image.width() != w || image.height() != h || image.isNull()) {
             QElapsedTimer allocTimer;
@@ -422,7 +420,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         QElapsedTimer wrapTimer;
         wrapTimer.start();
         uint8_t* dstData[4] = { image.bits(), nullptr, nullptr, nullptr };
-        int dstLinesize[4] = { image.bytesPerLine(), 0, 0, 0 };
+        int dstLinesize[4] = { static_cast<int>(image.bytesPerLine()), 0, 0, 0 };
         convertWrapNs += wrapTimer.nsecsElapsed();
 
         QElapsedTimer timer;
