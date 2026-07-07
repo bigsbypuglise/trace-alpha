@@ -4,6 +4,7 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavcodec/avcodec.h>
+#include <libavcodec/codec_desc.h>
 #include <libswscale/swscale.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/opt.h>
@@ -215,8 +216,20 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
         return false;
     }
 
+    // Threading mode matters enormously for seek-heavy review use:
+    // - Frame threading pipelines ACROSS frames. Throughput is great, but
+    //   after every seek+flush the pipeline must refill (~thread-count
+    //   packets) before one frame comes out — this made reverse stepping
+    //   and scrubbing lag ~100ms per request on 4K ProRes.
+    // - Slice threading parallelizes WITHIN one frame, so a cold
+    //   single-frame request (scrub, step, reverse) stays fast.
+    // Intra-only codecs (ProRes, DNxHD, MJPEG) decode every frame
+    // independently: force slice threading. Long-GOP codecs (H.264/HEVC)
+    // keep frame threading for playback throughput.
+    const AVCodecDescriptor* codecDesc = avcodec_descriptor_get(par->codec_id);
+    const bool intraOnly = codecDesc && (codecDesc->props & AV_CODEC_PROP_INTRA_ONLY);
     impl_->codec->thread_count = 0;
-    impl_->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+    impl_->codec->thread_type = intraOnly ? FF_THREAD_SLICE : (FF_THREAD_FRAME | FF_THREAD_SLICE);
 
     if (avcodec_open2(impl_->codec, impl_->codecDef, nullptr) < 0) {
         error = "FFmpeg: codec open failed";
@@ -374,7 +387,8 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.avgMemcpyMs += (memcpyMs - perfStats_.avgMemcpyMs) / n;
     };
 
-    auto convertCurrentFrame = [&](QImage& image) {
+    auto convertCurrentFrame = [&](QImage& image, bool fastOverride = false) {
+        const bool useFast = fastOverride || wantFastConvert;
         const int w = impl_->frame->width > 0 ? impl_->frame->width : impl_->codec->width;
         const int h = impl_->frame->height > 0 ? impl_->frame->height : impl_->codec->height;
         const AVPixelFormat srcPixFmt = static_cast<AVPixelFormat>(impl_->frame->format);
@@ -399,23 +413,23 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             || impl_->swsDstW != dstW
             || impl_->swsDstH != dstH
             || impl_->swsSrcPixFmt != srcPixFmt
-            || impl_->swsIsFast != wantFastConvert;
+            || impl_->swsIsFast != useFast;
 
         if (needRebuild) {
             QElapsedTimer wrapTimer;
             wrapTimer.start();
             if (impl_->sws) sws_freeContext(impl_->sws);
-            impl_->sws = createSwsContext(w, h, srcPixFmt, dstW, dstH, impl_->dstPixFmt, wantFastConvert);
+            impl_->sws = createSwsContext(w, h, srcPixFmt, dstW, dstH, impl_->dstPixFmt, useFast);
             convertWrapNs += wrapTimer.nsecsElapsed();
             impl_->swsSrcW = w;
             impl_->swsSrcH = h;
             impl_->swsDstW = dstW;
             impl_->swsDstH = dstH;
             impl_->swsSrcPixFmt = srcPixFmt;
-            impl_->swsIsFast = wantFastConvert;
+            impl_->swsIsFast = useFast;
         }
         perfStats_.swsContextReused = !needRebuild;
-        perfStats_.experimentalFastPathEnabled = wantFastConvert;
+        perfStats_.experimentalFastPathEnabled = useFast;
 
         if (!impl_->sws) {
             return;
@@ -509,7 +523,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                     const long long deltaToTarget = target - decodedFrame;
                     if (mode != RequestMode::Scrub && deltaToTarget <= impl_->reverseCacheCapacity) {
                         QImage cached;
-                        convertCurrentFrame(cached);
+                        convertCurrentFrame(cached, /*fastOverride=*/true);
                         pushReverseCache(decodedFrame, cached);
                     }
                     continue;

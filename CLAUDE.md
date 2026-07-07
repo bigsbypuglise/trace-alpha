@@ -40,6 +40,7 @@ The core abstraction is `trace::core::FrameSource` (`src/core/FrameSource.h`): a
 - **Request modes** (`Playback`/`Scrub`/`Step`) change behavior: seeks happen on scrub, backward moves, or jumps >1; sws conversion quality is mode-aware (fast flags for Playback/Scrub, `SWS_FULL_CHR_H_INT|SWS_ACCURATE_RND` for Step, since a paused frame is being inspected). Env overrides for A/B: `TRACE_PERF_FAST_CONVERT=1`, `TRACE_PERF_ACCURATE_CONVERT=1`.
 - **Reverse playback/stepping** works from a 12-frame `reverseCache` filled with frames decoded en route to a target; a cache miss triggers seek-to-keyframe + decode forward.
 - swscale is slice-threaded (threads=auto) when FFmpeg ≥ 5.1 at build time.
+- **Codec threading is mode-critical** (July 2026): intra-only codecs (ProRes/DNxHD/MJPEG) use `FF_THREAD_SLICE` only. Frame threading pipelines across frames, so every seek+flush (scrub, reverse step) stalled ~thread-count packets (~100ms) before emitting one frame. Long-GOP codecs keep FRAME|SLICE for playback throughput — which means H.264 scrub/step latency still carries that pipeline-refill cost (known, revisit with the frame-exact H.264 work).
 
 Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesces slider moves; release forces exact frame).
 
