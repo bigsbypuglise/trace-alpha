@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <clipPath id="sq"><rect width="1024" height="1024" rx="112"></rect></clipPath>
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#33373D"></stop><stop offset="1" stop-color="#1B1D21"></stop>
+    </linearGradient>
+    <linearGradient id="rimGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.14"></stop>
+      <stop offset="0.35" stop-color="#FFFFFF" stop-opacity="0.02"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </linearGradient>
+    <radialGradient id="topGlow" cx="0.5" cy="0" r="0.9">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.06"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </radialGradient>
+    <linearGradient id="glassDark" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.14"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0.04"></stop>
+    </linearGradient>
+    <linearGradient id="specEdge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#5AC8E8" stop-opacity="0.9"></stop>
+      <stop offset="0.35" stop-color="#5B8DEF" stop-opacity="0.7"></stop>
+      <stop offset="0.65" stop-color="#8B6FE8" stop-opacity="0.7"></stop>
+      <stop offset="1" stop-color="#D46FB8" stop-opacity="0.9"></stop>
+    </linearGradient>
+    <radialGradient id="coreGlow" gradientUnits="userSpaceOnUse" cx="565" cy="590" r="280">
+      <stop offset="0" stop-color="#D46FB8" stop-opacity="0.55"></stop>
+      <stop offset="0.4" stop-color="#8B6FE8" stop-opacity="0.4"></stop>
+      <stop offset="0.75" stop-color="#5B8DEF" stop-opacity="0.22"></stop>
+      <stop offset="1" stop-color="#5B8DEF" stop-opacity="0"></stop>
+    </radialGradient>
+    <linearGradient id="specularLine" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"></stop>
+      <stop offset="0.3" stop-color="#FFFFFF" stop-opacity="0.8"></stop>
+      <stop offset="0.7" stop-color="#FFFFFF" stop-opacity="0.8"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </linearGradient>
+  </defs>
+  <rect width="1024" height="1024" rx="112" fill="url(#bgGrad)"></rect>
+  <g clip-path="url(#sq)">
+    <rect width="1024" height="560" fill="url(#topGlow)"></rect>
+    <g transform="translate(512 512) scale(1.37) translate(-512 -512)">
+      <path d="M420 336 L720 512 L420 688 Z" fill="url(#glassDark)" stroke="url(#glassDark)" stroke-width="52" stroke-linejoin="round"></path>
+      <path d="M420 336 L720 512 L420 688 Z" fill="url(#coreGlow)" stroke="url(#coreGlow)" stroke-width="52" stroke-linejoin="round" opacity="0.8075" style="mix-blend-mode:screen"></path>
+      <path d="M446 380 L680 512 L446 644 Z" fill="none" stroke="url(#specEdge)" stroke-width="10" stroke-linejoin="round" opacity="0.7125" style="mix-blend-mode:screen"></path>
+      <path d="M424 346 L600 449" stroke="url(#specularLine)" stroke-width="9" stroke-linecap="round" fill="none" opacity="0.65"></path>
+    </g>
+  </g>
+  <rect x="4" y="4" width="1016" height="1016" rx="108" fill="none" stroke="url(#rimGrad)" stroke-width="7"></rect>
+</svg>

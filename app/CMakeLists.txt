@@ -52,6 +52,10 @@ add_executable(Trace
   resources.qrc
 )
 
+if(WIN32)
+  target_sources(Trace PRIVATE trace.rc)
+endif()
+
 target_include_directories(Trace PRIVATE ../src)
 target_link_libraries(Trace PRIVATE Qt6::Widgets)
 

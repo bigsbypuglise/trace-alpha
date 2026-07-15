@@ -1,5 +1,8 @@
 <RCC>
   <qresource prefix="/icons">
-    <file>../assets/icons/trace_icon_v001.png</file>
+    <file alias="trace-16.png">../assets/icons/export/png/windows/trace-16.png</file>
+    <file alias="trace-32.png">../assets/icons/export/png/windows/trace-32.png</file>
+    <file alias="trace-48.png">../assets/icons/export/png/windows/trace-48.png</file>
+    <file alias="trace-256.png">../assets/icons/export/png/windows/trace-256.png</file>
   </qresource>
 </RCC>

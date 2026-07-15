@@ -8,7 +8,11 @@ int main(int argc, char* argv[]) {
     app.setApplicationName("Trace");
     app.setOrganizationName("Trace Project");
     app.setStyle(QStyleFactory::create("Fusion"));
-    const QIcon appIcon(QStringLiteral(":/icons/trace_icon_v001.png"));
+    QIcon appIcon;
+    appIcon.addFile(QStringLiteral(":/icons/trace-16.png"));
+    appIcon.addFile(QStringLiteral(":/icons/trace-32.png"));
+    appIcon.addFile(QStringLiteral(":/icons/trace-48.png"));
+    appIcon.addFile(QStringLiteral(":/icons/trace-256.png"));
     app.setWindowIcon(appIcon);
 
     QPalette p = app.palette();

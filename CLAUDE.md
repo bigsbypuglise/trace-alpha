@@ -17,7 +17,7 @@ There is no local build on the Mac (no Qt6/FFmpeg toolchain assumed) and no test
 - Repo: `https://github.com/bigsbypuglise/trace-alpha` (GitHub account: bigsbypuglise; private)
 - Every push to any branch builds Windows (VS2022, Qt 6.7.2 via install-qt-action, FFmpeg via vcpkg) and uploads artifact `trace-alpha-windows-x64.zip` (workflow: `.github/workflows/windows-release.yml`)
 - Tags matching `v*` also publish a GitHub prerelease with that ZIP
-- Claude's sandbox cannot push (proxy blocks github.com) — commit locally, then have Anj run `cd ~/Claude/OpenClaw/trace && git push origin main`
+- Claude's sandbox cannot push (proxy blocks github.com) — commit locally, then have Anj run `cd ~/Claude/Trace && git push origin main`
 - Manual validation checklist: `docs/windows-validation-checklist.md`
 - Local build if a toolchain exists: `cmake -S . -B build && cmake --build build --config Release --target Trace`
 
