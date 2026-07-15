@@ -48,7 +48,7 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
 - **No async decode thread** until there's a design that provably preserves frame order; the March 2026 attempt was reverted. If revisiting, sequence-number every request and drop stale results.
 - **Forward-fill queue was removed** (July 2026): it decoded up to 4 frames per timer tick in bursts and caused rhythmic stutter on 4K ProRes. Don't re-add synchronous read-ahead.
-- **Seek lands on keyframe labeled as target** (from bounce fix 7a3fa95): after a seek, the first decoded frame is bumped to the requested index. Exact for all-intra codecs (ProRes); on long-GOP H.264 a scrub shows the nearest keyframe. This is a known accuracy gap, not accidental — fixing it means decoding forward from keyframe to true target without breaking scrub responsiveness.
+- **Seeks are frame-exact except mid-scrub-drag** (July 2026, supersedes the keyframe-label gap from 7a3fa95): after a Step/Playback seek, the first decoded frame's index is resolved from its PTS (`seekResolvePending` in `VideoDecoderFFmpeg`) and decode continues forward from the keyframe to the true target. Scrub-drag previews still label the landed keyframe as the target — deliberate, for responsiveness; the landing frame (slider release → Step) is exact. Files without PTS fall back to label-as-target. Cost: landing/step seeks on long-GOP H.264 decode up to a GOP of frames (decode-only until near target).
 - Video playback never skips frames (timer clamps steps to 1 for video) — heavy files slow down rather than drop frames. Deliberate: ordering over rate, for now.
 - Windows ships as **portable ZIP only** — no installer until packaging/playback stabilize (`docs/release-notes-alpha.md`).
 - **Scrub shows a half-res preview at ≥1920px wide sources** (July 2026): sws conversion dominates 4K frame cost; the viewer upscales to fit. The landing frame (slider release) is always full-res accurate via Step mode, and half-res previews never enter the reverse cache. Don't "fix" scrub softness by removing this — fix it by making conversion faster.
@@ -57,7 +57,7 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 ## Roadmap (rough priority)
 
 1. ~~Validate the July 2026 ProRes perf fix~~ **Validated 2026-07-06**: 4K ProRes plays smooth on the 4090 box (dec ~1ms, cvt ~14ms). Next: validate the scrub-responsiveness + arrow-key fixes, and test 4K H.264 MP4.
-2. Frame-exact scrub/step on long-GOP H.264 (see keyframe decision above)
+2. ~~Frame-exact scrub/step on long-GOP H.264~~ **Implemented July 2026, awaiting 4090 validation** (checklist cases 8–9). If landing latency on long-GOP files feels bad, next lever is dropping H.264 to slice-only threading in Step mode or capping the exact-decode walk.
 3. Reliable reverse playback beyond the 12-frame cache (ProRes is cheap — every frame is a keyframe; H.264 needs GOP-aware backward buffering)
 4. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`)
 

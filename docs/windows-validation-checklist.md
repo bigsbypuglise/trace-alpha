@@ -59,7 +59,21 @@ Prefer clips with frame counter burn-in or obvious visual frame landmarks.
 - Pause and immediately single-step
 - Repeat for MP4 and MOV
 
-### 8) HUD readout correctness
+### 8) Frame-exact scrub landing (H.264 long-GOP) — added July 2026
+Needs a clip with frame counter burn-in.
+- Pause, drag the timeline slider to a random spot, release
+- Confirm the burn-in counter matches the HUD frame number exactly
+- Repeat 10x at different spots (mid-GOP landings are the point)
+- Expect: mid-drag preview may look "sticky" between keyframes (normal);
+  the landing frame after release must be exact. Release may take a
+  moment on long-GOP files — watch HUD dec ms for how long
+- Same test on ProRes: landing should stay instant (no regression)
+
+### 9) Jump-then-step correctness (H.264)
+- Scrub to a random spot, release, then Step Left x3, Right x3
+- Confirm the burn-in counter tracks every step with no jumps
+
+### 10) HUD readout correctness
 - Toggle readout modes (Frame / Seconds / Timecode)
 - Validate at frame 0, 1, fps, and 10*fps
 
@@ -74,6 +88,7 @@ Pass when all are true:
 - No visible cumulative drift in 2–3 minute playback
 - HUD frame/seconds/timecode mutually consistent
 - ProRes behavior is comparable to H.264 (no codec-specific regressions)
+- H.264 scrub landing frame matches burn-in counter every time
 
 Fail if any issue is reproducible 2+ times.
 

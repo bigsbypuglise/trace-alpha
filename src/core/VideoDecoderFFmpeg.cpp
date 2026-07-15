@@ -93,6 +93,13 @@ struct VideoDecoderFFmpeg::Impl {
     long long lastDecodedFrame = -1;
     int playbackDirection = 1;
 
+    // Frame-exact seek resolution (long-GOP codecs like H.264): after a
+    // seek, the first decoded frame's index is resolved from its PTS instead
+    // of being labeled as the requested frame, so decodeUntilTarget keeps
+    // decoding forward from the keyframe to the *true* target frame.
+    bool seekResolvePending = false;
+    long long seekTargetFrame = -1;
+
     struct CachedFrame {
         long long frame = -1;
         QImage image;
@@ -162,6 +169,8 @@ void VideoDecoderFFmpeg::close() {
     impl_->streamStartTs = 0;
     impl_->lastDecodedFrame = -1;
     impl_->playbackDirection = 1;
+    impl_->seekResolvePending = false;
+    impl_->seekTargetFrame = -1;
     impl_->reverseCache.clear();
 #endif
     currentFrame_ = -1;
@@ -511,9 +520,24 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 const int64_t pts = (impl_->frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                         ? impl_->frame->best_effort_timestamp
                                         : impl_->frame->pts;
-                long long decodedFrame = frameFromPts(pts);
-                if (decodedFrame < 0) decodedFrame = 0;
-                if (decodedFrame <= impl_->lastDecodedFrame) decodedFrame = impl_->lastDecodedFrame + 1;
+                long long decodedFrame;
+                if (impl_->seekResolvePending) {
+                    // First frame after a frame-exact seek: trust the stream
+                    // timestamp so the keyframe keeps its true index and the
+                    // loop decodes forward to the exact target. Files without
+                    // PTS fall back to the old label-as-target behavior.
+                    impl_->seekResolvePending = false;
+                    decodedFrame = (pts != AV_NOPTS_VALUE) ? frameFromPts(pts)
+                                                           : impl_->seekTargetFrame;
+                    // A backward seek should never land past the target; if a
+                    // broken index puts us there, clamp so the UI stays put.
+                    if (decodedFrame > impl_->seekTargetFrame) decodedFrame = impl_->seekTargetFrame;
+                    if (decodedFrame < 0) decodedFrame = 0;
+                } else {
+                    decodedFrame = frameFromPts(pts);
+                    if (decodedFrame < 0) decodedFrame = 0;
+                    if (decodedFrame <= impl_->lastDecodedFrame) decodedFrame = impl_->lastDecodedFrame + 1;
+                }
                 impl_->lastDecodedFrame = decodedFrame;
 
                 if (decodedFrame < target) {
@@ -580,7 +604,22 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         const double seekN = static_cast<double>(perfStats_.seekSamples);
         perfStats_.avgSeekMs += (seekMs - perfStats_.avgSeekMs) / seekN;
 
-        impl_->lastDecodedFrame = frameIndex > 0 ? frameIndex - 1 : -1;
+        if (mode == RequestMode::Scrub) {
+            // Mid-drag preview: label the keyframe the seek lands on as the
+            // requested frame. Approximate but instant — exactness while the
+            // slider is moving isn't worth decoding a whole GOP per tick.
+            impl_->lastDecodedFrame = frameIndex > 0 ? frameIndex - 1 : -1;
+            impl_->seekResolvePending = false;
+        } else {
+            // Step / Playback jumps: frame-exact. Resolve the first decoded
+            // frame from its PTS and decode forward to the true target. On
+            // all-intra codecs (ProRes) the seek lands on the target anyway,
+            // so this costs nothing there; on long-GOP H.264 it decodes up
+            // to a GOP of frames — the price of showing the actual frame.
+            impl_->lastDecodedFrame = -1;
+            impl_->seekResolvePending = true;
+            impl_->seekTargetFrame = frameIndex;
+        }
     }
 
     if (!decodeUntilTarget(frameIndex)) {
