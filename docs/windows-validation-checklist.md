@@ -73,6 +73,23 @@ Needs a clip with frame counter burn-in.
 - Scrub to a random spot, release, then Step Left x3, Right x3
 - Confirm the burn-in counter tracks every step with no jumps
 
+### 9b) Landing latency A/B (H.264) — added July 2026
+The HUD now ends with `walk Nf cache Ncv/Nms`: frames decoded en route to
+the target, and how many were converted for the reverse cache plus their cost.
+
+- Scrub to a mid-GOP spot, release, read `walk` and `cache` numbers
+- Confirm `cache` is now ~4 converts, not ~12
+- Then step Left 4x: should be instant (served from cache)
+- Step Left a 5th time: expect a slower step (falls off the cache, re-seeks)
+
+If landing still feels slow, A/B the window from a terminal:
+```
+set TRACE_SEEK_CACHE_WINDOW=0
+Trace.exe
+```
+0 = fastest landing, no free backward steps. 12 = old behavior. Compare
+how landing feels at 0, 4, and 12 and note which you prefer.
+
 ### 10) HUD readout correctness
 - Toggle readout modes (Frame / Seconds / Timecode)
 - Validate at frame 0, 1, fps, and 10*fps

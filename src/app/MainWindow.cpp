@@ -619,7 +619,7 @@ void MainWindow::refreshHud(const QString& action) {
                 ? (100.0 * static_cast<double>(perf.reverseCacheHits) / static_cast<double>(perf.reverseCacheLookups))
                 : 0.0;
 
-            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | src %6 %7b -> dst %8 | sws %9 | copies %10 | F:%11 | open %12ms | first %13ms | dec %14/%15 | cvt %16/%17 | sws %18/%19 | alloc %20/%21 | wrap %22/%23 | memcpy %24/%25 | seek %26/%27 | q %28/%29 hit %30/%31 | handoff %32/%33 | draw %34/%35 | rev-hit %36%% (%37/%38) | late %39")
+            line = QString("Video | %1 | %2x%3 | fps %4 | codec %5 | src %6 %7b -> dst %8 | sws %9 | copies %10 | F:%11 | open %12ms | first %13ms | dec %14/%15 | cvt %16/%17 | sws %18/%19 | alloc %20/%21 | wrap %22/%23 | memcpy %24/%25 | seek %26/%27 | q %28/%29 hit %30/%31 | handoff %32/%33 | draw %34/%35 | rev-hit %36%% (%37/%38) | late %39 | walk %40f cache %41cv/%42ms")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
                 .arg(vm.width)
                 .arg(vm.height)
@@ -658,7 +658,10 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(reverseHitRate, 'f', 1))
                 .arg(perf.reverseCacheHits)
                 .arg(perf.reverseCacheLookups)
-                .arg(perf.lateFrames);
+                .arg(perf.lateFrames)
+                .arg(perf.lastWalkFrames)
+                .arg(perf.lastWalkCacheConverts)
+                .arg(QString::number(perf.lastWalkCacheConvertMs, 'f', 2));
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")

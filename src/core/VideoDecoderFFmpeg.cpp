@@ -62,6 +62,14 @@ bool envFlagSet(const char* name) {
     return !v.isEmpty() && v != "0" && v.compare("false", Qt::CaseInsensitive) != 0;
 }
 
+int envInt(const char* name, int fallback) {
+    const QByteArray v = qgetenv(name);
+    if (v.isEmpty()) return fallback;
+    bool ok = false;
+    const int parsed = v.toInt(&ok);
+    return ok ? parsed : fallback;
+}
+
 } // namespace
 #endif
 
@@ -86,6 +94,13 @@ struct VideoDecoderFFmpeg::Impl {
     // is chosen per request mode (fast for Playback/Scrub, accurate for Step).
     bool forceFastConvert = false;
     bool forceAccurateConvert = false;
+
+    // How many frames before the target get converted and cached while
+    // walking forward from a keyframe after a seek. Every one of these is a
+    // full-res conversion (~14ms at 4K) paid on the landing frame, for
+    // backward steps the user may never take. Small by default; the full
+    // reverse cache still fills during ordinary sequential decoding.
+    int seekWalkCacheWindow = 4;
 
     AVRational streamTimeBase{0, 1};
     AVRational fpsQ{24, 1};
@@ -259,6 +274,9 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 
     impl_->forceFastConvert = envFlagSet("TRACE_PERF_FAST_CONVERT");
     impl_->forceAccurateConvert = envFlagSet("TRACE_PERF_ACCURATE_CONVERT");
+    // A/B the landing-latency tradeoff: 0 = fastest landing, no free
+    // backward steps; 12 = old behavior (full cache, slowest landing).
+    impl_->seekWalkCacheWindow = std::clamp(envInt("TRACE_SEEK_CACHE_WINDOW", 4), 0, impl_->reverseCacheCapacity);
     impl_->dstPixFmt = AV_PIX_FMT_BGRA;
 
     impl_->swsSrcW = w;
@@ -363,6 +381,12 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
 
     qint64 decodeNs = 0;
     qint64 convertNs = 0;
+    qint64 cacheConvertNs = 0;
+    long long walkFrames = 0;
+    long long walkCacheConverts = 0;
+    // Set below, before the walk runs; read inside decodeUntilTarget to size
+    // the speculative cache window (landing seeks are latency-sensitive).
+    bool didSeek = false;
     qint64 convertAllocNs = 0;
     qint64 convertWrapNs = 0;
     qint64 swsScaleNs = 0;
@@ -371,7 +395,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     auto updatePerfStats = [&]() {
         const double decodeMs = static_cast<double>(decodeNs) / 1'000'000.0;
         const double convertMs = static_cast<double>(convertNs) / 1'000'000.0;
-        const double totalMs = decodeMs + convertMs;
+        // Total is wall-clock work for this request, so it must include the
+        // speculative cache conversions even though "cvt" excludes them.
+        const double cacheConvertMs = static_cast<double>(cacheConvertNs) / 1'000'000.0;
+        const double totalMs = decodeMs + convertMs + cacheConvertMs;
         const double allocMs = static_cast<double>(convertAllocNs) / 1'000'000.0;
         const double wrapMs = static_cast<double>(convertWrapNs) / 1'000'000.0;
         const double swsMs = static_cast<double>(swsScaleNs) / 1'000'000.0;
@@ -384,6 +411,9 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.lastConvertWrapMs = wrapMs;
         perfStats_.lastSwsScaleMs = swsMs;
         perfStats_.lastMemcpyMs = memcpyMs;
+        perfStats_.lastWalkFrames = walkFrames;
+        perfStats_.lastWalkCacheConverts = walkCacheConverts;
+        perfStats_.lastWalkCacheConvertMs = static_cast<double>(cacheConvertNs) / 1'000'000.0;
 
         ++perfStats_.samples;
         const double n = static_cast<double>(perfStats_.samples);
@@ -396,7 +426,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.avgMemcpyMs += (memcpyMs - perfStats_.avgMemcpyMs) / n;
     };
 
-    auto convertCurrentFrame = [&](QImage& image, bool fastOverride = false) {
+    auto convertCurrentFrame = [&](QImage& image, bool fastOverride = false, bool isCacheFill = false) {
         const bool useFast = fastOverride || wantFastConvert;
         const int w = impl_->frame->width > 0 ? impl_->frame->width : impl_->codec->width;
         const int h = impl_->frame->height > 0 ? impl_->frame->height : impl_->codec->height;
@@ -477,7 +507,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             dstLinesize);
         const qint64 swsNs = timer.nsecsElapsed();
         swsScaleNs += swsNs;
-        convertNs += swsNs;
+        // Speculative reverse-cache fills are attributed separately so the
+        // "cvt" readout reflects the frame actually being shown.
+        if (isCacheFill) cacheConvertNs += swsNs;
+        else convertNs += swsNs;
 
         perfStats_.fullFrameCopiesPerFrame = 1;
         perfStats_.dstPixelFormat = dstW != w ? QStringLiteral("RGB32/BGRA half") : QStringLiteral("RGB32/BGRA");
@@ -541,14 +574,24 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 impl_->lastDecodedFrame = decodedFrame;
 
                 if (decodedFrame < target) {
+                    ++walkFrames;
                     // Cache frames near the target for reverse stepping —
                     // but never during Scrub: previews are half-res and the
                     // extra conversions would drag scrub latency down.
+                    //
+                    // On a seek walk (long-GOP landing) the window is small:
+                    // each entry is a full-res conversion the user waits on
+                    // before seeing their frame. Walking without a seek is
+                    // ordinary forward decoding, where the wider window is
+                    // effectively free-standing work worth keeping.
                     const long long deltaToTarget = target - decodedFrame;
-                    if (mode != RequestMode::Scrub && deltaToTarget <= impl_->reverseCacheCapacity) {
+                    const long long cacheWindow = didSeek ? impl_->seekWalkCacheWindow
+                                                          : impl_->reverseCacheCapacity;
+                    if (mode != RequestMode::Scrub && deltaToTarget <= cacheWindow) {
                         QImage cached;
-                        convertCurrentFrame(cached, /*fastOverride=*/true);
+                        convertCurrentFrame(cached, /*fastOverride=*/true, /*isCacheFill=*/true);
                         pushReverseCache(decodedFrame, cached);
+                        ++walkCacheConverts;
                     }
                     continue;
                 }
@@ -588,6 +631,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         (!requestIsSequentialForward && frameIndex > currentFrame_ + 1);
 
     if (needSeek) {
+        didSeek = true;
         const int64_t relTs = av_rescale_q(frameIndex, frameTb, impl_->streamTimeBase);
         const int64_t targetTs = impl_->streamStartTs + relTs;
 

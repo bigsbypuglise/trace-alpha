@@ -37,6 +37,13 @@ struct VideoPerfStats {
     double lastHandoffMs = 0.0;
     double avgHandoffMs = 0.0;
 
+    // Seek-walk cost: on long-GOP codecs a frame-exact seek lands on a
+    // keyframe and decodes forward to the target. These expose how much of
+    // the landing delay is the decode walk vs. speculative cache conversion.
+    long long lastWalkFrames = 0;
+    long long lastWalkCacheConverts = 0;
+    double lastWalkCacheConvertMs = 0.0;
+
     long long seekSamples = 0;
     long long samples = 0;
     long long reverseCacheHits = 0;
