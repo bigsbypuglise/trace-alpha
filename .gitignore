@@ -15,3 +15,7 @@ compile_commands.json
 .vscode/
 .idea/
 *.swp
+
+# Icon working files (superseded revisions, source zips)
+assets/icons/_old/
+assets/icons/*.zip

@@ -39,7 +39,7 @@
   <rect width="1024" height="1024" rx="232" fill="url(#bgGrad)"></rect>
   <g clip-path="url(#sq)">
     <rect width="1024" height="560" fill="url(#topGlow)"></rect>
-    <g transform="translate(512 512) scale(1.37) translate(-512 -512)">
+    <g transform="translate(512 512) scale(1.37) translate(-546 -512)">
       <path d="M420 336 L720 512 L420 688 Z" fill="url(#glassDark)" stroke="url(#glassDark)" stroke-width="52" stroke-linejoin="round"></path>
       <path d="M420 336 L720 512 L420 688 Z" fill="url(#coreGlow)" stroke="url(#coreGlow)" stroke-width="52" stroke-linejoin="round" opacity="0.8075" style="mix-blend-mode:screen"></path>
       <path d="M446 380 L680 512 L446 644 Z" fill="none" stroke="url(#specEdge)" stroke-width="10" stroke-linejoin="round" opacity="0.7125" style="mix-blend-mode:screen"></path>
