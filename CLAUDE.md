@@ -15,8 +15,11 @@ Owner context: Anj is a VFX/motion-design lead, not a programmer. Explain things
 There is no local build on the Mac (no Qt6/FFmpeg toolchain assumed) and no test suite yet. **GitHub Actions is the source of truth for builds.**
 
 - Repo: `https://github.com/bigsbypuglise/trace-alpha` (GitHub account: bigsbypuglise; private)
-- Every push to any branch builds Windows (VS2022, Qt 6.7.2 via install-qt-action, FFmpeg via vcpkg) and uploads artifact `trace-alpha-windows-x64.zip` (workflow: `.github/workflows/windows-release.yml`)
-- Tags matching `v*` also publish a GitHub prerelease with that ZIP
+- Every push to any branch builds Windows (VS2022, Qt 6.7.2 via install-qt-action, FFmpeg via vcpkg) and uploads artifact `trace-alpha-windows-x64` (workflow: `.github/workflows/windows-release.yml`)
+- Tags matching `v*` also publish a GitHub prerelease with a `trace-alpha-windows-x64.zip` asset
+- **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
+- **Green must mean launchable** (Aug 2026): the workflow checks native tool exit codes (`windeployqt` failures used to pass silently), asserts FFmpeg was found at configure time, and verifies `Trace.exe` + Qt DLLs + `platforms/qwindows.dll` + av* DLLs exist before publishing. If a build goes green, the download starts.
+- vcpkg/FFmpeg and Qt are cached; the ~20+ min build only recurs on cache miss (7-day idle expiry). Bump `VCPKG_CACHE_VERSION` in the workflow to force a clean FFmpeg rebuild.
 - Claude's sandbox cannot push (proxy blocks github.com) — commit locally, then have Anj run `cd ~/Claude/Trace && git push origin main`
 - Manual validation checklist: `docs/windows-validation-checklist.md`
 - Local build if a toolchain exists: `cmake -S . -B build && cmake --build build --config Release --target Trace`

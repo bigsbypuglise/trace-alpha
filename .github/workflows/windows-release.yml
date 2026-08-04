@@ -11,6 +11,16 @@ on:
 permissions:
   contents: write
 
+# Superseded runs on the same branch are pointless once a newer push lands,
+# and Windows runners bill at 2x. Cancel them (but never a tag/release run).
+concurrency:
+  group: windows-build-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+env:
+  # Bump this string to force a rebuild of the cached FFmpeg/vcpkg tree.
+  VCPKG_CACHE_VERSION: v1
+
 jobs:
   build-windows:
     name: Build Windows (VS2022, Qt6, FFmpeg)
@@ -25,20 +35,38 @@ jobs:
         with:
           version: "6.7.2"
           modules: "qtimageformats"
+          cache: true
 
-      - name: Install vcpkg + FFmpeg
+      # FFmpeg is compiled from source by vcpkg and dominates build time.
+      # Cache the whole vcpkg tree so only the first build after a cache miss
+      # pays that cost. Cache entries expire after 7 days idle.
+      - name: Restore vcpkg + FFmpeg cache
+        id: vcpkg-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\vcpkg
+          key: vcpkg-${{ env.VCPKG_CACHE_VERSION }}-windows-2022-ffmpeg-x64
+
+      - name: Install vcpkg + FFmpeg (only on cache miss)
+        if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          if ($PSVersionTable.PSVersion.Major -ge 7) { $PSNativeCommandUseErrorActionPreference = $true }
+
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
+
           & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install ffmpeg:x64-windows
-          "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install ffmpeg failed ($LASTEXITCODE)" }
 
       - name: Resolve build tools and dependency paths
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+
+          "VCPKG_ROOT=$env:RUNNER_TEMP\vcpkg" | Out-File -FilePath $env:GITHUB_ENV -Append
 
           $qtRoot = $env:QT_ROOT_DIR
           if (-not $qtRoot -or -not (Test-Path $qtRoot)) {
@@ -50,9 +78,9 @@ jobs:
             throw "windeployqt.exe not found at expected path: $windeployqt"
           }
 
-          $ffmpegBin = Join-Path $env:VCPKG_ROOT "installed\x64-windows\bin"
+          $ffmpegBin = Join-Path "$env:RUNNER_TEMP\vcpkg" "installed\x64-windows\bin"
           if (-not (Test-Path $ffmpegBin)) {
-            throw "FFmpeg runtime bin not found: $ffmpegBin"
+            throw "FFmpeg runtime bin not found: $ffmpegBin (cache may be corrupt - bump VCPKG_CACHE_VERSION)"
           }
 
           "WINDEPLOYQT=$windeployqt" | Out-File -FilePath $env:GITHUB_ENV -Append
@@ -69,17 +97,32 @@ jobs:
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:CMAKE_PREFIX_PATH" `
             -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
+
+      # Fail loudly if FFmpeg wasn't detected: the app compiles without it but
+      # cannot play video, which is not a build worth shipping for testing.
+      - name: Verify FFmpeg was found by CMake
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $cache = Get-Content "build\CMakeCache.txt" -Raw
+          if ($cache -notmatch 'FFMPEG_AVCODEC_LIBRARY:FILEPATH=(?!.*NOTFOUND)') {
+            throw "FFmpeg was not found during configure - the build would have no video playback."
+          }
+          Write-Host "FFmpeg detected by CMake."
 
       - name: Build Trace target (Release)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
           cmake --build build --config Release --target Trace --parallel
+          if ($LASTEXITCODE -ne 0) { throw "Build failed ($LASTEXITCODE)" }
 
-      - name: Package portable ZIP (Trace + Qt + runtime DLLs)
+      - name: Package portable app folder (Trace + Qt + runtime DLLs)
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
+          if ($PSVersionTable.PSVersion.Major -ge 7) { $PSNativeCommandUseErrorActionPreference = $true }
 
           $exe = Join-Path $PWD "build\app\Release\Trace.exe"
           if (-not (Test-Path $exe)) {
@@ -91,27 +134,75 @@ jobs:
 
           $distRoot = Join-Path $PWD "dist"
           $dist = Join-Path $distRoot "trace-alpha-windows-x64"
-          $zip = Join-Path $distRoot "trace-alpha-windows-x64.zip"
 
           if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
-          if (Test-Path $zip) { Remove-Item $zip -Force }
-
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
           Copy-Item $exe (Join-Path $dist "Trace.exe") -Force
 
+          # windeployqt copies the Qt DLLs and the platform plugin next to the
+          # exe. Its exit code was previously ignored, so a failure here shipped
+          # an exe that could not start.
           & "$env:WINDEPLOYQT" --release --compiler-runtime (Join-Path $dist "Trace.exe")
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed ($LASTEXITCODE) - Qt runtime would be missing" }
 
           # FFmpeg DLLs are required when TRACE_WITH_FFMPEG is enabled.
           Copy-Item (Join-Path $env:FFMPEG_BIN "*.dll") $dist -Force
 
-          Compress-Archive -Path "$dist\*" -DestinationPath $zip
+      # A green build must mean a build that actually starts on Anj's box.
+      # Assert every runtime piece is present before publishing anything.
+      - name: Verify package is launchable
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $dist = Join-Path $PWD "dist\trace-alpha-windows-x64"
 
+          $required = @(
+            "Trace.exe",
+            "Qt6Core.dll",
+            "Qt6Gui.dll",
+            "Qt6Widgets.dll",
+            "platforms\qwindows.dll"
+          )
+
+          $missing = @()
+          foreach ($item in $required) {
+            if (-not (Test-Path (Join-Path $dist $item))) { $missing += $item }
+          }
+
+          # FFmpeg DLL names carry version suffixes (avcodec-61.dll etc).
+          foreach ($lib in @("avcodec", "avformat", "avutil", "swscale")) {
+            if (-not (Get-ChildItem $dist -Filter "$lib*.dll" -ErrorAction SilentlyContinue)) {
+              $missing += "$lib*.dll"
+            }
+          }
+
+          if ($missing.Count -gt 0) {
+            Write-Host "--- package contents ---"
+            Get-ChildItem $dist -Recurse | Select-Object -ExpandProperty FullName
+            throw "Package is missing required runtime files: $($missing -join ', ')"
+          }
+
+          $sizeMb = [math]::Round(((Get-ChildItem $dist -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB), 1)
+          Write-Host "Package verified: $($required.Count) required files present, $sizeMb MB total."
+
+      # Uploaded as a FOLDER, not a .zip. upload-artifact always zips what it
+      # is given, so uploading a zip produced a zip-inside-a-zip: unzipping the
+      # download left another archive instead of the app.
       - name: Upload workflow artifact (every push/tag)
         uses: actions/upload-artifact@v4
         with:
           name: trace-alpha-windows-x64
-          path: dist/trace-alpha-windows-x64.zip
+          path: dist/trace-alpha-windows-x64/**
           if-no-files-found: error
+
+      # Release assets are downloaded directly (not re-zipped by GitHub), so
+      # the Releases page gets a real single zip.
+      - name: Create release ZIP (tags v*)
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Compress-Archive -Path "dist\trace-alpha-windows-x64\*" -DestinationPath "dist\trace-alpha-windows-x64.zip" -Force
 
       - name: Publish/Update versioned prerelease asset (tags v*)
         if: startsWith(github.ref, 'refs/tags/v')
