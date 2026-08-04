@@ -31,6 +31,42 @@ int swsFlagsFor(bool fast) {
                 : (SWS_BILINEAR | SWS_FULL_CHR_H_INT | SWS_ACCURATE_RND);
 }
 
+// ProRes 4444 decodes to yuva444p12le: a full-resolution 12-bit alpha plane
+// alongside Y/U/V. The viewer draws QImage::Format_RGB32, which ignores
+// alpha entirely, so every byte swscale spends scaling that plane is thrown
+// away — and at 4K it is a quarter of the input data.
+//
+// For PLANAR formats the alpha plane is a separate plane, so describing the
+// same buffer as its alpha-less equivalent is layout-safe: planes 0-2 are
+// untouched and plane 3 simply never gets read. Packed formats (rgba and
+// friends) interleave alpha per pixel, so stripping would change the layout
+// and is deliberately not attempted.
+AVPixelFormat alphaStrippedFormat(AVPixelFormat fmt) {
+    const AVPixFmtDescriptor* src = av_pix_fmt_desc_get(fmt);
+    if (!src) return fmt;
+    if (!(src->flags & AV_PIX_FMT_FLAG_ALPHA)) return fmt;
+    if (!(src->flags & AV_PIX_FMT_FLAG_PLANAR)) return fmt;
+    if (src->flags & AV_PIX_FMT_FLAG_PAL) return fmt;
+    if (src->nb_components < 2) return fmt;
+
+    for (const AVPixFmtDescriptor* cand = av_pix_fmt_desc_next(nullptr);
+         cand != nullptr;
+         cand = av_pix_fmt_desc_next(cand)) {
+        if (cand->flags & AV_PIX_FMT_FLAG_ALPHA) continue;
+        if (!(cand->flags & AV_PIX_FMT_FLAG_PLANAR)) continue;
+        if (cand->nb_components != src->nb_components - 1) continue;
+        if (cand->log2_chroma_w != src->log2_chroma_w) continue;
+        if (cand->log2_chroma_h != src->log2_chroma_h) continue;
+        if ((cand->flags & AV_PIX_FMT_FLAG_BE) != (src->flags & AV_PIX_FMT_FLAG_BE)) continue;
+        if ((cand->flags & AV_PIX_FMT_FLAG_RGB) != (src->flags & AV_PIX_FMT_FLAG_RGB)) continue;
+        if (cand->comp[0].depth != src->comp[0].depth) continue;
+
+        const AVPixelFormat id = av_pix_fmt_desc_get_id(cand);
+        if (id != AV_PIX_FMT_NONE && sws_isSupportedInput(id)) return id;
+    }
+    return fmt;
+}
+
 SwsContext* createSwsContext(int srcW, int srcH, AVPixelFormat srcFmt, int dstW, int dstH, AVPixelFormat dstFmt, bool fast) {
     const int flags = swsFlagsFor(fast);
 
@@ -94,13 +130,10 @@ struct VideoDecoderFFmpeg::Impl {
     // is chosen per request mode (fast for Playback/Scrub, accurate for Step).
     bool forceFastConvert = false;
     bool forceAccurateConvert = false;
+    // Escape hatch: TRACE_KEEP_ALPHA=1 restores scaling of the alpha plane
+    // for A/B measurement.
+    bool keepAlpha = false;
 
-    // How many frames before the target get converted and cached while
-    // walking forward from a keyframe after a seek. Every one of these is a
-    // full-res conversion (~14ms at 4K) paid on the landing frame, for
-    // backward steps the user may never take. Small by default; the full
-    // reverse cache still fills during ordinary sequential decoding.
-    int seekWalkCacheWindow = 4;
 
     AVRational streamTimeBase{0, 1};
     AVRational fpsQ{24, 1};
@@ -120,7 +153,12 @@ struct VideoDecoderFFmpeg::Impl {
         QImage image;
     };
     std::deque<CachedFrame> reverseCache;
+    // Sized at open() from frame footprint: a 4K RGB32 frame is ~33MB, a
+    // 1080p one ~8MB, so a fixed count either wastes memory or wastes seeks.
     int reverseCacheCapacity = 12;
+    // -1 = adapt per request from measured conversion cost (see below).
+    // Overridden by TRACE_SEEK_CACHE_WINDOW for A/B.
+    int seekWalkCacheWindowOverride = -1;
 #endif
 };
 
@@ -274,9 +312,24 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 
     impl_->forceFastConvert = envFlagSet("TRACE_PERF_FAST_CONVERT");
     impl_->forceAccurateConvert = envFlagSet("TRACE_PERF_ACCURATE_CONVERT");
+    impl_->keepAlpha = envFlagSet("TRACE_KEEP_ALPHA");
     // A/B the landing-latency tradeoff: 0 = fastest landing, no free
     // backward steps; 12 = old behavior (full cache, slowest landing).
-    impl_->seekWalkCacheWindow = std::clamp(envInt("TRACE_SEEK_CACHE_WINDOW", 4), 0, impl_->reverseCacheCapacity);
+    // Reverse cache capacity scales with frame footprint so the memory cost
+    // stays bounded: ~7 frames at 4K, the full 32 at 1080p.
+    {
+        const long long frameBytes = static_cast<long long>(w) * h * 4;
+        const long long budgetBytes = 192LL * 1024 * 1024;
+        const int byFootprint = frameBytes > 0
+            ? static_cast<int>(budgetBytes / frameBytes)
+            : 12;
+        impl_->reverseCacheCapacity = std::clamp(byFootprint, 4, 32);
+    }
+    impl_->seekWalkCacheWindowOverride = envInt("TRACE_SEEK_CACHE_WINDOW", -1);
+    if (impl_->seekWalkCacheWindowOverride >= 0) {
+        impl_->seekWalkCacheWindowOverride =
+            std::min(impl_->seekWalkCacheWindowOverride, impl_->reverseCacheCapacity);
+    }
     impl_->dstPixFmt = AV_PIX_FMT_BGRA;
 
     impl_->swsSrcW = w;
@@ -384,9 +437,9 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     qint64 cacheConvertNs = 0;
     long long walkFrames = 0;
     long long walkCacheConverts = 0;
-    // Set below, before the walk runs; read inside decodeUntilTarget to size
-    // the speculative cache window (landing seeks are latency-sensitive).
+    // Both set below, before the walk runs; read inside decodeUntilTarget.
     bool didSeek = false;
+    long long cacheWindow = 0;
     qint64 convertAllocNs = 0;
     qint64 convertWrapNs = 0;
     qint64 swsScaleNs = 0;
@@ -430,10 +483,18 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         const bool useFast = fastOverride || wantFastConvert;
         const int w = impl_->frame->width > 0 ? impl_->frame->width : impl_->codec->width;
         const int h = impl_->frame->height > 0 ? impl_->frame->height : impl_->codec->height;
-        const AVPixelFormat srcPixFmt = static_cast<AVPixelFormat>(impl_->frame->format);
-        const AVPixFmtDescriptor* srcDesc = av_pix_fmt_desc_get(srcPixFmt);
+        const AVPixelFormat decodedPixFmt = static_cast<AVPixelFormat>(impl_->frame->format);
+        const AVPixFmtDescriptor* srcDesc = av_pix_fmt_desc_get(decodedPixFmt);
         perfStats_.srcPixelFormat = srcDesc && srcDesc->name ? QString::fromUtf8(srcDesc->name) : QStringLiteral("unknown");
         perfStats_.srcBitDepth = srcDesc ? av_get_bits_per_pixel(srcDesc) : 0;
+
+        // The destination ignores alpha, so don't pay to scale it.
+        const AVPixelFormat srcPixFmt = impl_->keepAlpha ? decodedPixFmt
+                                                         : alphaStrippedFormat(decodedPixFmt);
+        perfStats_.alphaPlaneSkipped = (srcPixFmt != decodedPixFmt);
+        if (perfStats_.alphaPlaneSkipped) {
+            perfStats_.srcPixelFormat += QStringLiteral(" (a-skip)");
+        }
 
         // Scrub preview converts at half resolution for large sources: the
         // sws conversion dominates per-frame cost at 4K and the viewer
@@ -578,15 +639,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                     // Cache frames near the target for reverse stepping —
                     // but never during Scrub: previews are half-res and the
                     // extra conversions would drag scrub latency down.
-                    //
-                    // On a seek walk (long-GOP landing) the window is small:
-                    // each entry is a full-res conversion the user waits on
-                    // before seeing their frame. Walking without a seek is
-                    // ordinary forward decoding, where the wider window is
-                    // effectively free-standing work worth keeping.
                     const long long deltaToTarget = target - decodedFrame;
-                    const long long cacheWindow = didSeek ? impl_->seekWalkCacheWindow
-                                                          : impl_->reverseCacheCapacity;
                     if (mode != RequestMode::Scrub && deltaToTarget <= cacheWindow) {
                         QImage cached;
                         convertCurrentFrame(cached, /*fastOverride=*/true, /*isCacheFill=*/true);
@@ -664,6 +717,28 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             impl_->seekResolvePending = true;
             impl_->seekTargetFrame = frameIndex;
         }
+    }
+
+    // How many frames to convert and cache on the way to the target.
+    //
+    // Without a seek this is ordinary forward decoding: fill the whole cache,
+    // the frames are being decoded anyway.
+    //
+    // After a seek the conversions are latency the user waits on before their
+    // frame appears — but they also prevent the *next* backward step from
+    // seeking and walking the GOP again. Which cost dominates depends entirely
+    // on conversion price: at 0.7ms a frame (1080p) caching a lot is nearly
+    // free and saves whole seeks; at 14ms (4K) each entry is real delay.
+    // So spend a fixed time budget rather than a fixed frame count.
+    if (!didSeek) {
+        cacheWindow = impl_->reverseCacheCapacity;
+    } else if (impl_->seekWalkCacheWindowOverride >= 0) {
+        cacheWindow = impl_->seekWalkCacheWindowOverride;
+    } else {
+        constexpr double kWalkCacheBudgetMs = 18.0;
+        const double convertMs = perfStats_.avgConvertMs > 0.0 ? perfStats_.avgConvertMs : 4.0;
+        const int affordable = static_cast<int>(kWalkCacheBudgetMs / convertMs);
+        cacheWindow = std::clamp(affordable, 1, impl_->reverseCacheCapacity);
     }
 
     if (!decodeUntilTarget(frameIndex)) {

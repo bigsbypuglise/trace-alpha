@@ -58,6 +58,7 @@ struct VideoPerfStats {
     QString dstPixelFormat;
     int srcBitDepth = 0;
     bool swsContextReused = false;
+    bool alphaPlaneSkipped = false;
     int fullFrameCopiesPerFrame = 0;
     bool experimentalFastPathEnabled = false;
 };
