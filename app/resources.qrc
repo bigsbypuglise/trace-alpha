@@ -5,4 +5,38 @@
     <file alias="trace-48.png">../assets/icons/export/png/windows/trace-48.png</file>
     <file alias="trace-256.png">../assets/icons/export/png/windows/trace-256.png</file>
   </qresource>
+
+  <!--
+    Transport icons. Only controls that exist in the app are embedded; the
+    rest of the design export (volume, PiP, clip nav, loop, etc.) is
+    deliberately left out until those features are real.
+
+    Three sizes per icon so QIcon can pick the right pixmap per display
+    scale factor: 24px @1x, 48px @2x, 72px @3x.
+  -->
+  <qresource prefix="/ui">
+    <file alias="play-24.png">../assets/Interface/export/player-icons/png/1x/trace-play.png</file>
+    <file alias="play-48.png">../assets/Interface/export/player-icons/png/2x/trace-play.png</file>
+    <file alias="play-72.png">../assets/Interface/export/player-icons/png/3x/trace-play.png</file>
+
+    <file alias="pause-24.png">../assets/Interface/export/player-icons/png/1x/trace-pause.png</file>
+    <file alias="pause-48.png">../assets/Interface/export/player-icons/png/2x/trace-pause.png</file>
+    <file alias="pause-72.png">../assets/Interface/export/player-icons/png/3x/trace-pause.png</file>
+
+    <file alias="prev-frame-24.png">../assets/Interface/export/player-icons/png/1x/prev-frame.png</file>
+    <file alias="prev-frame-48.png">../assets/Interface/export/player-icons/png/2x/prev-frame.png</file>
+    <file alias="prev-frame-72.png">../assets/Interface/export/player-icons/png/3x/prev-frame.png</file>
+
+    <file alias="next-frame-24.png">../assets/Interface/export/player-icons/png/1x/next-frame.png</file>
+    <file alias="next-frame-48.png">../assets/Interface/export/player-icons/png/2x/next-frame.png</file>
+    <file alias="next-frame-72.png">../assets/Interface/export/player-icons/png/3x/next-frame.png</file>
+
+    <file alias="fullscreen-24.png">../assets/Interface/export/player-icons/png/1x/fullscreen.png</file>
+    <file alias="fullscreen-48.png">../assets/Interface/export/player-icons/png/2x/fullscreen.png</file>
+    <file alias="fullscreen-72.png">../assets/Interface/export/player-icons/png/3x/fullscreen.png</file>
+
+    <file alias="exit-fullscreen-24.png">../assets/Interface/export/player-icons/png/1x/exit-fullscreen.png</file>
+    <file alias="exit-fullscreen-48.png">../assets/Interface/export/player-icons/png/2x/exit-fullscreen.png</file>
+    <file alias="exit-fullscreen-72.png">../assets/Interface/export/player-icons/png/3x/exit-fullscreen.png</file>
+  </qresource>
 </RCC>

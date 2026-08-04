@@ -20,7 +20,7 @@ QT_BEGIN_NAMESPACE
 class QKeyEvent;
 class QDragEnterEvent;
 class QDropEvent;
-class QToolBar;
+
 class QSlider;
 class QAction;
 QT_END_NAMESPACE
@@ -28,6 +28,7 @@ QT_END_NAMESPACE
 namespace trace::ui {
 class ViewerWidget;
 class TransportOverlay;
+class TransportBar;
 }
 
 namespace trace::app {
@@ -45,7 +46,7 @@ protected:
 private:
     void setupUi();
     void setupMenus();
-    void setupDeveloperTransportBar();
+    void setupTransportControls();
     void syncTransportBar();
     void openFileDialog();
     void openPath(const QString& path);
@@ -62,7 +63,7 @@ private:
 
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
-    QToolBar* devTransportBar_ = nullptr;
+    trace::ui::TransportBar* transportBar_ = nullptr;
     QAction* prevFrameAction_ = nullptr;
     QAction* playPauseAction_ = nullptr;
     QAction* nextFrameAction_ = nullptr;

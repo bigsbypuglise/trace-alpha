@@ -9,7 +9,7 @@
 #include <QMenuBar>
 #include <QMimeData>
 #include <QStatusBar>
-#include <QToolBar>
+
 #include <QSlider>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -19,6 +19,7 @@
 
 #include "ui/ViewerWidget.h"
 #include "ui/TransportOverlay.h"
+#include "ui/TransportBar.h"
 #include "core/SequenceParser.h"
 #include "core/TimeFormat.h"
 #include "core/VideoFrameSource.h"
@@ -35,7 +36,7 @@ MainWindow::MainWindow() {
     setAcceptDrops(true);
     setupUi();
     setupMenus();
-    setupDeveloperTransportBar();
+    setupTransportControls();
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
         if (!frameSource_ || !frameSource_->canPlay()) return;
@@ -117,9 +118,14 @@ void MainWindow::setupUi() {
     layout->setSpacing(0);
 
     viewer_ = new trace::ui::ViewerWidget(central);
+    transportBar_ = new trace::ui::TransportBar(central);
     overlay_ = new trace::ui::TransportOverlay(central);
 
     layout->addWidget(viewer_, 1);
+    layout->addWidget(transportBar_, 0);
+    // Dev diagnostics HUD sits below the transport bar. It carries the perf
+    // readouts used for playback validation, so it stays until the playback
+    // foundation is signed off.
     layout->addWidget(overlay_, 0);
     setCentralWidget(central);
 }
@@ -137,6 +143,7 @@ void MainWindow::setupMenus() {
     connect(fullscreenAction, &QAction::triggered, this, [this]() {
         setWindowState(windowState() ^ Qt::WindowFullScreen);
         viewState_.fullscreen = isFullScreen();
+        if (transportBar_) transportBar_->setFullscreen(isFullScreen());
         refreshHud("Fullscreen");
     });
     fileMenu->addAction(fullscreenAction);
@@ -148,11 +155,11 @@ void MainWindow::setupMenus() {
     fileMenu->addAction(quitAction);
 }
 
-void MainWindow::setupDeveloperTransportBar() {
-    devTransportBar_ = addToolBar("Developer Transport");
-    devTransportBar_->setMovable(false);
-
-    prevFrameAction_ = devTransportBar_->addAction("Previous Frame");
+void MainWindow::setupTransportControls() {
+    // The QActions carry the transport behavior and are shared by the
+    // transport bar, menus, and keyboard. The bar only emits intent; nothing
+    // about playback logic lives in the UI widget.
+    prevFrameAction_ = new QAction("Previous Frame", this);
     connect(prevFrameAction_, &QAction::triggered, this, [this]() {
         playback_.stepBackward();
         playback_.pause();
@@ -172,13 +179,13 @@ void MainWindow::setupDeveloperTransportBar() {
         refreshHud("Prev Frame");
     });
 
-    playPauseAction_ = devTransportBar_->addAction("Play");
+    playPauseAction_ = new QAction("Play", this);
     connect(playPauseAction_, &QAction::triggered, this, [this]() {
         togglePlayPause();
         refreshHud("Play/Pause");
     });
 
-    nextFrameAction_ = devTransportBar_->addAction("Next Frame");
+    nextFrameAction_ = new QAction("Next Frame", this);
     connect(nextFrameAction_, &QAction::triggered, this, [this]() {
         playback_.stepForward();
         playback_.pause();
@@ -198,11 +205,23 @@ void MainWindow::setupDeveloperTransportBar() {
         refreshHud("Next Frame");
     });
 
-    timelineSlider_ = new QSlider(Qt::Horizontal, devTransportBar_);
-    timelineSlider_->setMinimum(0);
-    timelineSlider_->setMaximum(0);
-    timelineSlider_->setValue(0);
-    timelineSlider_->setMinimumWidth(220);
+    // The transport bar owns the slider widget; MainWindow keeps driving it,
+    // so every scrub/seek path below is unchanged.
+    transportBar_->setFrameText(QStringLiteral("--"));
+    connect(transportBar_, &trace::ui::TransportBar::prevFrameClicked,
+            prevFrameAction_, &QAction::trigger);
+    connect(transportBar_, &trace::ui::TransportBar::playPauseClicked,
+            playPauseAction_, &QAction::trigger);
+    connect(transportBar_, &trace::ui::TransportBar::nextFrameClicked,
+            nextFrameAction_, &QAction::trigger);
+    connect(transportBar_, &trace::ui::TransportBar::fullscreenClicked, this, [this]() {
+        setWindowState(windowState() ^ Qt::WindowFullScreen);
+        viewState_.fullscreen = isFullScreen();
+        transportBar_->setFullscreen(isFullScreen());
+        refreshHud("Fullscreen");
+    });
+
+    timelineSlider_ = transportBar_->timelineSlider();
     // Keyboard is reserved for transport (arrow-key stepping, J-K-L). If the
     // slider kept focus after a drag, arrows would move the slider instead of
     // stepping frames.
@@ -261,8 +280,6 @@ void MainWindow::setupDeveloperTransportBar() {
         }
         refreshHud("Scrub");
     });
-    devTransportBar_->addWidget(timelineSlider_);
-
     syncTransportBar();
 }
 
@@ -286,6 +303,15 @@ void MainWindow::syncTransportBar() {
     nextFrameAction_->setEnabled(hasAnyMedia);
     playPauseAction_->setEnabled(hasPlayableRange);
     playPauseAction_->setText(playing ? "Pause" : "Play");
+
+    if (transportBar_) {
+        transportBar_->setControlsEnabled(hasAnyMedia);
+        transportBar_->setPlaying(playing);
+        transportBar_->setFullscreen(isFullScreen());
+        transportBar_->setFrameText(hasAnyMedia
+            ? QStringLiteral("%1 / %2").arg(st.currentFrame).arg(std::max(0LL, st.maxFrame))
+            : QStringLiteral("--"));
+    }
 }
 
 void MainWindow::openFileDialog() {

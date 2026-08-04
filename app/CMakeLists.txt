@@ -28,6 +28,8 @@ add_executable(Trace
   ../src/ui/ViewerWidget.cpp
   ../src/ui/TransportOverlay.h
   ../src/ui/TransportOverlay.cpp
+  ../src/ui/TransportBar.h
+  ../src/ui/TransportBar.cpp
   ../src/core/MediaItem.h
   ../src/core/PlaybackState.h
   ../src/core/ViewState.h
