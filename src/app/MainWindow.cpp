@@ -56,9 +56,17 @@ constexpr double kScrubEase = 0.5;
 // as a burst that the panel samples once. Lower values allow bursting again in
 // exchange for closing the pointer gap faster.
 //
-// TRACE_SCRUB_PACE overrides it: 0 disables pacing entirely (pre-Aug-2026
-// behaviour, paints as fast as decode allows), 1.0 is the default, and values
-// in between trade smoothness against lag.
+// DEFAULT IS 0 -- pacing OFF. It was written to fix backward drags arriving as
+// a burst-then-freeze, and it does even the motion out, but it was tried on the
+// Windows box and made fast scrub feel worse overall: it costs forward roughly
+// 20 frames of lag at a 6x drag because the re-arm round trip caps the paced
+// rate near 140fps rather than the panel's 240. Forward smoothness is the thing
+// that was signed off, so it wins by default until pacing is cheap enough not
+// to trade against it. Do not turn this on again without re-testing fast
+// forward drag specifically.
+//
+// TRACE_SCRUB_PACE: 0 off (default), 1.0 one frame per refresh, values between
+// trade smoothness against lag.
 double scrubPaceFraction() {
     static const double frac = [] {
         const QByteArray raw = qgetenv("TRACE_SCRUB_PACE");
@@ -67,7 +75,7 @@ double scrubPaceFraction() {
             const double v = raw.toDouble(&ok);
             if (ok && v >= 0.0 && v <= 4.0) return v;
         }
-        return 1.0;
+        return 0.0;
     }();
     return frac;
 }
