@@ -161,6 +161,21 @@ MainWindow::MainWindow() {
             lastAvSyncMs_ = (static_cast<double>(beforeFrame) - audioFramePos) * (1000.0 / fps);
             maxAvSyncMs_ = std::max(maxAvSyncMs_, std::abs(lastAvSyncMs_));
 
+            // Watchdog. A clock that stops advancing must degrade to "audio out
+            // of sync", never to "picture frozen" -- a stalled QAudioSink held
+            // the playhead still indefinitely and looked like a hung app.
+            // Picture keeps moving on the wall clock; only sync is lost.
+            if (std::abs(audioSeconds - lastAudioClockS_) > 1e-6) {
+                lastAudioClockS_ = audioSeconds;
+                audioClockStall_.restart();
+            } else if (audioClockStall_.isValid()
+                       && audioClockStall_.elapsed() > kAudioStallMs) {
+                audioClockStalled_ = true;
+                audioDriving_ = false;
+                statusBar()->showMessage(
+                    "Audio clock stalled - playback continued without sync", 4000);
+            }
+
             const long long delta = audioFrame - beforeFrame;
             if (delta <= 0) {
                 // Sound has not reached the next frame yet. Hold the current
@@ -756,6 +771,10 @@ void MainWindow::startAudioForPlayback() {
     // Already running and locked: restarting would seek the device for nothing.
     if (audioDriving_ && audio_.isPlaying()) return;
 
+    lastAudioClockS_ = -1.0;
+    audioClockStalled_ = false;
+    audioClockStall_.start();
+
     const double fps = std::max(1.0, frameSource_->fps());
     const double startSeconds = static_cast<double>(playback_.state().currentFrame) / fps;
     audio_.start(startSeconds);
@@ -1012,13 +1031,19 @@ void MainWindow::refreshHud(const QString& action) {
                     .arg(audioStats.sampleRate)
                     .arg(audioStats.channels)
                     .arg(audioStats.muted ? " MUTED" : "")
-                    .arg(audioDriving_ ? "MASTER" : "idle")
+                    .arg(audioClockStalled_ ? "STALLED" : audioDriving_ ? "MASTER" : "idle")
                     .arg(QString::number(lastAvSyncMs_, 'f', 1))
                     .arg(QString::number(maxAvSyncMs_, 'f', 1))
                     .arg(QString::number(audioStats.bufferedMs, 'f', 0))
                     .arg(audioStats.underruns)
                     .arg(audioRepeatedFrames_)
-                    .arg(audioSkippedFrames_);
+                    .arg(audioSkippedFrames_)
+                  + QString(" | proc %1ms sinkbuf %2 free %3 state %4 clk %5s")
+                    .arg(audioStats.processedUSecs / 1000)
+                    .arg(audioStats.sinkBufferBytes)
+                    .arg(audioStats.sinkFreeBytes)
+                    .arg(audioStats.sinkState)
+                    .arg(QString::number(audioStats.clockSeconds, 'f', 3));
 
             const QString l8 = QString("cache FIFO | %1/%2 (%3 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
                 .arg(perf.cacheOccupancy)

@@ -122,6 +122,11 @@ private:
     // sits from where the audio clock says it should be, in milliseconds.
     // Positive = picture ahead of sound.
     bool audioDriving_ = false;
+    // Watchdog against a stalled audio clock holding the playhead still.
+    static constexpr qint64 kAudioStallMs = 300;
+    QElapsedTimer audioClockStall_;
+    double lastAudioClockS_ = -1.0;
+    bool audioClockStalled_ = false;
     double lastAvSyncMs_ = 0.0;
     double maxAvSyncMs_ = 0.0;
     long long audioRepeatedFrames_ = 0;  // clock did not advance a whole frame

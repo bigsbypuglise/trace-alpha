@@ -41,6 +41,11 @@ namespace {
 // a seek does not have a long tail of stale sound to discard.
 constexpr double kRingSeconds = 0.5;
 
+// Reported by AudioFeed::bytesAvailable so the sink never parks in IdleState.
+// Any comfortably large value works; the sink clamps its reads to its own
+// buffer size regardless.
+constexpr qint64 kAlwaysAvailable = 1 << 20;
+
 AVSampleFormat avFormatFor(QAudioFormat::SampleFormat fmt) {
     switch (fmt) {
         case QAudioFormat::UInt8: return AV_SAMPLE_FMT_U8;
@@ -129,6 +134,20 @@ public:
 
     bool isSequential() const override { return true; }
 
+    // QAudioSink asks how much is readable before it reads, and parks itself in
+    // IdleState if the answer is zero -- waiting on a readyRead() that a
+    // custom device like this one never emits. The default implementation
+    // returns 0 because it only counts QIODevice's own internal read buffer,
+    // which we do not use. Leaving it unoverridden meant the sink started,
+    // pulled nothing, kept processedUSecs() at zero, and froze the picture:
+    // the audio clock never advanced off its start value.
+    //
+    // readData always satisfies the full request (silence on underrun), so
+    // "data is always available" is the truthful answer here.
+    qint64 bytesAvailable() const override {
+        return kAlwaysAvailable + QIODevice::bytesAvailable();
+    }
+
 protected:
     qint64 readData(char* data, qint64 maxSize) override {
         if (maxSize <= 0) return 0;
@@ -188,6 +207,15 @@ struct AudioOutput::Impl {
     double startSeconds = 0.0;
     bool playing = false;
     bool muted = false;
+
+    // The device drains its buffer in chunks, so `bufferSize - bytesFree`
+    // sampled at an arbitrary instant is a sawtooth spanning the whole buffer
+    // (0.5s here). Subtracting it raw made the clock jitter by that much, and
+    // the tick alternately held and skipped frames chasing it. Smooth the
+    // latency term instead: true device latency is near-constant, the sampling
+    // noise is not.
+    mutable double smoothedLatencyS = -1.0;
+    mutable double lastClockS = 0.0;
 
     QString codecName;
     int outRate = 0;
@@ -409,6 +437,8 @@ void AudioOutput::start(double startSeconds) {
     impl_->stopRequested = false;
     impl_->decodeEnded = false;
     impl_->startSeconds = startSeconds;
+    impl_->smoothedLatencyS = -1.0;
+    impl_->lastClockS = startSeconds;
 
     impl_->thread = std::make_unique<Impl::DecodeThread>(impl_.get());
     impl_->thread->start();
@@ -444,8 +474,21 @@ double AudioOutput::clockSeconds() const {
     // clock runs a buffer ahead of the sound and video leads picture-to-track.
     const double processed = static_cast<double>(impl_->sink->processedUSecs()) / 1'000'000.0;
     const qint64 inFlight = impl_->sink->bufferSize() - impl_->sink->bytesFree();
-    const double inFlightSec = impl_->bytesToSeconds(std::max<qint64>(inFlight, 0));
-    return impl_->startSeconds + std::max(0.0, processed - inFlightSec);
+    const double rawLatency = impl_->bytesToSeconds(std::max<qint64>(inFlight, 0));
+
+    if (impl_->smoothedLatencyS < 0.0) {
+        impl_->smoothedLatencyS = rawLatency;
+    } else {
+        constexpr double kAlpha = 0.02;  // slow: real latency barely moves
+        impl_->smoothedLatencyS += kAlpha * (rawLatency - impl_->smoothedLatencyS);
+    }
+
+    const double clock = impl_->startSeconds
+                       + std::max(0.0, processed - impl_->smoothedLatencyS);
+    // Media time must never run backwards: a frame is never presented twice in
+    // the wrong order because the clock wobbled.
+    impl_->lastClockS = std::max(impl_->lastClockS, clock);
+    return impl_->lastClockS;
 }
 
 bool AudioOutput::ended() const {
@@ -476,6 +519,12 @@ AudioPerfStats AudioOutput::stats() const {
     s.bufferedMs = impl_->bytesToSeconds(impl_->ring.used()) * 1000.0;
     s.underruns = impl_->underruns;
     s.ended = ended();
+    if (impl_->sink) {
+        s.processedUSecs = impl_->sink->processedUSecs();
+        s.sinkBufferBytes = impl_->sink->bufferSize();
+        s.sinkFreeBytes = impl_->sink->bytesFree();
+        s.sinkState = static_cast<int>(impl_->sink->state());
+    }
     return s;
 }
 

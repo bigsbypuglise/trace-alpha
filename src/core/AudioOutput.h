@@ -19,6 +19,14 @@ struct AudioPerfStats {
     double bufferedMs = 0.0;     // decoded audio waiting to be handed to the device
     long long underruns = 0;     // times the device asked for data we did not have
     bool ended = false;          // audio stream ran out before video did
+
+    // Raw sink numbers behind the clock. Present because the clock pinning at
+    // its start value froze the picture once already, and the derived figure
+    // alone could not say which term was wrong.
+    long long processedUSecs = 0;
+    long long sinkBufferBytes = 0;
+    long long sinkFreeBytes = 0;
+    int sinkState = -1;
 };
 
 // Decoded audio for the currently open file, played on the default output
