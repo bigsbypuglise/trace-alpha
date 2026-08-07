@@ -101,7 +101,7 @@ MainWindow::MainWindow() {
                 schedulerTickClock_.start();
             } else {
                 const double tickDeltaMs = static_cast<double>(schedulerTickClock_.restart());
-                lastTickJitterMs_ = tickDeltaMs - static_cast<double>(kSchedulerTickMs);
+                lastTickJitterMs_ = tickDeltaMs - static_cast<double>(schedulerIntervalMs_);
                 const double absJitter = std::abs(lastTickJitterMs_);
                 ++schedulerTicks_;
                 avgTickJitterMs_ += (absJitter - avgTickJitterMs_) / static_cast<double>(schedulerTicks_);
@@ -571,8 +571,20 @@ void MainWindow::openPath(const QString& path) {
     // delivered every ~13ms and polling for the due time costs latency a
     // periodic timer never pays. The residual gap is per-frame work, not
     // scheduler quantization, so the periodic timer stays.
+    //
+    // The interval is floor(), not round(). round() puts the tick at 42ms for
+    // a 41.71ms frame (23.976fps) -- systematically SLOWER than the frame rate,
+    // so presentation can never keep up and the deficit shows as steady drift.
+    // Under the audio clock it showed as hold/skip churn (rep 14 skip 13 over
+    // 13s) on a file with 40x decode headroom, since every wasted tick had to
+    // be repaid by skipping a frame later. floor() makes the tick a *bound* on
+    // frame duration: opportunities always exist and the clock decides which
+    // ones to use, which is exactly what the hold branch is for. This is not
+    // the rejected short-poll scheduler above -- it stays a periodic timer at
+    // the frame interval, 1ms faster.
     playTimer_.setSingleShot(false);
-    playTimer_.setInterval(static_cast<int>(std::round(1000.0 / fps)));
+    schedulerIntervalMs_ = std::max(1, static_cast<int>(std::floor(1000.0 / fps)));
+    playTimer_.setInterval(schedulerIntervalMs_);
     // Qt defaults to a coarse timer above 20ms, which on Windows quantizes to
     // the ~15.6ms system tick. A precise timer is what makes a 6ms scheduler
     // tick meaningful at all.
@@ -981,7 +993,7 @@ void MainWindow::refreshHud(const QString& action) {
                       .arg(playbackFramesPresented_);
 
             const QString l5 = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | drift %8ms | ticks %9 | presents %10")
-                .arg(kSchedulerTickMs)
+                .arg(schedulerIntervalMs_)
                 .arg(QString::number(lastTickJitterMs_, 'f', 2))
                 .arg(QString::number(avgTickJitterMs_, 'f', 2))
                 .arg(QString::number(maxTickJitterMs_, 'f', 2))

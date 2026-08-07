@@ -5,6 +5,7 @@
 #include <QAudioDevice>
 #include <QAudioFormat>
 #include <QAudioSink>
+#include <QElapsedTimer>
 #include <QIODevice>
 #include <QMediaDevices>
 #include <QMutex>
@@ -216,6 +217,17 @@ struct AudioOutput::Impl {
     // noise is not.
     mutable double smoothedLatencyS = -1.0;
     mutable double lastClockS = 0.0;
+
+    // processedUSecs() counts bytes handed to the device, so it advances in
+    // whatever chunk the sink last pulled -- a staircase, not a ramp. Reading
+    // media time straight off it made the playhead oscillate about a frame
+    // either side of true, and the tick paid for that with ~1.2 held and ~1.2
+    // skipped frames per second. So the clock runs on wall time and is
+    // *disciplined* by audio rather than sampled from it: smooth between
+    // pulls, and still locked to the sound card's rate over the long run.
+    mutable QElapsedTimer clockWall;
+    mutable double clockBase = 0.0;
+    mutable bool clockInit = false;
 
     QString codecName;
     int outRate = 0;
@@ -439,6 +451,8 @@ void AudioOutput::start(double startSeconds) {
     impl_->startSeconds = startSeconds;
     impl_->smoothedLatencyS = -1.0;
     impl_->lastClockS = startSeconds;
+    impl_->clockInit = false;
+    impl_->clockBase = startSeconds;
 
     impl_->thread = std::make_unique<Impl::DecodeThread>(impl_.get());
     impl_->thread->start();
@@ -483,11 +497,34 @@ double AudioOutput::clockSeconds() const {
         impl_->smoothedLatencyS += kAlpha * (rawLatency - impl_->smoothedLatencyS);
     }
 
-    const double clock = impl_->startSeconds
-                       + std::max(0.0, processed - impl_->smoothedLatencyS);
+    const double raw = impl_->startSeconds
+                     + std::max(0.0, processed - impl_->smoothedLatencyS);
+
+    if (!impl_->clockInit) {
+        impl_->clockInit = true;
+        impl_->clockWall.start();
+        impl_->clockBase = raw;
+        impl_->lastClockS = raw;
+        return raw;
+    }
+
+    const double wall = static_cast<double>(impl_->clockWall.nsecsElapsed()) / 1e9;
+    const double error = raw - (impl_->clockBase + wall);
+
+    // A large error is a real event (startup fill, a stall, an underrun run),
+    // not sampling noise: snap to it rather than crawling for seconds. Small
+    // errors are the staircase, and get corrected gently.
+    constexpr double kSnapSeconds = 0.25;
+    constexpr double kSlew = 0.05;
+    if (std::abs(error) > kSnapSeconds) {
+        impl_->clockBase = raw - wall;
+    } else {
+        impl_->clockBase += kSlew * error;
+    }
+
     // Media time must never run backwards: a frame is never presented twice in
     // the wrong order because the clock wobbled.
-    impl_->lastClockS = std::max(impl_->lastClockS, clock);
+    impl_->lastClockS = std::max(impl_->lastClockS, impl_->clockBase + wall);
     return impl_->lastClockS;
 }
 

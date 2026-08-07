@@ -106,7 +106,9 @@ private:
     // so the tick interval no longer quantizes the playback rate.
     // Reference interval for the jitter metric: the timer runs at the frame
     // interval, so jitter is reported against that.
-    static constexpr int kSchedulerTickMs = 42;
+    // Set from the media's frame rate at open. Was a hardcoded 42, which made
+    // the jitter readout wrong for anything that was not 24fps.
+    int schedulerIntervalMs_ = 42;
     QElapsedTimer schedulerTickClock_;
     long long schedulerTicks_ = 0;
     long long presentSamples_ = 0;
