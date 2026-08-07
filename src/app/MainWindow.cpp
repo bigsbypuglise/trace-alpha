@@ -556,6 +556,9 @@ void MainWindow::openPath(const QString& path) {
     lastFrameHandoffMs_ = 0.0;
     avgFrameHandoffMs_ = 0.0;
     frameHandoffSamples_ = 0;
+    // Re-seed per media: a 1080p estimate would let a 4K file walk far enough
+    // to fall behind the pointer on its first drag.
+    scrubWalkPerFrameMs_ = 1.0;
 
     trace::core::MediaItem item;
     item.path = path.toStdString();
@@ -981,17 +984,90 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         return;
     }
 
-    activeScrubFrame_ = targetFrame;
-    playback_.setCurrentFrame(targetFrame);
+    // Mid-drag frames use Scrub (fast, half-res preview at >=1920px). The
+    // landing frame — slider release or a jump while not dragging — uses Step
+    // so the frame being inspected is full-res and accurately converted.
+    const bool dragging = !forceExact && scrubbing_;
+    const auto mode = dragging
+        ? trace::core::VideoDecoderFFmpeg::RequestMode::Scrub
+        : trace::core::VideoDecoderFFmpeg::RequestMode::Step;
 
-    // Mid-drag frames use Scrub (fast, half-res preview at 4K). The landing
-    // frame — slider release or a jump while not dragging — uses Step so the
-    // frame being inspected is full-res and accurately converted.
-    const auto mode = (forceExact || !scrubbing_)
-        ? trace::core::VideoDecoderFFmpeg::RequestMode::Step
-        : trace::core::VideoDecoderFFmpeg::RequestMode::Scrub;
-    prepareVideoRequest(mode, 1, true);
+    // Dragging forward is a shuttle, not a sample: walk the decoder through
+    // every frame between here and the pointer and put each one on screen.
+    // A click still jumps, because a click arrives as press+release and the
+    // release forces the exact target through the Step path above.
+    //
+    // This is affordable because it inverts what used to be paid for. Seeking
+    // was the expensive half (a keyframe landing plus a GOP walk); stepping
+    // forward is ~1ms at 1080p. The old path seeked on every drag update and
+    // showed the keyframe it landed on, so a drag displayed one new picture per
+    // GOP while claiming to be exact.
+    //
+    // The budget decides the policy by itself, which is what makes this work
+    // across codecs: at 1080p H.264 a frame costs ~1.3ms so a slice covers
+    // several frames and a drag shuttles through all of them; at 4K ProRes a
+    // frame costs ~20ms so maxWalk collapses to 1, every drag update is a jump,
+    // and the picture stays on the pointer instead of falling behind it. Heavy
+    // media therefore degrades to "as many frames as fit, always current"
+    // rather than to "wrong frame, instantly".
+    long long walkFrom = activeScrubFrame_;
+    activeScrubFrame_ = targetFrame;
+
     QString error;
+    if (dragging && walkFrom >= 0 && targetFrame > walkFrom) {
+        constexpr double kScrubWalkBudgetMs = 10.0;
+        const long long maxWalk = std::clamp(
+            static_cast<long long>(kScrubWalkBudgetMs / scrubWalkPerFrameMs_),
+            1LL, 240LL);
+
+        if (targetFrame - walkFrom <= maxWalk) {
+            QElapsedTimer walkTimer;
+            walkTimer.start();
+            prepareVideoRequest(mode, 1, true);
+            long long walked = 0;
+            for (long long f = walkFrom + 1; f <= targetFrame; ++f) {
+                // A remote read pumped the event loop and something re-entered;
+                // drop out and let the re-armed timer resume from here.
+                if (storageBusy_) break;
+                playback_.setCurrentFrame(f);
+                if (!loadCurrentFrame(error, mode)) break;
+                // repaint(), not update(): update() coalesces, so a loop of
+                // them would decode every frame and display only the last --
+                // which is the behaviour this exists to remove.
+                viewer_->repaint();
+                activeScrubFrame_ = f;
+                ++walked;
+                if (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0
+                        >= kScrubWalkBudgetMs) {
+                    break;
+                }
+            }
+            // Self-calibrating: the next slice's walk-or-jump decision is made
+            // from what this one actually cost, decode + convert + paint
+            // included. Seeded optimistically at 1ms so the first drag on a new
+            // file shuttles; one slice is enough to converge on heavy media.
+            if (walked > 0) {
+                const double perFrame =
+                    (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0)
+                    / static_cast<double>(walked);
+                scrubWalkPerFrameMs_ += 0.35 * (perFrame - scrubWalkPerFrameMs_);
+                scrubWalkPerFrameMs_ = std::max(0.05, scrubWalkPerFrameMs_);
+            }
+            // Behind the pointer with budget spent: re-arm so the next slice
+            // continues. If the pointer keeps running the gap eventually
+            // exceeds maxWalk and the branch below jumps instead, which is what
+            // keeps the picture current rather than trailing.
+            if (activeScrubFrame_ < targetFrame && !scrubTimer_.isActive()) {
+                scrubTimer_.start();
+            }
+            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+            refreshHud("Scrub");
+            return;
+        }
+    }
+
+    playback_.setCurrentFrame(targetFrame);
+    prepareVideoRequest(mode, 1, true);
     if (!loadCurrentFrame(error, mode)) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
     }
@@ -1310,14 +1386,20 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.cacheInserts)
                 .arg(perf.cacheEvictions);
 
-            const QString l7 = QString("scrub %1 | target %2 | shown %3 | delta %4 | walk %5f | dst %6")
+            // `shown`/`delta` are measured, not asserted. They used to be
+            // assigned -- Scrub wrote the requested index onto whatever
+            // keyframe the seek landed on, so this line read `exact | delta 0`
+            // while displaying a frame most of a GOP away.
+            const QString l7 = QString("scrub %1 | target %2 | shown %3 | delta %4 | walk %5f | dst %6 | shuttle %7ms/f maxwalk %8")
                 .arg(perf.previewApproximate ? "APPROX" : "exact")
                 .arg(perf.previewTargetFrame)
                 .arg(perf.previewDisplayedFrame)
                 .arg(perf.previewTargetFrame >= 0 && perf.previewDisplayedFrame >= 0
                          ? perf.previewTargetFrame - perf.previewDisplayedFrame : 0)
                 .arg(perf.lastWalkFrames)
-                .arg(perf.dstPixelFormat);
+                .arg(perf.dstPixelFormat)
+                .arg(QString::number(scrubWalkPerFrameMs_, 'f', 2))
+                .arg(std::clamp(static_cast<long long>(10.0 / scrubWalkPerFrameMs_), 1LL, 240LL));
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
                  + "\n" + l7 + "\n" + l8 + "\n" + l9

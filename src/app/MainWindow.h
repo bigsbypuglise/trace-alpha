@@ -168,6 +168,12 @@ private:
     qint64 firstPresentNs_ = -1;
     qint64 lastPresentNs_ = -1;
     QElapsedTimer sessionClock_;
+    // Measured cost of one frame of the scrub shuttle walk, which decides how
+    // far a single slice may walk before jumping instead. Measured rather than
+    // derived from VideoPerfStats averages: those are pooled across seek-walk
+    // decodes and read ~4x the true sequential cost (dec 0.07 last vs 5.02
+    // avg on the 1080p clip), which would collapse the walk to a jump.
+    double scrubWalkPerFrameMs_ = 1.0;
     bool suppressSliderSignal_ = false;
     bool scrubbing_ = false;
     long long pendingScrubFrame_ = -1;

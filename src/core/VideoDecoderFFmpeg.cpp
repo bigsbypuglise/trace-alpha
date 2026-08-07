@@ -1203,10 +1203,19 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         frameIndex > currentFrame_ &&
         (frameIndex - currentFrame_) <= kPlaybackForwardWalkLimit;
 
+    // Scrub no longer forces a seek. It used to, unconditionally, which meant
+    // every mid-drag update landed on the keyframe at-or-before the target and
+    // never walked forward to the real frame -- so dragging showed one new
+    // picture per GOP (measured: frames 49..55 all displayed keyframe 30) while
+    // the HUD reported `exact | delta 0`. Dragging is now a shuttle: the caller
+    // walks the decoder forward one frame at a time and every frame is
+    // presented, which is only affordable because forward decode is cheap and
+    // it was the seek that was expensive. Genuine jumps -- backward moves, or a
+    // forward gap larger than the caller's walk budget -- still seek via the
+    // conditions below.
     const bool needSeek =
         (currentFrame_ < 0) ||
         (frameIndex < currentFrame_) ||
-        (mode == RequestMode::Scrub) ||
         (mode == RequestMode::Step && std::llabs(frameIndex - currentFrame_) > 1) ||
         // Re-request of the currently shown frame outside playback: seek so
         // the frame is re-decoded (e.g. full-res Step after a half-res
@@ -1225,7 +1234,6 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             const char* reason =
                 (currentFrame_ < 0) ? "InitialOpen" :
                 (frameIndex < currentFrame_) ? "BackwardRequest_CacheMiss" :
-                (mode == RequestMode::Scrub) ? "Scrub" :
                 (mode == RequestMode::Step && std::llabs(frameIndex - currentFrame_) > 1) ? "StepJump" :
                 (mode != RequestMode::Playback && frameIndex == currentFrame_) ? "RerequestOutsidePlayback" :
                 (!requestIsSequentialForward && frameIndex > currentFrame_ + 1) ? "NonSequentialForwardGap" :
@@ -1272,22 +1280,22 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         const double seekN = static_cast<double>(perfStats_.seekSamples);
         perfStats_.avgSeekMs += (seekMs - perfStats_.avgSeekMs) / seekN;
 
-        if (mode == RequestMode::Scrub) {
-            // Mid-drag preview: label the keyframe the seek lands on as the
-            // requested frame. Approximate but instant — exactness while the
-            // slider is moving isn't worth decoding a whole GOP per tick.
-            impl_->lastDecodedFrame = frameIndex > 0 ? frameIndex - 1 : -1;
-            impl_->seekResolvePending = false;
-        } else {
-            // Step / Playback jumps: frame-exact. Resolve the first decoded
-            // frame from its PTS and decode forward to the true target. On
-            // all-intra codecs (ProRes) the seek lands on the target anyway,
-            // so this costs nothing there; on long-GOP H.264 it decodes up
-            // to a GOP of frames — the price of showing the actual frame.
-            impl_->lastDecodedFrame = -1;
-            impl_->seekResolvePending = true;
-            impl_->seekTargetFrame = frameIndex;
-        }
+        // Every seek is frame-exact, Scrub included. Resolve the first decoded
+        // frame from its PTS and decode forward to the true target. On
+        // all-intra codecs (ProRes) the seek lands on the target anyway, so
+        // this costs nothing there; on long-GOP H.264 it decodes up to a GOP
+        // of frames — the price of showing the actual frame.
+        //
+        // Scrub used to take a shortcut here: it labelled the landed keyframe
+        // as the requested frame and displayed that. It was instant and it was
+        // wrong — up to a full GOP behind the pointer, with `delta 0` reported
+        // for a frame that was nothing of the sort. A review tool cannot show
+        // one frame and name it another, and telemetry that asserts its own
+        // correctness is how it survived unnoticed. Dragging gets its frames
+        // from the caller's forward walk now, not from mislabelled seeks.
+        impl_->lastDecodedFrame = -1;
+        impl_->seekResolvePending = true;
+        impl_->seekTargetFrame = frameIndex;
     }
 
     // How many frames to convert and cache on the way to the target.
