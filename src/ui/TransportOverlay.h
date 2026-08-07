@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <QString>
+#include <QStringList>
 
 namespace trace::ui {
 
@@ -11,6 +12,8 @@ public:
     explicit TransportOverlay(QWidget* parent = nullptr);
 
     void setTransport(const QString& mode, qint64 frame, double speed, const QString& action);
+    // Accepts a '\n'-separated block; the overlay grows to fit so no field
+    // gets clipped off the right edge at normal window widths.
     void setHudLine(const QString& line);
 
 protected:
@@ -21,7 +24,7 @@ private:
     qint64 frame_ = 0;
     double speed_ = 0.0;
     QString action_ = "Idle";
-    QString hudLine_ = "No media loaded";
+    QStringList hudLines_ = {"No media loaded"};
 };
 
 } // namespace trace::ui

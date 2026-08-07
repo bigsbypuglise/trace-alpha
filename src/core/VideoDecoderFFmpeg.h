@@ -30,6 +30,15 @@ struct VideoPerfStats {
     double avgConvertAllocMs = 0.0;
     double lastConvertWrapMs = 0.0;
     double avgConvertWrapMs = 0.0;
+    // "wrap" is an aggregate bucket; these split it into its real stages so a
+    // cost showing up there can be attributed instead of guessed at.
+    double lastCtxRebuildMs = 0.0;
+    double avgCtxRebuildMs = 0.0;
+    double lastDetachMs = 0.0;
+    double avgDetachMs = 0.0;
+    long long lastCtxRebuilds = 0;
+    long long lastConvertCalls = 0;
+    bool lastImageWasShared = false;
     double lastSwsScaleMs = 0.0;
     double avgSwsScaleMs = 0.0;
     double lastMemcpyMs = 0.0;

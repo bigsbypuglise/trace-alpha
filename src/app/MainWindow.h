@@ -79,6 +79,31 @@ private:
     QTimer scrubTimer_;
     QElapsedTimer playbackClock_;
     double playbackAccumulatorMs_ = 0.0;
+    // Presented-rate accounting: measured from wall clock over the current
+    // playback run, so it reflects what the viewer actually saw rather than
+    // what was requested. Reset each time playback starts.
+    QElapsedTimer playbackRateClock_;
+    long long playbackFramesPresented_ = 0;
+    // Sampled on each presented frame so the readout freezes when playback
+    // stops instead of decaying as the idle clock keeps running.
+    double playbackRunElapsedS_ = 0.0;
+
+    // High-precision presentation scheduling. The timer runs far faster than
+    // the frame rate and presentation is gated on the playback accumulator,
+    // so the tick interval no longer quantizes the playback rate.
+    // Reference interval for the jitter metric: the timer runs at the frame
+    // interval, so jitter is reported against that.
+    static constexpr int kSchedulerTickMs = 42;
+    QElapsedTimer schedulerTickClock_;
+    long long schedulerTicks_ = 0;
+    long long presentSamples_ = 0;
+    double lastTickJitterMs_ = 0.0;
+    double avgTickJitterMs_ = 0.0;
+    double maxTickJitterMs_ = 0.0;
+    double lastPresentLatencyMs_ = 0.0;
+    double avgPresentLatencyMs_ = 0.0;
+    double maxPresentLatencyMs_ = 0.0;
+    double lastDriftMs_ = 0.0;
     bool suppressSliderSignal_ = false;
     bool scrubbing_ = false;
     long long pendingScrubFrame_ = -1;

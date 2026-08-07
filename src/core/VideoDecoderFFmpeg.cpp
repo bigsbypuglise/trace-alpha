@@ -153,6 +153,33 @@ struct VideoDecoderFFmpeg::Impl {
         QImage image;
     };
     std::deque<CachedFrame> reverseCache;
+
+    // Conversion targets are recycled. Writing into a QImage the viewer or
+    // the reverse cache still references makes bits() detach — a full ~38MB
+    // deep copy at 4K, every frame, of data sws_scale is about to overwrite.
+    // A pool entry whose only holder is the pool reports isDetached(), so it
+    // is safe to write in place. Buffers are reused rather than reallocated
+    // so the pages stay committed and warm.
+    std::deque<QImage> convertPool;
+    int convertPoolLimit = 16;
+
+    QImage* acquireConvertTarget(int w, int h, QImage::Format fmt) {
+        for (auto& img : convertPool) {
+            if (img.isDetached() && img.width() == w && img.height() == h && img.format() == fmt) {
+                return &img;
+            }
+        }
+        // Release unreferenced buffers of the wrong geometry so a resolution
+        // or format change doesn't pin the pool at stale sizes.
+        for (auto it = convertPool.begin(); it != convertPool.end();) {
+            const bool stale = it->isDetached()
+                && (it->width() != w || it->height() != h || it->format() != fmt);
+            it = stale ? convertPool.erase(it) : it + 1;
+        }
+        if (static_cast<int>(convertPool.size()) >= convertPoolLimit) return nullptr;
+        convertPool.emplace_back(w, h, fmt);
+        return &convertPool.back();
+    }
     // Sized at open() from frame footprint: a 4K RGB32 frame is ~33MB, a
     // 1080p one ~8MB, so a fixed count either wastes memory or wastes seeks.
     int reverseCacheCapacity = 12;
@@ -325,6 +352,12 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             : 12;
         impl_->reverseCacheCapacity = std::clamp(byFootprint, 4, 32);
     }
+    // One target per outstanding holder: the reverse cache, the viewer, the
+    // frame in flight, plus slack. Buffers here are the same ones the old
+    // detach path allocated and threw away each frame, so this is not extra
+    // steady-state memory.
+    impl_->convertPool.clear();
+    impl_->convertPoolLimit = impl_->reverseCacheCapacity + 4;
     impl_->seekWalkCacheWindowOverride = envInt("TRACE_SEEK_CACHE_WINDOW", -1);
     if (impl_->seekWalkCacheWindowOverride >= 0) {
         impl_->seekWalkCacheWindowOverride =
@@ -442,6 +475,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     long long cacheWindow = 0;
     qint64 convertAllocNs = 0;
     qint64 convertWrapNs = 0;
+    qint64 ctxRebuildNs = 0;
+    qint64 detachNs = 0;
+    long long ctxRebuilds = 0;
+    long long convertCalls = 0;
     qint64 swsScaleNs = 0;
     qint64 memcpyNs = 0;
 
@@ -464,6 +501,12 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.lastConvertWrapMs = wrapMs;
         perfStats_.lastSwsScaleMs = swsMs;
         perfStats_.lastMemcpyMs = memcpyMs;
+        const double ctxRebuildMs = static_cast<double>(ctxRebuildNs) / 1'000'000.0;
+        const double detachMs = static_cast<double>(detachNs) / 1'000'000.0;
+        perfStats_.lastCtxRebuildMs = ctxRebuildMs;
+        perfStats_.lastDetachMs = detachMs;
+        perfStats_.lastCtxRebuilds = ctxRebuilds;
+        perfStats_.lastConvertCalls = convertCalls;
         perfStats_.lastWalkFrames = walkFrames;
         perfStats_.lastWalkCacheConverts = walkCacheConverts;
         perfStats_.lastWalkCacheConvertMs = static_cast<double>(cacheConvertNs) / 1'000'000.0;
@@ -475,11 +518,14 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.avgTotalMs += (totalMs - perfStats_.avgTotalMs) / n;
         perfStats_.avgConvertAllocMs += (allocMs - perfStats_.avgConvertAllocMs) / n;
         perfStats_.avgConvertWrapMs += (wrapMs - perfStats_.avgConvertWrapMs) / n;
+        perfStats_.avgCtxRebuildMs += (ctxRebuildMs - perfStats_.avgCtxRebuildMs) / n;
+        perfStats_.avgDetachMs += (detachMs - perfStats_.avgDetachMs) / n;
         perfStats_.avgSwsScaleMs += (swsMs - perfStats_.avgSwsScaleMs) / n;
         perfStats_.avgMemcpyMs += (memcpyMs - perfStats_.avgMemcpyMs) / n;
     };
 
     auto convertCurrentFrame = [&](QImage& image, bool fastOverride = false, bool isCacheFill = false) {
+        ++convertCalls;
         const bool useFast = fastOverride || wantFastConvert;
         const int w = impl_->frame->width > 0 ? impl_->frame->width : impl_->codec->width;
         const int h = impl_->frame->height > 0 ? impl_->frame->height : impl_->codec->height;
@@ -520,7 +566,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             wrapTimer.start();
             if (impl_->sws) sws_freeContext(impl_->sws);
             impl_->sws = createSwsContext(w, h, srcPixFmt, dstW, dstH, impl_->dstPixFmt, useFast);
-            convertWrapNs += wrapTimer.nsecsElapsed();
+            const qint64 rebuildNs = wrapTimer.nsecsElapsed();
+            convertWrapNs += rebuildNs;
+            ctxRebuildNs += rebuildNs;
+            ++ctxRebuilds;
             impl_->swsSrcW = w;
             impl_->swsSrcH = h;
             impl_->swsDstW = dstW;
@@ -539,22 +588,41 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // exactly QImage::Format_RGB32's 0xffRRGGBB layout (alpha ignored).
         constexpr QImage::Format kFrameFormat = QImage::Format_RGB32;
 
-        if (image.format() != kFrameFormat || image.width() != dstW || image.height() != dstH || image.isNull()) {
-            QElapsedTimer allocTimer;
-            allocTimer.start();
-            image = QImage(dstW, dstH, kFrameFormat);
-            convertAllocNs += allocTimer.nsecsElapsed();
+        // Convert into a buffer nothing else holds, then hand it out by
+        // shallow assignment. Writing straight into `image` would deep-copy
+        // the previous frame on every bits() call, since the viewer and the
+        // reverse cache still reference it.
+        QElapsedTimer allocTimer;
+        allocTimer.start();
+        QImage* target = impl_->acquireConvertTarget(dstW, dstH, kFrameFormat);
+        QImage fallback;
+        if (!target) {
+            // More outstanding references than the pool expects. Correctness
+            // must not depend on pool sizing, so use a private buffer.
+            fallback = QImage(dstW, dstH, kFrameFormat);
+            target = &fallback;
         }
+        convertAllocNs += allocTimer.nsecsElapsed();
 
-        if (image.isNull()) {
+        if (target->isNull()) {
             return;
         }
 
-        QElapsedTimer wrapTimer;
-        wrapTimer.start();
-        uint8_t* dstData[4] = { image.bits(), nullptr, nullptr, nullptr };
-        int dstLinesize[4] = { static_cast<int>(image.bytesPerLine()), 0, 0, 0 };
-        convertWrapNs += wrapTimer.nsecsElapsed();
+        // QImage::bits() is non-const: it detaches, deep-copying the whole
+        // buffer whenever the image is still shared (viewer, reverse cache).
+        // Time that separately from the trivial pointer setup it used to be
+        // lumped in with, so the cost is attributable rather than guessed at.
+        const bool wasShared = !target->isDetached();
+        QElapsedTimer detachTimer;
+        detachTimer.start();
+        uint8_t* const dstBits = target->bits();
+        const qint64 thisDetachNs = detachTimer.nsecsElapsed();
+        convertWrapNs += thisDetachNs;
+        detachNs += thisDetachNs;
+        perfStats_.lastImageWasShared = wasShared;
+
+        uint8_t* dstData[4] = { dstBits, nullptr, nullptr, nullptr };
+        int dstLinesize[4] = { static_cast<int>(target->bytesPerLine()), 0, 0, 0 };
 
         QElapsedTimer timer;
         timer.start();
@@ -572,6 +640,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // "cvt" readout reflects the frame actually being shown.
         if (isCacheFill) cacheConvertNs += swsNs;
         else convertNs += swsNs;
+
+        // Shallow: shares the pooled buffer with the caller. The pool will not
+        // reuse this entry again until every holder has released it.
+        image = *target;
 
         perfStats_.fullFrameCopiesPerFrame = 1;
         perfStats_.dstPixelFormat = dstW != w ? QStringLiteral("RGB32/BGRA half") : QStringLiteral("RGB32/BGRA");
