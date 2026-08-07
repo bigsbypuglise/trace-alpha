@@ -797,6 +797,18 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.openMs, 'f', 2))
                 .arg(QString::number(perf.firstFrameMs, 'f', 2));
 
+            // Colour and resampling state: a picture that looks wrong is either
+            // a matrix/range mismatch or a scaled presentation, and both are
+            // otherwise invisible.
+            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6")
+                .arg(perf.colorMatrix)
+                .arg(perf.colorMatrixInferred ? "*" : "")
+                .arg(perf.srcFullRange ? "full" : "limited")
+                .arg(drawPerf.lastDrawSize.width())
+                .arg(drawPerf.lastDrawSize.height())
+                .arg(!drawPerf.lastDrawWasScaled ? "1:1"
+                     : drawPerf.lastDrawWasFiltered ? "filtered" : "NEAREST");
+
             const QString l2 = QString("dec %1/%2 | sws %3/%4 | ctx %5/%6 | detach %7/%8 | alloc %9 | memcpy %10 | handoff %11 | draw %12 | total %13 | budget %14ms")
                 .arg(QString::number(perf.lastDecodeMs, 'f', 2))
                 .arg(QString::number(perf.avgDecodeMs, 'f', 2))
@@ -915,7 +927,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.lastWalkFrames)
                 .arg(perf.dstPixelFormat);
 
-            line = l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7 + "\n" + l8;
+            line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7 + "\n" + l8;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")

@@ -2,6 +2,7 @@
 
 #include <QWidget>
 #include <QImage>
+#include <QSize>
 #include <QString>
 #include <QElapsedTimer>
 
@@ -25,6 +26,13 @@ struct ViewerPerfStats {
     long long updateCount = 0;
     // Set when a paint is served without a new setImage() since the last one.
     long long paintsWithoutNewImage = 0;
+
+    // Whether the last frame was resampled to fit, and the size it was drawn
+    // at: the scale factor is what decides whether filtering is good enough or
+    // the downscale needs to move into swscale.
+    bool lastDrawWasScaled = false;
+    bool lastDrawWasFiltered = false;
+    QSize lastDrawSize;
 };
 
 class ViewerWidget final : public QWidget {

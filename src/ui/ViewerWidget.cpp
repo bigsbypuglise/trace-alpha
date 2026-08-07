@@ -2,8 +2,23 @@
 
 #include <QPainter>
 #include <QElapsedTimer>
+#include <QByteArray>
 
 namespace trace::ui {
+namespace {
+
+// Filtering the fit-to-window resample costs real time per paint at 4K.
+// TRACE_NEAREST_SCALE=1 restores the old point-sampled blit so the two can be
+// A/B'd against the HUD's `draw` figure without a rebuild.
+bool nearestScaleForced() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_NEAREST_SCALE");
+        return !v.isEmpty() && v != "0";
+    }();
+    return on;
+}
+
+} // namespace
 
 ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
     setMinimumSize(640, 360);
@@ -58,7 +73,17 @@ void ViewerWidget::paintEvent(QPaintEvent* event) {
         if (hasImage_) {
             const QSize fitted = image_.size().scaled(size(), Qt::KeepAspectRatio);
             QRect target((width() - fitted.width()) / 2, (height() - fitted.height()) / 2, fitted.width(), fitted.height());
-            p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+            // Nearest-neighbour point sampling is what jagged every diagonal
+            // edge in the frame: any window that is not exactly the source
+            // resolution drops whole pixel rows and columns. Filter whenever
+            // the frame is being resampled -- but never when it maps 1:1, where
+            // filtering could only soften pixels the user is inspecting.
+            const bool resampled = fitted != image_.size();
+            const bool filtered = resampled && !nearestScaleForced();
+            p.setRenderHint(QPainter::SmoothPixmapTransform, filtered);
+            perfStats_.lastDrawWasScaled = resampled;
+            perfStats_.lastDrawWasFiltered = filtered;
+            perfStats_.lastDrawSize = fitted;
             QElapsedTimer drawTimer;
             drawTimer.start();
             p.drawImage(target, image_);

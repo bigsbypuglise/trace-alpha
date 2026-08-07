@@ -69,6 +69,57 @@ AVPixelFormat alphaStrippedFormat(AVPixelFormat fmt) {
     return fmt;
 }
 
+// swscale defaults to BT.601 coefficients for every YUV source unless it is
+// told otherwise. HD and UHD video is BT.709, so the default silently applies
+// the wrong matrix to nearly everything Trace opens: skin tones flatten and
+// saturated colour shifts hue. Files also carry a range flag (limited 16-235 vs
+// full 0-255) that swscale assumes is limited; a full-range file decoded as
+// limited comes out washed out.
+int swsCoefficientsFor(AVColorSpace spc, int width, int height, bool* inferred) {
+    if (inferred) *inferred = false;
+    switch (spc) {
+        case AVCOL_SPC_BT709:       return SWS_CS_ITU709;
+        case AVCOL_SPC_FCC:         return SWS_CS_FCC;
+        case AVCOL_SPC_BT470BG:     return SWS_CS_ITU601;
+        case AVCOL_SPC_SMPTE170M:   return SWS_CS_SMPTE170M;
+        case AVCOL_SPC_SMPTE240M:   return SWS_CS_SMPTE240M;
+        case AVCOL_SPC_BT2020_NCL:
+        case AVCOL_SPC_BT2020_CL:   return SWS_CS_BT2020;
+        default: break;
+    }
+    // Unspecified/unknown: the standard fallback every player uses -- anything
+    // HD or larger is BT.709, SD is BT.601.
+    if (inferred) *inferred = true;
+    return (width >= 1280 || height > 576) ? SWS_CS_ITU709 : SWS_CS_ITU601;
+}
+
+// Note SWS_CS_ITU601, SWS_CS_ITU624, SWS_CS_SMPTE170M and SWS_CS_DEFAULT are
+// all the same value (5) -- they name one set of coefficients, so only one of
+// them can appear here.
+const char* swsCoefficientsName(int cs) {
+    switch (cs) {
+        case SWS_CS_ITU709:     return "bt709";
+        case SWS_CS_FCC:        return "fcc";
+        case SWS_CS_ITU601:     return "bt601";
+        case SWS_CS_SMPTE240M:  return "smpte240m";
+        case SWS_CS_BT2020:     return "bt2020";
+        default:                return "unknown";
+    }
+}
+
+// Returns false when swscale rejects the request (it does so for conversions
+// with no YUV side, e.g. RGB sources -- nothing to correct there).
+bool applyColorspaceDetails(SwsContext* ctx, int coefficients, bool srcFullRange) {
+    if (!ctx) return false;
+    const int* srcTable = sws_getCoefficients(coefficients);
+    const int* dstTable = sws_getCoefficients(SWS_CS_DEFAULT);
+    // Destination is RGB, which is always full range.
+    return sws_setColorspaceDetails(ctx,
+                                    srcTable, srcFullRange ? 1 : 0,
+                                    dstTable, 1,
+                                    0, 1 << 16, 1 << 16) >= 0;
+}
+
 SwsContext* createSwsContext(int srcW, int srcH, AVPixelFormat srcFmt, int dstW, int dstH, AVPixelFormat dstFmt, bool fast) {
     const int flags = swsFlagsFor(fast);
 
@@ -163,6 +214,11 @@ struct VideoDecoderFFmpeg::Impl {
 
         long long lastUsed = 0;
 
+        // Colour details are per-context state, not per-call, so they belong to
+        // the slot. They are applied without a full rebuild when they change.
+        int coefficients = -1;
+        bool srcFullRange = false;
+
         bool matches(int sw, int sh, int dw, int dh, AVPixelFormat sf, AVPixelFormat df, bool f) const {
             return ctx && srcW == sw && srcH == sh && dstW == dw && dstH == dh
                 && srcFmt == sf && dstFmt == df && fast == f;
@@ -170,6 +226,19 @@ struct VideoDecoderFFmpeg::Impl {
         void adopt(SwsContext* c, int sw, int sh, int dw, int dh, AVPixelFormat sf, AVPixelFormat df, bool f) {
             ctx = c; srcW = sw; srcH = sh; dstW = dw; dstH = dh;
             srcFmt = sf; dstFmt = df; fast = f;
+            coefficients = -1; srcFullRange = false;
+        }
+        // Cheap next to a rebuild: swscale just recomputes its conversion
+        // tables, so a mid-file colour change costs microseconds, not a context
+        // teardown.
+        void setColor(int cs, bool fullRange) {
+            if (coefficients == cs && srcFullRange == fullRange) return;
+            // Record the request even when swscale rejects it (it does for
+            // conversions with no YUV side, e.g. RGB sources) so a failing
+            // configuration is not retried on every single frame.
+            coefficients = cs;
+            srcFullRange = fullRange;
+            applyColorspaceDetails(ctx, cs, fullRange);
         }
         void reset() {
             if (ctx) sws_freeContext(ctx);
@@ -177,6 +246,8 @@ struct VideoDecoderFFmpeg::Impl {
             srcW = srcH = dstW = dstH = 0;
             srcFmt = dstFmt = AV_PIX_FMT_NONE;
             fast = false;
+            coefficients = -1;
+            srcFullRange = false;
         }
     };
     // Measurement showed two slots are not enough: three distinct
@@ -688,6 +759,24 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             ctxRebuildNs += rebuildNs;
             ++ctxRebuilds;
         }
+        // Read the matrix/range off the frame rather than the codec context:
+        // the frame is what was actually decoded, and container-level metadata
+        // is not always propagated before the first frame arrives.
+        AVColorSpace spc = impl_->frame->colorspace;
+        if (spc == AVCOL_SPC_UNSPECIFIED) spc = impl_->codec->colorspace;
+        AVColorRange range = impl_->frame->color_range;
+        if (range == AVCOL_RANGE_UNSPECIFIED) range = impl_->codec->color_range;
+
+        bool matrixInferred = false;
+        const int coefficients = swsCoefficientsFor(spc, w, h, &matrixInferred);
+        const bool srcFullRange = (range == AVCOL_RANGE_JPEG);
+        if (slot && slot->ctx) {
+            slot->setColor(coefficients, srcFullRange);
+        }
+        perfStats_.colorMatrix = QString::fromLatin1(swsCoefficientsName(coefficients));
+        perfStats_.colorMatrixInferred = matrixInferred;
+        perfStats_.srcFullRange = srcFullRange;
+
         perfStats_.swsContextReused = !needRebuild;
         perfStats_.experimentalFastPathEnabled = useFast;
         perfStats_.swsSlotRebuilds = impl_->swsRebuilds;

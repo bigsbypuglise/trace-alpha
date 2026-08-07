@@ -88,6 +88,11 @@ struct VideoPerfStats {
 
     QString srcPixelFormat;
     QString dstPixelFormat;
+    // YUV->RGB matrix and range actually used for conversion, so a wrong-looking
+    // image can be checked against what the file claims rather than guessed at.
+    QString colorMatrix;
+    bool srcFullRange = false;
+    bool colorMatrixInferred = false;
     int srcBitDepth = 0;
     bool swsContextReused = false;
     bool alphaPlaneSkipped = false;
