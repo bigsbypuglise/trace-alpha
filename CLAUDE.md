@@ -12,7 +12,19 @@ Owner context: Anj is a VFX/motion-design lead, not a programmer. Explain things
 
 ## Build and test
 
-There is no local build on the Mac (no Qt6/FFmpeg toolchain assumed) and no test suite yet. **GitHub Actions is the source of truth for builds.**
+No test suite yet. **GitHub Actions is the source of truth for release builds**, but the Windows box has a full local toolchain — use it to catch compile errors before pushing.
+
+### Local build on the Windows box (Aug 2026 — verified working)
+
+Qt 6.10.2 (msvc2022_64, includes Multimedia), vcpkg FFmpeg 8.x (avcodec-62), and VS2022 Community are all installed. None are on `PATH`, so call them by full path:
+
+```
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="C:\Qt\6.10.2\msvc2022_64" -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' --build build --config Release --target Trace --parallel
+& 'C:\Qt\6.10.2\msvc2022_64\bin\windeployqt.exe' --release --no-translations 'build\app\Release\Trace.exe'
+```
+
+FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt runtime, `platforms\qwindows.dll` and the multimedia plugins. Then run `build\app\Release\Trace.exe`. **Configure prints `Trace: audio output enabled` or `DISABLED` — check that line.** Note local Qt is 6.10.2 while CI pins 6.7.2, so a local green is not proof CI is green; it does catch every compile error.
 
 - Repo: `https://github.com/bigsbypuglise/trace-alpha` (GitHub account: bigsbypuglise; private)
 - Every push to any branch builds Windows (VS2022, Qt 6.7.2 via install-qt-action, FFmpeg via vcpkg) and uploads artifact `trace-alpha-windows-x64` (workflow: `.github/workflows/windows-release.yml`)
