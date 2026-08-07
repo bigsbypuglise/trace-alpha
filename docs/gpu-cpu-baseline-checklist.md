@@ -9,7 +9,23 @@ every GPU claim. Measured on `main` at or after `cd79d49`.
 
 ---
 
-## Step 0 — two experiments that come first (5 minutes, no code)
+## Step 0 — RESOLVED 2026-08-07
+
+Both experiments were run. **Results below; do not repeat them.**
+
+- **0a. Display refresh rate — negative result.** Same build, same clip, same window at
+  **59Hz / 119.98Hz / 240Hz** (2.4975 / 4.9992 / 10.000 refreshes per 24fps frame). Counters
+  flat across all three; subjective verdict "about the same" at 120Hz and "slightly smoother,
+  hard to tell" at 240Hz. Display cadence is **not** the dominant term — see the CLAUDE.md
+  entry for why this was predictable (the 2:3 cadence hits QuickTime identically).
+- **0b. Viewing path — clean.** The "not buttery" feedback was **not** over Parsec; the tester
+  ran the ~9MB 1080p clip locally on his own machine. Treat it as valid local-playback
+  feedback. Parsec has since been disabled on the test box for all measurement.
+
+Baselines from here on are taken at **240Hz on the physical panel** unless stated. Since
+refresh rate has no measurable effect on the counters, rows at different rates are comparable.
+
+### Original text, kept for the method
 
 These can change the priority of the whole initiative, so do them before the table.
 
