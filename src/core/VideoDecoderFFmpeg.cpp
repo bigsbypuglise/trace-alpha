@@ -262,6 +262,11 @@ struct VideoDecoderFFmpeg::Impl {
         long long frame = -1;
         QImage image;
     };
+    // Eviction is FIFO. LRU (promote-on-hit) was prototyped and measured: on
+    // 4K H.264, where the cache actually fills and evicts, it produced an
+    // identical hit rate (9/15 either way, 9 promotions) because the scrub
+    // working set exceeds capacity rather than a hot subset being evicted.
+    // At 1080p nothing is evicted at all, so the policy cannot matter there.
     std::deque<CachedFrame> reverseCache;
 
     // Conversion targets are recycled. Writing into a QImage the viewer or
@@ -536,6 +541,14 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     if (impl_->forceFastConvert) wantFastConvert = true;
     if (impl_->forceAccurateConvert) wantFastConvert = false;
 
+    auto reportCacheState = [&]() {
+        perfStats_.cacheCapacity = impl_->reverseCacheCapacity;
+        perfStats_.cacheOccupancy = static_cast<int>(impl_->reverseCache.size());
+        long long bytes = 0;
+        for (const auto& e : impl_->reverseCache) bytes += e.image.sizeInBytes();
+        perfStats_.cacheBytes = bytes;
+    };
+
     auto pushReverseCache = [&](long long cachedFrame, const QImage& image) {
         if (cachedFrame < 0 || image.isNull()) return;
 
@@ -545,21 +558,24 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         }
 
         impl_->reverseCache.push_back({cachedFrame, image});
+        ++perfStats_.cacheInserts;
         while (static_cast<int>(impl_->reverseCache.size()) > impl_->reverseCacheCapacity) {
             impl_->reverseCache.pop_front();
+            ++perfStats_.cacheEvictions;
         }
+        reportCacheState();
     };
 
     auto tryReverseCache = [&](long long wantedFrame) -> bool {
         ++perfStats_.reverseCacheLookups;
-        for (auto it = impl_->reverseCache.rbegin(); it != impl_->reverseCache.rend(); ++it) {
-            if (it->frame == wantedFrame) {
-                ++perfStats_.reverseCacheHits;
-                outImage = it->image;
-                currentFrame_ = wantedFrame;
-                error.clear();
-                return true;
-            }
+        for (auto it = impl_->reverseCache.begin(); it != impl_->reverseCache.end(); ++it) {
+            if (it->frame != wantedFrame) continue;
+            ++perfStats_.reverseCacheHits;
+            outImage = it->image;
+            currentFrame_ = wantedFrame;
+            error.clear();
+            reportCacheState();
+            return true;
         }
         return false;
     };

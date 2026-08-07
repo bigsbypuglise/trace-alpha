@@ -896,6 +896,16 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(spanS, 'f', 2))
                 .arg(QString::number(spanFps, 'f', 2));
 
+            const QString l8 = QString("cache FIFO | %1/%2 (%3 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
+                .arg(perf.cacheOccupancy)
+                .arg(perf.cacheCapacity)
+                .arg(QString::number(static_cast<double>(perf.cacheBytes) / (1024.0 * 1024.0), 'f', 1))
+                .arg(QString::number(reverseHitRate, 'f', 1))
+                .arg(perf.reverseCacheHits)
+                .arg(perf.reverseCacheLookups)
+                .arg(perf.cacheInserts)
+                .arg(perf.cacheEvictions);
+
             const QString l7 = QString("scrub %1 | target %2 | shown %3 | delta %4 | walk %5f | dst %6")
                 .arg(perf.previewApproximate ? "APPROX" : "exact")
                 .arg(perf.previewTargetFrame)
@@ -905,7 +915,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.lastWalkFrames)
                 .arg(perf.dstPixelFormat);
 
-            line = l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7;
+            line = l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7 + "\n" + l8;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")

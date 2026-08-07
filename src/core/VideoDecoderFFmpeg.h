@@ -69,6 +69,13 @@ struct VideoPerfStats {
     long long drainFramesRecovered = 0;
     long long staleSuccessPrevented = 0;
 
+    // Frame cache accounting.
+    int cacheCapacity = 0;
+    int cacheOccupancy = 0;
+    long long cacheInserts = 0;
+    long long cacheEvictions = 0;
+    long long cacheBytes = 0;
+
     long long seekSamples = 0;
     long long samples = 0;
     long long reverseCacheHits = 0;
