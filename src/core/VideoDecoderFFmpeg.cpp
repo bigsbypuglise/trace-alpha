@@ -1164,9 +1164,17 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 perfStats_.previewApproximate = false;
                 perfStats_.previewTargetFrame = target;
                 perfStats_.previewDisplayedFrame = decodedFrame;
-                // Half-res scrub previews must not enter the reverse cache:
-                // a later backward step would show a soft frame while paused.
-                if (mode != RequestMode::Scrub) pushReverseCache(decodedFrame, outImage);
+                // Half-res scrub previews must not enter the reverse cache: a
+                // later backward step would show a soft frame while paused.
+                // But a Scrub frame is only halved above 1920px (see the
+                // conversion branch), so at 1080p the presented frame is
+                // full-res and belongs in the cache like any other -- which is
+                // what makes a backward drag over ground just covered forwards
+                // a run of cache hits instead of a run of seeks. Mirrors the
+                // half-res condition exactly so the two cannot drift apart.
+                const bool presentedHalfRes =
+                    (mode == RequestMode::Scrub) && (metadata_.width > 1920);
+                if (!presentedHalfRes) pushReverseCache(decodedFrame, outImage);
                 return true;
             }
 

@@ -1033,12 +1033,19 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     activeScrubFrame_ = targetFrame;
 
     QString error;
-    if (dragging && walkFrom >= 0 && targetFrame > walkFrom) {
-        // A forward drag NEVER jumps. Frames are shown consecutively however
-        // far the pointer has run ahead, and the picture is allowed to trail
-        // it. Snapping to the pointer instead was tried and felt harsh: a fast
-        // drag skipped whole runs of frames, which reads as tearing through
-        // the clip rather than shuttling it.
+    if (dragging && walkFrom >= 0 && targetFrame != walkFrom) {
+        // A drag NEVER jumps, in either direction. Frames are shown
+        // consecutively however far the pointer has run ahead, and the picture
+        // is allowed to trail it. Snapping to the pointer instead was tried and
+        // felt harsh: a fast drag skipped whole runs of frames, which reads as
+        // tearing through the clip rather than shuttling it.
+        //
+        // Backward is the same walk with the sign flipped, and it is only
+        // affordable because of the reverse cache. A backward step that misses
+        // costs a seek plus a GOP walk, but that walk fills the cache on its
+        // way through, so one miss is followed by a run of hits covering the
+        // rest of the GOP. The time budget absorbs the miss (one frame that
+        // slice, then re-arm) rather than letting it stall the drag.
         //
         // How far a slice advances is eased rather than fixed. Covering a
         // constant fraction of the remaining distance gives an exponential
@@ -1047,17 +1054,19 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         // with the time budget below the two limits swap over naturally --
         // budget-bound while far away, ease-bound as it converges -- so the
         // motion accelerates and decelerates without either being scheduled.
-        const long long gap = targetFrame - walkFrom;
+        const int dir = targetFrame > walkFrom ? 1 : -1;
+        const long long gap = std::llabs(targetFrame - walkFrom);
         const long long desired = std::max<long long>(1,
             static_cast<long long>(std::ceil(static_cast<double>(gap) * kScrubEase)));
 
         constexpr double kScrubWalkBudgetMs = 8.0;
         QElapsedTimer walkTimer;
         walkTimer.start();
-        prepareVideoRequest(mode, 1, true);
+        prepareVideoRequest(mode, dir, true);
         long long walked = 0;
-        const long long walkEnd = std::min(targetFrame, walkFrom + desired);
-        for (long long f = walkFrom + 1; f <= walkEnd; ++f) {
+        const long long steps = std::min(gap, desired);
+        for (long long i = 1; i <= steps; ++i) {
+            const long long f = walkFrom + dir * i;
             // A remote read pumped the event loop and something re-entered;
             // drop out and let the re-armed timer resume from here.
             if (storageBusy_) break;
@@ -1091,7 +1100,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         // slices a second, and a quick drag outran it and trailed further and
         // further behind. Zero-interval still goes through the event loop, so
         // pointer moves and repaints are serviced between slices.
-        if (activeScrubFrame_ < targetFrame) {
+        if (activeScrubFrame_ != targetFrame) {
             scrubTimer_.start(0);
         }
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
@@ -1436,7 +1445,7 @@ void MainWindow::refreshHud(const QString& action) {
                 // is expected and is the eased catch-up; it should fall to 0
                 // shortly after the pointer stops.
                 .arg(pendingScrubFrame_ >= 0 && activeScrubFrame_ >= 0
-                         ? pendingScrubFrame_ - activeScrubFrame_ : 0);
+                         ? std::llabs(pendingScrubFrame_ - activeScrubFrame_) : 0LL);
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
                  + "\n" + l7 + "\n" + l8 + "\n" + l9
