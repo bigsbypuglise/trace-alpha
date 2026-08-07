@@ -193,6 +193,9 @@ struct VideoDecoderFFmpeg::Impl {
     int streamIndex = -1;
     AVPixelFormat dstPixFmt = AV_PIX_FMT_BGRA;
 
+    // Instrumented, read-only file access behind FFmpeg. Owns the AVIOContext.
+    MediaIoSource io;
+
     // Two persistent conversion contexts rather than one shared context.
     // Full-resolution output (playback, stepping, paused seeks, the exact
     // frame after scrub release) and the reduced-resolution drag preview have
@@ -406,6 +409,22 @@ void VideoDecoderFFmpeg::setPlaybackDirection(int direction) {
 #endif
 }
 
+IoPhaseStats VideoDecoderFFmpeg::ioStats(IoPhase phase) const {
+#ifdef TRACE_WITH_FFMPEG
+    if (impl_) return impl_->io.stats(phase);
+#else
+    Q_UNUSED(phase);
+#endif
+    return {};
+}
+
+StorageInfo VideoDecoderFFmpeg::storageInfo() const {
+#ifdef TRACE_WITH_FFMPEG
+    if (impl_) return impl_->io.storage();
+#endif
+    return {};
+}
+
 void VideoDecoderFFmpeg::setHandoffTiming(double handoffMs) {
     perfStats_.lastHandoffMs = handoffMs;
     const double sampleCount = perfStats_.samples > 0 ? static_cast<double>(perfStats_.samples) : 1.0;
@@ -424,7 +443,11 @@ void VideoDecoderFFmpeg::close() {
     impl_->swsRebuilds = 0;
 
     if (impl_->codec) avcodec_free_context(&impl_->codec);
+    // AVFMT_FLAG_CUSTOM_IO means avformat_close_input leaves ->pb alone, so the
+    // I/O source owns and frees it. Order matters: close the format context
+    // first, since it may still read through pb while shutting down.
     if (impl_->fmt) avformat_close_input(&impl_->fmt);
+    impl_->io.close();
 
     impl_->streamIndex = -1;
     impl_->streamTimeBase = {0, 1};
@@ -448,8 +471,32 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     QElapsedTimer openTimer;
     openTimer.start();
 
+    // Media is read through our own AVIOContext rather than FFmpeg's file
+    // protocol. Measurement first: the buffer size matches FFmpeg's own default
+    // exactly, so this describes the read pattern Trace already had. It exists
+    // so the pattern can be seen at all -- with the built-in protocol, read
+    // count, read size and seek behaviour are invisible from outside FFmpeg.
+    if (!impl_->io.open(path, error)) {
+        return false;
+    }
+
+    impl_->fmt = avformat_alloc_context();
+    if (!impl_->fmt) {
+        error = "FFmpeg: alloc format context failed";
+        impl_->io.close();
+        return false;
+    }
+    impl_->fmt->pb = impl_->io.avio();
+    // Tells avformat_close_input not to free a pb it did not create.
+    impl_->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+
+    // The path is still passed so the demuxer can be probed by extension as
+    // well as by content; the bytes come from pb.
     if (avformat_open_input(&impl_->fmt, path.toUtf8().constData(), nullptr, nullptr) < 0) {
         error = "FFmpeg: unable to open file";
+        // On failure avformat_open_input frees the context it was given.
+        impl_->fmt = nullptr;
+        impl_->io.close();
         return false;
     }
     if (avformat_find_stream_info(impl_->fmt, nullptr) < 0) {
@@ -586,6 +633,24 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     perfStats_.openMs = static_cast<double>(openTimer.nsecsElapsed()) / 1'000'000.0;
     perfStats_.forwardQueueCapacity = 0;
 
+    // Storage identification and source shape, reported so a bad classification
+    // is visible rather than silently changing behaviour.
+    const StorageInfo& si = impl_->io.storage();
+    perfStats_.sourceStorage = QStringLiteral("%1 (%2)%3")
+                                   .arg(si.remote ? "REMOTE" : "local")
+                                   .arg(si.reason)
+                                   .arg(si.overridden ? " [override]" : "");
+    perfStats_.sourceVolume = si.volumeRoot + (si.filesystem.isEmpty()
+                                                   ? QString()
+                                                   : QStringLiteral(" %1").arg(si.filesystem));
+    perfStats_.sourceBytes = impl_->io.fileSize();
+    perfStats_.ioBufferBytes = MediaIoSource::bufferSize();
+    if (metadata_.durationSeconds > 0.0 && perfStats_.sourceBytes > 0) {
+        perfStats_.sourceBitrateMbps =
+            (static_cast<double>(perfStats_.sourceBytes) * 8.0 / 1'000'000.0)
+            / metadata_.durationSeconds;
+    }
+
     error.clear();
     return true;
 #else
@@ -601,6 +666,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         error = "Video decoder not open";
         return false;
     }
+
+    // Attribute every read this request causes to the right activity. Scrub and
+    // Step are both random access as far as storage is concerned; only
+    // Playback is the sequential forward pattern we are trying to protect.
+    impl_->io.setPhase(mode == RequestMode::Playback ? IoPhase::Playback : IoPhase::Seek);
 
     const AVRational frameTb{impl_->fpsQ.den, impl_->fpsQ.num};
     frameIndex = std::max<long long>(0, frameIndex);

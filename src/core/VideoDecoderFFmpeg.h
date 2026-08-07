@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include "core/MediaIoSource.h"
 #include <QImage>
 
 namespace trace::core {
@@ -86,6 +87,14 @@ struct VideoPerfStats {
     int forwardQueueCapacity = 0;
     long long lateFrames = 0;
 
+    // Storage/IO telemetry. Populated from MediaIoSource; see ioStats().
+    QString sourceStorage;       // "local" / "remote", with the deciding reason
+    QString sourceVolume;
+    qint64 sourceBytes = 0;
+    double sourceBitrateMbps = 0.0;
+    qint64 sourceReadPos = 0;
+    int ioBufferBytes = 0;
+
     QString srcPixelFormat;
     QString dstPixelFormat;
     // YUV->RGB matrix and range actually used for conversion, so a wrong-looking
@@ -123,6 +132,12 @@ public:
     long long currentFrame() const { return currentFrame_; }
     const VideoMetadata& metadata() const { return metadata_; }
     const VideoPerfStats& perfStats() const { return perfStats_; }
+
+    // Per-phase file I/O counters. Forward playback and random access are
+    // reported separately on purpose: averaged together they cannot answer
+    // whether ordinary playback is read-starved.
+    IoPhaseStats ioStats(IoPhase phase) const;
+    StorageInfo storageInfo() const;
 
 private:
     struct Impl;

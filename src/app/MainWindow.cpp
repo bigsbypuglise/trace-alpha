@@ -1031,6 +1031,41 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(spanS, 'f', 2))
                 .arg(QString::number(spanFps, 'f', 2));
 
+            // Storage + I/O. The whole point of splitting playback from seek is
+            // that averaging them cannot answer whether ordinary forward
+            // playback is read-starved.
+            const auto ioPlay = videoDecoder_.ioStats(trace::core::IoPhase::Playback);
+            const auto ioSeek = videoDecoder_.ioStats(trace::core::IoPhase::Seek);
+            const auto ioOpen = videoDecoder_.ioStats(trace::core::IoPhase::Open);
+
+            const QString lio1 = QString("src %1 | %2 | %3 MB | %4 Mbps | iobuf %5 KB")
+                .arg(perf.sourceStorage)
+                .arg(perf.sourceVolume)
+                .arg(QString::number(perf.sourceBytes / (1024.0 * 1024.0), 'f', 1))
+                .arg(QString::number(perf.sourceBitrateMbps, 'f', 1))
+                .arg(perf.ioBufferBytes / 1024);
+
+            auto ioLine = [](const char* tag, const trace::core::IoPhaseStats& s) {
+                return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6%% "
+                               "| seek %7 | lat %8/%9ms | %10 Mbps | stall %11 (%12ms)")
+                    .arg(tag)
+                    .arg(s.reads)
+                    .arg(QString::number(s.avgReadBytes() / 1024.0, 'f', 1))
+                    .arg(s.minReadBytes)
+                    .arg(s.maxReadBytes)
+                    .arg(QString::number(s.sequentialFraction() * 100.0, 'f', 1))
+                    .arg(s.seeks)
+                    .arg(QString::number(s.avgLatencyMs(), 'f', 3))
+                    .arg(QString::number(s.latencyMaxMs, 'f', 1))
+                    .arg(QString::number(s.readMbps(), 'f', 0))
+                    .arg(s.stalls)
+                    .arg(QString::number(s.stallMsTotal, 'f', 0));
+            };
+
+            const QString lio2 = ioLine("open", ioOpen);
+            const QString lio3 = ioLine("play", ioPlay);
+            const QString lio4 = ioLine("seek", ioSeek);
+
             // Audio line. `sync` is the number that decides whether audio-master
             // is working: picture position minus audio clock, in ms. Under
             // about +/-20ms nobody can see it; a number that grows without
@@ -1076,7 +1111,9 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.lastWalkFrames)
                 .arg(perf.dstPixelFormat);
 
-            line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7 + "\n" + l8 + "\n" + l9;
+            line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
+                 + "\n" + l7 + "\n" + l8 + "\n" + l9
+                 + "\n" + lio1 + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")
