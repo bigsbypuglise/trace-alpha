@@ -725,6 +725,11 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
     }
 
+    // Refresh here too: the scrub branch of valueChanged returns without
+    // touching the HUD, so mid-drag preview state (exact vs approximate,
+    // walk distance) was previously invisible until the slider was released.
+    refreshHud(forceExact ? "Scrub Release" : "Scrub");
+
     if (forceExact || !scrubbing_) {
         pendingScrubFrame_ = -1;
     } else if (pendingScrubFrame_ != activeScrubFrame_) {
@@ -891,7 +896,16 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(spanS, 'f', 2))
                 .arg(QString::number(spanFps, 'f', 2));
 
-            line = l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6;
+            const QString l7 = QString("scrub %1 | target %2 | shown %3 | delta %4 | walk %5f | dst %6")
+                .arg(perf.previewApproximate ? "APPROX" : "exact")
+                .arg(perf.previewTargetFrame)
+                .arg(perf.previewDisplayedFrame)
+                .arg(perf.previewTargetFrame >= 0 && perf.previewDisplayedFrame >= 0
+                         ? perf.previewTargetFrame - perf.previewDisplayedFrame : 0)
+                .arg(perf.lastWalkFrames)
+                .arg(perf.dstPixelFormat);
+
+            line = l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")

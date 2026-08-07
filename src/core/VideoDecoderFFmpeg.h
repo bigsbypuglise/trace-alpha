@@ -37,6 +37,13 @@ struct VideoPerfStats {
     double lastDetachMs = 0.0;
     double avgDetachMs = 0.0;
     long long lastCtxRebuilds = 0;
+    // Active-drag preview. When the scrub walk cap engages the displayed frame
+    // trails the requested one; release resolves the exact frame and this
+    // reports false again.
+    bool previewApproximate = false;
+    long long previewTargetFrame = -1;
+    long long previewDisplayedFrame = -1;
+
     // Conversion-context set. After warm-up rebuilds should stop climbing even
     // as scrub preview and exact output alternate.
     long long swsSlotRebuilds = 0;

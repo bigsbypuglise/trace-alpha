@@ -839,6 +839,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                         pushReverseCache(decodedFrame, cached);
                         ++walkCacheConverts;
                     }
+
                     continue;
                 }
 
@@ -848,6 +849,9 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 // first frame at/after the target keeps ordering stable.
                 convertCurrentFrame(outImage);
                 currentFrame_ = decodedFrame;
+                perfStats_.previewApproximate = false;
+                perfStats_.previewTargetFrame = target;
+                perfStats_.previewDisplayedFrame = decodedFrame;
                 // Half-res scrub previews must not enter the reverse cache:
                 // a later backward step would show a soft frame while paused.
                 if (mode != RequestMode::Scrub) pushReverseCache(decodedFrame, outImage);
