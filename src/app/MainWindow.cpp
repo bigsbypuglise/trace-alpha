@@ -799,7 +799,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(lastTotalMs, 'f', 2))
                 .arg(QString::number(budgetMs, 'f', 2));
 
-            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6%% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15")
+            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6%% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18")
                 .arg(perf.lastConvertCalls)
                 .arg(perf.lastCtxRebuilds)
                 .arg(perf.lastImageWasShared ? "yes" : "no")
@@ -814,7 +814,10 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.lastWalkCacheConvertMs, 'f', 2))
                 .arg(QString::number(perf.lastSeekMs, 'f', 2))
                 .arg(QString::number(perf.avgSeekMs, 'f', 2))
-                .arg(perf.seekSamples);
+                .arg(perf.seekSamples)
+                .arg(perf.drainPacketsSent)
+                .arg(perf.drainFramesRecovered)
+                .arg(perf.staleSuccessPrevented);
 
             // Presented rate from the wall clock: the only number that says
             // whether playback actually held real time.

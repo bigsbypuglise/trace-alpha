@@ -53,6 +53,11 @@ struct VideoPerfStats {
     long long lastWalkCacheConverts = 0;
     double lastWalkCacheConvertMs = 0.0;
 
+    // End-of-stream drain accounting.
+    long long drainPacketsSent = 0;
+    long long drainFramesRecovered = 0;
+    long long staleSuccessPrevented = 0;
+
     long long seekSamples = 0;
     long long samples = 0;
     long long reverseCacheHits = 0;

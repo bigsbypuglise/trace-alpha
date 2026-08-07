@@ -171,6 +171,13 @@ struct VideoDecoderFFmpeg::Impl {
     bool seekResolvePending = false;
     long long seekTargetFrame = -1;
 
+    // End-of-stream drain state. Frame-threaded decoders hold frames in
+    // flight, so reaching input EOF is not the same as having no frames left.
+    // Reset whenever the codec is flushed (seek) or recreated (open).
+    bool inputEofReached = false;
+    bool drainPacketSent = false;
+    bool decoderFullyDrained = false;
+
     // Seek-decision diagnostics (TRACE_SEEK_LOG=1). Measurement only.
     long long requestCounter = 0;
     long long seekCounter = 0;
@@ -388,6 +395,9 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     // steady-state memory.
     impl_->convertPool.clear();
     impl_->convertPoolLimit = impl_->reverseCacheCapacity + 4;
+    impl_->inputEofReached = false;
+    impl_->drainPacketSent = false;
+    impl_->decoderFullyDrained = false;
     impl_->seekWalkCacheWindowOverride = envInt("TRACE_SEEK_CACHE_WINDOW", -1);
     if (impl_->seekWalkCacheWindowOverride >= 0) {
         impl_->seekWalkCacheWindowOverride =
@@ -685,33 +695,58 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     // burst stutter the old queue caused on heavy codecs (4K ProRes).
     auto decodeUntilTarget = [&](long long target) -> bool {
         while (true) {
-            QElapsedTimer readSendTimer;
-            readSendTimer.start();
-            const int readRes = av_read_frame(impl_->fmt, impl_->pkt);
-            decodeNs += readSendTimer.nsecsElapsed();
-            if (readRes < 0) break;
+            // Nothing left in the codec: the caller asked for a frame past the
+            // real end of the stream.
+            if (impl_->decoderFullyDrained) return false;
 
-            if (impl_->pkt->stream_index != impl_->streamIndex) {
-                av_packet_unref(impl_->pkt);
-                continue;
-            }
+            if (!impl_->drainPacketSent) {
+                QElapsedTimer readSendTimer;
+                readSendTimer.start();
+                const int readRes = av_read_frame(impl_->fmt, impl_->pkt);
+                decodeNs += readSendTimer.nsecsElapsed();
 
-            QElapsedTimer sendTimer;
-            sendTimer.start();
-            const int sendRes = avcodec_send_packet(impl_->codec, impl_->pkt);
-            decodeNs += sendTimer.nsecsElapsed();
-            if (sendRes < 0) {
-                av_packet_unref(impl_->pkt);
-                continue;
+                if (readRes < 0) {
+                    // Input exhausted, but a frame-threaded decoder still holds
+                    // up to thread_count frames in flight. Without this flush
+                    // they are never emitted: the tail of every long-GOP file
+                    // went missing and each request past the last emitted frame
+                    // re-seeked and re-showed a stale image.
+                    QElapsedTimer drainTimer;
+                    drainTimer.start();
+                    avcodec_send_packet(impl_->codec, nullptr);
+                    decodeNs += drainTimer.nsecsElapsed();
+                    impl_->inputEofReached = true;
+                    impl_->drainPacketSent = true;
+                    ++perfStats_.drainPacketsSent;
+                } else if (impl_->pkt->stream_index != impl_->streamIndex) {
+                    av_packet_unref(impl_->pkt);
+                    continue;
+                } else {
+                    QElapsedTimer sendTimer;
+                    sendTimer.start();
+                    const int sendRes = avcodec_send_packet(impl_->codec, impl_->pkt);
+                    decodeNs += sendTimer.nsecsElapsed();
+                    av_packet_unref(impl_->pkt);
+                    if (sendRes < 0) continue;
+                }
             }
-            av_packet_unref(impl_->pkt);
 
             while (true) {
                 QElapsedTimer recvTimer;
                 recvTimer.start();
                 const int recvRes = avcodec_receive_frame(impl_->codec, impl_->frame);
                 decodeNs += recvTimer.nsecsElapsed();
+                if (recvRes == AVERROR_EOF) {
+                    // Codec is empty and will produce nothing further until it
+                    // is flushed by a seek or reopened.
+                    impl_->decoderFullyDrained = true;
+                    break;
+                }
+                // EAGAIN: needs more input. During drain no more input exists,
+                // so the outer loop's drained check ends it rather than
+                // spinning.
                 if (recvRes != 0) break;
+                if (impl_->drainPacketSent) ++perfStats_.drainFramesRecovered;
 
                 const int64_t pts = (impl_->frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                         ? impl_->frame->best_effort_timestamp
@@ -764,8 +799,18 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 if (mode != RequestMode::Scrub) pushReverseCache(decodedFrame, outImage);
                 return true;
             }
+
+            // Draining and the codec yielded nothing this pass: there is no
+            // further input to feed it, so stop rather than spin on EAGAIN.
+            if (impl_->drainPacketSent && !impl_->decoderFullyDrained) {
+                impl_->decoderFullyDrained = true;
+            }
         }
-        return !outImage.isNull();
+        // The requested frame was not produced. Returning true here (because
+        // outImage still held the *previous* frame) is what made the viewer
+        // repeat the tail frame and re-seek once per tick past EOF.
+        ++perfStats_.staleSuccessPrevented;
+        return false;
     };
 
     ++impl_->requestCounter;
@@ -836,6 +881,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             return false;
         }
         avcodec_flush_buffers(impl_->codec);
+        // Flushing refills the codec from the new position, so the stream is
+        // no longer at EOF and the drain must be able to run again.
+        impl_->inputEofReached = false;
+        impl_->drainPacketSent = false;
+        impl_->decoderFullyDrained = false;
         const double seekMs = static_cast<double>(seekTimer.nsecsElapsed()) / 1'000'000.0;
         perfStats_.lastSeekMs = seekMs;
         ++perfStats_.seekSamples;
