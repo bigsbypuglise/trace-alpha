@@ -17,6 +17,8 @@ extern "C" {
 
 #include <QElapsedTimer>
 #include <QByteArray>
+#include <QFile>
+#include <QDir>
 
 namespace trace::core {
 
@@ -98,6 +100,27 @@ bool envFlagSet(const char* name) {
     return !v.isEmpty() && v != "0" && v.compare("false", Qt::CaseInsensitive) != 0;
 }
 
+// Seek-decision logging (TRACE_SEEK_LOG=1). Measurement scaffolding: writes
+// one structured line per seek to %TEMP%\trace_seeklog.txt. Off by default.
+bool seekLogEnabled() {
+    static const bool on = !qgetenv("TRACE_SEEK_LOG").isEmpty()
+                        && qgetenv("TRACE_SEEK_LOG") != "0";
+    return on;
+}
+
+void seekLogLine(const QString& line) {
+    static QFile* f = [] {
+        auto* file = new QFile(QDir::tempPath() + "/trace_seeklog.txt");
+        file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+        return file;
+    }();
+    if (f && f->isOpen()) {
+        f->write(line.toUtf8());
+        f->write("\n");
+        f->flush();
+    }
+}
+
 int envInt(const char* name, int fallback) {
     const QByteArray v = qgetenv(name);
     if (v.isEmpty()) return fallback;
@@ -147,6 +170,13 @@ struct VideoDecoderFFmpeg::Impl {
     // decoding forward from the keyframe to the *true* target frame.
     bool seekResolvePending = false;
     long long seekTargetFrame = -1;
+
+    // Seek-decision diagnostics (TRACE_SEEK_LOG=1). Measurement only.
+    long long requestCounter = 0;
+    long long seekCounter = 0;
+    long long prevRequestedFrame = -1;
+    int64_t lastDecodedPts = AV_NOPTS_VALUE;
+    int64_t prevDecodedPts = AV_NOPTS_VALUE;
 
     struct CachedFrame {
         long long frame = -1;
@@ -704,6 +734,8 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                     if (decodedFrame < 0) decodedFrame = 0;
                     if (decodedFrame <= impl_->lastDecodedFrame) decodedFrame = impl_->lastDecodedFrame + 1;
                 }
+                impl_->prevDecodedPts = impl_->lastDecodedPts;
+                impl_->lastDecodedPts = pts;
                 impl_->lastDecodedFrame = decodedFrame;
 
                 if (decodedFrame < target) {
@@ -736,6 +768,9 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         return !outImage.isNull();
     };
 
+    ++impl_->requestCounter;
+    const long long prevRequestedFrame = impl_->prevRequestedFrame;
+    impl_->prevRequestedFrame = frameIndex;
     const bool requestIsBackward = currentFrame_ >= 0 && frameIndex < currentFrame_;
     const bool requestIsSequentialForward = currentFrame_ >= 0 && frameIndex == currentFrame_ + 1;
 
@@ -757,6 +792,40 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
 
     if (needSeek) {
         didSeek = true;
+#ifdef TRACE_WITH_FFMPEG
+        // Measurement only (TRACE_SEEK_LOG=1): record which condition in the
+        // needSeek expression above actually fired, evaluated in the same
+        // order, plus the state the decision was made from.
+        if (seekLogEnabled()) {
+            const char* reason =
+                (currentFrame_ < 0) ? "InitialOpen" :
+                (frameIndex < currentFrame_) ? "BackwardRequest_CacheMiss" :
+                (mode == RequestMode::Scrub) ? "Scrub" :
+                (mode == RequestMode::Step && std::llabs(frameIndex - currentFrame_) > 1) ? "StepJump" :
+                (mode != RequestMode::Playback && frameIndex == currentFrame_) ? "RerequestOutsidePlayback" :
+                (!requestIsSequentialForward && frameIndex > currentFrame_ + 1) ? "NonSequentialForwardGap" :
+                "Unknown";
+            const char* modeName = (mode == RequestMode::Playback) ? "Playback"
+                                 : (mode == RequestMode::Scrub) ? "Scrub" : "Step";
+            seekLogLine(QString("seek#%1 req#%2 reason=%3 mode=%4 requested=%5 prevRequested=%6 current=%7 lastDecoded=%8 dCurrent=%9 dLastDecoded=%10 pts=%11 prevPts=%12 seqFwd=%13 bframes=%14 codec=%15")
+                .arg(impl_->seekCounter)
+                .arg(impl_->requestCounter)
+                .arg(reason)
+                .arg(modeName)
+                .arg(frameIndex)
+                .arg(prevRequestedFrame)
+                .arg(currentFrame_)
+                .arg(impl_->lastDecodedFrame)
+                .arg(frameIndex - currentFrame_)
+                .arg(frameIndex - impl_->lastDecodedFrame)
+                .arg(static_cast<long long>(impl_->lastDecodedPts))
+                .arg(static_cast<long long>(impl_->prevDecodedPts))
+                .arg(requestIsSequentialForward ? 1 : 0)
+                .arg(impl_->codec ? impl_->codec->has_b_frames : -1)
+                .arg(metadata_.codecName));
+        }
+        ++impl_->seekCounter;
+#endif
         const int64_t relTs = av_rescale_q(frameIndex, frameTb, impl_->streamTimeBase);
         const int64_t targetTs = impl_->streamStartTs + relTs;
 
