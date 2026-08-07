@@ -71,6 +71,21 @@ MainWindow::MainWindow() {
             avgHandlerMs_ += (lastHandlerMs_ - avgHandlerMs_) / hn;
         });
 
+        // Clock-update accounting, measured between consecutive tick entries so
+        // it covers everything in the gap -- the HUD refresh at the end of this
+        // tick, and any refreshHud() a keypress triggered in between. The audio
+        // control loop must be stepped exactly once per tick while it drives;
+        // anything else means telemetry is moving the playhead.
+        {
+            const long long updates = audio_.clockUpdateCount();
+            if (lastClockUpdateMark_ >= 0) {
+                lastClockUpdatesPerTick_ = updates - lastClockUpdateMark_;
+                maxClockUpdatesPerTick_ = std::max(maxClockUpdatesPerTick_,
+                                                   lastClockUpdatesPerTick_);
+            }
+            lastClockUpdateMark_ = updates;
+        }
+
         const auto playbackState = playback_.state();
         if (playbackState.mode != PlaybackMode::PlayingForward && playbackState.mode != PlaybackMode::PlayingReverse) {
             playTimer_.stop();
@@ -120,6 +135,14 @@ MainWindow::MainWindow() {
         int steps = static_cast<int>(std::floor(playbackAccumulatorMs_ / frameDurationMs));
         if (steps < 1) steps = 1;
 
+        // Whether the audio clock is the authority for this tick. Resolved
+        // before the accumulator gate because when audio drives, the
+        // accumulator must not also get a vote -- see below.
+        const bool audioActive = audioDriving_ && audio_.isPlaying()
+                              && !audio_.ended() && audio_.clockReady();
+        audioClockPriming_ = audioDriving_ && audio_.isPlaying()
+                          && !audio_.ended() && !audio_.clockReady();
+
         if (isVideo) {
             // The short tick exists to land on each frame's due time, not to
             // present once per tick. Presenting per tick made the timer
@@ -128,7 +151,19 @@ MainWindow::MainWindow() {
             // Retained as a guard: with the periodic timer at the frame
             // interval this is effectively never taken, but it keeps
             // presentation tied to the playback clock rather than to the tick.
-            if (playbackAccumulatorMs_ < frameDurationMs) return;
+            //
+            // Bypassed while audio drives. Two clocks were deciding different
+            // halves of the same question: this accumulator decided *when* to
+            // present, the audio clock decided *which frame*. The tick is
+            // floor(1000/fps) = 41ms against a 41.667ms frame, so roughly every
+            // 62nd tick the accumulator came up short and returned here without
+            // presenting -- and by the next tick the audio clock had moved on
+            // two frames, so one was skipped. Holds and skips therefore arrived
+            // in matched pairs at the beat frequency of the two clocks, which
+            // is exactly the 1-2/sec residue that survived every attempt to
+            // filter the clock itself. With audio driving, the audio clock is
+            // the only scheduler: it decides both when and which.
+            if (!audioActive && playbackAccumulatorMs_ < frameDurationMs) return;
 
             // Presentation latency: how far past its due time this frame went.
             lastPresentLatencyMs_ = playbackAccumulatorMs_ - frameDurationMs;
@@ -161,8 +196,14 @@ MainWindow::MainWindow() {
         // what keeps picture locked to sound: the sound card's rate is the one
         // rate in the system that cannot be negotiated with, and it is also
         // what lifts the 23.81fps ceiling the 42ms tick imposed.
-        if (audioDriving_ && audio_.isPlaying() && !audio_.ended()) {
-            const double audioSeconds = audio_.clockSeconds();
+        // Not until the device is actually making sound: see clockReady(). The
+        // wall-clock accumulator above already produced a correct target for
+        // this tick, so the priming window costs nothing and is provably clean
+        // (a no-audio run presents every frame with zero corrections).
+        if (audioActive) {
+            // The one and only place the audio control loop is stepped. Every
+            // other reader (HUD, stats) peeks.
+            const double audioSeconds = audio_.advanceClock();
             const double audioFramePos = audioSeconds * fps;
             const long long audioFrame = static_cast<long long>(std::llround(audioFramePos));
 
@@ -810,6 +851,8 @@ void MainWindow::togglePlayPause() {
         lastDriftMs_ = 0.0;
         lastAvSyncMs_ = maxAvSyncMs_ = 0.0;
         audioRepeatedFrames_ = audioSkippedFrames_ = 0;
+        lastClockUpdateMark_ = -1;
+        lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
         playTimer_.start();
     }
     syncTransportBar();
@@ -1187,14 +1230,18 @@ void MainWindow::refreshHud(const QString& action) {
             // about +/-20ms nobody can see it; a number that grows without
             // bound means the clock is not actually driving.
             const auto audioStats = audio_.stats();
-            const QString l9 = !audioStats.available
+            const QString l9 = audioStats.disabledByEnv
+                ? QStringLiteral("audio DISABLED (TRACE_NO_AUDIO) - wall-clock control test")
+                : !audioStats.available
                 ? QStringLiteral("audio none")
                 : QString("audio %1 %2Hz %3ch%4 | %5 | sync %6ms (max %7) | buf %8ms | under %9 | rep %10 skip %11")
                     .arg(audioStats.codecName)
                     .arg(audioStats.sampleRate)
                     .arg(audioStats.channels)
                     .arg(audioStats.muted ? " MUTED" : "")
-                    .arg(audioClockStalled_ ? "STALLED" : audioDriving_ ? "MASTER" : "idle")
+                    .arg(audioClockStalled_ ? "STALLED"
+                         : audioClockPriming_ ? "PRIMING"
+                         : audioDriving_ ? "MASTER" : "idle")
                     .arg(QString::number(lastAvSyncMs_, 'f', 1))
                     .arg(QString::number(maxAvSyncMs_, 'f', 1))
                     .arg(QString::number(audioStats.bufferedMs, 'f', 0))
@@ -1207,6 +1254,33 @@ void MainWindow::refreshHud(const QString& action) {
                     .arg(audioStats.sinkFreeBytes)
                     .arg(audioStats.sinkState)
                     .arg(QString::number(audioStats.clockSeconds, 'f', 3));
+
+            // Buffer geometry and clock-loop health. The startup churn was
+            // caused by the device buffer being twice what the clock constants
+            // assumed, so requested-vs-actual, the ring invariant, and the
+            // silence padding all have to be readable rather than inferred.
+            // `clk-upd` must read 1/1: anything higher means telemetry is
+            // stepping the control loop and the HUD is changing playback.
+            const QString l10 = !audioStats.available
+                ? QString()
+                : QString("audiobuf req %1 KB / got %2 KB (%3ms) | ring %4 KB (%5ms, %6x) | fill %7ms | silence %8 B | lat %9ms | snap %10ms x%11 | clk-upd %12/%13")
+                    .arg(audioStats.sinkBufferRequestedBytes / 1024)
+                    .arg(audioStats.sinkBufferBytes / 1024)
+                    .arg(QString::number(audioStats.deviceBufferMs, 'f', 0))
+                    .arg(audioStats.ringCapacityBytes / 1024)
+                    .arg(QString::number(audioStats.ringCapacityMs, 'f', 0))
+                    .arg(QString::number(
+                        audioStats.sinkBufferBytes > 0
+                            ? static_cast<double>(audioStats.ringCapacityBytes)
+                                  / static_cast<double>(audioStats.sinkBufferBytes)
+                            : 0.0, 'f', 2))
+                    .arg(QString::number(audioStats.startupFillMs, 'f', 1))
+                    .arg(audioStats.silenceBytes)
+                    .arg(QString::number(audioStats.smoothedLatencyMs, 'f', 1))
+                    .arg(QString::number(audioStats.snapThresholdMs, 'f', 0))
+                    .arg(audioStats.clockSnaps)
+                    .arg(lastClockUpdatesPerTick_)
+                    .arg(maxClockUpdatesPerTick_);
 
             const QString l8 = QString("cache FIFO | %1/%2 (%3 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
                 .arg(perf.cacheOccupancy)
@@ -1229,6 +1303,7 @@ void MainWindow::refreshHud(const QString& action) {
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
                  + "\n" + l7 + "\n" + l8 + "\n" + l9
+                 + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;

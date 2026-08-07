@@ -10,6 +10,7 @@ namespace trace::core {
 // clock says it should be is the defect this readout exists to expose.
 struct AudioPerfStats {
     bool available = false;      // file has an audio stream Trace could open
+    bool disabledByEnv = false;  // TRACE_NO_AUDIO=1: control test, not a failure
     bool playing = false;
     bool muted = false;
     QString codecName;
@@ -27,6 +28,29 @@ struct AudioPerfStats {
     long long sinkBufferBytes = 0;
     long long sinkFreeBytes = 0;
     int sinkState = -1;
+
+    // Buffer geometry. The startup churn this instrumentation was added for was
+    // caused by the device buffer being twice what the clock constants assumed,
+    // so requested-vs-actual has to be visible rather than inferred.
+    long long sinkBufferRequestedBytes = 0;
+    long long ringCapacityBytes = 0;
+    // Durations, computed against the device's real bytes-per-frame. Not
+    // derivable from the byte counts alone at the call site: this device hands
+    // back float stereo (8 bytes/frame), so assuming 16-bit doubles every
+    // figure -- which is exactly the misreading that made a 250ms buffer look
+    // like 500ms.
+    double deviceBufferMs = 0.0;
+    double ringCapacityMs = 0.0;
+    double startupFillMs = 0.0;   // wall time spent priming the ring before start
+    long long silenceBytes = 0;   // padding handed to the device on short reads
+
+    // Clock-control health. `clockUpdates` must advance exactly once per video
+    // tick: telemetry that steps the loop changes playback, which is the bug
+    // the advance/peek split exists to prevent.
+    long long clockUpdates = 0;
+    double smoothedLatencyMs = 0.0;
+    double snapThresholdMs = 0.0;
+    long long clockSnaps = 0;
 };
 
 // Decoded audio for the currently open file, played on the default output
@@ -58,7 +82,28 @@ public:
 
     // Media time of the audio currently being heard, in seconds. This is the
     // master clock while playing; meaningless when stopped.
-    double clockSeconds() const;
+    //
+    // Split in two deliberately. The clock is a first-order control loop, so
+    // *reading* it used to step it: clockSeconds() was declared const, mutated
+    // the loop state, and was called both by the playback tick and by the HUD's
+    // stats() -- which doubled the effective gain and meant turning the HUD on
+    // changed playback timing. advanceClock() is the single mutating step and
+    // belongs to the video tick alone; every observer uses peekClock().
+    double advanceClock();
+    double peekClock() const;
+
+    // False until the device has actually begun emitting sound. Between
+    // sink->start() and the buffer filling, processedUSecs() is still below the
+    // device-latency term, so the clock's raw reading is pinned at its start
+    // value while wall time runs on. Driving video off a pinned clock stalls
+    // the playhead for exactly one buffer duration and then lurches -- which is
+    // where the startup hold/skip churn came from, and why the churn scaled
+    // with buffer size. Video runs on the wall clock until this goes true.
+    bool clockReady() const;
+
+    // Number of times advanceClock() has run. Exposed so the tick can assert it
+    // steps the loop exactly once per presented frame.
+    long long clockUpdateCount() const;
 
     // True once the audio stream has been fully played out. Video keeps its own
     // clock past this point so a short audio track cannot truncate playback.

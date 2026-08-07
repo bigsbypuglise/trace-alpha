@@ -140,6 +140,17 @@ private:
     long long audioRepeatedFrames_ = 0;  // clock did not advance a whole frame
     long long audioSkippedFrames_ = 0;   // clock ran past the next frame
 
+    // The audio clock is a control loop, so reading it used to step it: the HUD
+    // and the tick both called the old mutating clockSeconds(), doubling the
+    // gain and making playback timing depend on whether the HUD was visible.
+    // Measured between tick entries, so it catches a stray step from anywhere.
+    // True while audio is running but the device has not begun emitting sound.
+    // Video stays on the wall clock for that window.
+    bool audioClockPriming_ = false;
+    long long lastClockUpdateMark_ = -1;
+    long long lastClockUpdatesPerTick_ = 0;
+    long long maxClockUpdatesPerTick_ = 0;
+
     // Frame-cycle accounting. The tick handler runs decode+convert+handoff and
     // returns; the viewer's paintEvent runs later, in the event loop, so paint
     // is NOT additive to handler time. Period = handler + everything outside.

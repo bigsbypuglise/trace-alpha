@@ -37,15 +37,93 @@ namespace trace::core {
 #ifdef TRACE_WITH_AUDIO
 namespace {
 
-// Half a second of decoded audio in front of the device. Large enough that a
-// 33ms video frame on the UI thread cannot starve playback, small enough that
-// a seek does not have a long tail of stale sound to discard.
-constexpr double kRingSeconds = 0.5;
+// Device buffer, in seconds. Set explicitly rather than left to the driver.
+//
+// The driver default is not stable across machines or Qt versions: the CI
+// artifact (Qt 6.7.2) reported 192000 bytes and the local build (Qt 6.10.2)
+// 96000, which on this device's float-stereo format (8 bytes/frame, 384000
+// bytes/sec) is 500ms versus 250ms. Playback quality depends on that number,
+// so it must be ours rather than inherited -- but note the buffer was *not*
+// the root cause of the churn (see the scheduling comment in MainWindow's
+// playback tick); it is the second-order term.
+//
+// Override with TRACE_AUDIO_BUFFER_MS to measure alternatives.
+// Measured on the 1080p H.264 validation clip, single-clock scheduling, each
+// row a full 241-frame run (no run dropped a frame -- the differences are
+// holds, drift and A/V excursion):
+//   500ms: 95.3% real time, 14 holds, drift -497ms, sync max 380ms
+//   250ms: 97.6% real time,  8 holds, drift -251ms, sync max 130ms
+//   100ms: 99.1% real time,  4 holds, drift  -87ms, sync max  62ms
+// 100ms reaches the no-audio wall-clock control (98.7%), so there is nothing
+// further to win by shrinking it, and a smaller device buffer only buys
+// dropout risk on a loaded machine.
+constexpr double kDeviceBufferSeconds = 0.10;
+
+// Decoded audio in front of the device. MUST exceed the device buffer: the sink
+// asks for its whole buffer on the first pull, and a ring smaller than that
+// cannot answer, so readData padded the shortfall with silence -- which
+// processedUSecs() then counted as elapsed media time, putting the clock ahead
+// of the sound before a single real sample was heard. 2x is the measured-safe
+// margin; the floor keeps short-buffer devices from thrashing the decode thread.
+constexpr double kRingToDeviceRatio = 2.0;
+constexpr double kMinRingSeconds = 0.5;
 
 // Reported by AudioFeed::bytesAvailable so the sink never parks in IdleState.
 // Any comfortably large value works; the sink clamps its reads to its own
 // buffer size regardless.
 constexpr qint64 kAlwaysAvailable = 1 << 20;
+
+// How long start() will wait for the decode thread to prime the ring before
+// handing the device its first pull. Bounded: a slow remote read must not
+// freeze the play keypress. Anything not ready by then degrades to the old
+// behaviour (silence padding) rather than blocking further.
+constexpr int kMaxPrimeWaitMs = 150;
+
+// Developer control test (Phase 1). With audio out of the picture entirely,
+// video runs the wall-clock path, which isolates how much of the observed
+// judder the audio master clock is responsible for.
+bool audioDisabledByEnv() {
+    static const bool disabled = qgetenv("TRACE_NO_AUDIO").toInt() != 0;
+    return disabled;
+}
+
+// Freezing the device-latency term at its seeded value was measured against
+// the sampled EMA and came out neutral (rep 9 skip 7 fixed vs rep 8 skip 6
+// sampled, same rate, same drift), so the EMA stays: it is the documented,
+// previously measured behaviour and there is no evidence for replacing it.
+// The knob remains so the experiment can be repeated cheaply.
+bool useFixedLatency() {
+    static const bool fixed = qgetenv("TRACE_AUDIO_FIXED_LATENCY").toInt() != 0;
+    return fixed;
+}
+
+// How hard the wall-clock projection is pulled toward the audio reading each
+// update. A slower gain was the obvious suspect for the residual churn -- the
+// loop chasing the processedUSecs() staircase -- but 0.004 (time constant ~10s)
+// measured identical to 0.05 once the scheduling fix landed: 99.1% real time,
+// 4 holds, 0 skips, drift -86 vs -87ms. So the documented value stays, and the
+// knob exists to re-run that comparison rather than to be tuned blind.
+double clockSlew() {
+    static const double slew = [] {
+        const QByteArray raw = qgetenv("TRACE_AUDIO_SLEW");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const double v = raw.toDouble(&ok);
+            if (ok && v > 0.0 && v <= 1.0) return v;
+        }
+        return 0.05;
+    }();
+    return slew;
+}
+
+double configuredDeviceBufferSeconds() {
+    static const double seconds = [] {
+        const int ms = qgetenv("TRACE_AUDIO_BUFFER_MS").toInt();
+        if (ms > 0) return static_cast<double>(ms) / 1000.0;
+        return kDeviceBufferSeconds;
+    }();
+    return seconds;
+}
 
 AVSampleFormat avFormatFor(QAudioFormat::SampleFormat fmt) {
     switch (fmt) {
@@ -130,8 +208,10 @@ private:
 // The QIODevice QAudioSink pulls from. Runs on Qt's audio thread.
 class AudioFeed final : public QIODevice {
 public:
-    AudioFeed(AudioRing& ring, std::atomic<long long>& underruns)
-        : ring_(ring), underruns_(underruns) {}
+    AudioFeed(AudioRing& ring,
+              std::atomic<long long>& underruns,
+              std::atomic<long long>& silenceBytes)
+        : ring_(ring), underruns_(underruns), silenceBytes_(silenceBytes) {}
 
     bool isSequential() const override { return true; }
 
@@ -158,7 +238,15 @@ protected:
             // Hand the device silence rather than a short read: a short read
             // makes QAudioSink go idle and stop the clock. Silence keeps the
             // clock running, which keeps video moving through the gap.
+            //
+            // Counted, because processedUSecs() cannot tell silence from sound:
+            // every padded byte advances the audio clock without any audio
+            // having been heard, so a large figure means the clock is running
+            // ahead of the media. Measured with the ring invariant in place it
+            // is 0 throughout playback and only accrues at end of stream, once
+            // the audio track has run out and video is still going.
             std::fill(data + got, data + maxSize, 0);
+            silenceBytes_ += (maxSize - got);
             ++underruns_;
         }
         return maxSize;
@@ -169,6 +257,7 @@ protected:
 private:
     AudioRing& ring_;
     std::atomic<long long>& underruns_;
+    std::atomic<long long>& silenceBytes_;
 };
 
 } // namespace
@@ -204,19 +293,38 @@ struct AudioOutput::Impl {
     std::atomic<bool> stopRequested{false};
     std::atomic<bool> decodeEnded{false};
     std::atomic<long long> underruns{0};
+    std::atomic<long long> silenceBytes{0};
 
     double startSeconds = 0.0;
     bool playing = false;
     bool muted = false;
+    bool disabledByEnv = false;
+
+    // Buffer geometry, resolved at start() against the sink the driver actually
+    // gave us. Everything the clock loop is tuned against derives from these
+    // rather than from a hard-coded nominal size.
+    qint64 requestedBufferBytes = 0;
+    qint64 actualBufferBytes = 0;
+    int ringCapacityBytes = 0;
+    double deviceBufferS = 0.0;
+    double snapSeconds = 0.25;
+    double startupFillMs = 0.0;
 
     // The device drains its buffer in chunks, so `bufferSize - bytesFree`
-    // sampled at an arbitrary instant is a sawtooth spanning the whole buffer
-    // (0.5s here). Subtracting it raw made the clock jitter by that much, and
-    // the tick alternately held and skipped frames chasing it. Smooth the
-    // latency term instead: true device latency is near-constant, the sampling
-    // noise is not.
-    mutable double smoothedLatencyS = -1.0;
-    mutable double lastClockS = 0.0;
+    // sampled at an arbitrary instant is a sawtooth spanning the whole buffer.
+    // Subtracting it raw made the clock jitter by that much, and the tick
+    // alternately held and skipped frames chasing it. Smooth the latency term
+    // instead: true device latency is near-constant, the sampling noise is not.
+    //
+    // Seeded from the configured buffer duration, never from the first sample:
+    // at start() the device is empty, so the first sample reads ~0 while the
+    // true steady-state latency is nearly a whole buffer, and the loop would
+    // open by chasing an offset we already know. Correctness, not a measured
+    // win -- it is also what makes clockReady() a meaningful test.
+    double smoothedLatencyS = -1.0;
+    double lastClockS = 0.0;
+    long long clockUpdates = 0;
+    long long clockSnaps = 0;
 
     // processedUSecs() counts bytes handed to the device, so it advances in
     // whatever chunk the sink last pulled -- a staircase, not a ramp. Reading
@@ -225,9 +333,9 @@ struct AudioOutput::Impl {
     // skipped frames per second. So the clock runs on wall time and is
     // *disciplined* by audio rather than sampled from it: smooth between
     // pulls, and still locked to the sound card's rate over the long run.
-    mutable QElapsedTimer clockWall;
-    mutable double clockBase = 0.0;
-    mutable bool clockInit = false;
+    QElapsedTimer clockWall;
+    double clockBase = 0.0;
+    bool clockInit = false;
 
     QString codecName;
     int outRate = 0;
@@ -319,7 +427,10 @@ bool AudioOutput::hasAudio() const { return false; }
 void AudioOutput::start(double) {}
 void AudioOutput::stop() {}
 bool AudioOutput::isPlaying() const { return false; }
-double AudioOutput::clockSeconds() const { return 0.0; }
+double AudioOutput::advanceClock() { return 0.0; }
+double AudioOutput::peekClock() const { return 0.0; }
+bool AudioOutput::clockReady() const { return false; }
+long long AudioOutput::clockUpdateCount() const { return 0; }
 bool AudioOutput::ended() const { return true; }
 void AudioOutput::setMuted(bool) {}
 bool AudioOutput::isMuted() const { return false; }
@@ -331,6 +442,13 @@ bool AudioOutput::open(const QString& path, QString& error) {
     error.clear();
     close();
     impl_->path = path;
+
+    // Control test: behave exactly as a picture-only file does, so video falls
+    // back to the wall-clock path with nothing else changed.
+    if (audioDisabledByEnv()) {
+        impl_->disabledByEnv = true;
+        return false;
+    }
 
     if (avformat_open_input(&impl_->fmt, path.toUtf8().constData(), nullptr, nullptr) < 0) {
         impl_->fmt = nullptr;
@@ -413,7 +531,8 @@ bool AudioOutput::open(const QString& path, QString& error) {
     }
 
     impl_->sink = std::make_unique<QAudioSink>(device, impl_->deviceFormat);
-    impl_->feed = std::make_unique<AudioFeed>(impl_->ring, impl_->underruns);
+    impl_->feed = std::make_unique<AudioFeed>(impl_->ring, impl_->underruns,
+                                              impl_->silenceBytes);
     return true;
 }
 
@@ -425,6 +544,8 @@ void AudioOutput::close() {
     impl_->teardownStream();
     impl_->codecName.clear();
     impl_->underruns = 0;
+    impl_->silenceBytes = 0;
+    impl_->disabledByEnv = false;
 }
 
 bool AudioOutput::hasAudio() const {
@@ -442,25 +563,83 @@ void AudioOutput::start(double startSeconds) {
     av_seek_frame(impl_->fmt, impl_->streamIndex, ts, AVSEEK_FLAG_BACKWARD);
     avcodec_flush_buffers(impl_->codec);
 
-    const int capacity = static_cast<int>(kRingSeconds
-                                          * static_cast<double>(impl_->outRate)
-                                          * static_cast<double>(impl_->outBytesPerFrame));
+    // Ask for a known device buffer instead of accepting the driver's default.
+    // The default was 1.0s on the Windows test box against constants tuned for
+    // 0.5s, and that mismatch is what produced the startup hold/skip churn.
+    const double bytesPerSecond = static_cast<double>(impl_->outRate)
+                                * static_cast<double>(impl_->outBytesPerFrame);
+    const double wantSeconds = configuredDeviceBufferSeconds();
+    impl_->requestedBufferBytes = static_cast<qint64>(wantSeconds * bytesPerSecond);
+    impl_->sink->setBufferSize(impl_->requestedBufferBytes);
+
+    // The ring must be able to answer the sink's first pull in full, so size it
+    // off what the sink will actually be, not off what we asked for -- drivers
+    // are free to round or ignore the request.
+    const double effectiveBufferS = impl_->bytesToSeconds(
+        impl_->sink->bufferSize() > 0 ? impl_->sink->bufferSize()
+                                      : impl_->requestedBufferBytes);
+    const double ringSeconds = std::max(kMinRingSeconds,
+                                        kRingToDeviceRatio * effectiveBufferS);
+    const int capacity = static_cast<int>(ringSeconds * bytesPerSecond);
+
+    impl_->ringCapacityBytes = capacity;
     impl_->ring.reset(capacity);
     impl_->stopRequested = false;
     impl_->decodeEnded = false;
     impl_->startSeconds = startSeconds;
-    impl_->smoothedLatencyS = -1.0;
     impl_->lastClockS = startSeconds;
     impl_->clockInit = false;
     impl_->clockBase = startSeconds;
+    impl_->underruns = 0;
+    impl_->silenceBytes = 0;
+    impl_->clockUpdates = 0;
+    impl_->clockSnaps = 0;
 
     impl_->thread = std::make_unique<Impl::DecodeThread>(impl_.get());
     impl_->thread->start();
+
+    // Prime before the device is allowed its first pull. Starting the sink
+    // against an empty ring lets readData pad the opening buffer with silence,
+    // and processedUSecs() counts padding as elapsed media time -- so the clock
+    // would begin life ahead of the sound. Measured cost here is ~10-13ms and
+    // startup silence is 0.
+    //
+    // NOTE this is a blocking wait on the UI thread, bounded at
+    // kMaxPrimeWaitMs. On local media it never approaches the cap; on a cold
+    // high-latency source it could, which is the one interaction with the
+    // responsive-I/O work worth re-checking.
+    QElapsedTimer prime;
+    prime.start();
+    const int primeTarget = static_cast<int>(
+        std::min<double>(capacity, effectiveBufferS * bytesPerSecond));
+    while (impl_->ring.used() < primeTarget
+           && prime.elapsed() < kMaxPrimeWaitMs
+           && !impl_->decodeEnded) {
+        QThread::msleep(1);
+    }
+    impl_->startupFillMs = static_cast<double>(prime.nsecsElapsed()) / 1e6;
 
     impl_->feed->open(QIODevice::ReadOnly);
     impl_->sink->setVolume(impl_->muted ? 0.0 : 1.0);
     impl_->sink->start(impl_->feed.get());
     impl_->playing = true;
+
+    // Resolve the loop's tuning against the sink we actually got.
+    impl_->actualBufferBytes = impl_->sink->bufferSize();
+    impl_->deviceBufferS = impl_->bytesToSeconds(impl_->actualBufferBytes);
+
+    // Seed the latency estimate at the steady state rather than at zero. The
+    // device buffer fills over the first seconds of playback, so a
+    // first-sample seed starts a full buffer wrong and the EMA cannot catch a
+    // ramp that size -- which is what kept tripping the hard snap.
+    impl_->smoothedLatencyS = impl_->deviceBufferS;
+
+    // A snap marks a genuine discontinuity (a stall, an underrun run), not
+    // routine buffer fill, so scale it to the buffer that actually exists
+    // rather than leaving a fixed 0.25s that a large-buffer device could trip
+    // on. Defensive: across every run measured here the snap fired zero times,
+    // so this is insurance for devices unlike this one, not a fix.
+    impl_->snapSeconds = std::max(0.25, 1.5 * impl_->deviceBufferS);
 }
 
 void AudioOutput::stop() {
@@ -481,8 +660,10 @@ bool AudioOutput::isPlaying() const {
     return impl_ && impl_->playing;
 }
 
-double AudioOutput::clockSeconds() const {
+double AudioOutput::advanceClock() {
     if (!impl_ || !impl_->playing || !impl_->sink) return 0.0;
+    ++impl_->clockUpdates;
+
     // processedUSecs counts everything handed to the device, including audio
     // sitting in its buffer that nobody has heard yet. Back that out, or the
     // clock runs a buffer ahead of the sound and video leads picture-to-track.
@@ -490,9 +671,12 @@ double AudioOutput::clockSeconds() const {
     const qint64 inFlight = impl_->sink->bufferSize() - impl_->sink->bytesFree();
     const double rawLatency = impl_->bytesToSeconds(std::max<qint64>(inFlight, 0));
 
+    // Seeded in start() from the configured buffer duration; this branch only
+    // covers a sink that somehow reported nothing back then. See
+    // useFixedLatency() for why the EMA was kept.
     if (impl_->smoothedLatencyS < 0.0) {
         impl_->smoothedLatencyS = rawLatency;
-    } else {
+    } else if (!useFixedLatency()) {
         constexpr double kAlpha = 0.02;  // slow: real latency barely moves
         impl_->smoothedLatencyS += kAlpha * (rawLatency - impl_->smoothedLatencyS);
     }
@@ -511,13 +695,16 @@ double AudioOutput::clockSeconds() const {
     const double wall = static_cast<double>(impl_->clockWall.nsecsElapsed()) / 1e9;
     const double error = raw - (impl_->clockBase + wall);
 
-    // A large error is a real event (startup fill, a stall, an underrun run),
-    // not sampling noise: snap to it rather than crawling for seconds. Small
-    // errors are the staircase, and get corrected gently.
-    constexpr double kSnapSeconds = 0.25;
-    constexpr double kSlew = 0.05;
-    if (std::abs(error) > kSnapSeconds) {
+    // A large error is a real event (a stall, an underrun run), not sampling
+    // noise: snap to it rather than crawling for seconds. Small errors are the
+    // staircase, and get corrected gently. The threshold scales with the actual
+    // device buffer -- a fixed 0.25s fired on every routine fill once the
+    // driver handed us a 1.0s buffer, and each of those snaps was a visible
+    // hold or skip.
+    const double kSlew = clockSlew();
+    if (std::abs(error) > impl_->snapSeconds) {
         impl_->clockBase = raw - wall;
+        ++impl_->clockSnaps;
     } else {
         impl_->clockBase += kSlew * error;
     }
@@ -526,6 +713,24 @@ double AudioOutput::clockSeconds() const {
     // the wrong order because the clock wobbled.
     impl_->lastClockS = std::max(impl_->lastClockS, impl_->clockBase + wall);
     return impl_->lastClockS;
+}
+
+bool AudioOutput::clockReady() const {
+    if (!impl_ || !impl_->playing || !impl_->sink) return false;
+    if (impl_->smoothedLatencyS < 0.0) return false;
+    const double processed =
+        static_cast<double>(impl_->sink->processedUSecs()) / 1'000'000.0;
+    // Strictly greater: at exactly equal, raw is still clamped at startSeconds.
+    return processed > impl_->smoothedLatencyS;
+}
+
+double AudioOutput::peekClock() const {
+    if (!impl_ || !impl_->playing) return 0.0;
+    return impl_->lastClockS;
+}
+
+long long AudioOutput::clockUpdateCount() const {
+    return impl_ ? impl_->clockUpdates : 0;
 }
 
 bool AudioOutput::ended() const {
@@ -552,10 +757,23 @@ AudioPerfStats AudioOutput::stats() const {
     s.codecName = impl_->codecName;
     s.sampleRate = impl_->outRate;
     s.channels = impl_->outChannels;
-    s.clockSeconds = clockSeconds();
+    // peek, never advance: this is telemetry, and stepping the control loop
+    // from here is what made playback timing depend on whether the HUD was on.
+    s.clockSeconds = peekClock();
     s.bufferedMs = impl_->bytesToSeconds(impl_->ring.used()) * 1000.0;
     s.underruns = impl_->underruns;
     s.ended = ended();
+    s.disabledByEnv = impl_->disabledByEnv;
+    s.sinkBufferRequestedBytes = impl_->requestedBufferBytes;
+    s.ringCapacityBytes = impl_->ringCapacityBytes;
+    s.deviceBufferMs = impl_->bytesToSeconds(impl_->actualBufferBytes) * 1000.0;
+    s.ringCapacityMs = impl_->bytesToSeconds(impl_->ringCapacityBytes) * 1000.0;
+    s.startupFillMs = impl_->startupFillMs;
+    s.silenceBytes = impl_->silenceBytes;
+    s.clockUpdates = impl_->clockUpdates;
+    s.smoothedLatencyMs = impl_->smoothedLatencyS * 1000.0;
+    s.snapThresholdMs = impl_->snapSeconds * 1000.0;
+    s.clockSnaps = impl_->clockSnaps;
     if (impl_->sink) {
         s.processedUSecs = impl_->sink->processedUSecs();
         s.sinkBufferBytes = impl_->sink->bufferSize();
