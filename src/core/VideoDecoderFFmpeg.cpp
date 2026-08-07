@@ -172,6 +172,30 @@ void seekLogLine(const QString& line) {
     }
 }
 
+// TRACE_OPEN_LOG=1 appends one structured line per successful open to
+// %TEMP%\trace_openlog.txt. Exists so the probe-limit comparison matrix is
+// validated against exact values -- fps to six places, exact frame counts,
+// time base, colour metadata -- rather than numbers read off a screenshot.
+// Off by default.
+bool openLogEnabled() {
+    static const bool on = !qgetenv("TRACE_OPEN_LOG").isEmpty()
+                        && qgetenv("TRACE_OPEN_LOG") != "0";
+    return on;
+}
+
+void openLogLine(const QString& line) {
+    static QFile* f = [] {
+        auto* file = new QFile(QDir::tempPath() + "/trace_openlog.txt");
+        file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+        return file;
+    }();
+    if (f && f->isOpen()) {
+        f->write(line.toUtf8());
+        f->write("\n");
+        f->flush();
+    }
+}
+
 int envInt(const char* name, int fallback) {
     const QByteArray v = qgetenv(name);
     if (v.isEmpty()) return fallback;
@@ -490,6 +514,18 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     // Tells avformat_close_input not to free a pb it did not create.
     impl_->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
 
+    // Probe limits. Left at FFmpeg's defaults unless overridden, because
+    // shrinking them trades metadata certainty for open speed and that trade
+    // has to be validated per format, not assumed. Env knobs exist so the
+    // comparison matrix can be run without a rebuild per value:
+    //   TRACE_PROBESIZE=<bytes>  TRACE_ANALYZEDURATION=<microseconds>
+    if (const int probeOverride = envInt("TRACE_PROBESIZE", 0); probeOverride > 0) {
+        av_opt_set_int(impl_->fmt, "probesize", probeOverride, 0);
+    }
+    if (const int analyzeOverride = envInt("TRACE_ANALYZEDURATION", 0); analyzeOverride > 0) {
+        av_opt_set_int(impl_->fmt, "analyzeduration", analyzeOverride, 0);
+    }
+
     // The path is still passed so the demuxer can be probed by extension as
     // well as by content; the bytes come from pb.
     QElapsedTimer demuxTimer;
@@ -503,6 +539,10 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     }
     const double demuxMs = static_cast<double>(demuxTimer.nsecsElapsed()) / 1'000'000.0;
 
+    // Probing is the dominant term in open time everywhere it has been
+    // measured, so its I/O is captured as a delta rather than guessed at.
+    const IoPhaseStats beforeProbe = impl_->io.stats(IoPhase::Open);
+
     QElapsedTimer streamInfoTimer;
     streamInfoTimer.start();
     if (avformat_find_stream_info(impl_->fmt, nullptr) < 0) {
@@ -511,6 +551,17 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
         return false;
     }
     const double streamInfoMs = static_cast<double>(streamInfoTimer.nsecsElapsed()) / 1'000'000.0;
+
+    const IoPhaseStats afterProbe = impl_->io.stats(IoPhase::Open);
+    perfStats_.probeReads = afterProbe.reads - beforeProbe.reads;
+    perfStats_.probeBytes = afterProbe.bytes - beforeProbe.bytes;
+    perfStats_.probeSeeks = afterProbe.seeks - beforeProbe.seeks;
+    perfStats_.streamCount = static_cast<int>(impl_->fmt->nb_streams);
+    {
+        int64_t v = 0;
+        if (av_opt_get_int(impl_->fmt, "probesize", 0, &v) >= 0) perfStats_.probeSizeLimit = v;
+        if (av_opt_get_int(impl_->fmt, "analyzeduration", 0, &v) >= 0) perfStats_.analyzeDurationUs = v;
+    }
 
     impl_->streamIndex = av_find_best_stream(impl_->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (impl_->streamIndex < 0) {
@@ -653,6 +704,7 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     perfStats_.sourceBytes = impl_->io.fileSize();
     perfStats_.ioBufferBytes = MediaIoSource::bufferSize();
     perfStats_.openClassifyMs = si.classifyMs;
+    perfStats_.classifyCached = si.classifyCached;
     perfStats_.openFileMs = si.fileOpenMs;
     perfStats_.openDemuxMs = demuxMs;
     perfStats_.openStreamInfoMs = streamInfoMs;
@@ -660,6 +712,47 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
         perfStats_.sourceBitrateMbps =
             (static_cast<double>(perfStats_.sourceBytes) * 8.0 / 1'000'000.0)
             / metadata_.durationSeconds;
+    }
+
+    // Everything a probe-limit change could plausibly degrade, recorded in one
+    // line so a faster open can be proven not to have cost correctness.
+    if (openLogEnabled()) {
+        const int audioIdx = av_find_best_stream(impl_->fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        const AVPixFmtDescriptor* pd = av_pix_fmt_desc_get(static_cast<AVPixelFormat>(par->format));
+        openLogLine(QStringLiteral(
+            "file=%1\tstorage=%2\tprobesize=%3\tanalyzedur=%4"
+            "\tclassifyMs=%5\tcached=%6\tfileopenMs=%7\tdemuxMs=%8\tstreaminfoMs=%9\topenMs=%10"
+            "\tprobeReads=%11\tprobeBytes=%12\tprobeSeeks=%13"
+            "\tstreams=%14\tvideoIdx=%15\taudioIdx=%16\tcodec=%17"
+            "\tw=%18\th=%19\tpixfmt=%20\tfps=%21\tfpsQ=%22/%23\ttb=%24/%25"
+            "\tdur=%26\tframes=%27\tcolorspace=%28\trange=%29")
+            .arg(QFileInfo(path).fileName())
+            .arg(si.remote ? "remote" : "local")
+            .arg(perfStats_.probeSizeLimit)
+            .arg(perfStats_.analyzeDurationUs)
+            .arg(QString::number(si.classifyMs, 'f', 2))
+            .arg(si.classifyCached ? 1 : 0)
+            .arg(QString::number(si.fileOpenMs, 'f', 2))
+            .arg(QString::number(demuxMs, 'f', 2))
+            .arg(QString::number(streamInfoMs, 'f', 2))
+            .arg(QString::number(perfStats_.openMs, 'f', 2))
+            .arg(perfStats_.probeReads)
+            .arg(perfStats_.probeBytes)
+            .arg(perfStats_.probeSeeks)
+            .arg(perfStats_.streamCount)
+            .arg(impl_->streamIndex)
+            .arg(audioIdx)
+            .arg(metadata_.codecName)
+            .arg(par->width)
+            .arg(par->height)
+            .arg(pd && pd->name ? QString::fromUtf8(pd->name) : QStringLiteral("?"))
+            .arg(QString::number(metadata_.fps, 'f', 6))
+            .arg(impl_->fpsQ.num).arg(impl_->fpsQ.den)
+            .arg(impl_->streamTimeBase.num).arg(impl_->streamTimeBase.den)
+            .arg(QString::number(metadata_.durationSeconds, 'f', 4))
+            .arg(metadata_.frameCount)
+            .arg(static_cast<int>(par->color_space))
+            .arg(static_cast<int>(par->color_range)));
     }
 
     error.clear();

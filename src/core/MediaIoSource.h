@@ -69,6 +69,7 @@ struct StorageInfo {
     // classification we perform ourselves.
     double classifyMs = 0.0;
     double fileOpenMs = 0.0;
+    bool classifyCached = false;      // served from the per-volume cache
 };
 
 // A read-only, instrumented file source handed to FFmpeg as a custom
@@ -107,7 +108,14 @@ public:
     static constexpr double kStallMs = 20.0;
 
     // Classifies without opening anything. Never writes to the volume.
+    // Results are cached per volume root: the Win32 volume queries cost ~8.5ms
+    // on a virtual mount versus ~0.9ms locally, and the answer is identical for
+    // every file on the same volume.
     static StorageInfo classifyStorage(const QString& path);
+
+    // Drops the classification cache. Exists so a volume that is disconnected
+    // and reconnected is not judged by a stale entry.
+    static void forgetStorageClassification();
 
 private:
     struct Impl;

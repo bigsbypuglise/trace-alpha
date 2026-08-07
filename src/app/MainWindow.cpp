@@ -1044,11 +1044,23 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.sourceBytes / (1024.0 * 1024.0), 'f', 1))
                 .arg(QString::number(perf.sourceBitrateMbps, 'f', 1))
                 .arg(perf.ioBufferBytes / 1024)
-              + QString(" | open: classify %1 + fileopen %2 + demux %3 + streaminfo %4 ms")
+              + QString(" | open: classify %1%2 + fileopen %3 + demux %4 + streaminfo %5 ms")
                 .arg(QString::number(perf.openClassifyMs, 'f', 1))
+                .arg(perf.classifyCached ? "(cached)" : "")
                 .arg(QString::number(perf.openFileMs, 'f', 1))
                 .arg(QString::number(perf.openDemuxMs, 'f', 1))
                 .arg(QString::number(perf.openStreamInfoMs, 'f', 1));
+
+            const QString lprobe = QString("probe | limit %1 KB / %2 ms | rd %3 | %4 KB | seek %5 | streams %6 | fps %7 | dur %8s | frames %9")
+                .arg(perf.probeSizeLimit / 1024)
+                .arg(perf.analyzeDurationUs / 1000)
+                .arg(perf.probeReads)
+                .arg(QString::number(perf.probeBytes / 1024.0, 'f', 1))
+                .arg(perf.probeSeeks)
+                .arg(perf.streamCount)
+                .arg(QString::number(vm.fps, 'f', 6))
+                .arg(QString::number(vm.durationSeconds, 'f', 3))
+                .arg(vm.frameCount);
 
             auto ioLine = [](const char* tag, const trace::core::IoPhaseStats& s) {
                 return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6%% "
@@ -1118,7 +1130,7 @@ void MainWindow::refreshHud(const QString& action) {
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
                  + "\n" + l7 + "\n" + l8 + "\n" + l9
-                 + "\n" + lio1 + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
+                 + "\n" + lio1 + "\n" + lprobe + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")

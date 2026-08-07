@@ -5,6 +5,9 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QHash>
+#include <QMutex>
+#include <QMutexLocker>
 
 #include <algorithm>
 
@@ -78,11 +81,73 @@ MediaIoSource::~MediaIoSource() { close(); }
 
 int MediaIoSource::bufferSize() { return kDefaultBufferSize; }
 
+namespace {
+
+// Cheap key for the volume a path lives on, derived from the string alone.
+// Deriving it this way matters: GetVolumePathNameW is itself one of the calls
+// being cached, so the key must not require it. Generic - drive letters and
+// UNC roots - with no LucidLink-specific knowledge.
+QString volumeKeyFor(const QString& absolutePath) {
+    const QString p = QDir::toNativeSeparators(absolutePath);
+    if (p.startsWith(QLatin1String("\\\\"))) {
+        // \\server\share -> keep both components.
+        const int slash1 = p.indexOf(QLatin1Char('\\'), 2);
+        if (slash1 < 0) return p;
+        const int slash2 = p.indexOf(QLatin1Char('\\'), slash1 + 1);
+        return (slash2 < 0 ? p : p.left(slash2)).toLower();
+    }
+    if (p.size() >= 2 && p.at(1) == QLatin1Char(':')) {
+        return p.left(2).toLower();
+    }
+    return QStringLiteral("/");
+}
+
+struct ClassificationCache {
+    QMutex mutex;
+    QHash<QString, StorageInfo> entries;
+    QElapsedTimer age;
+};
+
+ClassificationCache& classificationCache() {
+    static ClassificationCache cache;
+    return cache;
+}
+
+// Bounded staleness rather than device notifications: the only consequence of
+// a stale entry is telemetry and tuning, never correctness, and a volume that
+// disconnects will be re-judged within this window.
+constexpr qint64 kClassificationTtlMs = 60'000;
+
+} // namespace
+
+void MediaIoSource::forgetStorageClassification() {
+    ClassificationCache& cache = classificationCache();
+    QMutexLocker lock(&cache.mutex);
+    cache.entries.clear();
+    cache.age.invalidate();
+}
+
 // Identifies the backing volume by querying it. Never writes a probe file --
 // the LucidLink mount this exists for is live client storage.
 StorageInfo MediaIoSource::classifyStorage(const QString& path) {
     StorageInfo info;
     const QString absolute = QFileInfo(path).absoluteFilePath();
+
+    const QString key = volumeKeyFor(absolute);
+    {
+        ClassificationCache& cache = classificationCache();
+        QMutexLocker lock(&cache.mutex);
+        if (cache.age.isValid() && cache.age.elapsed() > kClassificationTtlMs) {
+            cache.entries.clear();
+            cache.age.invalidate();
+        }
+        const auto it = cache.entries.constFind(key);
+        if (it != cache.entries.constEnd()) {
+            StorageInfo cached = *it;
+            cached.classifyCached = true;
+            return cached;
+        }
+    }
 
 #ifdef Q_OS_WIN
     const QString native = QDir::toNativeSeparators(absolute);
@@ -142,6 +207,12 @@ StorageInfo MediaIoSource::classifyStorage(const QString& path) {
                              : QStringLiteral("forced local by TRACE_REMOTE_IO=0");
     }
 
+    {
+        ClassificationCache& cache = classificationCache();
+        QMutexLocker lock(&cache.mutex);
+        if (!cache.age.isValid()) cache.age.start();
+        cache.entries.insert(key, info);
+    }
     return info;
 }
 

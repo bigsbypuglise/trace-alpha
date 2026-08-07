@@ -98,9 +98,19 @@ struct VideoPerfStats {
     // not in reads at all, so these are tracked separately or the cost cannot
     // be attributed.
     double openClassifyMs = 0.0;
+    bool classifyCached = false;
     double openFileMs = 0.0;
     double openDemuxMs = 0.0;
     double openStreamInfoMs = 0.0;
+    // What avformat_find_stream_info actually cost in I/O, and the limits it
+    // ran under. Probing is the dominant term in open time on every source
+    // measured, so it is broken out rather than inferred.
+    qint64 probeSizeLimit = 0;
+    qint64 analyzeDurationUs = 0;
+    long long probeReads = 0;
+    long long probeBytes = 0;
+    long long probeSeeks = 0;
+    int streamCount = 0;
 
     QString srcPixelFormat;
     QString dstPixelFormat;
