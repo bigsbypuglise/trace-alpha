@@ -104,6 +104,24 @@ private:
     double avgPresentLatencyMs_ = 0.0;
     double maxPresentLatencyMs_ = 0.0;
     double lastDriftMs_ = 0.0;
+
+    // Frame-cycle accounting. The tick handler runs decode+convert+handoff and
+    // returns; the viewer's paintEvent runs later, in the event loop, so paint
+    // is NOT additive to handler time. Period = handler + everything outside.
+    QElapsedTimer frameCycleClock_;
+    double lastHandlerMs_ = 0.0;
+    double avgHandlerMs_ = 0.0;
+    double lastPeriodMs_ = 0.0;
+    double avgPeriodMs_ = 0.0;
+    double lastOutsideMs_ = 0.0;
+    double avgOutsideMs_ = 0.0;
+    double maxPeriodMs_ = 0.0;
+    long long cycleSamples_ = 0;
+    // Wall-clock span between the first and last presented frame, which is
+    // what (N-1) frame intervals actually cover.
+    qint64 firstPresentNs_ = -1;
+    qint64 lastPresentNs_ = -1;
+    QElapsedTimer sessionClock_;
     bool suppressSliderSignal_ = false;
     bool scrubbing_ = false;
     long long pendingScrubFrame_ = -1;

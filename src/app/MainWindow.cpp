@@ -41,6 +41,28 @@ MainWindow::MainWindow() {
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
         if (!frameSource_ || !frameSource_->canPlay()) return;
 
+        // Callback-to-callback period, measured at handler entry. Everything
+        // not inside this handler (queued paint, backing-store flush, event
+        // dispatch, idle wait for the next tick) is the difference between
+        // this period and the handler duration recorded at the end.
+        if (frameCycleClock_.isValid()) {
+            lastPeriodMs_ = static_cast<double>(frameCycleClock_.nsecsElapsed()) / 1'000'000.0;
+            lastOutsideMs_ = lastPeriodMs_ - lastHandlerMs_;
+            ++cycleSamples_;
+            const double cn = static_cast<double>(cycleSamples_);
+            avgPeriodMs_ += (lastPeriodMs_ - avgPeriodMs_) / cn;
+            avgOutsideMs_ += (lastOutsideMs_ - avgOutsideMs_) / cn;
+            maxPeriodMs_ = std::max(maxPeriodMs_, lastPeriodMs_);
+        }
+        frameCycleClock_.restart();
+        QElapsedTimer handlerTimer;
+        handlerTimer.start();
+        const auto recordHandler = qScopeGuard([this, &handlerTimer]() {
+            lastHandlerMs_ = static_cast<double>(handlerTimer.nsecsElapsed()) / 1'000'000.0;
+            const double hn = static_cast<double>(cycleSamples_ + 1);
+            avgHandlerMs_ += (lastHandlerMs_ - avgHandlerMs_) / hn;
+        });
+
         const auto playbackState = playback_.state();
         if (playbackState.mode != PlaybackMode::PlayingForward && playbackState.mode != PlaybackMode::PlayingReverse) {
             playTimer_.stop();
@@ -134,6 +156,11 @@ MainWindow::MainWindow() {
         } else {
             ++playbackFramesPresented_;
             playbackRunElapsedS_ = static_cast<double>(playbackRateClock_.elapsed()) / 1000.0;
+            // First/last present span: N presented frames cover N-1 intervals,
+            // so rate from this span is the honest steady-state figure.
+            const qint64 nowNs = sessionClock_.isValid() ? sessionClock_.nsecsElapsed() : 0;
+            if (firstPresentNs_ < 0) firstPresentNs_ = nowNs;
+            lastPresentNs_ = nowNs;
             // Clock drift: ideal media time for the frames presented so far
             // versus wall clock. Positive = ahead of real time, negative =
             // behind. A scheduler holding rate keeps this flat near zero.
@@ -627,8 +654,16 @@ void MainWindow::togglePlayPause() {
         // Presented-rate window starts with the play action, so pausing and
         // resuming measures the new run rather than averaging across the gap.
         playbackRateClock_.start();
+        sessionClock_.start();
+        firstPresentNs_ = -1;
+        lastPresentNs_ = -1;
         playbackFramesPresented_ = 0;
         playbackRunElapsedS_ = 0.0;
+        frameCycleClock_.invalidate();
+        cycleSamples_ = 0;
+        lastHandlerMs_ = avgHandlerMs_ = 0.0;
+        lastPeriodMs_ = avgPeriodMs_ = maxPeriodMs_ = 0.0;
+        lastOutsideMs_ = avgOutsideMs_ = 0.0;
         schedulerTickClock_.invalidate();
         schedulerTicks_ = 0;
         presentSamples_ = 0;
@@ -814,7 +849,34 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(schedulerTicks_)
                 .arg(presentSamples_);
 
-            line = l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5;
+            // Span-based rate: N presented frames cover N-1 intervals, so this
+            // excludes both startup before frame 1 and any end-of-stream hold.
+            const double spanS = (firstPresentNs_ >= 0 && lastPresentNs_ > firstPresentNs_)
+                ? static_cast<double>(lastPresentNs_ - firstPresentNs_) / 1'000'000'000.0
+                : 0.0;
+            const double spanFps = (spanS > 0.0 && playbackFramesPresented_ > 1)
+                ? static_cast<double>(playbackFramesPresented_ - 1) / spanS
+                : 0.0;
+
+            const QString l6 = QString("period %1/%2/%3 | handler %4/%5 | outside %6/%7 | paint %8/%9 tot %10 draw %11 upd->paint %12 | paints %13/%14 | span %15s span-fps %16")
+                .arg(QString::number(lastPeriodMs_, 'f', 2))
+                .arg(QString::number(avgPeriodMs_, 'f', 2))
+                .arg(QString::number(maxPeriodMs_, 'f', 2))
+                .arg(QString::number(lastHandlerMs_, 'f', 2))
+                .arg(QString::number(avgHandlerMs_, 'f', 2))
+                .arg(QString::number(lastOutsideMs_, 'f', 2))
+                .arg(QString::number(avgOutsideMs_, 'f', 2))
+                .arg(QString::number(drawPerf.lastPaintMs, 'f', 2))
+                .arg(QString::number(drawPerf.avgPaintMs, 'f', 2))
+                .arg(QString::number(drawPerf.avgPaintTotalMs, 'f', 2))
+                .arg(QString::number(drawPerf.avgDrawImageMs, 'f', 2))
+                .arg(QString::number(drawPerf.avgUpdateToPaintMs, 'f', 2))
+                .arg(drawPerf.paintCount)
+                .arg(drawPerf.updateCount)
+                .arg(QString::number(spanS, 'f', 2))
+                .arg(QString::number(spanFps, 'f', 2));
+
+            line = l1 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")
