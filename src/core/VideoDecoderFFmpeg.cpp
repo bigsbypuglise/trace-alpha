@@ -653,7 +653,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // slider release) is always converted at full resolution.
         int dstW = w;
         int dstH = h;
-        if (mode == RequestMode::Scrub && w >= 1920) {
+        // Cache fills are always full resolution: an entry may later serve a
+        // paused step or the exact landing frame, and a half-res entry would
+        // show soft. Only the frame actually presented mid-drag is halved.
+        if (mode == RequestMode::Scrub && !isCacheFill && w >= 1920) {
             dstW = (w / 2) & ~1;
             dstH = (h / 2) & ~1;
         }
@@ -832,8 +835,14 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                     // Cache frames near the target for reverse stepping —
                     // but never during Scrub: previews are half-res and the
                     // extra conversions would drag scrub latency down.
+                    // Walked frames are decoded regardless; converting one is
+                    // the only extra cost, and it buys a future exact hit
+                    // anywhere in this GOP. Cache fills are always converted
+                    // at full resolution (fastOverride, not the Scrub
+                    // half-res path), so an entry is safe to reuse later for
+                    // stepping or for the exact landing frame.
                     const long long deltaToTarget = target - decodedFrame;
-                    if (mode != RequestMode::Scrub && deltaToTarget <= cacheWindow) {
+                    if (deltaToTarget <= cacheWindow) {
                         QImage cached;
                         convertCurrentFrame(cached, /*fastOverride=*/true, /*isCacheFill=*/true);
                         pushReverseCache(decodedFrame, cached);
@@ -877,7 +886,14 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     const bool requestIsBackward = currentFrame_ >= 0 && frameIndex < currentFrame_;
     const bool requestIsSequentialForward = currentFrame_ >= 0 && frameIndex == currentFrame_ + 1;
 
-    if (requestIsBackward && tryReverseCache(frameIndex)) {
+    // Random-access requests (scrub drag, slider release, jump-steps) consult
+    // the cache in either direction. It used to be checked only when the
+    // request moved backward, so a forward scrub onto a frame decoded moments
+    // earlier still paid a seek plus a full GOP walk. Sequential playback is
+    // deliberately excluded: it must keep advancing the decoder rather than
+    // being served from behind.
+    const bool randomAccess = (mode != RequestMode::Playback) && !requestIsSequentialForward;
+    if ((requestIsBackward || randomAccess) && tryReverseCache(frameIndex)) {
         updatePerfStats();
         return true;
     }
