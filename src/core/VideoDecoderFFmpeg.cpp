@@ -137,17 +137,90 @@ struct VideoDecoderFFmpeg::Impl {
     AVFormatContext* fmt = nullptr;
     AVCodecContext* codec = nullptr;
     const AVCodec* codecDef = nullptr;
-    SwsContext* sws = nullptr;
     AVFrame* frame = nullptr;
     AVPacket* pkt = nullptr;
     int streamIndex = -1;
-    int swsSrcW = 0;
-    int swsSrcH = 0;
-    int swsDstW = 0;
-    int swsDstH = 0;
-    AVPixelFormat swsSrcPixFmt = AV_PIX_FMT_NONE;
-    bool swsIsFast = false;
     AVPixelFormat dstPixFmt = AV_PIX_FMT_BGRA;
+
+    // Two persistent conversion contexts rather than one shared context.
+    // Full-resolution output (playback, stepping, paused seeks, the exact
+    // frame after scrub release) and the reduced-resolution drag preview have
+    // different geometry *and* different flags, so a single context was torn
+    // down and rebuilt every time the two alternated. That cost ~8-9ms and was
+    // paid on every slider release -- exactly when the exact frame is meant to
+    // appear. Each slot caches its own parameters and rebuilds only when its
+    // own inputs change.
+    struct SwsSlot {
+        SwsContext* ctx = nullptr;
+        int srcW = 0;
+        int srcH = 0;
+        int dstW = 0;
+        int dstH = 0;
+        AVPixelFormat srcFmt = AV_PIX_FMT_NONE;
+        AVPixelFormat dstFmt = AV_PIX_FMT_NONE;
+        bool fast = false;
+        long long rebuilds = 0;
+
+        long long lastUsed = 0;
+
+        bool matches(int sw, int sh, int dw, int dh, AVPixelFormat sf, AVPixelFormat df, bool f) const {
+            return ctx && srcW == sw && srcH == sh && dstW == dw && dstH == dh
+                && srcFmt == sf && dstFmt == df && fast == f;
+        }
+        void adopt(SwsContext* c, int sw, int sh, int dw, int dh, AVPixelFormat sf, AVPixelFormat df, bool f) {
+            ctx = c; srcW = sw; srcH = sh; dstW = dw; dstH = dh;
+            srcFmt = sf; dstFmt = df; fast = f;
+        }
+        void reset() {
+            if (ctx) sws_freeContext(ctx);
+            ctx = nullptr;
+            srcW = srcH = dstW = dstH = 0;
+            srcFmt = dstFmt = AV_PIX_FMT_NONE;
+            fast = false;
+        }
+    };
+    // Measurement showed two slots are not enough: three distinct
+    // configurations are live during a scrub cycle -- full-res accurate (the
+    // exact frame on release), full-res fast (speculative reverse-cache fills
+    // during the GOP walk) and half-res fast (the drag preview). Keying two
+    // slots on geometry alone left the full slot thrashing between fast and
+    // accurate flags, still rebuilding ~12 times over three drags. A small
+    // LRU set keyed on the complete parameter tuple holds all of them.
+    static constexpr int kSwsSlotCount = 4;
+    SwsSlot swsSlots[kSwsSlotCount];
+    long long swsUseClock = 0;
+    long long swsRebuilds = 0;
+
+    SwsSlot* acquireSwsSlot(int sw, int sh, int dw, int dh,
+                            AVPixelFormat sf, AVPixelFormat df, bool fast,
+                            bool* rebuilt) {
+        for (auto& s : swsSlots) {
+            if (s.matches(sw, sh, dw, dh, sf, df, fast)) {
+                s.lastUsed = ++swsUseClock;
+                if (rebuilt) *rebuilt = false;
+                return &s;
+            }
+        }
+        SwsSlot* victim = &swsSlots[0];
+        for (auto& s : swsSlots) {
+            if (!s.ctx) { victim = &s; break; }
+            if (s.lastUsed < victim->lastUsed) victim = &s;
+        }
+        victim->reset();
+        SwsContext* ctx = createSwsContext(sw, sh, sf, dw, dh, df, fast);
+        if (rebuilt) *rebuilt = true;
+        ++swsRebuilds;
+        if (!ctx) return nullptr;
+        victim->adopt(ctx, sw, sh, dw, dh, sf, df, fast);
+        victim->lastUsed = ++swsUseClock;
+        return victim;
+    }
+
+    int swsSlotsInUse() const {
+        int n = 0;
+        for (const auto& s : swsSlots) if (s.ctx) ++n;
+        return n;
+    }
 
     // Env overrides for A/B testing; when neither is set, conversion quality
     // is chosen per request mode (fast for Playback/Scrub, accurate for Step).
@@ -270,17 +343,14 @@ void VideoDecoderFFmpeg::close() {
     if (impl_->frame) av_frame_free(&impl_->frame);
     if (impl_->pkt) av_packet_free(&impl_->pkt);
 
-    if (impl_->sws) sws_freeContext(impl_->sws);
-    impl_->sws = nullptr;
+    for (auto& s : impl_->swsSlots) s.reset();
+    impl_->swsUseClock = 0;
+    impl_->swsRebuilds = 0;
 
     if (impl_->codec) avcodec_free_context(&impl_->codec);
     if (impl_->fmt) avformat_close_input(&impl_->fmt);
 
     impl_->streamIndex = -1;
-    impl_->swsSrcW = 0;
-    impl_->swsSrcH = 0;
-    impl_->swsSrcPixFmt = AV_PIX_FMT_NONE;
-    impl_->swsIsFast = false;
     impl_->streamTimeBase = {0, 1};
     impl_->fpsQ = {24, 1};
     impl_->streamStartTs = 0;
@@ -405,15 +475,10 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     }
     impl_->dstPixFmt = AV_PIX_FMT_BGRA;
 
-    impl_->swsSrcW = w;
-    impl_->swsSrcH = h;
-    impl_->swsDstW = w;
-    impl_->swsDstH = h;
-    impl_->swsSrcPixFmt = impl_->codec->pix_fmt;
-    impl_->swsIsFast = false;
-
-    impl_->sws = createSwsContext(w, h, impl_->codec->pix_fmt, w, h, impl_->dstPixFmt, impl_->swsIsFast);
-    if (!impl_->sws) {
+    // Prime the full-resolution slot. The preview slot is built lazily on the
+    // first reduced-resolution scrub conversion, and only if scrubbing happens.
+    if (!impl_->acquireSwsSlot(w, h, w, h, impl_->codec->pix_fmt, impl_->dstPixFmt,
+                               false, nullptr)) {
         error = "FFmpeg: swscale init failed";
         close();
         return false;
@@ -593,34 +658,23 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             dstH = (h / 2) & ~1;
         }
 
-        const bool needRebuild = !impl_->sws
-            || impl_->swsSrcW != w
-            || impl_->swsSrcH != h
-            || impl_->swsDstW != dstW
-            || impl_->swsDstH != dstH
-            || impl_->swsSrcPixFmt != srcPixFmt
-            || impl_->swsIsFast != useFast;
-
+        QElapsedTimer wrapTimer;
+        wrapTimer.start();
+        bool needRebuild = false;
+        Impl::SwsSlot* slot = impl_->acquireSwsSlot(
+            w, h, dstW, dstH, srcPixFmt, impl_->dstPixFmt, useFast, &needRebuild);
         if (needRebuild) {
-            QElapsedTimer wrapTimer;
-            wrapTimer.start();
-            if (impl_->sws) sws_freeContext(impl_->sws);
-            impl_->sws = createSwsContext(w, h, srcPixFmt, dstW, dstH, impl_->dstPixFmt, useFast);
             const qint64 rebuildNs = wrapTimer.nsecsElapsed();
             convertWrapNs += rebuildNs;
             ctxRebuildNs += rebuildNs;
             ++ctxRebuilds;
-            impl_->swsSrcW = w;
-            impl_->swsSrcH = h;
-            impl_->swsDstW = dstW;
-            impl_->swsDstH = dstH;
-            impl_->swsSrcPixFmt = srcPixFmt;
-            impl_->swsIsFast = useFast;
         }
         perfStats_.swsContextReused = !needRebuild;
         perfStats_.experimentalFastPathEnabled = useFast;
+        perfStats_.swsSlotRebuilds = impl_->swsRebuilds;
+        perfStats_.swsSlotsInUse = impl_->swsSlotsInUse();
 
-        if (!impl_->sws) {
+        if (!slot || !slot->ctx) {
             return;
         }
 
@@ -667,7 +721,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         QElapsedTimer timer;
         timer.start();
         sws_scale(
-            impl_->sws,
+            slot->ctx,
             impl_->frame->data,
             impl_->frame->linesize,
             0,

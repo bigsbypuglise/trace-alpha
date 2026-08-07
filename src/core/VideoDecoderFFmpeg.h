@@ -37,6 +37,10 @@ struct VideoPerfStats {
     double lastDetachMs = 0.0;
     double avgDetachMs = 0.0;
     long long lastCtxRebuilds = 0;
+    // Conversion-context set. After warm-up rebuilds should stop climbing even
+    // as scrub preview and exact output alternate.
+    long long swsSlotRebuilds = 0;
+    int swsSlotsInUse = 0;
     long long lastConvertCalls = 0;
     bool lastImageWasShared = false;
     double lastSwsScaleMs = 0.0;

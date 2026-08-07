@@ -798,7 +798,9 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.lastSwsScaleMs, 'f', 2))
                 .arg(QString::number(perf.avgSwsScaleMs, 'f', 2))
                 .arg(QString::number(perf.lastCtxRebuildMs, 'f', 2))
-                .arg(QString::number(perf.avgCtxRebuildMs, 'f', 2))
+                .arg(QString::number(perf.avgCtxRebuildMs, 'f', 2) + " [rb"
+                     + QString::number(perf.swsSlotRebuilds) + "/slots"
+                     + QString::number(perf.swsSlotsInUse) + "]")
                 .arg(QString::number(perf.lastDetachMs, 'f', 2))
                 .arg(QString::number(perf.avgDetachMs, 'f', 2))
                 .arg(QString::number(perf.lastConvertAllocMs, 'f', 2))
