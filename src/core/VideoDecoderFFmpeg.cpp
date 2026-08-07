@@ -492,6 +492,8 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 
     // The path is still passed so the demuxer can be probed by extension as
     // well as by content; the bytes come from pb.
+    QElapsedTimer demuxTimer;
+    demuxTimer.start();
     if (avformat_open_input(&impl_->fmt, path.toUtf8().constData(), nullptr, nullptr) < 0) {
         error = "FFmpeg: unable to open file";
         // On failure avformat_open_input frees the context it was given.
@@ -499,11 +501,16 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
         impl_->io.close();
         return false;
     }
+    const double demuxMs = static_cast<double>(demuxTimer.nsecsElapsed()) / 1'000'000.0;
+
+    QElapsedTimer streamInfoTimer;
+    streamInfoTimer.start();
     if (avformat_find_stream_info(impl_->fmt, nullptr) < 0) {
         error = "FFmpeg: unable to read stream info";
         close();
         return false;
     }
+    const double streamInfoMs = static_cast<double>(streamInfoTimer.nsecsElapsed()) / 1'000'000.0;
 
     impl_->streamIndex = av_find_best_stream(impl_->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
     if (impl_->streamIndex < 0) {
@@ -645,6 +652,10 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
                                                    : QStringLiteral(" %1").arg(si.filesystem));
     perfStats_.sourceBytes = impl_->io.fileSize();
     perfStats_.ioBufferBytes = MediaIoSource::bufferSize();
+    perfStats_.openClassifyMs = si.classifyMs;
+    perfStats_.openFileMs = si.fileOpenMs;
+    perfStats_.openDemuxMs = demuxMs;
+    perfStats_.openStreamInfoMs = streamInfoMs;
     if (metadata_.durationSeconds > 0.0 && perfStats_.sourceBytes > 0) {
         perfStats_.sourceBitrateMbps =
             (static_cast<double>(perfStats_.sourceBytes) * 8.0 / 1'000'000.0)

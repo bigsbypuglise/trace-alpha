@@ -150,8 +150,13 @@ StorageInfo MediaIoSource::classifyStorage(const QString& path) {
 bool MediaIoSource::open(const QString& path, QString& error) {
     close();
 
+    QElapsedTimer classifyTimer;
+    classifyTimer.start();
     impl_->storage = classifyStorage(path);
+    impl_->storage.classifyMs = static_cast<double>(classifyTimer.nsecsElapsed()) / 1'000'000.0;
 
+    QElapsedTimer fileOpenTimer;
+    fileOpenTimer.start();
     impl_->file.setFileName(path);
     // Unbuffered: Qt must not add a second layer of caching between FFmpeg's
     // AVIO buffer and the filesystem, or the measured read sizes would be
@@ -160,7 +165,10 @@ bool MediaIoSource::open(const QString& path, QString& error) {
         error = QStringLiteral("Unable to open media file: %1").arg(impl_->file.errorString());
         return false;
     }
+    // size() is included deliberately: on a virtual mount, stat can cost as
+    // much as the open.
     impl_->size = impl_->file.size();
+    impl_->storage.fileOpenMs = static_cast<double>(fileOpenTimer.nsecsElapsed()) / 1'000'000.0;
     impl_->pos = 0;
     impl_->lastReadEnd = -1;
 

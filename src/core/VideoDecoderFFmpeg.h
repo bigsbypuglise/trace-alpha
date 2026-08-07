@@ -94,6 +94,13 @@ struct VideoPerfStats {
     double sourceBitrateMbps = 0.0;
     qint64 sourceReadPos = 0;
     int ioBufferBytes = 0;
+    // Open-path breakdown. On a virtual mount the time to open a file is often
+    // not in reads at all, so these are tracked separately or the cost cannot
+    // be attributed.
+    double openClassifyMs = 0.0;
+    double openFileMs = 0.0;
+    double openDemuxMs = 0.0;
+    double openStreamInfoMs = 0.0;
 
     QString srcPixelFormat;
     QString dstPixelFormat;

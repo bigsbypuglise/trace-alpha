@@ -1043,7 +1043,12 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.sourceVolume)
                 .arg(QString::number(perf.sourceBytes / (1024.0 * 1024.0), 'f', 1))
                 .arg(QString::number(perf.sourceBitrateMbps, 'f', 1))
-                .arg(perf.ioBufferBytes / 1024);
+                .arg(perf.ioBufferBytes / 1024)
+              + QString(" | open: classify %1 + fileopen %2 + demux %3 + streaminfo %4 ms")
+                .arg(QString::number(perf.openClassifyMs, 'f', 1))
+                .arg(QString::number(perf.openFileMs, 'f', 1))
+                .arg(QString::number(perf.openDemuxMs, 'f', 1))
+                .arg(QString::number(perf.openStreamInfoMs, 'f', 1));
 
             auto ioLine = [](const char* tag, const trace::core::IoPhaseStats& s) {
                 return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6%% "

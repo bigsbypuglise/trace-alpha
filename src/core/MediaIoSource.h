@@ -62,6 +62,13 @@ struct StorageInfo {
     bool remote = false;
     QString reason;                   // why `remote` was decided
     bool overridden = false;          // TRACE_REMOTE_IO forced the answer
+
+    // Cost of finding all of the above, and of the open() syscall itself.
+    // Both are separate from any read, and on a virtual mount either can
+    // dominate the time to open a file -- including, potentially, the
+    // classification we perform ourselves.
+    double classifyMs = 0.0;
+    double fileOpenMs = 0.0;
 };
 
 // A read-only, instrumented file source handed to FFmpeg as a custom
