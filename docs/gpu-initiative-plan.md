@@ -2,9 +2,14 @@
 
 **Status: Gate A complete (architecture audit). No renderer code written yet.**
 
-This document supersedes any earlier GPU design note. A `docs/gpu-conversion-spec.md`
-was referenced by the initiative brief but **does not exist in this repository** and never
-did on this branch — if one reappears from another checkout, this file wins.
+This document holds the **decisions**. The requirements it answers are in
+`docs/gpu-initiative-brief.md`; where the two differ, this file wins.
+
+The `gpu-conversion-spec.md` the brief says to delete is the OpenGL/QOpenGLWidget design.
+It is archived at `docs/archive/gpu-conversion-spec-SUPERSEDED.md` — not deleted, because its
+colorimetry and bit-depth tables were the only written record of those values. They are ported
+into §11 below. Nothing else in it should be implemented; see §11 and the archive header for
+which of its premises are stale.
 
 ---
 
