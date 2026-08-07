@@ -34,6 +34,22 @@ using trace::core::MediaKind;
 using trace::core::PlaybackMode;
 using trace::core::PrimaryReadoutMode;
 
+namespace {
+
+// Coalescing window for slider events, so a burst of moves costs one decode
+// rather than one each. Deliberately NOT used to pace shuttle catch-up.
+constexpr int kScrubCoalesceMs = 12;
+
+// Fraction of the remaining distance a shuttle slice covers. Sets how tightly
+// the picture tracks the pointer: the steady-state lag under a constant drag
+// is roughly (frames the pointer moves per slice) / kScrubEase, so halving the
+// lag means doubling this. 0.25 was measured as too loose -- "lagging too far
+// behind" on a quick drag -- and 0.5 tracks closely while still decelerating
+// into the target rather than arriving with a jolt.
+constexpr double kScrubEase = 0.5;
+
+} // namespace
+
 MainWindow::MainWindow() {
     setWindowTitle("Trace");
     setAcceptDrops(true);
@@ -310,7 +326,10 @@ MainWindow::MainWindow() {
     });
 
     scrubTimer_.setSingleShot(true);
-    scrubTimer_.setInterval(12);
+    // Explicit interval on every start() below: catch-up slices re-arm with
+    // start(0), which would otherwise leave the interval at zero for the
+    // coalescing path too.
+    scrubTimer_.setInterval(kScrubCoalesceMs);
     connect(&scrubTimer_, &QTimer::timeout, this, [this]() {
         flushVideoScrub(false);
     });
@@ -956,7 +975,7 @@ void MainWindow::queueVideoScrubFrame(long long frameIndex) {
     // one synchronous decode per event.
     if (scrubTimer_.isActive()) return;
     flushVideoScrub(false);
-    scrubTimer_.start();
+    scrubTimer_.start(kScrubCoalesceMs);
 }
 
 void MainWindow::flushVideoScrub(bool forceExact) {
@@ -964,7 +983,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     // frame is already the newest target, so latest-target-wins is preserved
     // and the drag stays responsive instead of losing the release.
     if (storageBusy_) {
-        if (!scrubTimer_.isActive()) scrubTimer_.start();
+        if (!scrubTimer_.isActive()) scrubTimer_.start(kScrubCoalesceMs);
         return;
     }
     scrubTimer_.stop();
@@ -1029,11 +1048,10 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         // budget-bound while far away, ease-bound as it converges -- so the
         // motion accelerates and decelerates without either being scheduled.
         const long long gap = targetFrame - walkFrom;
-        constexpr double kEase = 0.25;
         const long long desired = std::max<long long>(1,
-            static_cast<long long>(std::ceil(static_cast<double>(gap) * kEase)));
+            static_cast<long long>(std::ceil(static_cast<double>(gap) * kScrubEase)));
 
-        constexpr double kScrubWalkBudgetMs = 10.0;
+        constexpr double kScrubWalkBudgetMs = 8.0;
         QElapsedTimer walkTimer;
         walkTimer.start();
         prepareVideoRequest(mode, 1, true);
@@ -1065,10 +1083,16 @@ void MainWindow::flushVideoScrub(bool forceExact) {
             scrubWalkPerFrameMs_ += 0.35 * (perFrame - scrubWalkPerFrameMs_);
             scrubWalkPerFrameMs_ = std::max(0.05, scrubWalkPerFrameMs_);
         }
-        // Still behind: re-arm and keep walking, including while the pointer is
-        // held still, so the picture eases onto the target and settles there.
-        if (activeScrubFrame_ < targetFrame && !scrubTimer_.isActive()) {
-            scrubTimer_.start();
+        // Still behind: come straight back for the next slice rather than
+        // waiting out the coalescing interval. That interval exists to stop
+        // rapid slider events stacking one decode each; it has no business
+        // throttling catch-up. Leaving it in place capped the shuttle at a
+        // slice per 12ms *plus* the slice's own ~8-10ms of work, so roughly 45
+        // slices a second, and a quick drag outran it and trailed further and
+        // further behind. Zero-interval still goes through the event loop, so
+        // pointer moves and repaints are serviced between slices.
+        if (activeScrubFrame_ < targetFrame) {
+            scrubTimer_.start(0);
         }
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         refreshHud("Scrub");
@@ -1089,7 +1113,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     if (forceExact || !scrubbing_) {
         pendingScrubFrame_ = -1;
     } else if (pendingScrubFrame_ != activeScrubFrame_) {
-        scrubTimer_.start();
+        scrubTimer_.start(kScrubCoalesceMs);
     }
 }
 
