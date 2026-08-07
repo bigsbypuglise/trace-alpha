@@ -174,6 +174,14 @@ private:
     // decodes and read ~4x the true sequential cost (dec 0.07 last vs 5.02
     // avg on the 1080p clip), which would collapse the walk to a jump.
     double scrubWalkPerFrameMs_ = 1.0;
+    // Presentation pacing for the shuttle. Without it a slice that lands a run
+    // of cache hits paints a dozen frames inside 8ms -- far faster than the
+    // display can show them, so most are overwritten before a refresh ever
+    // samples them -- and then stalls on the next miss. The eye sees a couple
+    // of frames, a freeze, a couple more: the "jumpy"/"steppy" report. Frames
+    // are paced to one per refresh interval so each one is actually seen.
+    QElapsedTimer scrubPresentClock_;
+    qint64 scrubLastPresentNs_ = -1;
     bool suppressSliderSignal_ = false;
     bool scrubbing_ = false;
     long long pendingScrubFrame_ = -1;

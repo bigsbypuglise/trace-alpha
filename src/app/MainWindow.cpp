@@ -1,4 +1,6 @@
-#include "app/MainWindow.h"
+﻿#include "app/MainWindow.h"
+
+#include <QScreen>
 
 #include <QAction>
 #include <QDragEnterEvent>
@@ -47,6 +49,28 @@ constexpr int kScrubCoalesceMs = 12;
 // behind" on a quick drag -- and 0.5 tracks closely while still decelerating
 // into the target rather than arriving with a jolt.
 constexpr double kScrubEase = 0.5;
+
+// Fraction of a display refresh interval that must pass between shuttle
+// presentations. 1.0 means at most one frame per refresh -- every painted
+// frame is genuinely shown, and a run of cheap cache hits can no longer arrive
+// as a burst that the panel samples once. Lower values allow bursting again in
+// exchange for closing the pointer gap faster.
+//
+// TRACE_SCRUB_PACE overrides it: 0 disables pacing entirely (pre-Aug-2026
+// behaviour, paints as fast as decode allows), 1.0 is the default, and values
+// in between trade smoothness against lag.
+double scrubPaceFraction() {
+    static const double frac = [] {
+        const QByteArray raw = qgetenv("TRACE_SCRUB_PACE");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const double v = raw.toDouble(&ok);
+            if (ok && v >= 0.0 && v <= 4.0) return v;
+        }
+        return 1.0;
+    }();
+    return frac;
+}
 
 } // namespace
 
@@ -1004,7 +1028,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     }
 
     // Mid-drag frames use Scrub (fast, half-res preview at >=1920px). The
-    // landing frame — slider release or a jump while not dragging — uses Step
+    // landing frame â€” slider release or a jump while not dragging â€” uses Step
     // so the frame being inspected is full-res and accurately converted.
     const bool dragging = !forceExact && scrubbing_;
     const auto mode = dragging
@@ -1029,8 +1053,15 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     // and the picture stays on the pointer instead of falling behind it. Heavy
     // media therefore degrades to "as many frames as fit, always current"
     // rather than to "wrong frame, instantly".
-    long long walkFrom = activeScrubFrame_;
-    activeScrubFrame_ = targetFrame;
+    // activeScrubFrame_ tracks what is actually ON SCREEN, so it is only
+    // advanced where a frame has genuinely been presented. It used to be
+    // assigned the target up front, which meant a walk that exited without
+    // completing an iteration -- a decode failure, a re-entrancy bail, a pacing
+    // break on the first step -- left it claiming to have arrived. The next
+    // slice then computed its gap from a position the viewer had never shown,
+    // so the walk silently skipped everything in between and `lag` read 0 while
+    // frames were being missed.
+    const long long walkFrom = activeScrubFrame_;
 
     QString error;
     if (dragging && walkFrom >= 0 && targetFrame != walkFrom) {
@@ -1060,22 +1091,46 @@ void MainWindow::flushVideoScrub(bool forceExact) {
             static_cast<long long>(std::ceil(static_cast<double>(gap) * kScrubEase)));
 
         constexpr double kScrubWalkBudgetMs = 8.0;
+        // One frame per display refresh, no faster. Painting quicker than the
+        // panel refreshes does not show more frames -- it overwrites them
+        // before a refresh samples them -- and it is what made a run of cache
+        // hits arrive as a burst followed by a freeze on the next miss.
+        const QScreen* scr = screen();
+        const double refreshHz = (scr && scr->refreshRate() > 1.0)
+            ? scr->refreshRate() : 60.0;
+        const double minPresentIntervalMs = (1000.0 / refreshHz) * scrubPaceFraction();
+        if (!scrubPresentClock_.isValid()) scrubPresentClock_.start();
+
         QElapsedTimer walkTimer;
         walkTimer.start();
         prepareVideoRequest(mode, dir, true);
         long long walked = 0;
+        int reArmMs = 0;
         const long long steps = std::min(gap, desired);
         for (long long i = 1; i <= steps; ++i) {
             const long long f = walkFrom + dir * i;
             // A remote read pumped the event loop and something re-entered;
             // drop out and let the re-armed timer resume from here.
             if (storageBusy_) break;
+            // Too soon for the display to have shown the previous frame: end
+            // the slice and come back exactly when it is due, rather than
+            // spinning or painting into the void.
+            if (scrubLastPresentNs_ >= 0) {
+                const double sinceMs =
+                    static_cast<double>(scrubPresentClock_.nsecsElapsed() - scrubLastPresentNs_)
+                    / 1'000'000.0;
+                if (sinceMs < minPresentIntervalMs) {
+                    reArmMs = static_cast<int>(std::ceil(minPresentIntervalMs - sinceMs));
+                    break;
+                }
+            }
             playback_.setCurrentFrame(f);
             if (!loadCurrentFrame(error, mode)) break;
             // repaint(), not update(): update() coalesces, so a loop of them
             // would decode every frame and display only the last -- which is
             // the behaviour this exists to remove.
             viewer_->repaint();
+            scrubLastPresentNs_ = scrubPresentClock_.nsecsElapsed();
             activeScrubFrame_ = f;
             ++walked;
             if (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0
@@ -1101,7 +1156,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         // further behind. Zero-interval still goes through the event loop, so
         // pointer moves and repaints are serviced between slices.
         if (activeScrubFrame_ != targetFrame) {
-            scrubTimer_.start(0);
+            scrubTimer_.start(reArmMs);
         }
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         refreshHud("Scrub");
@@ -1110,8 +1165,10 @@ void MainWindow::flushVideoScrub(bool forceExact) {
 
     playback_.setCurrentFrame(targetFrame);
     prepareVideoRequest(mode, 1, true);
-    if (!loadCurrentFrame(error, mode)) {
-        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+    if (loadCurrentFrame(error, mode)) {
+        activeScrubFrame_ = targetFrame;
+    } else if (!error.isEmpty()) {
+        statusBar()->showMessage(error, 3000);
     }
 
     // Refresh here too: the scrub branch of valueChanged returns without
@@ -1602,3 +1659,4 @@ void MainWindow::prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMod
 }
 
 } // namespace trace::app
+

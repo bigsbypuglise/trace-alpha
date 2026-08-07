@@ -359,6 +359,13 @@ struct VideoDecoderFFmpeg::Impl {
     struct CachedFrame {
         long long frame = -1;
         QImage image;
+        // Half-res entries are fine to *shuttle* through during a drag -- the
+        // drag is already showing half-res previews at this resolution -- but
+        // must never serve a Step or an exact landing, where the frame is being
+        // inspected. Tagging them is what lets 4K backward drags hit the cache
+        // at all: previously no Scrub preview was stored, so every backward
+        // step at 4K missed and paid a seek plus a GOP walk.
+        bool halfRes = false;
     };
     // Eviction is FIFO. LRU (promote-on-hit) was prototyped and measured: on
     // 4K H.264, where the cache actually fills and evicts, it produced an
@@ -808,15 +815,21 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.cacheBytes = bytes;
     };
 
-    auto pushReverseCache = [&](long long cachedFrame, const QImage& image) {
+    auto pushReverseCache = [&](long long cachedFrame, const QImage& image,
+                                bool halfRes = false) {
         if (cachedFrame < 0 || image.isNull()) return;
 
         if (!impl_->reverseCache.empty() && impl_->reverseCache.back().frame == cachedFrame) {
-            impl_->reverseCache.back().image = image;
+            // A full-res entry always wins: it can serve every caller, a
+            // half-res one cannot. Never downgrade an existing entry.
+            if (!halfRes || impl_->reverseCache.back().halfRes) {
+                impl_->reverseCache.back().image = image;
+                impl_->reverseCache.back().halfRes = halfRes;
+            }
             return;
         }
 
-        impl_->reverseCache.push_back({cachedFrame, image});
+        impl_->reverseCache.push_back({cachedFrame, image, halfRes});
         ++perfStats_.cacheInserts;
         while (static_cast<int>(impl_->reverseCache.size()) > impl_->reverseCacheCapacity) {
             impl_->reverseCache.pop_front();
@@ -825,10 +838,14 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         reportCacheState();
     };
 
+    // Only a Scrub preview may be served a half-res entry; everything else is
+    // inspecting the frame and must get full resolution.
+    const bool acceptHalfRes = (mode == RequestMode::Scrub);
     auto tryReverseCache = [&](long long wantedFrame) -> bool {
         ++perfStats_.reverseCacheLookups;
         for (auto it = impl_->reverseCache.begin(); it != impl_->reverseCache.end(); ++it) {
             if (it->frame != wantedFrame) continue;
+            if (it->halfRes && !acceptHalfRes) return false;
             ++perfStats_.reverseCacheHits;
             outImage = it->image;
             currentFrame_ = wantedFrame;
@@ -1174,7 +1191,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 // half-res condition exactly so the two cannot drift apart.
                 const bool presentedHalfRes =
                     (mode == RequestMode::Scrub) && (metadata_.width > 1920);
-                if (!presentedHalfRes) pushReverseCache(decodedFrame, outImage);
+                pushReverseCache(decodedFrame, outImage, presentedHalfRes);
                 return true;
             }
 
