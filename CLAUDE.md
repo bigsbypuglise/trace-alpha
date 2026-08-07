@@ -189,6 +189,56 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    Reverse *playback* (as opposed to dragging) beyond the cache is the same underlying problem — H.264 needs GOP-aware backward buffering.
 7. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`). **EXR does not open today**: OpenImageIO is not installed in vcpkg and not built in CI, so `TRACE_WITH_OIIO` is undefined in both.
 
+## Where scrub stands (end of 2026-08-07 session)
+
+Forward dragging is signed off ("feeling really nice"). Everything below is
+open, and the owner's summary was that fast scrub still feels off and there is
+"a lot to improve upon" -- treat the current state as a good foundation, not as
+done.
+
+**The product spec, in the owner's words:** click jumps to a point; dragging
+displays every frame consecutively and never jumps; a fast drag should feel
+like ~4x playback, a medium drag ~2x, easing to a stop; the slider should
+always feel smooth. Frames are never skipped during a drag at any speed --
+overrun shows up as lag and is walked off.
+
+**Known open items, in the order they are likely worth attacking:**
+
+1. **Cache eviction should be by bytes, not entry count.** This is the single
+   highest-value fix identified. Capacity is `192MB / (w*h*4)` using the
+   *full-res* frame size, giving 6 entries at 4K -- but a half-res Scrub entry
+   is a quarter of that footprint, so roughly 24 would fit the same budget. Six
+   cannot serve a backward walk through a 30-frame GOP however good the hit
+   logic is. This is what makes 4K H.264 backward drag steppy (23.5ms/frame,
+   ~56% hits).
+2. **4K ProRes scrub is decode-bound and cannot be made much faster.** ~11.2ms
+   per frame (decode 4.1 + half-res sws 6.7 + paint 0.4), so ~90 frames/sec,
+   about 3.7x playback. The owner asked for 4x faster; that is not reachable
+   without skipping frames. FFmpeg's ProRes decoder has no `lowres` path.
+   Quarter-res previews would buy ~4ms of the sws term and nothing else. If
+   speed matters more than every-frame on heavy ProRes, that is a product
+   decision to take explicitly rather than a bug to fix.
+3. **Backward drag smoothness beyond the cache fix.** Even with more capacity,
+   a miss costs a seek plus a GOP walk (~22ms) against ~0.5ms for a hit, so the
+   cost is inherently lumpy. Pacing was the obvious answer and was rejected on
+   feel (see the shuttle entry in Decisions). GOP-aware backward buffering --
+   decode a GOP forward into the cache and serve the drag from it in reverse --
+   is the real fix.
+4. **The HUD's `target`/`shown` go stale on cache hits**, because the cache-hit
+   path returns before `previewTargetFrame`/`previewDisplayedFrame` are set. Not
+   harmful, but it misleads while debugging a drag -- fix it before the next
+   scrub investigation rather than during one.
+
+**Tuning knobs added this session**, all defaulting to shipped behaviour:
+`TRACE_SCRUB_PACE`, `TRACE_AUDIO_BUFFER_MS`, `TRACE_AUDIO_SLEW`,
+`TRACE_AUDIO_FIXED_LATENCY`, `TRACE_NO_AUDIO`.
+
+**Measurement note:** the HUD is unreadable in a normal screenshot on the
+5120x1440 panel -- it downsamples too far. Capture the Trace window at native
+resolution instead (GetWindowRect + Graphics.CopyFromScreen). Synthetic drags
+that teleport the pointer and pause overstate how well the shuttle keeps up;
+use a continuous sweep with a spin-wait for realistic pacing.
+
 ## Working conventions
 
 - **The `V:\` LucidLink mount on the test box is live client production storage and is STRICTLY READ-ONLY.** Never create, copy, move, rename, delete or modify anything on it, and never stage test media there. Read only files Anj nominates; do not browse project folders. Storage-detection code must identify the volume by querying it (`GetDriveType`, capacity/free), never by writing a probe file.
