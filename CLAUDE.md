@@ -109,13 +109,39 @@ Trace reads media through its own `AVIOContext` (`MediaIoSource`), sized to FFmp
 - Storage classification is cached per volume (`7.9 → 0.0 ms` on the second open in a session). LucidLink is **not** `DRIVE_REMOTE` — it presents as `DRIVE_FIXED`/NTFS and is recognised by advertising petabyte capacity with `free == total`. Never keyed on drive letter or volume label, and never by writing a probe file.
 - `TRACE_OPEN_LOG=1` writes one line per open (fps to 6dp, exact frame count, time base, colour metadata) so probe experiments are validated on exact values.
 
+### Responsive I/O (shipped, `8b47e08`)
+
+Remote reads no longer run on the UI thread. A dedicated worker performs the blocking read while the calling thread pumps the event loop; **longest UI-thread block went from ~1067 ms to ~5.9 ms**. Three things matter if you touch this:
+
+- **Local keeps the direct synchronous read.** No worker, no handoff. Measured identical (open times within noise, 4K ProRes 94.4% of real time, `buffering 0 / waiting 0ms` proving the async path is never entered locally). Don't "unify" the two paths.
+- **Cancellation never abandons a read.** The destination buffer belongs to FFmpeg and is being written; returning early would hand the decoder a buffer still in flight. A superseded read runs to completion and is *reported* stale, and the decode spanning it is discarded. Latest-target-wins survives.
+- **`storageBusy_` re-entrancy guard is load-bearing.** Pumping events inside a decoder call lets a timer tick or key press re-enter FFmpeg mid-read. Every path that drives the decoder checks it and defers; scrub re-arms rather than dropping. This is the first place to look if odd frame-order or crash reports appear.
+
+### Read-ahead — TRIED TWICE, NOT SHIPPED, both measured worse
+
+Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from LucidLink, using an injected per-read delay to reproduce the cold profile repeatably (a real cold cache is a one-shot — once read, a file is warm for good; the injector reproduced cold within 3%: 11.63 fps vs a real 11.35).
+
+| | fps | read lat | throughput | seeks | seq | buffer |
+|---|---|---|---|---|---|---|
+| control (off) | **11.63** | 54.9 ms | 762 Mbps | 2 | 99.2% | — |
+| v1, 8 MB | 9.60 | 72.8 ms | 574 Mbps | 2 | 99.2% | hit 0 / miss 128 |
+| v2, 16 MB | **7.02** | **19.9 ms** | **1218 Mbps** | **25** | **91.1%** | hit 218 / miss 5 |
+
+- **v1 failed outright**: the decoder also issued its own reads, rebasing the buffer while fills were in flight, so every fill was discarded (0 hits) and speculative fills queued ahead of the read the decoder was blocked on.
+- **v2 fixed the mechanism** (worker as sole reader) — hit rate 218/223, latency down 2.8×, throughput up 60% — **and playback still got worse**. Cause: serving `min(requested, available)` fragmented reads (123 @ 5105 KB → 218 @ 2967 KB), dropped sequentiality to 91.1%, and drove demuxer seeks 2 → 25, each discarding the buffer.
+- **Next experiment before anything else**: only satisfy FFmpeg's read callback when the *complete* requested byte count is buffered (except at EOF), so read sizes stay ~5 MB and the demuxer never repositions. Benchmark before committing.
+- **Buffering cannot beat bandwidth.** Cold delivers ~600–800 Mbps. A 4.5 Gbps 9K file cannot be made real time by any buffer; even a perfect read-ahead on the 1013 Mbps file tops out near 19 fps. Target case is realistically **~100–600 Mbps** studio review media (4K ProRes 422/HQ).
+- The benchmark needs an injected-latency knob to be repeatable. Rebuild it if resuming.
+
 ## Roadmap (rough priority)
 
 1. ~~4K ProRes 4444 playback is at the limit of the sync design~~ **Resolved 2026-08-07**: the ~38ms figure was dominated by a bug, not by codec cost. `QImage::bits()` was detaching — a full ~37.7MB deep copy of the previous frame, every frame, of data `sws_scale` then overwrote — because the viewer and reverse cache still referenced the buffer. A recycling conversion-buffer pool removed it. Playback is now **~23.7fps (~99% of real time), late 0**, with per-frame work at ~33ms against a 41.67ms budget, i.e. **~8ms of idle headroom**. The remaining gap to 24.000 is *not* CPU cost: video presents one frame per timer tick, `round(1000/24) = 42ms`, so the hard ceiling is **1000/42 = 23.81fps** and we measure 99.4–99.8% of it. Exact 24.000 needs a presentation clock with sub-ms resolution (vsync / waitable swapchain) — fold it into the GPU renderer pass. Three scheduler alternatives were measured and reverted; see the comparison table at the timer setup in `MainWindow.cpp` and don't re-try them.
 2. **H.264 scrub is cache-bound, not decode-bound** (2026-08-07). Measured on the 1080p validation clip (GOP 30, keyframes at 0/30/60/90, `walk = frame mod 30`): seek itself costs only **1–3ms**, so the frame-threading hypothesis is disproven. Exact scrub cost scales with the GOP walk — 0f ≈ 34ms, 10f ≈ 41ms, 20f ≈ 50–60ms, 29f ≈ 61ms — and a cache hit serves the same frame in **0.33–0.55ms**. Remaining levers, in order: (a) **make first-access cost visible** — the HUD shows only the release half of a click, so the press's walk is invisible and any deeper-fill policy would look free; (b) deeper walk-fill (`cacheWindow` is still only 1–2 frames, so most of a 29-frame walk is decoded and discarded) — but each extra fill is a full-res conversion (~11ms at 1080p) paid on the access the user feels; (c) 4K capacity (6 slots fills and evicts immediately, vs 24 at 1080p). Note **normal playback already warms the cache**: after a playback pass, the same scrub pattern runs at **84.6% hit rate with 2 seeks** versus **53.8% and 6 seeks** cold — so the watch-then-scrub-back workflow is already fast, which narrows the case for (b).
-3. **Audio, first pass — needs validation on Windows** (2026-08-07). Written but never compiled or heard: no Qt/FFmpeg toolchain on the dev machine, so the first CI run is the first real test. Watch the HUD `audio` line, `sync` in particular. Open questions the validation pass should answer: (a) is the device-latency correction in `AudioOutput::clockSeconds()` (backing out `bufferSize - bytesFree`) enough, or is there a constant picture-ahead offset needing a tuned trim; (b) do 4K files underrun, and if so is the 0.5s ring the right size; (c) does the bounded 3-frame catch-up ever visibly stutter. After that: J-K-L off-speed audio, then scrub audio.
-4. Reliable reverse playback beyond the frame cache (ProRes is cheap — every frame is a keyframe; H.264 needs GOP-aware backward buffering)
-5. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`). **EXR does not open today**: OpenImageIO is not installed in vcpkg and not built in CI, so `TRACE_WITH_OIIO` is undefined in both.
+3. **GPU-backed presentation / D3D11** — the likely next major performance initiative. It is also where the exact-cadence problem belongs: video presents one frame per timer tick, so the rate ceiling is `1000/round(1000/fps)`, and closing it needs a real presentation clock (vsync / waitable swapchain), not another scheduler experiment.
+4. **LucidLink read-ahead — optional follow-up, not started work.** See the read-ahead section above: two designs measured worse. First try full-request buffered serving instead of partial reads, then benchmark. Do not treat as in-progress.
+5. **Audio, first pass — needs validation on Windows** (2026-08-07). Written but never compiled or heard: no Qt/FFmpeg toolchain on the dev machine, so the first CI run is the first real test. Watch the HUD `audio` line, `sync` in particular. Open questions the validation pass should answer: (a) is the device-latency correction in `AudioOutput::clockSeconds()` (backing out `bufferSize - bytesFree`) enough, or is there a constant picture-ahead offset needing a tuned trim; (b) do 4K files underrun, and if so is the 0.5s ring the right size; (c) does the bounded 3-frame catch-up ever visibly stutter. After that: J-K-L off-speed audio, then scrub audio.
+6. Reliable reverse playback beyond the frame cache (ProRes is cheap — every frame is a keyframe; H.264 needs GOP-aware backward buffering)
+7. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`). **EXR does not open today**: OpenImageIO is not installed in vcpkg and not built in CI, so `TRACE_WITH_OIIO` is undefined in both.
 
 ## Working conventions
 
