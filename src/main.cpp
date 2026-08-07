@@ -1,6 +1,7 @@
 #include <QApplication>
 #include <QStyleFactory>
 #include <QIcon>
+#include <QStringList>
 #include "app/MainWindow.h"
 
 int main(int argc, char* argv[]) {
@@ -28,5 +29,14 @@ int main(int argc, char* argv[]) {
     win.setWindowIcon(appIcon);
     win.resize(1280, 760);
     win.show();
+
+    // Optional media path: Trace.exe "D:\Media\Clip.mov". Applied after show()
+    // so the window exists to display it. Anything unusable is ignored, so a
+    // bad argument still leaves a normally running app.
+    const QStringList args = app.arguments();
+    if (args.size() > 1) {
+        win.openMediaPath(args.at(1));
+    }
+
     return app.exec();
 }

@@ -38,6 +38,11 @@ class MainWindow final : public QMainWindow {
 public:
     MainWindow();
 
+    // Opens a media path supplied on the command line, exactly as File > Open
+    // would. Invalid or missing paths are ignored so a bad argument never
+    // blocks startup. Exists so playback can be driven from a script.
+    void openMediaPath(const QString& path);
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;

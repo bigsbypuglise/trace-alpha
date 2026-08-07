@@ -732,6 +732,15 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     }
 }
 
+void MainWindow::openMediaPath(const QString& path) {
+    const QFileInfo fi(path);
+    if (path.isEmpty() || !fi.exists() || !fi.isFile()) {
+        statusBar()->showMessage("Ignored command-line path: " + path, 3000);
+        return;
+    }
+    openPath(fi.absoluteFilePath());
+}
+
 void MainWindow::refreshHud(const QString& action) {
     const auto st = playback_.state();
     QString mode = "Empty";
