@@ -275,3 +275,88 @@ not depend on any GPU decision.
   cheaper and higher quality than full-res convert plus Qt's bilinear (already noted in
   CLAUDE.md). Worth measuring as a control so Phase 7 cannot claim a win that was really just
   "we stopped using a bad filter."
+
+---
+
+## 10. On "why async comes after GPU conversion"
+
+The brief (Phase 12) argues async scrub should follow GPU conversion, because once CPU BGRA
+conversion is gone "the decoder worker can hand off an `AVFrame` reference ... instead of
+shipping a full RGB buffer. Smaller surface area, easier to get ordering right."
+
+**That argument does not hold, and the ordering here is deliberately the other way.**
+
+- `QImage` is already implicitly shared with an atomic refcount. Handing one across threads is
+  *already* a refcount bump, not a copy. There is no "full RGB buffer" being shipped today.
+- With `VideoFrame` (§4), the cross-thread payload is a `shared_ptr` either way. The GPU path
+  does not make the handoff smaller or safer; the ownership model does, and that is §4's job.
+- The brief's own §14 says the frame-representation question "collides with async scrub" and is
+  "precisely the kind of unanswered question that turns attempt three into another revert."
+  That is an argument that **ownership** must precede async — not that the *renderer* must.
+
+There is one real residue of the argument: with planar upload the worker no longer runs
+swscale, so its per-request cost falls and cancellation granularity improves. That is a
+performance nuance, not a correctness one, and it does not gate the design.
+
+Doing async first also means it is validated against the known-good CPU path, where a working
+A/B harness and a measured baseline already exist — rather than against a renderer that is
+itself new.
+
+## 11. Colorimetry and bit-depth reference
+
+Ported from the archived OpenGL spec, which is otherwise superseded. These values are
+API-independent; only the texture format names change for D3D11.
+
+### Plane formats
+
+| Source format | Codec | Planes | D3D11 texture | Shader scale |
+|---|---|---|---|---|
+| `yuv420p` | H.264 8-bit | Y, U/2, V/2 | `DXGI_FORMAT_R8_UNORM` | 1.0 |
+| `yuv422p10le` | ProRes 422 | Y, U/2 w, V/2 w | `DXGI_FORMAT_R16_UNORM` | 65535/1023 |
+| `yuva444p12le` | ProRes 4444 | Y, U, V (A ignored) | `DXGI_FORMAT_R16_UNORM` | 65535/4095 |
+
+`R16_UNORM` normalizes by 65535, but the sample occupies only the low 10 or 12 bits — hence
+the scale. FFmpeg's `p10le`/`p12le` are LSB-aligned so these factors should be correct, but
+**confirm empirically against a known test pattern rather than inheriting the assumption.**
+A wrong factor shows as a global gamma/level shift, not as obvious corruption.
+
+The shader never samples plane 3, which makes `alphaStrippedFormat()` unnecessary on the GPU
+path — but do not remove it, the CPU path still needs it.
+
+### Matrix selection
+
+Read `AVFrame::colorspace` and `AVFrame::color_range`; the decoder already tracks both and
+exposes them in the HUD `color` line.
+
+- `AVCOL_SPC_BT709` → BT.709
+- `AVCOL_SPC_BT470BG` / `AVCOL_SPC_SMPTE170M` → BT.601
+- `AVCOL_SPC_BT2020_NCL` / `_CL` → BT.2020
+- `AVCOL_SPC_UNSPECIFIED` → infer by height: `>= 720` is BT.709, else BT.601
+- `AVCOL_RANGE_JPEG` → full range; anything else → limited
+
+### Normalization, before the matrix
+
+```
+limited:  y = (Y - 16/255) / (219/255)      c = (C - 128/255) / (224/255)
+full:     y =  Y                            c =  C - 128/255
+```
+
+### Matrices (`u` = Cb, `v` = Cr, both centred at 0)
+
+```
+BT.709   R = y + 1.5748*v
+         G = y - 0.1873*u - 0.4681*v
+         B = y + 1.8556*u
+
+BT.601   R = y + 1.4020*v
+         G = y - 0.344136*u - 0.714136*v
+         B = y + 1.7720*u
+
+BT.2020  R = y + 1.4746*v
+         G = y - 0.16455*u - 0.57135*v
+         B = y + 1.8814*u
+```
+
+Pass the 3x3 and the two normalization terms as **shader constants**, not compiled variants.
+BT.2020 gets the correct matrix but **no tonemap** — HDR/PQ content will still look wrong.
+That is a known gap carried over from the CPU path, not a new regression.
