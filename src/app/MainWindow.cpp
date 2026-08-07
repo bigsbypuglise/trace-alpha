@@ -66,9 +66,17 @@ MainWindow::MainWindow() {
         const auto playbackState = playback_.state();
         if (playbackState.mode != PlaybackMode::PlayingForward && playbackState.mode != PlaybackMode::PlayingReverse) {
             playTimer_.stop();
+            stopAudio();
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
             return;
+        }
+
+        // One guard covering every way playback can stop being 1x forward:
+        // J-K-L shuttle, reverse, a speed change mid-run. All of them go
+        // through playback state, and the timer is still ticking here.
+        if (audioDriving_ && !audioShouldDrive()) {
+            stopAudio();
         }
 
         const int direction = playbackState.mode == PlaybackMode::PlayingReverse ? -1 : 1;
@@ -138,7 +146,43 @@ MainWindow::MainWindow() {
         }
 
         const long long beforeFrame = playbackState.currentFrame;
-        const long long unclampedTarget = beforeFrame + static_cast<long long>(direction) * steps;
+        long long unclampedTarget = beforeFrame + static_cast<long long>(direction) * steps;
+
+        // Audio is the master clock while it plays. Taking the target frame
+        // from the device clock rather than from a wall-clock accumulator is
+        // what keeps picture locked to sound: the sound card's rate is the one
+        // rate in the system that cannot be negotiated with, and it is also
+        // what lifts the 23.81fps ceiling the 42ms tick imposed.
+        if (audioDriving_ && audio_.isPlaying() && !audio_.ended()) {
+            const double audioSeconds = audio_.clockSeconds();
+            const double audioFramePos = audioSeconds * fps;
+            const long long audioFrame = static_cast<long long>(std::llround(audioFramePos));
+
+            lastAvSyncMs_ = (static_cast<double>(beforeFrame) - audioFramePos) * (1000.0 / fps);
+            maxAvSyncMs_ = std::max(maxAvSyncMs_, std::abs(lastAvSyncMs_));
+
+            const long long delta = audioFrame - beforeFrame;
+            if (delta <= 0) {
+                // Sound has not reached the next frame yet. Hold the current
+                // frame and take no decode step: requesting the same index in
+                // Playback mode would advance the decoder, which is exactly the
+                // frame-order bounce the linear-decode invariant exists to
+                // prevent.
+                ++audioRepeatedFrames_;
+                refreshHud("Play");
+                return;
+            }
+
+            // Bounded catch-up. Small forward jumps decode forward (see the
+            // playback walk allowance in VideoDecoderFFmpeg); a larger jump
+            // would force a seek and cost far more time than the drift it was
+            // correcting, so cap it and let the remainder be caught next tick.
+            constexpr long long kMaxCatchUpFrames = 3;
+            const long long advance = std::min(delta, kMaxCatchUpFrames);
+            if (advance > 1) audioSkippedFrames_ += advance - 1;
+            unclampedTarget = beforeFrame + advance;
+        }
+
         const long long minFrame = 0;
         const long long maxFrame = playbackState.maxFrame >= 0 ? playbackState.maxFrame : beforeFrame;
         const long long targetFrame = std::clamp(unclampedTarget, minFrame, maxFrame);
@@ -149,6 +193,7 @@ MainWindow::MainWindow() {
         if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Playback)) {
             playback_.setCurrentFrame(beforeFrame);
             playTimer_.stop();
+            stopAudio();
             playback_.pause();
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
@@ -173,6 +218,7 @@ MainWindow::MainWindow() {
 
         if (targetFrame == beforeFrame || (direction > 0 && targetFrame >= maxFrame) || (direction < 0 && targetFrame <= minFrame)) {
             playTimer_.stop();
+            stopAudio();
             playback_.pause();
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
@@ -244,6 +290,7 @@ void MainWindow::setupTransportControls() {
         playback_.stepBackward();
         playback_.pause();
         playTimer_.stop();
+        stopAudio();
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
 
@@ -270,6 +317,7 @@ void MainWindow::setupTransportControls() {
         playback_.stepForward();
         playback_.pause();
         playTimer_.stop();
+        stopAudio();
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
 
@@ -311,6 +359,7 @@ void MainWindow::setupTransportControls() {
         scrubbing_ = true;
         playback_.pause();
         playTimer_.stop();
+        stopAudio();
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
     });
@@ -341,6 +390,7 @@ void MainWindow::setupTransportControls() {
         if (suppressSliderSignal_) return;
         playback_.pause();
         playTimer_.stop();
+        stopAudio();
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
 
@@ -402,6 +452,8 @@ void MainWindow::openFileDialog() {
 
 void MainWindow::openPath(const QString& path) {
     playTimer_.stop();
+    stopAudio();
+    audio_.close();
     scrubTimer_.stop();
     scrubbing_ = false;
     pendingScrubFrame_ = -1;
@@ -424,6 +476,12 @@ void MainWindow::openPath(const QString& path) {
     if (ext == "mp4" || ext == "mov") {
         QString err;
         if (videoDecoder_.open(path, err)) {
+            // Audio is opened alongside but is never required: a picture-only
+            // render must still open exactly as it did before.
+            QString audioErr;
+            if (!audio_.open(path, audioErr) && !audioErr.isEmpty()) {
+                statusBar()->showMessage(audioErr, 3000);
+            }
             item.kind = MediaKind::VideoFile;
             item.frameCount = videoDecoder_.metadata().frameCount;
             frameSource_ = std::make_unique<trace::core::VideoFrameSource>(&videoDecoder_);
@@ -642,6 +700,7 @@ void MainWindow::togglePlayPause() {
 
     if (playTimer_.isActive()) {
         playTimer_.stop();
+        stopAudio();
         playback_.pause();
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
@@ -649,6 +708,7 @@ void MainWindow::togglePlayPause() {
         playback_.togglePlayPause();
         const int direction = playback_.state().mode == PlaybackMode::PlayingReverse ? -1 : 1;
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
+        startAudioForPlayback();
         playbackClock_.start();
         playbackAccumulatorMs_ = 0.0;
         // Presented-rate window starts with the play action, so pausing and
@@ -670,9 +730,41 @@ void MainWindow::togglePlayPause() {
         lastTickJitterMs_ = avgTickJitterMs_ = maxTickJitterMs_ = 0.0;
         lastPresentLatencyMs_ = avgPresentLatencyMs_ = maxPresentLatencyMs_ = 0.0;
         lastDriftMs_ = 0.0;
+        lastAvSyncMs_ = maxAvSyncMs_ = 0.0;
+        audioRepeatedFrames_ = audioSkippedFrames_ = 0;
         playTimer_.start();
     }
     syncTransportBar();
+}
+
+// Sound only at 1x forward. Off-speed J-K-L, reverse, scrubbing and stepping
+// are deliberately silent in this build: resampled or reversed audio is a
+// separate piece of work, and half-working sound is worse than none in a
+// review tool.
+bool MainWindow::audioShouldDrive() const {
+    if (!audio_.hasAudio()) return false;
+    if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::VideoFile) return false;
+    const auto st = playback_.state();
+    return st.mode == PlaybackMode::PlayingForward && std::abs(st.speed) <= 1.0001;
+}
+
+void MainWindow::startAudioForPlayback() {
+    if (!audioShouldDrive() || !frameSource_) {
+        stopAudio();
+        return;
+    }
+    // Already running and locked: restarting would seek the device for nothing.
+    if (audioDriving_ && audio_.isPlaying()) return;
+
+    const double fps = std::max(1.0, frameSource_->fps());
+    const double startSeconds = static_cast<double>(playback_.state().currentFrame) / fps;
+    audio_.start(startSeconds);
+    audioDriving_ = audio_.isPlaying();
+}
+
+void MainWindow::stopAudio() {
+    audio_.stop();
+    audioDriving_ = false;
 }
 
 bool MainWindow::isVideoScrubActive() const {
@@ -908,6 +1000,26 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(spanS, 'f', 2))
                 .arg(QString::number(spanFps, 'f', 2));
 
+            // Audio line. `sync` is the number that decides whether audio-master
+            // is working: picture position minus audio clock, in ms. Under
+            // about +/-20ms nobody can see it; a number that grows without
+            // bound means the clock is not actually driving.
+            const auto audioStats = audio_.stats();
+            const QString l9 = !audioStats.available
+                ? QStringLiteral("audio none")
+                : QString("audio %1 %2Hz %3ch%4 | %5 | sync %6ms (max %7) | buf %8ms | under %9 | rep %10 skip %11")
+                    .arg(audioStats.codecName)
+                    .arg(audioStats.sampleRate)
+                    .arg(audioStats.channels)
+                    .arg(audioStats.muted ? " MUTED" : "")
+                    .arg(audioDriving_ ? "MASTER" : "idle")
+                    .arg(QString::number(lastAvSyncMs_, 'f', 1))
+                    .arg(QString::number(maxAvSyncMs_, 'f', 1))
+                    .arg(QString::number(audioStats.bufferedMs, 'f', 0))
+                    .arg(audioStats.underruns)
+                    .arg(audioRepeatedFrames_)
+                    .arg(audioSkippedFrames_);
+
             const QString l8 = QString("cache FIFO | %1/%2 (%3 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
                 .arg(perf.cacheOccupancy)
                 .arg(perf.cacheCapacity)
@@ -927,7 +1039,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.lastWalkFrames)
                 .arg(perf.dstPixelFormat);
 
-            line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7 + "\n" + l8;
+            line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6 + "\n" + l7 + "\n" + l8 + "\n" + l9;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")
@@ -965,12 +1077,17 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             togglePlayPause();
             refreshHud("Space");
             return;
+        case Qt::Key_M:
+            audio_.setMuted(!audio_.isMuted());
+            refreshHud(audio_.isMuted() ? "Mute" : "Unmute");
+            return;
         case Qt::Key_Left:
             playback_.stepBackward();
             needsReload = true;
             prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
             if (playTimer_.isActive()) {
                 playTimer_.stop();
+                stopAudio();
                 playbackClock_.invalidate();
                 playbackAccumulatorMs_ = 0.0;
             }
@@ -981,6 +1098,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, false);
             if (playTimer_.isActive()) {
                 playTimer_.stop();
+                stopAudio();
                 playbackClock_.invalidate();
                 playbackAccumulatorMs_ = 0.0;
             }
@@ -988,6 +1106,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_J:
             if (frameSource_ && frameSource_->canPlay()) {
                 playback_.jogReverse();
+                stopAudio();  // reverse is silent; don't wait a tick for it
                 prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, -1, true);
                 playbackClock_.start();
                 playbackAccumulatorMs_ = 0.0;
@@ -999,6 +1118,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             playback_.pause();
             if (playTimer_.isActive()) {
                 playTimer_.stop();
+                stopAudio();
                 playbackClock_.invalidate();
                 playbackAccumulatorMs_ = 0.0;
             }
@@ -1010,6 +1130,9 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
                 prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, 1, false);
                 playbackClock_.start();
                 playbackAccumulatorMs_ = 0.0;
+                // L at 1x is normal forward play and gets sound; the shuttle
+                // speeds above it do not, and this silences them on the way up.
+                startAudioForPlayback();
                 if (!playTimer_.isActive()) playTimer_.start();
             }
             refreshHud("L");

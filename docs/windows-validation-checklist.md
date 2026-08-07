@@ -94,6 +94,52 @@ how landing feels at 0, 4, and 12 and note which you prefer.
 - Toggle readout modes (Frame / Seconds / Timecode)
 - Validate at frame 0, 1, fps, and 10*fps
 
+### 11) Picture quality vs a reference player — added Aug 2026
+Compare against QuickTime/VLC **on the same machine and the same display**.
+Cross-machine comparisons (Mac QuickTime vs Windows Trace) also differ because
+macOS colour-manages to the display profile and Trace does not — that gap is
+expected and is not what this test is for.
+
+- Open a clip with fine detail or type in it, window NOT at native resolution
+- Expect: diagonal edges smooth, no stair-stepping. The HUD `display` field
+  should read `filtered`
+- Resize the window until `display` reads `1:1` — image should look sharpest
+  here, with no resampling at all
+- A/B the old behaviour from a terminal and confirm the jaggies come back:
+```
+set TRACE_NEAREST_SCALE=1
+Trace.exe
+```
+- Check the HUD `color` field against the file: HD/UHD clips should read
+  `bt709`, and `limited` for almost everything out of an NLE. A `*` after the
+  matrix means the file did not tag it and Trace inferred it from frame size
+- Expect: skin tones and saturated colour now match the reference player far
+  more closely than before. Large remaining differences are worth reporting
+  with the `color` line included
+
+### 12) Audio playback and sync — added Aug 2026
+Needs a clip with sound, ideally with a visual sync reference (clapper, or
+burn-in counter plus a beep).
+
+- Open a clip with audio, press Space. Expect sound within ~100ms of picture
+  starting
+- HUD `audio` line should read `MASTER` while playing
+- Watch `sync`: this is picture minus audio clock in ms. Expect it to sit
+  inside roughly ±20ms and to stay flat. A number that climbs steadily means
+  the clock is not driving — report it with the whole audio line
+- `under` (device underruns) should stay 0 on 1080p. Some on 4K is the
+  expected symptom of decode not keeping up; note the number
+- `rep` / `skip` are frames held or skipped to hold sync. A handful over a
+  long play is normal; hundreds is not
+- Play 2–3 minutes continuously and confirm sync at the end still looks right —
+  drift accumulates, so the end of a long clip is where it shows
+- Press `M` to mute/unmute mid-play; picture must not stutter
+- Pause and resume repeatedly: audio should restart in sync each time
+- Press `L` (1x) — sound plays. Press `L` again (2x) — sound stops. Press `J`
+  (reverse) — sound stops. Scrub and step — silent. All deliberate
+- Open a clip with **no** audio track: HUD reads `audio none`, playback
+  behaves exactly as it did before this change
+
 ---
 
 ## Pass/fail criteria

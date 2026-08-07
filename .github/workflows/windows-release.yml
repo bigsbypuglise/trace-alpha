@@ -36,11 +36,14 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install Qt 6 (Widgets + imageformats)
+      # qtmultimedia supplies QAudioSink for audio output. Without it CMake
+      # builds a silent Trace rather than failing, so the verify step below
+      # asserts the DLL actually shipped.
+      - name: Install Qt 6 (Widgets + imageformats + multimedia)
         uses: jurplel/install-qt-action@v4
         with:
           version: "6.7.2"
-          modules: "qtimageformats"
+          modules: "qtimageformats qtmultimedia"
           cache: true
 
       # FFmpeg is compiled from source by vcpkg and dominates build time.
@@ -117,6 +120,16 @@ jobs:
           }
           Write-Host "FFmpeg detected by CMake."
 
+          # Audio degrades silently to a picture-only build, so assert both
+          # halves of it were found rather than discovering it on the desktop.
+          if ($cache -notmatch 'FFMPEG_SWRESAMPLE_LIBRARY:FILEPATH=(?!.*NOTFOUND)') {
+            throw "swresample was not found during configure - the build would have no audio."
+          }
+          if ($cache -notmatch 'Qt6Multimedia_DIR:PATH=(?!.*NOTFOUND)') {
+            throw "Qt6 Multimedia was not found during configure - the build would have no audio."
+          }
+          Write-Host "Audio dependencies detected by CMake."
+
       - name: Build Trace target (Release)
         shell: pwsh
         run: |
@@ -167,6 +180,7 @@ jobs:
             "Qt6Core.dll",
             "Qt6Gui.dll",
             "Qt6Widgets.dll",
+            "Qt6Multimedia.dll",
             "platforms\qwindows.dll"
           )
 
@@ -177,7 +191,7 @@ jobs:
 
           # FFmpeg DLL names carry version suffixes (avcodec-62.dll on 8.x),
           # so match by prefix rather than pinning a soname here.
-          foreach ($lib in @("avcodec", "avformat", "avutil", "swscale")) {
+          foreach ($lib in @("avcodec", "avformat", "avutil", "swscale", "swresample")) {
             if (-not (Get-ChildItem $dist -Filter "$lib*.dll" -ErrorAction SilentlyContinue)) {
               $missing += "$lib*.dll"
             }

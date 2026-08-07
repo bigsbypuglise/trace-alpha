@@ -1003,6 +1003,18 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         return true;
     }
 
+    // Audio-clocked playback corrects drift by advancing a frame or two extra,
+    // and a seek for that is strictly the wrong trade: it costs a keyframe
+    // landing plus a GOP walk (up to ~60ms on long-GOP H.264) to avoid decoding
+    // two frames forward. Inside this window, walk. Playback only -- Step and
+    // Scrub keep their existing seek behaviour.
+    constexpr long long kPlaybackForwardWalkLimit = 4;
+    const bool smallPlaybackForwardJump =
+        mode == RequestMode::Playback &&
+        currentFrame_ >= 0 &&
+        frameIndex > currentFrame_ &&
+        (frameIndex - currentFrame_) <= kPlaybackForwardWalkLimit;
+
     const bool needSeek =
         (currentFrame_ < 0) ||
         (frameIndex < currentFrame_) ||
@@ -1012,7 +1024,8 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // the frame is re-decoded (e.g. full-res Step after a half-res
         // scrub preview of the same frame) instead of decoding forward.
         (mode != RequestMode::Playback && frameIndex == currentFrame_) ||
-        (!requestIsSequentialForward && frameIndex > currentFrame_ + 1);
+        (!requestIsSequentialForward && !smallPlaybackForwardJump
+             && frameIndex > currentFrame_ + 1);
 
     if (needSeek) {
         didSeek = true;

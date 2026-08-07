@@ -7,6 +7,9 @@ set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTORCC ON)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets)
+# Audio output only. Optional so the app still builds and plays picture on a
+# toolchain without Qt Multimedia.
+find_package(Qt6 QUIET COMPONENTS Multimedia)
 find_package(OpenImageIO QUIET)
 
 find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h)
@@ -14,10 +17,17 @@ find_library(FFMPEG_AVFORMAT_LIBRARY avformat)
 find_library(FFMPEG_AVCODEC_LIBRARY avcodec)
 find_library(FFMPEG_AVUTIL_LIBRARY avutil)
 find_library(FFMPEG_SWSCALE_LIBRARY swscale)
+find_library(FFMPEG_SWRESAMPLE_LIBRARY swresample)
 
 set(TRACE_FFMPEG_FOUND FALSE)
 if(FFMPEG_INCLUDE_DIR AND FFMPEG_AVFORMAT_LIBRARY AND FFMPEG_AVCODEC_LIBRARY AND FFMPEG_AVUTIL_LIBRARY AND FFMPEG_SWSCALE_LIBRARY)
   set(TRACE_FFMPEG_FOUND TRUE)
+endif()
+
+# Audio needs all three: a decoder, a resampler, and a device to play out of.
+set(TRACE_AUDIO_FOUND FALSE)
+if(TRACE_FFMPEG_FOUND AND FFMPEG_SWRESAMPLE_LIBRARY AND Qt6Multimedia_FOUND)
+  set(TRACE_AUDIO_FOUND TRUE)
 endif()
 
 add_executable(Trace
@@ -46,6 +56,8 @@ add_executable(Trace
   ../src/core/FrameCache.cpp
   ../src/core/VideoDecoderFFmpeg.h
   ../src/core/VideoDecoderFFmpeg.cpp
+  ../src/core/AudioOutput.h
+  ../src/core/AudioOutput.cpp
   ../src/core/FrameSource.h
   ../src/core/VideoFrameSource.h
   ../src/core/VideoFrameSource.cpp
@@ -75,4 +87,15 @@ if(TRACE_FFMPEG_FOUND)
     ${FFMPEG_SWSCALE_LIBRARY}
   )
   target_compile_definitions(Trace PRIVATE TRACE_WITH_FFMPEG=1)
+endif()
+
+if(TRACE_AUDIO_FOUND)
+  target_link_libraries(Trace PRIVATE
+    Qt6::Multimedia
+    ${FFMPEG_SWRESAMPLE_LIBRARY}
+  )
+  target_compile_definitions(Trace PRIVATE TRACE_WITH_AUDIO=1)
+  message(STATUS "Trace: audio output enabled")
+else()
+  message(STATUS "Trace: audio output DISABLED (needs Qt6 Multimedia + swresample)")
 endif()

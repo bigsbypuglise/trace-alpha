@@ -15,6 +15,7 @@
 #include "core/VideoDecoderFFmpeg.h"
 #include "core/FrameSource.h"
 #include "core/VideoFrameSource.h"
+#include "core/AudioOutput.h"
 
 QT_BEGIN_NAMESPACE
 class QKeyEvent;
@@ -65,6 +66,12 @@ private:
     void flushVideoScrub(bool forceExact);
     trace::core::VideoFrameSource* videoFrameSource();
     void prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction = 1, bool clearQueue = false);
+    // Audio drives playback timing when it is running, so these decide whether
+    // this playback run is audio-clocked and stop the device the moment it
+    // stops being 1x forward.
+    bool audioShouldDrive() const;
+    void startAudioForPlayback();
+    void stopAudio();
 
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
@@ -79,6 +86,7 @@ private:
     trace::core::StillImageLoader stillLoader_;
     trace::core::FrameCache frameCache_{1};
     trace::core::VideoDecoderFFmpeg videoDecoder_;
+    trace::core::AudioOutput audio_;
     std::unique_ptr<trace::core::FrameSource> frameSource_;
     QTimer playTimer_;
     QTimer scrubTimer_;
@@ -109,6 +117,15 @@ private:
     double avgPresentLatencyMs_ = 0.0;
     double maxPresentLatencyMs_ = 0.0;
     double lastDriftMs_ = 0.0;
+
+    // A/V sync accounting for the current run: how far the frame just presented
+    // sits from where the audio clock says it should be, in milliseconds.
+    // Positive = picture ahead of sound.
+    bool audioDriving_ = false;
+    double lastAvSyncMs_ = 0.0;
+    double maxAvSyncMs_ = 0.0;
+    long long audioRepeatedFrames_ = 0;  // clock did not advance a whole frame
+    long long audioSkippedFrames_ = 0;   // clock ran past the next frame
 
     // Frame-cycle accounting. The tick handler runs decode+convert+handoff and
     // returns; the viewer's paintEvent runs later, in the event loop, so paint
