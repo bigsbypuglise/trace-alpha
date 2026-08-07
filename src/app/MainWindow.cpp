@@ -1015,55 +1015,64 @@ void MainWindow::flushVideoScrub(bool forceExact) {
 
     QString error;
     if (dragging && walkFrom >= 0 && targetFrame > walkFrom) {
-        constexpr double kScrubWalkBudgetMs = 10.0;
-        const long long maxWalk = std::clamp(
-            static_cast<long long>(kScrubWalkBudgetMs / scrubWalkPerFrameMs_),
-            1LL, 240LL);
+        // A forward drag NEVER jumps. Frames are shown consecutively however
+        // far the pointer has run ahead, and the picture is allowed to trail
+        // it. Snapping to the pointer instead was tried and felt harsh: a fast
+        // drag skipped whole runs of frames, which reads as tearing through
+        // the clip rather than shuttling it.
+        //
+        // How far a slice advances is eased rather than fixed. Covering a
+        // constant fraction of the remaining distance gives an exponential
+        // approach: a long way behind and it moves fast, close and it settles
+        // gently onto the target instead of arriving with a jolt. Combined
+        // with the time budget below the two limits swap over naturally --
+        // budget-bound while far away, ease-bound as it converges -- so the
+        // motion accelerates and decelerates without either being scheduled.
+        const long long gap = targetFrame - walkFrom;
+        constexpr double kEase = 0.25;
+        const long long desired = std::max<long long>(1,
+            static_cast<long long>(std::ceil(static_cast<double>(gap) * kEase)));
 
-        if (targetFrame - walkFrom <= maxWalk) {
-            QElapsedTimer walkTimer;
-            walkTimer.start();
-            prepareVideoRequest(mode, 1, true);
-            long long walked = 0;
-            for (long long f = walkFrom + 1; f <= targetFrame; ++f) {
-                // A remote read pumped the event loop and something re-entered;
-                // drop out and let the re-armed timer resume from here.
-                if (storageBusy_) break;
-                playback_.setCurrentFrame(f);
-                if (!loadCurrentFrame(error, mode)) break;
-                // repaint(), not update(): update() coalesces, so a loop of
-                // them would decode every frame and display only the last --
-                // which is the behaviour this exists to remove.
-                viewer_->repaint();
-                activeScrubFrame_ = f;
-                ++walked;
-                if (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0
-                        >= kScrubWalkBudgetMs) {
-                    break;
-                }
+        constexpr double kScrubWalkBudgetMs = 10.0;
+        QElapsedTimer walkTimer;
+        walkTimer.start();
+        prepareVideoRequest(mode, 1, true);
+        long long walked = 0;
+        const long long walkEnd = std::min(targetFrame, walkFrom + desired);
+        for (long long f = walkFrom + 1; f <= walkEnd; ++f) {
+            // A remote read pumped the event loop and something re-entered;
+            // drop out and let the re-armed timer resume from here.
+            if (storageBusy_) break;
+            playback_.setCurrentFrame(f);
+            if (!loadCurrentFrame(error, mode)) break;
+            // repaint(), not update(): update() coalesces, so a loop of them
+            // would decode every frame and display only the last -- which is
+            // the behaviour this exists to remove.
+            viewer_->repaint();
+            activeScrubFrame_ = f;
+            ++walked;
+            if (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0
+                    >= kScrubWalkBudgetMs) {
+                break;
             }
-            // Self-calibrating: the next slice's walk-or-jump decision is made
-            // from what this one actually cost, decode + convert + paint
-            // included. Seeded optimistically at 1ms so the first drag on a new
-            // file shuttles; one slice is enough to converge on heavy media.
-            if (walked > 0) {
-                const double perFrame =
-                    (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0)
-                    / static_cast<double>(walked);
-                scrubWalkPerFrameMs_ += 0.35 * (perFrame - scrubWalkPerFrameMs_);
-                scrubWalkPerFrameMs_ = std::max(0.05, scrubWalkPerFrameMs_);
-            }
-            // Behind the pointer with budget spent: re-arm so the next slice
-            // continues. If the pointer keeps running the gap eventually
-            // exceeds maxWalk and the branch below jumps instead, which is what
-            // keeps the picture current rather than trailing.
-            if (activeScrubFrame_ < targetFrame && !scrubTimer_.isActive()) {
-                scrubTimer_.start();
-            }
-            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
-            refreshHud("Scrub");
-            return;
         }
+        // Kept as telemetry: it is what the HUD reports the shuttle rate from,
+        // and it is the number to look at first if a drag ever feels slow.
+        if (walked > 0) {
+            const double perFrame =
+                (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0)
+                / static_cast<double>(walked);
+            scrubWalkPerFrameMs_ += 0.35 * (perFrame - scrubWalkPerFrameMs_);
+            scrubWalkPerFrameMs_ = std::max(0.05, scrubWalkPerFrameMs_);
+        }
+        // Still behind: re-arm and keep walking, including while the pointer is
+        // held still, so the picture eases onto the target and settles there.
+        if (activeScrubFrame_ < targetFrame && !scrubTimer_.isActive()) {
+            scrubTimer_.start();
+        }
+        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        refreshHud("Scrub");
+        return;
     }
 
     playback_.setCurrentFrame(targetFrame);
@@ -1390,7 +1399,7 @@ void MainWindow::refreshHud(const QString& action) {
             // assigned -- Scrub wrote the requested index onto whatever
             // keyframe the seek landed on, so this line read `exact | delta 0`
             // while displaying a frame most of a GOP away.
-            const QString l7 = QString("scrub %1 | target %2 | shown %3 | delta %4 | walk %5f | dst %6 | shuttle %7ms/f maxwalk %8")
+            const QString l7 = QString("scrub %1 | target %2 | shown %3 | delta %4 | walk %5f | dst %6 | shuttle %7ms/f lag %8f")
                 .arg(perf.previewApproximate ? "APPROX" : "exact")
                 .arg(perf.previewTargetFrame)
                 .arg(perf.previewDisplayedFrame)
@@ -1399,7 +1408,11 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.lastWalkFrames)
                 .arg(perf.dstPixelFormat)
                 .arg(QString::number(scrubWalkPerFrameMs_, 'f', 2))
-                .arg(std::clamp(static_cast<long long>(10.0 / scrubWalkPerFrameMs_), 1LL, 240LL));
+                // How far the picture is trailing the pointer mid-drag. Non-zero
+                // is expected and is the eased catch-up; it should fall to 0
+                // shortly after the pointer stops.
+                .arg(pendingScrubFrame_ >= 0 && activeScrubFrame_ >= 0
+                         ? pendingScrubFrame_ - activeScrubFrame_ : 0);
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
                  + "\n" + l7 + "\n" + l8 + "\n" + l9

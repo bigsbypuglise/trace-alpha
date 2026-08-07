@@ -931,7 +931,17 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // Cache fills are always full resolution: an entry may later serve a
         // paused step or the exact landing frame, and a half-res entry would
         // show soft. Only the frame actually presented mid-drag is halved.
-        if (mode == RequestMode::Scrub && !isCacheFill && w >= 1920) {
+        //
+        // Threshold is `> 1920`, not `>= 1920`: at exactly 1080p halving is a
+        // pessimisation. A full-res convert is 1920x1080 -> 1920x1080, which
+        // sws does unscaled; halving adds a 1920->960 resample that costs more
+        // than the smaller output saves. Measured on the 1080p validation clip,
+        // same file, same session: full-res playback `sws 0.57/0.72ms` against
+        // half-res scrub `sws 2.50/5.07ms`. The rule was written for 4K, where
+        // conversion really does dominate, and 1080p was being caught by it --
+        // which throttled the drag shuttle to roughly a third of its rate and
+        // showed a soft preview for the privilege.
+        if (mode == RequestMode::Scrub && !isCacheFill && w > 1920) {
             dstW = (w / 2) & ~1;
             dstH = (h / 2) & ~1;
         }
