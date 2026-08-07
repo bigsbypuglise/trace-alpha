@@ -19,7 +19,13 @@ concurrency:
 
 env:
   # Bump this string to force a rebuild of the cached FFmpeg/vcpkg tree.
-  VCPKG_CACHE_VERSION: v1
+  # v2 (Aug 2026): the v1 cache still held FFmpeg 7.x (avcodec-61) while local
+  # dev builds resolve to 8.x, so perf numbers measured locally could not be
+  # compared against the shipping build. Bumping forces a rebuild onto the
+  # current vcpkg ffmpeg port. Note this pins the *cache*, not the version:
+  # vcpkg is cloned unpinned below, so a future cache miss can still drift.
+  # Pin a vcpkg baseline commit if exact reproducibility becomes necessary.
+  VCPKG_CACHE_VERSION: v2
 
 jobs:
   build-windows:
@@ -169,7 +175,8 @@ jobs:
             if (-not (Test-Path (Join-Path $dist $item))) { $missing += $item }
           }
 
-          # FFmpeg DLL names carry version suffixes (avcodec-61.dll etc).
+          # FFmpeg DLL names carry version suffixes (avcodec-62.dll on 8.x),
+          # so match by prefix rather than pinning a soname here.
           foreach ($lib in @("avcodec", "avformat", "avutil", "swscale")) {
             if (-not (Get-ChildItem $dist -Filter "$lib*.dll" -ErrorAction SilentlyContinue)) {
               $missing += "$lib*.dll"
