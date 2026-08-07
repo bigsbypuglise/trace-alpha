@@ -8,6 +8,7 @@
 #include <QLabel>
 #include <QHBoxLayout>
 #include <QFontDatabase>
+#include <QProxyStyle>
 
 namespace trace::ui {
 namespace {
@@ -30,6 +31,28 @@ constexpr double kBgActive = 0.12;
 constexpr double kStrokeActive = 0.22;
 
 constexpr int kBarHeight = 76;
+
+// Qt's default slider bindings are wrong for a video timeline: left-clicking
+// the groove page-steps (SH_Slider_PageSetButtons), so a click far down the
+// track nudged the playhead by pageStep frames instead of going there, and
+// only middle-click jumped to the clicked position. Swapping the two hints
+// hands the work to QSlider's own machinery, which maps the click through
+// QStyle::sliderValueFromPosition and then continues as a drag from that
+// point -- so groove/handle geometry, the stylesheet's handle width and RTL
+// all stay correct without hand-rolled math.
+class AbsoluteSeekSliderStyle final : public QProxyStyle {
+public:
+    using QProxyStyle::QProxyStyle;
+
+    int styleHint(StyleHint hint,
+                  const QStyleOption* option,
+                  const QWidget* widget,
+                  QStyleHintReturn* returnData) const override {
+        if (hint == SH_Slider_AbsoluteSetButtons) return Qt::LeftButton;
+        if (hint == SH_Slider_PageSetButtons) return Qt::NoButton;
+        return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+};
 
 } // namespace
 
@@ -212,6 +235,12 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     slider_->setMinimum(0);
     slider_->setMaximum(0);
     slider_->setValue(0);
+    // Click anywhere on the track to seek there, then drag from that point.
+    // Applied before the stylesheet so QStyleSheetStyle wraps this proxy
+    // rather than replacing it. Parented to the slider so it is not leaked.
+    auto* seekStyle = new AbsoluteSeekSliderStyle;
+    seekStyle->setParent(slider_);
+    slider_->setStyle(seekStyle);
     // Keyboard is reserved for transport (arrow-key stepping, J-K-L). If the
     // slider kept focus after a drag, arrows would move the slider instead of
     // stepping frames.
