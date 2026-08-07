@@ -449,6 +449,20 @@ StorageInfo VideoDecoderFFmpeg::storageInfo() const {
     return {};
 }
 
+void VideoDecoderFFmpeg::setStallPump(MediaIoSource::StallPump pump) {
+#ifdef TRACE_WITH_FFMPEG
+    if (impl_) impl_->io.setStallPump(std::move(pump));
+#else
+    Q_UNUSED(pump);
+#endif
+}
+
+void VideoDecoderFFmpeg::cancelOutstandingIo() {
+#ifdef TRACE_WITH_FFMPEG
+    if (impl_) impl_->io.cancelOutstanding();
+#endif
+}
+
 void VideoDecoderFFmpeg::setHandoffTiming(double handoffMs) {
     perfStats_.lastHandoffMs = handoffMs;
     const double sampleCount = perfStats_.samples > 0 ? static_cast<double>(perfStats_.samples) : 1.0;

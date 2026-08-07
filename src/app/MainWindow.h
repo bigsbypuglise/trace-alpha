@@ -73,6 +73,12 @@ private:
     void startAudioForPlayback();
     void stopAudio();
 
+    // Runs while a remote read is outstanding: keeps the event loop alive so
+    // the window still repaints and input is still accepted, and raises the
+    // buffering state once the wait is long enough for a user to notice.
+    void pumpDuringStorageStall(double waitedMs);
+    bool storageBusy() const { return storageBusy_; }
+
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
     trace::ui::TransportBar* transportBar_ = nullptr;
@@ -159,6 +165,27 @@ private:
     double lastFrameHandoffMs_ = 0.0;
     double avgFrameHandoffMs_ = 0.0;
     long long frameHandoffSamples_ = 0;
+
+    // Storage responsiveness state.
+    //
+    // storageBusy_ is a re-entrancy guard, and it is the load-bearing part:
+    // pumping events inside a decoder call means a timer tick or a key press
+    // can re-enter the decoder while FFmpeg is mid-read. Every path that
+    // drives the decoder checks it and defers instead.
+    bool storageBusy_ = false;
+    bool buffering_ = false;
+    double storageWaitMs_ = 0.0;
+    long long bufferingEvents_ = 0;
+    double bufferingMsTotal_ = 0.0;
+    double maxStorageWaitMs_ = 0.0;
+    QElapsedTimer bufferingClock_;
+    // A user action arrived while storage was busy; applied once it clears.
+    // Bumped whenever a user action supersedes in-flight storage work. A
+    // decode that spans a bump is discarded rather than presented.
+    long long ioCancelCount_ = 0;
+    // Long enough that ordinary reads never flicker the indicator, short
+    // enough that a real stall is acknowledged before it feels like a hang.
+    static constexpr double kBufferingVisibleMs = 150.0;
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;

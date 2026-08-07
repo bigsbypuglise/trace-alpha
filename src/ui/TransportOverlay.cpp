@@ -29,6 +29,12 @@ void TransportOverlay::setHudLine(const QString& line) {
     update();
 }
 
+void TransportOverlay::setStorageState(const QString& state) {
+    if (storageState_ == state) return;
+    storageState_ = state;
+    update();
+}
+
 void TransportOverlay::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
 
@@ -42,6 +48,14 @@ void TransportOverlay::paintEvent(QPaintEvent* event) {
                             .arg(speed_, 0, 'f', 2)
                             .arg(action_);
     p.drawText(QRect(0, 0, width(), kTransportRowHeight), Qt::AlignVCenter | Qt::AlignLeft, top);
+
+    // Right-aligned on the transport row. Amber rather than red: waiting on a
+    // mounted filespace is a normal condition, not a fault.
+    if (!storageState_.isEmpty()) {
+        p.setPen(QColor(235, 175, 70));
+        p.drawText(QRect(0, 0, width() - 8, kTransportRowHeight),
+                   Qt::AlignVCenter | Qt::AlignRight, storageState_);
+    }
 
     p.setPen(QColor(170, 170, 170));
     for (int i = 0; i < hudLines_.size(); ++i) {

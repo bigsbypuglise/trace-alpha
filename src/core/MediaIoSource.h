@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <cstdint>
+#include <functional>
 #include <memory>
 
 struct AVIOContext;
@@ -31,6 +32,12 @@ struct IoPhaseStats {
     long long stalls = 0;             // single reads over kStallMs
     double stallMsTotal = 0.0;
     double activeMs = 0.0;            // wall time this phase has been current
+    // Longest single stretch the calling thread spent inside one read. On the
+    // UI thread this is, literally, how long the application was unable to
+    // repaint or accept input -- the number this whole pass exists to kill.
+    double callerBlockMaxMs = 0.0;
+    long long bufferingEvents = 0;    // waits long enough to be user-visible
+    double bufferingMsTotal = 0.0;
 
     double avgReadBytes() const {
         return reads > 0 ? static_cast<double>(bytes) / static_cast<double>(reads) : 0.0;
@@ -106,6 +113,24 @@ public:
 
     // A read slower than this is recorded as a stall.
     static constexpr double kStallMs = 20.0;
+
+    // Called repeatedly by the calling thread while a remote read is
+    // outstanding, with how long it has been waiting. The owner uses it to
+    // keep the event loop alive and to surface a buffering state. Reads on
+    // local volumes never call it -- they stay a plain synchronous read with
+    // no worker, no handoff and no added cost.
+    //
+    // Installing this is what converts "the UI thread is stuck in a syscall"
+    // into "the UI thread is waiting but still running".
+    using StallPump = std::function<void(double waitedMs)>;
+    void setStallPump(StallPump pump);
+
+    // Marks everything currently outstanding as belonging to a superseded
+    // request. The in-flight read is still allowed to finish -- its
+    // destination buffer belongs to FFmpeg and must not be written after we
+    // return -- but the result is reported as stale so no caller presents it.
+    void cancelOutstanding();
+    bool lastReadWasStale() const;
 
     // Classifies without opening anything. Never writes to the volume.
     // Results are cached per volume root: the Win32 volume queries cost ~8.5ms

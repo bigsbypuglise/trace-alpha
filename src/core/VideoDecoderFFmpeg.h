@@ -156,6 +156,12 @@ public:
     IoPhaseStats ioStats(IoPhase phase) const;
     StorageInfo storageInfo() const;
 
+    // Installed by the owner so a slow remote read keeps the event loop
+    // running instead of freezing it. See MediaIoSource::StallPump.
+    void setStallPump(MediaIoSource::StallPump pump);
+    // Supersedes any outstanding remote read so its result is not presented.
+    void cancelOutstandingIo();
+
 private:
     struct Impl;
     Impl* impl_ = nullptr;

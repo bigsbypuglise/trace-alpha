@@ -8,6 +8,8 @@
 #include <QHash>
 #include <QMutex>
 #include <QMutexLocker>
+#include <QThread>
+#include <QWaitCondition>
 
 #include <algorithm>
 
@@ -58,6 +60,71 @@ struct MediaIoSource::Impl {
     IoPhaseStats stats[static_cast<int>(IoPhase::Count)];
     StorageInfo storage;
     QElapsedTimer phaseClock;
+
+    // --- asynchronous read path (remote sources only) ---
+    //
+    // The worker owns the QFile outright once started, so no file state is
+    // ever touched from two threads. Each request is an absolute
+    // seek-plus-read, which keeps the worker stateless between requests and
+    // means a superseded request leaves nothing behind to unwind.
+    struct IoRequest {
+        qint64 offset = 0;
+        int size = 0;
+        uint8_t* dst = nullptr;   // FFmpeg's buffer; valid until we return
+        qint64 got = 0;
+        bool submitted = false;
+        bool complete = false;
+        unsigned generation = 0;
+    };
+
+    class IoWorker final : public QThread {
+    public:
+        explicit IoWorker(Impl* owner) : owner_(owner) {}
+        void run() override { owner_->workerLoop(); }
+    private:
+        Impl* owner_;
+    };
+
+    QMutex ioMutex;
+    QWaitCondition ioRequested;   // UI -> worker
+    QWaitCondition ioComplete;    // worker -> UI
+    IoRequest request;
+    bool workerStop = false;
+    std::unique_ptr<IoWorker> worker;
+    StallPump stallPump;
+    unsigned generation = 1;
+    bool lastStale = false;
+
+    bool useAsyncReads() const { return worker != nullptr; }
+
+    void workerLoop() {
+        QMutexLocker lock(&ioMutex);
+        while (!workerStop) {
+            if (!request.submitted) {
+                ioRequested.wait(&ioMutex, 50);
+                continue;
+            }
+            // Copy the parameters out, then do the blocking work unlocked so
+            // the waiting thread can still observe state and cancel.
+            const qint64 offset = request.offset;
+            const int size = request.size;
+            uint8_t* dst = request.dst;
+
+            // Blocking work happens unlocked so the waiting thread can still
+            // inspect state and mark the request superseded while it runs.
+            ioMutex.unlock();
+            qint64 got = -1;
+            if (file.seek(offset)) {
+                got = file.read(reinterpret_cast<char*>(dst), size);
+            }
+            ioMutex.lock();
+
+            request.got = got;
+            request.submitted = false;
+            request.complete = true;
+            ioComplete.wakeAll();
+        }
+    }
 
 #ifdef TRACE_WITH_FFMPEG
     AVIOContext* avio = nullptr;
@@ -265,13 +332,63 @@ bool MediaIoSource::open(const QString& path, QString& error) {
         return false;
     }
 
+    // Only remote sources get the worker. A local read completes in tens of
+    // microseconds; routing it through a thread handoff would add cost to the
+    // one path that was never at fault, and Phase 5 asks explicitly that the
+    // local path not regress.
+    if (impl_->storage.remote) {
+        impl_->workerStop = false;
+        impl_->worker = std::make_unique<Impl::IoWorker>(impl_.get());
+        impl_->worker->start();
+    }
+
     impl_->phase = IoPhase::Open;
     impl_->phaseClock.start();
     return true;
 }
 
+void MediaIoSource::setStallPump(StallPump pump) {
+    if (!impl_) return;
+    QMutexLocker lock(&impl_->ioMutex);
+    impl_->stallPump = std::move(pump);
+}
+
+void MediaIoSource::cancelOutstanding() {
+    if (!impl_) return;
+    QMutexLocker lock(&impl_->ioMutex);
+    ++impl_->generation;
+}
+
+bool MediaIoSource::lastReadWasStale() const {
+    return impl_ && impl_->lastStale;
+}
+
 void MediaIoSource::close() {
     if (!impl_) return;
+
+    // Stop the worker before anything it touches goes away. An in-flight read
+    // is allowed to finish -- it is writing into a buffer we do not own -- so
+    // teardown is bounded by one read rather than abandoning it mid-write.
+    if (impl_->worker) {
+        {
+            QMutexLocker lock(&impl_->ioMutex);
+            impl_->workerStop = true;
+            ++impl_->generation;
+            impl_->ioRequested.wakeAll();
+        }
+        impl_->worker->wait();
+        impl_->worker.reset();
+    }
+    {
+        QMutexLocker lock(&impl_->ioMutex);
+        impl_->request = Impl::IoRequest{};
+        impl_->lastStale = false;
+        // stallPump deliberately survives: it is the owner's policy for how to
+        // wait, not per-file state, and open() calls close() first -- clearing
+        // it here would silently disarm the pump for every file after the
+        // first.
+    }
+
     if (impl_->avio) {
         // avio_context_free frees the context but not the buffer it was given,
         // and the context may have swapped that pointer, so take it back first.
@@ -306,8 +423,65 @@ int MediaIoSource::readPacket(void* opaque, uint8_t* buf, int size) {
 
     QElapsedTimer t;
     t.start();
-    const qint64 got = impl->file.read(reinterpret_cast<char*>(buf), size);
+
+    qint64 got = -1;
+    bool stale = false;
+    double unservicedMaxMs = 0.0;
+
+    if (!impl->useAsyncReads()) {
+        // Local volumes keep the plain synchronous read: no worker, no
+        // handoff, no added latency on a path that was never the problem.
+        got = impl->file.read(reinterpret_cast<char*>(buf), size);
+    } else {
+        // Remote. Hand the blocking syscall to the worker and stay awake.
+        QMutexLocker lock(&impl->ioMutex);
+        impl->request = Impl::IoRequest{};
+        impl->request.offset = impl->pos;
+        impl->request.size = size;
+        impl->request.dst = buf;
+        impl->request.submitted = true;
+        impl->request.generation = impl->generation;
+        const unsigned myGeneration = impl->generation;
+        impl->ioRequested.wakeAll();
+
+        // The wait always runs to completion even when superseded: `buf`
+        // belongs to FFmpeg and the worker is writing into it, so returning
+        // early would hand the decoder a buffer still being filled. What
+        // cancellation buys is that the caller learns the result is stale, not
+        // that the read is abandoned.
+        // The honest responsiveness metric is not how long the read took, but
+        // the longest stretch in which the caller did nothing -- that is the
+        // window in which the UI could not repaint or accept input.
+        qint64 lastServicedNs = t.nsecsElapsed();
+        while (!impl->request.complete) {
+            if (impl->stallPump) {
+                const double waited = static_cast<double>(t.elapsed());
+                lock.unlock();
+                impl->stallPump(waited);   // caller keeps its event loop alive
+                lock.relock();
+                const qint64 nowNs = t.nsecsElapsed();
+                unservicedMaxMs = std::max(
+                    unservicedMaxMs,
+                    static_cast<double>(nowNs - lastServicedNs) / 1'000'000.0);
+                lastServicedNs = nowNs;
+            } else {
+                impl->ioComplete.wait(&impl->ioMutex, 20);
+            }
+        }
+        got = impl->request.got;
+        stale = (myGeneration != impl->generation);
+        impl->request = Impl::IoRequest{};
+    }
+
     const double ms = static_cast<double>(t.nsecsElapsed()) / 1'000'000.0;
+    impl->lastStale = stale;
+    // Without a pump the caller was inside the syscall for the whole read.
+    if (!impl->useAsyncReads() || !impl->stallPump) unservicedMaxMs = ms;
+    s.callerBlockMaxMs = std::max(s.callerBlockMaxMs, unservicedMaxMs);
+    if (ms >= MediaIoSource::kStallMs) {
+        ++s.bufferingEvents;
+        s.bufferingMsTotal += ms;
+    }
 
     if (got < 0) return AVERROR(EIO);
     if (got == 0) return AVERROR_EOF;
@@ -355,7 +529,10 @@ int64_t MediaIoSource::seekPacket(void* opaque, int64_t offset, int whence) {
         impl->lastReadEnd = -1;
     }
 
-    if (!impl->file.seek(target)) return AVERROR(EIO);
+    // On the async path the worker seeks as part of each read, so the file
+    // handle is never touched from this thread; `pos` is the only state that
+    // needs updating. Reads are absolute, so nothing can be left half-seeked.
+    if (!impl->useAsyncReads() && !impl->file.seek(target)) return AVERROR(EIO);
     impl->pos = target;
     return target;
 }

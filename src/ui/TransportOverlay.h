@@ -15,6 +15,10 @@ public:
     // Accepts a '\n'-separated block; the overlay grows to fit so no field
     // gets clipped off the right edge at normal window widths.
     void setHudLine(const QString& line);
+    // Non-empty shows a storage state badge (e.g. BUFFERING). Deliberately
+    // understated: a slow remote read is a normal condition on a mounted
+    // filespace, not an error, and it must not read as a crash.
+    void setStorageState(const QString& state);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -25,6 +29,7 @@ private:
     double speed_ = 0.0;
     QString action_ = "Idle";
     QStringList hudLines_ = {"No media loaded"};
+    QString storageState_;
 };
 
 } // namespace trace::ui
