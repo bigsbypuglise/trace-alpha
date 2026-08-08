@@ -48,6 +48,7 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
     void setupUi();
@@ -61,6 +62,8 @@ private:
     void prefetchNeighbors();
     void togglePlayPause();
     void refreshHud(const QString& action = {});
+    // Tell the decoder how big a scrub preview needs to be, in device pixels.
+    void syncScrubPreviewSize();
     bool isVideoScrubActive() const;
     void queueVideoScrubFrame(long long frameIndex);
     void flushVideoScrub(bool forceExact);
@@ -183,7 +186,26 @@ private:
     QElapsedTimer scrubPresentClock_;
     qint64 scrubLastPresentNs_ = -1;
     bool suppressSliderSignal_ = false;
+    // Set when a playback run stopped because there was nothing further to
+    // show -- either the playhead reached the last frame, or the decoder ran
+    // out at the tail. Play then restarts the file instead of pressing against
+    // an end that cannot move, which is what made the button look dead.
+    // Cleared by any move away from the end, so it only ever describes the
+    // position playback actually stopped at.
+    bool playbackAtEnd_ = false;
+    long long playbackEndFrame_ = -1;
     bool scrubbing_ = false;
+    // A press is a jump, not the first step of a shuttle. The slider does an
+    // absolute set on a groove click, so the value arrives before the pointer
+    // has moved anywhere -- and shuttling to it walked every frame in between,
+    // which on heavy media is seconds of decoding to reach a frame the user
+    // pointed straight at. The first flush after a press lands exactly; only
+    // movement after that shuttles.
+    bool scrubJumpPending_ = false;
+    // Whether the frame currently on screen was landed exactly, at full
+    // resolution, through Step. Lets the release skip re-decoding a frame the
+    // press already put there accurately -- never a soft or approximate one.
+    bool scrubShownExact_ = false;
     long long pendingScrubFrame_ = -1;
     long long activeScrubFrame_ = -1;
 

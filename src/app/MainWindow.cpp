@@ -10,6 +10,7 @@
 #include <QKeyEvent>
 #include <QMenuBar>
 #include <QMimeData>
+#include <QResizeEvent>
 #include <QStatusBar>
 
 #include <QCoreApplication>
@@ -327,6 +328,13 @@ MainWindow::MainWindow() {
             playback_.pause();
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
+            // The decoder is exhausted at the tail: this is the end of the file
+            // as far as the viewer is concerned, even though the frame count
+            // says there is more. Treat it as such so Play restarts.
+            if (direction > 0) {
+                playbackAtEnd_ = true;
+                playbackEndFrame_ = playback_.state().currentFrame;
+            }
             if (!error.isEmpty()) statusBar()->showMessage(error, 2000);
         } else {
             ++playbackFramesPresented_;
@@ -352,6 +360,10 @@ MainWindow::MainWindow() {
             playback_.pause();
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
+            if (direction > 0 && targetFrame >= maxFrame) {
+                playbackAtEnd_ = true;
+                playbackEndFrame_ = targetFrame;
+            }
         }
         refreshHud(direction > 0 ? "Play" : "Reverse Play");
 
@@ -490,6 +502,7 @@ void MainWindow::setupTransportControls() {
     connect(timelineSlider_, &QSlider::sliderPressed, this, [this]() {
         if (suppressSliderSignal_) return;
         scrubbing_ = true;
+        scrubJumpPending_ = true;
         playback_.pause();
         playTimer_.stop();
         stopAudio();
@@ -546,6 +559,22 @@ void MainWindow::setupTransportControls() {
     syncTransportBar();
 }
 
+void MainWindow::resizeEvent(QResizeEvent* event) {
+    QMainWindow::resizeEvent(event);
+    syncScrubPreviewSize();
+}
+
+void MainWindow::syncScrubPreviewSize() {
+    if (!viewer_) return;
+    // Device pixels, not logical: on a scaled display the widget is drawn at
+    // more pixels than its logical size, and converting to the logical size
+    // would put the softness back that this exists to remove.
+    const double dpr = viewer_->devicePixelRatioF();
+    const QSize px(static_cast<int>(std::lround(viewer_->width() * dpr)),
+                   static_cast<int>(std::lround(viewer_->height() * dpr)));
+    videoDecoder_.setScrubPreviewSize(px);
+}
+
 void MainWindow::syncTransportBar() {
     if (!timelineSlider_ || !playPauseAction_) return;
 
@@ -597,6 +626,8 @@ void MainWindow::openPath(const QString& path) {
     audio_.close();
     scrubTimer_.stop();
     scrubbing_ = false;
+    scrubJumpPending_ = false;
+    scrubShownExact_ = false;
     pendingScrubFrame_ = -1;
     activeScrubFrame_ = -1;
     playbackClock_.invalidate();
@@ -682,6 +713,11 @@ void MainWindow::openPath(const QString& path) {
     frameCache_.setWindowCenter(playback_.state().currentFrame);
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
+    // Before the first frame: the decoder sizes scrub previews from this, and a
+    // file opened into an already-sized window never gets a resize event to
+    // tell it.
+    syncScrubPreviewSize();
+
     QString error;
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
@@ -896,6 +932,26 @@ void MainWindow::togglePlayPause() {
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
     } else {
+        // Play at the end restarts the file. Playback stops on the last frame
+        // and leaves it there, so a second Play had nothing left to advance to
+        // and the button read as dead. Rewinding here rather than in the tick
+        // keeps it a property of the Play action: the playhead is only moved by
+        // an explicit request to start, never on its own while stopping.
+        if (playbackAtEnd_) {
+            playback_.setCurrentFrame(0);
+            playbackAtEnd_ = false;
+            QString error;
+            // Step, not Playback: this is a jump to a new position, and the
+            // frame is being landed on rather than decoded in sequence.
+            prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
+            if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
+                && !error.isEmpty()) {
+                statusBar()->showMessage(error, 3000);
+            }
+            // The slider still reads the old position, and startAudioForPlayback
+            // below takes its start offset from the current frame.
+            syncTransportBar();
+        }
         playback_.togglePlayPause();
         const int direction = playback_.state().mode == PlaybackMode::PlayingReverse ? -1 : 1;
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
@@ -1034,11 +1090,30 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     if (!forceExact && targetFrame == activeScrubFrame_) {
         return;
     }
+    // The press already landed this exact frame, full-res and accurate. A click
+    // arrives as press then release on the same value, so without this the
+    // release paid a second seek and decode of a frame already on screen -- on
+    // 4K ProRes 4444 that is another ~25ms in front of a picture the user can
+    // already see. Only skipped when the frame is known exact: a soft preview
+    // or a shuttled frame must still be re-landed.
+    if (forceExact && targetFrame == activeScrubFrame_ && scrubShownExact_) {
+        pendingScrubFrame_ = -1;
+        refreshHud("Scrub Release");
+        return;
+    }
 
     // Mid-drag frames use Scrub (fast, half-res preview at >=1920px). The
     // landing frame â€” slider release or a jump while not dragging â€” uses Step
     // so the frame being inspected is full-res and accurately converted.
-    const bool dragging = !forceExact && scrubbing_;
+    //
+    // A press is not yet a drag. The slider sets its value absolutely on a
+    // groove click, so the first value after a press is where the user pointed,
+    // not somewhere they dragged through -- shuttling to it walks every frame
+    // in between, which is the wrong answer to "go there" and on heavy media is
+    // most of a second of decoding before the frame appears. Land the press
+    // exactly; the shuttle starts from there if the pointer then moves.
+    const bool dragging = !forceExact && scrubbing_ && !scrubJumpPending_;
+    scrubJumpPending_ = false;
     const auto mode = dragging
         ? trace::core::VideoDecoderFFmpeg::RequestMode::Scrub
         : trace::core::VideoDecoderFFmpeg::RequestMode::Step;
@@ -1140,6 +1215,9 @@ void MainWindow::flushVideoScrub(bool forceExact) {
             viewer_->repaint();
             scrubLastPresentNs_ = scrubPresentClock_.nsecsElapsed();
             activeScrubFrame_ = f;
+            // Shuttled, so possibly a half-res preview: the release must land
+            // this frame properly even if it is already the one on screen.
+            scrubShownExact_ = false;
             ++walked;
             if (static_cast<double>(walkTimer.nsecsElapsed()) / 1'000'000.0
                     >= kScrubWalkBudgetMs) {
@@ -1175,6 +1253,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     prepareVideoRequest(mode, 1, true);
     if (loadCurrentFrame(error, mode)) {
         activeScrubFrame_ = targetFrame;
+        scrubShownExact_ = (mode == trace::core::VideoDecoderFFmpeg::RequestMode::Step);
     } else if (!error.isEmpty()) {
         statusBar()->showMessage(error, 3000);
     }
@@ -1202,6 +1281,16 @@ void MainWindow::openMediaPath(const QString& path) {
 
 void MainWindow::refreshHud(const QString& action) {
     const auto st = playback_.state();
+
+    // Any move off the frame playback stopped on -- a step, a scrub, a new
+    // file -- means the playhead is no longer parked at the end, so Play should
+    // resume from where it now is rather than rewinding. This runs after every
+    // transport action, which is why the flag is cleared here rather than at
+    // each of the dozen sites that can move the playhead.
+    if (playbackAtEnd_ && st.currentFrame != playbackEndFrame_) {
+        playbackAtEnd_ = false;
+        playbackEndFrame_ = -1;
+    }
     QString mode = "Empty";
     switch (st.mode) {
         case PlaybackMode::Paused: mode = "Paused"; break;
@@ -1483,7 +1572,10 @@ void MainWindow::refreshHud(const QString& action) {
                     .arg(lastClockUpdatesPerTick_)
                     .arg(maxClockUpdatesPerTick_);
 
-            const QString l8 = QString("cache FIFO | %1/%2 (%3 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
+            // Capacity is the count that fits at the size currently stored, so
+            // it rises as a 4K drag fills the cache with half-res previews.
+            // The MB pair is the real rule; the count is derived from it.
+            const QString l8 = QString("cache FIFO | %1/%2 (%3/%9 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
                 .arg(perf.cacheOccupancy)
                 .arg(perf.cacheCapacity)
                 .arg(QString::number(static_cast<double>(perf.cacheBytes) / (1024.0 * 1024.0), 'f', 1))
@@ -1491,7 +1583,8 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.reverseCacheHits)
                 .arg(perf.reverseCacheLookups)
                 .arg(perf.cacheInserts)
-                .arg(perf.cacheEvictions);
+                .arg(perf.cacheEvictions)
+                .arg(QString::number(static_cast<double>(perf.cacheBudgetBytes) / (1024.0 * 1024.0), 'f', 0));
 
             // `shown`/`delta` are measured, not asserted. They used to be
             // assigned -- Scrub wrote the requested index onto whatever
