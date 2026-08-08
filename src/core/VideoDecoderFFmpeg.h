@@ -15,6 +15,11 @@ struct VideoMetadata {
     long long frameCount = -1;
     double durationSeconds = 0.0;
     QString codecName;
+    // Every frame is a keyframe (ProRes, DNxHD, MJPEG). Already used to pick
+    // the threading mode; exposed because it is also the exact answer to "does
+    // a seek land on the target, or does it land before it and walk?", which
+    // decides whether a scrub preview may skip frames.
+    bool intraOnly = false;
 };
 
 struct VideoPerfStats {

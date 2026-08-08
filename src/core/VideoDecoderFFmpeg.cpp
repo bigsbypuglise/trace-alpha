@@ -442,9 +442,31 @@ struct VideoDecoderFFmpeg::Impl {
     int seekWalkCacheWindowOverride = -1;
     // How much conversion a *drag* may spend filling the cache on one seek
     // walk, against 18ms for a Step landing. Higher fills more of the GOP per
-    // seek (fewer seeks, more hits) at the cost of a longer pause on the frame
+    // seek: fewer seeks, more hits, at the cost of a longer pause on the frame
     // that pays for it. TRACE_SCRUB_FILL_MS to A/B.
-    double scrubWalkCacheBudgetMs = 60.0;
+    //
+    // Raised 60 -> 240 once the walk moved off the UI thread (step 5). The old
+    // value was chosen when this ran synchronously, where a 240ms fill was a
+    // 240ms frozen window; on the worker it costs the UI thread nothing, and
+    // the measured `ui gap` is unchanged between the two. Measured on 4K H.264
+    // backward, which is the case that pays for seeks:
+    //
+    //   fill  30ms   hit 70.2%  dec  46.0 f/s  seeks 12  stalls 9 of 37
+    //   fill  60ms   hit 86.4%  dec  91.5 f/s  seeks 10  stalls 7 of 73
+    //   fill 120ms   hit 89.1%  dec  92.0 f/s  seeks  8  stalls 6 of 78
+    //   fill 240ms   hit 91.9%  dec 121.3 f/s  seeks  7  stalls 5 of 97
+    //   fill 480ms   hit 92.9%  dec 124.0 f/s  seeks  6  stalls 4 of 98
+    //
+    // Flat past 240, so that is where it sits. Stalls and seeks both fall, so
+    // the longer fill is not being paid for in the place it would show. Memory
+    // is unaffected: eviction is by bytes against the same 192MB budget, and
+    // occupancy measured 184.6MB at 240 against 190.7MB at 60.
+    //
+    // 1080p gains far less (hit 90.9 -> 91.8%) because its cache is bound by
+    // bytes rather than by this budget -- nothing is halved at 1080p, so 24
+    // full-res entries fill the budget. The win is where previews are small
+    // enough for the cache to hold a GOP's worth of them.
+    double scrubWalkCacheBudgetMs = 240.0;
     // Size the viewer draws at, or 0 when unknown. Used only as a *ceiling* on
     // scrub preview conversion, never as a floor: a preview is never made
     // larger than half resolution, and never larger than it will be shown.
@@ -705,6 +727,7 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     const bool intraOnly = codecDesc && (codecDesc->props & AV_CODEC_PROP_INTRA_ONLY);
     impl_->codec->thread_count = 0;
     impl_->codec->thread_type = intraOnly ? FF_THREAD_SLICE : (FF_THREAD_FRAME | FF_THREAD_SLICE);
+    metadata_.intraOnly = intraOnly;
 
     if (avcodec_open2(impl_->codec, impl_->codecDef, nullptr) < 0) {
         error = "FFmpeg: codec open failed";

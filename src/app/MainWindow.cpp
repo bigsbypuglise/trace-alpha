@@ -854,7 +854,8 @@ void MainWindow::openPath(const QString& path) {
     // Learned from the seeks this media actually performs; assumed free until
     // then, so an all-intra file is never penalised for a property it lacks.
     mediaWalkFramesTotal_ = 0;
-    mediaWalkRequests_ = 0;
+    mediaSeekCount_ = 0;
+    mediaSeeksSeen_ = 0;
 
     trace::core::MediaItem item;
     item.path = path.toStdString();
@@ -1315,13 +1316,25 @@ long long MainWindow::computeScrubStride(long long gap) const {
     // 10. And it runs away, because a higher stride lowers the measured decode
     // rate, which raises the stride: 1080p backward reached stride 14.
     //
-    // The test is measured rather than keyed on codec name, and it is a mean
-    // rather than a latch. A single walk is not evidence: ProRes seeks land
-    // short occasionally and walk a handful of frames, and latching on the
-    // first one disabled sampling for the rest of the session -- measured on a
-    // 4444 reversal set, where one 8-frame walk took pointer-to-preview from
-    // 22ms back to 1784ms. What matters is whether walking is the norm.
-    if (mediaWalkPerRequest() > kRandomAccessWalkLimit) return 1;
+    // Asked of the codec, not inferred from behaviour.
+    //
+    // Three inferred versions of this test were built and all three were wrong,
+    // which is worth recording because the temptation to measure it is strong.
+    // A latch on the first observed walk: ProRes seeks occasionally land short,
+    // and one such walk disabled sampling for the session (4444 reversal set,
+    // pointer-to-preview 22ms -> 1784ms). A decaying mean: collapses to zero
+    // during a run of cache hits and declares a long-GOP file free. A mean per
+    // request: diluted by forward steps that never seek, so any gesture with a
+    // forward segment opened the gate during its backward stretches (4K H.264
+    // reversals, stalls 2 of 437 -> 13 of 199). A mean per seek with an
+    // evidence threshold: a forward ProRes sweep performs two seeks in total
+    // and never reaches it, so 4444 went straight back to a 181-frame lag.
+    //
+    // The property wanted is exact and static -- does a seek land on the target
+    // -- and the decoder has known it since open, where it already picks the
+    // threading mode from it. `ra-walk` is kept in the HUD as the empirical
+    // check on this answer rather than as the answer.
+    if (!videoDecoder_.metadata().intraOnly) return 1;
     // No estimate yet -- the first frames of a gesture walk consecutively,
     // which is also the right answer for a drag that turns out to be slow.
     // Three presented frames is enough for the rate to mean anything and short
@@ -1423,8 +1436,14 @@ void MainWindow::notePresentedScrubFrame(long long frame) {
     }
 
     scrubWalkMaxFrames_ = std::max(scrubWalkMaxFrames_, hudPerf_.lastWalkFrames);
-    mediaWalkFramesTotal_ += hudPerf_.lastWalkFrames;
-    ++mediaWalkRequests_;
+    // Only a request that actually sought says anything about the cost of
+    // random access. Detected by the decoder's seek counter moving, so a cache
+    // hit and a sequential step both correctly count for nothing.
+    if (hudPerf_.seekSamples > mediaSeeksSeen_) {
+        mediaSeeksSeen_ = hudPerf_.seekSamples;
+        mediaWalkFramesTotal_ += hudPerf_.lastWalkFrames;
+        ++mediaSeekCount_;
+    }
 }
 
 void MainWindow::startUiServiceMeasurement() {
@@ -2319,16 +2338,16 @@ void MainWindow::refreshHud(const QString& action) {
             // to walk to reach its target. Below 1 random access is cheap and
             // sampling is allowed; above it a strided step would leave the
             // region the decoder already opened and pay for a new one.
-            const QString l7f = QString("sample %1 | stride %2 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f")
+            const QString l7f = QString("sample %1 | stride %2 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
                 .arg(!scrubSamplingEnabled() ? "OFF"
-                     : mediaWalkPerRequest() > kRandomAccessWalkLimit ? "GATED"
+                     : !videoDecoder_.metadata().intraOnly ? "GATED"
                      : scrubStride_ > 1 ? "ON" : "idle")
                 .arg(scrubStride_)
                 .arg(scrubFramesSkipped_)
                 .arg(scrubSampledSteps_)
                 .arg(QString::number(ctrlPointerFps_, 'f', 1))
                 .arg(QString::number(scrubDecodeFps_, 'f', 1))
-                .arg(QString::number(mediaWalkPerRequest(), 'f', 2));
+                .arg(QString::number(mediaWalkPerSeek(), 'f', 2));
 
             const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3%% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
                 .arg(QString::number(scrubPointerFps_, 'f', 1))

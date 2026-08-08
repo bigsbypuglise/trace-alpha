@@ -347,11 +347,18 @@ private:
     // file as having free random access. A latch was tried too and is wrong in
     // the other direction: ProRes seeks occasionally land short and walk a few
     // frames, and one such walk disabled sampling for the session.
+    // Counted per SEEK, not per request. A forward drag performs almost no
+    // seeks, so requests that never sought are no evidence at all about what
+    // random access costs -- averaging them in diluted a long-GOP file's mean
+    // below the threshold on any gesture with a forward segment, which turned
+    // sampling on during exactly the backward stretches it must not run in.
+    // Measured on a 4K H.264 reversal set: stalls 2 of 437 -> 13 of 199.
     long long mediaWalkFramesTotal_ = 0;
-    long long mediaWalkRequests_ = 0;
-    double mediaWalkPerRequest() const {
-        return mediaWalkRequests_ > 0
-            ? static_cast<double>(mediaWalkFramesTotal_) / static_cast<double>(mediaWalkRequests_)
+    long long mediaSeekCount_ = 0;
+    long long mediaSeeksSeen_ = 0;
+    double mediaWalkPerSeek() const {
+        return mediaSeekCount_ > 0
+            ? static_cast<double>(mediaWalkFramesTotal_) / static_cast<double>(mediaSeekCount_)
             : 0.0;
     }
     // Above this, a strided step is expected to leave the region the decoder
