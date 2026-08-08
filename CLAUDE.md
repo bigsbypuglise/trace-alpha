@@ -148,6 +148,19 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 - **The viewer filters the fit-to-window resample** (Aug 2026): `SmoothPixmapTransform` was off, so any window not exactly the source resolution point-sampled the frame — dropping whole pixel rows and stair-stepping every diagonal. A tester caught it against QuickTime. Filtering is on whenever the frame is resampled and **off at 1:1**, where it could only soften pixels being inspected. `TRACE_NEAREST_SCALE=1` restores the old path; HUD `display` shows `1:1` / `filtered` / `NEAREST`. Note Qt's raster filter is bilinear: fine to ~2x downscale, weaker beyond it. Qt's raster filter is bilinear: fine to ~2x downscale, weaker beyond it. **Scrub previews no longer go through it** — they convert to the display size in swscale and draw 1:1 (see the byte-budget entry above), which is both cheaper and higher quality. The **landing frame still does**: a Step converts full-res and Qt scales it, which on the validation window is a 6.4x downscale. Measured, preview and landing local contrast are within 0.7%, so there is no visible inversion today — but if landing quality is ever the complaint, converting Step to display size too is the fix, and the cache-clear-on-resize machinery it needs already exists.
 - **swscale is told the source colorimetry** (Aug 2026): it was never given any, so it used its BT.601 default for every file — the wrong matrix for essentially everything Trace opens, which flattened skin tones and shifted saturated colour. Range was likewise assumed limited, washing out full-range files. Matrix and range are now read off the decoded frame (falling back to the codec context, then to the standard "HD and up is 709" heuristic) and applied per sws slot via `sws_setColorspaceDetails`, which recomputes tables rather than rebuilding a context. Colour details are slot state, not per-call — they are part of what a slot caches. HUD `color` line shows the matrix (with `*` when inferred) and range. **BT.2020 gets the right matrix but no tonemap**: HDR/PQ content will still look wrong, and that is a known gap, not a regression.
 - **Cross-platform picture comparisons are not evidence on their own** (Aug 2026): macOS QuickTime colour-manages to the display profile; Trace on Windows does not. Any Mac-vs-Windows screenshot pair shows a tint difference for that reason alone. Ask for same-machine, same-display comparisons before treating a colour report as a bug.
+- **Paint pacing during a drag is a dead end — measured twice, rejected twice** (Aug 2026, `5daa5ce`). The theory each time was that a shuttle paints faster than the panel refreshes, so most frames are overwritten unseen and the motion arrives as bursts. The theory is *true* — 616 of 627 paints at 4K, 98%, land inside one refresh interval — and fixing it buys nothing.
+
+  First attempt broke out of the walk and re-armed a timer per frame, which throttled the decoder as well: 151 paints against 631, ~45/sec, and a fast drag could not finish a sweep. Second attempt only declines repaints and never interrupts the walk, so catch-up speed is untouched. Measured:
+
+  | | wasted paints | **stalls** | max gap |
+  |---|---|---|---|
+  | 4K H.264 | 98% → 43% | **7 → 8** | 102 → 116ms |
+  | 1080p | 97% → 26% | **21 → 34** | 78 → 85ms |
+
+  A paint costs 0.23–0.36ms, so ~600 wasted paints is ~200ms across an entire multi-gesture run — not a stutter. Stall count was unchanged at 4K and clearly worse at 1080p. `TRACE_SCRUB_PACE` keeps the better mechanism available (0 = off, the default; 1.0 = one frame per refresh).
+
+  **The point to carry forward: burstiness is not what a drag feels like, stalls are** — the 30–116ms gaps where a cache miss forces a seek and a GOP walk. No paint scheduling can reach those. Don't return to pacing; make misses rarer.
+- **`currentFrame_` is not where the decoder is** (Aug 2026, `2523d77`): a cache hit sets it without advancing the decoder, so the two diverge by however far a cache-served drag ran. The seek decision used to ask whether the *request* was sequential (`frameIndex == currentFrame_ + 1`) and skip the seek if so — which meant that after running to the end of a file, dragging back through cache hits, then dragging forward again, the request looked perfectly sequential while the decoder sat at EOF with its drain packet sent. `decodeUntilTarget` returned false at its drained check, which is *above* the `staleSuccessPrevented` counter, so the HUD read `stale-blocked 0` while "No decodable frame at target position" appeared on screen. Always ask whether the **decoder** can reach the frame (`frameIndex > lastDecodedFrame`); `lastDecodedFrame` only moves on an actual decode. Reproduced in 4 of 8 scripted-reversal captures, zero in 24 after. Always reachable, but it needed a run of backward cache hits — raising the 4K hit rate from ~0% to ~88% is what made it findable. HUD `recov N` counts the backstop retry and should stay 0.
 - **Approximate scrub previews are rejected** (Aug 2026): capping the GOP walk during drag was prototyped twice and never shipped. On a 30-frame GOP a cap of 8 shows a frame ~21 frames (~0.9s) behind the pointer — unacceptable for a review tool. Exact frame identity during scrub is the constraint; make the cache better instead.
 
 ## LucidLink / high-latency storage — measured Aug 2026
@@ -238,28 +251,51 @@ thread (which reopens the async-decode question the project has twice reverted)
 or to skip frames on the heaviest media as an explicit product decision. Do not
 promise 4x on 4444 without one of those.
 
+**Owner testing, after the throughput work (2026-08-07):** 4K ProRes 422 HQ
+**signed off** -- "feeling really nice". 1080p MP4 "closest right now" but
+backward still "a lil glitchy". 4K ProRes 4444 "still very slow" (expected,
+decode-bound). 4K MP4 "decent" but threw a decode error on fast scrub (fixed,
+`2523d77`). Overall verdict was that the throughput gain did not convert into
+the smoothness expected -- which was correct, and is the entry below.
+
+**The measurement mistake worth not repeating:** throughput (`shuttle ms/f`)
+and `lag` were both excellent on files that felt bad. They say how many frames
+were produced and how far behind the pointer the picture is; they say nothing
+about *when* frames land, which is what smoothness is. The `smooth` HUD line
+added in `5daa5ce` measures the interval between consecutive paints. Reach for
+it first on any "feels wrong" report -- and note that a drag can score
+perfectly on lag while stalling for 100ms.
+
 **Known open items, in the order they are likely worth attacking:**
 
-1. **4K ProRes 4444 fast drag** — see above. Needs a decision, not a fix.
-2. **Backward *playback* (not dragging) beyond the cache** is still GOP-walk
-   bound on long-GOP H.264. The drag path is fast now because it walks
-   sequentially and the cache absorbs the misses; reverse playback does not
-   share that. GOP-aware backward buffering is the real fix.
-3. **The landing frame is the slowest single conversion in the app.** A Step
-   lands 4K ProRes 4444 in ~55ms (decode 22 + full-res accurate sws 32). The
-   drag preview beside it costs ~2ms. Converting the landing frame to display
-   size too would be both faster and sharper -- the viewer only ever fits to
-   window, so no pixel the user can see is lost -- but it changes what the
-   *inspected* frame is made of, so it wants an explicit decision. Measured
-   check that this is not already a problem: preview and landing local contrast
-   are within 0.7% of each other, so there is no visible sharpness inversion
-   today.
-4. **1080p is deliberately excluded from display-size previews** (the `> 1920`
-   gate). Its sws is already ~1ms so there is little to win, and the path is
-   signed off. Worth revisiting only with a measurement.
-5. **The HUD's `target`/`shown` go stale on cache hits**, because the cache-hit
+1. **Stalls are the stutter.** Measured on a fast scrub: 4K H.264 carries 7-8
+   gaps of 30-116ms in a multi-gesture run, 1080p carries 21. Those are cache
+   misses forcing a seek plus a GOP walk (~30ms against ~0.5ms for a hit), and
+   they are what "stable but not smooth" is. **Paint scheduling cannot reach
+   them** -- see the pacing entry in Decisions, which was measured and
+   rejected. The fix is to make misses rarer: prefetch ahead of the drag
+   direction while the shuttle is idle between slices, rather than making a
+   miss cheaper.
+2. **The slider handle itself trails the pointer** on heavy media -- the
+   owner's "slider not keeping up with the pull". Reproduced: the walk loop
+   saturates the UI thread, so mouse-move events queue behind decode work. This
+   is separate from picture lag and nothing so far has addressed it. The walk
+   budget (`kScrubWalkBudgetMs`, 8ms) and the zero-interval re-arm are the two
+   places that decide how much of the thread the shuttle takes.
+3. **4K ProRes 4444 fast drag** -- decode-bound at 15.4ms/frame of a 17.7ms
+   total, ~2.3x playback against the owner's ~4x. FFmpeg's ProRes decoder has
+   no `lowres` path, so this needs decoding off the UI thread (which reopens
+   the async-decode question the project has twice reverted) or an explicit
+   product decision to skip frames on the heaviest media. Not a bug to fix.
+4. **Backward *playback* (not dragging)** beyond the cache is still GOP-walk
+   bound on long-GOP H.264. The drag path is fast because it walks sequentially
+   and the cache absorbs misses; reverse playback does not share that.
+5. **1080p backward is still "a lil glitchy"** per the owner, though it
+   measures well (2.82ms/f, `lag 0f`, 91-94% hits). Its stall count is the
+   highest of any file (21 in a stress run), so item 1 is the likely cause.
+6. **The HUD's `target`/`shown` go stale on cache hits**, because the cache-hit
    path returns before `previewTargetFrame`/`previewDisplayedFrame` are set.
-   Still true, still only a debugging nuisance.
+   Still only a debugging nuisance.
 
 **Tuning knobs**, all defaulting to shipped behaviour: `TRACE_SCRUB_FILL_MS`
 (seek-walk cache fill budget during a drag, default 60ms),
@@ -271,7 +307,7 @@ promise 4x on 4444 without one of those.
 5120x1440 panel -- it downsamples too far. Capture the Trace window at native
 resolution instead (GetWindowRect + Graphics.CopyFromScreen). Synthetic drags
 that teleport the pointer and pause overstate how well the shuttle keeps up;
-use a continuous sweep with a spin-wait for realistic pacing. Find the timeline
+use a continuous sweep with a spin-wait for realistic pacing. A single smooth sweep is NOT enough to find correctness bugs: the decode-error in `2523d77` only appeared under hard direction reversals and runs into both ends of the clip, held under one continuous button press. Keep both gesture sets. Find the timeline
 groove by scanning for the RGB(55,55,55) track rather than assuming a y offset:
 the transport sits above a HUD whose height depends on the media.
 
