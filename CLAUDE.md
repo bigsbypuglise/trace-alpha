@@ -251,6 +251,24 @@ thread (which reopens the async-decode question the project has twice reverted)
 or to skip frames on the heaviest media as an explicit product decision. Do not
 promise 4x on 4444 without one of those.
 
+**4K ProRes 422 HQ scrub is the quality bar** (owner, 2026-08-07): "that 4K
+ProRes HQ is for sure our new north, ideally all media would function/scrub
+just like this." Use it as the reference when judging any other format --
+compare against it directly rather than against a target number.
+
+What makes it work, so the bar is reproducible rather than lucky: **~5-6ms per
+frame** (decode 3.6 + sws 1.3 + paint 0.1), every frame a keyframe so a seek
+costs nothing and a miss has no GOP walk, and previews converting straight to
+the displayed size. Three of those four are properties of the codec; the fourth
+was the fix.
+
+Reaching the bar elsewhere: **4K H.264 and 4K 60fps** decode faster than ProRes
+(0.5ms) but are long-GOP, so a cache miss costs a seek plus a GOP walk -- that
+is a prefetch problem and is reachable. **1080p** is already cheaper per frame
+and has the same stall problem. **ProRes 4444 is the honest exception**: decode
+alone is 15.4ms, 4x the whole 422 HQ frame budget, and no cache or conversion
+work can touch it.
+
 **Owner testing, after the throughput work (2026-08-07):** 4K ProRes 422 HQ
 **signed off** -- "feeling really nice". 1080p MP4 "closest right now" but
 backward still "a lil glitchy". 4K ProRes 4444 "still very slow" (expected,
