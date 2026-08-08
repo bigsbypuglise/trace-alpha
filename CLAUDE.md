@@ -88,7 +88,16 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   **Backward drags shuttle too** (Aug 2026) — the same walk with the sign flipped. It is affordable because a backward step that misses the reverse cache costs a seek plus a GOP walk, and *that walk fills the cache on its way through*, so one miss is followed by a run of hits covering the rest of the GOP. The time budget absorbs the miss (one frame that slice, then re-arm) instead of letting it stall the drag. Two things had to change for it to work: the walk became direction-aware, and **the presented frame is now cached when it is full-res** — previously no Scrub frame entered the cache at all because previews used to be half-res everywhere, but above 1920px is the only place they still are.
 
   Measured at 1080p, continuous backward sweeps: at **6x** peak lag **0** with 221/221 frames painted and **91.4% cache hits** at 1.50ms/frame — marginally *faster* than forward, since most frames are hits rather than decodes. At **20x**, 417/417 painted at 92.1% hits. **4K H.264 is the weak case**: 28.9ms/frame, 57.7% hits, and it trails badly (59 frames behind 400ms after the pointer stops). Three things stack there — cache capacity is 6 rather than 24 (footprint-derived), previews are half-res so the presented frame is still not cached, and a miss on long-GOP costs a full seek-and-walk. It never skips a frame; it is just slow. 4K ProRes is fine by comparison because every frame is a keyframe, so a miss costs no GOP walk.
-- **Reverse cache is sized by cost, not by frame count** (Aug 2026, supersedes the fixed 4-frame window): capacity is set at open from frame footprint (~192MB budget → measured **6 frames at 4K** (31.6MB each), **24 at 1080p** (7.9MB each)), and the seek-walk fill window is whatever fits an ~18ms conversion budget using measured `avgConvertMs`. A fixed count is wrong in both directions: at 0.7ms/frame (1080p H.264) caching a lot is nearly free and saves whole GOP re-walks on backward stepping, while at 14ms/frame (4K) each entry is latency the user feels on the landing frame. The Aug 2026 fixed window of 4 fixed scrub landing but made repeated backward stepping seek ~3x more often. Env `TRACE_SEEK_CACHE_WINDOW` still forces a count; HUD `walk Nf cache Ncv/Nms` shows the cost.
+- **The frame cache is budgeted in bytes, and previews convert to the displayed size** (Aug 2026, `b5a56af`, supersedes the entry-count capacity below and the flat half-res rule). Both were the same mistake: pricing a scrub preview as though it were a full-resolution frame.
+
+  Capacity was `192MB / (w*h*4)` — six entries at 4K — but a preview costs a quarter of that or less, so the cache sat at 47MB of its 192MB budget while a backward drag missed on nearly every frame. Six entries cannot serve a walk back through a thirty-frame GOP however good the hit logic is. Eviction is on summed `sizeInBytes()` now; the same budget holds 24 at half res and ~150 at display res. The reported `cap` in the HUD is derived from the size currently stored, so it moves as a drag fills the cache.
+
+  Previews convert straight to the size the viewer will draw them at, capped at half resolution and never upscaled. Converting 4096x2304 → 2048x1152 to show it in a 640x360 widget does four times the pixel work that reaches the screen and then hands the surplus to Qt's raster bilinear, which is the weaker resampler — so this is the expensive half of the frame getting **cheaper and sharper at once**, and the viewer now draws previews 1:1. Measured on 4K ProRes 422 HQ: `sws 7.08 → 1.87ms`, total `11.18 → 7.32ms`. The cache is cleared when the size changes (`setScrubPreviewSize`), because entries carry the size in force when they were made; mixed sizes in one drag read as the picture breaking up. `TRACE_PREVIEW_DISPLAY_SIZE=0` restores the old rule.
+
+  **Seek-walk cache fills follow the request mode.** A Step landing keeps the 18ms budget — one frame is wanted and every speculative conversion is delay in front of it. A Scrub seek happens mid-drag, where the frames walked past are exactly the ones the drag is about to ask for in reverse, so declining them means paying the whole seek and GOP walk again for each; those get 60ms (`TRACE_SCRUB_FILL_MS`). Scrub fills are stored at preview resolution and **tagged**, and stepping refuses tagged entries — the old code paid for a full-res fill and then declined it anyway.
+
+  **This does nothing for ProRes backward, for a structural reason worth remembering**: every frame is a keyframe, so a backward seek lands directly on the target with no frames walked en route, and there is nothing to cache. ProRes backward measured 0% hits before and after. Its improvement came entirely from the cheaper conversion. Don't "fix" ProRes hit rates by enlarging the cache.
+- **Reverse cache is sized by cost, not by frame count** (Aug 2026, **superseded by the byte budget above** — kept for the reasoning): capacity used to be set at open from frame footprint (~192MB budget → measured **6 frames at 4K** (31.6MB each), **24 at 1080p** (7.9MB each)), and the seek-walk fill window is whatever fits an ~18ms conversion budget using measured `avgConvertMs`. A fixed count is wrong in both directions: at 0.7ms/frame (1080p H.264) caching a lot is nearly free and saves whole GOP re-walks on backward stepping, while at 14ms/frame (4K) each entry is latency the user feels on the landing frame. The Aug 2026 fixed window of 4 fixed scrub landing but made repeated backward stepping seek ~3x more often. Env `TRACE_SEEK_CACHE_WINDOW` still forces a count; HUD `walk Nf cache Ncv/Nms` shows the cost.
 - **Alpha planes are stripped before conversion** (Aug 2026): ProRes 4444 decodes to `yuva444p12le`, and the viewer draws `QImage::Format_RGB32`, which ignores alpha — so scaling that full-res 12-bit plane was pure waste. `alphaStrippedFormat()` re-describes planar YUVA buffers as their alpha-less equivalent (planes 0–2 are byte-identical; plane 3 just never gets read). Only applied to PLANAR formats: packed formats like `rgba` interleave alpha per pixel, so stripping would corrupt the layout. `TRACE_KEEP_ALPHA=1` restores the old behavior; HUD shows `(a-skip)` when active.
 - **Audio is the playback master clock, and it is the one exception to "never skip frames"** (Aug 2026): the sound card's rate is the only rate in the system that cannot be negotiated with, so during 1x forward playback the target frame comes from the device clock rather than the wall-clock accumulator. This also lifts the 23.81fps tick ceiling. Corrections are bounded: hold the current frame when sound has not reached the next one (never re-request the same index in Playback mode — that advances the decoder and is exactly the frame-order bounce the linear invariant prevents), advance at most 3 frames to catch up. **Stepping and scrubbing remain exact always** — this only affects continuous playback with sound. With no audio track, or any time audio is not driving, the old wall-clock path runs unchanged.
 - **Playback jumps within 4 frames walk instead of seeking** (Aug 2026): needed for audio catch-up. A seek costs a keyframe landing plus a GOP walk (~60ms on long-GOP H.264) to avoid decoding two frames forward — strictly the wrong trade. Scoped to `RequestMode::Playback`; Step and Scrub seek behavior is untouched.
@@ -124,15 +133,19 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 - **Audio owns its own demuxer and decode thread** (Aug 2026): sharing `VideoDecoderFFmpeg`'s `AVFormatContext` would mean locking it against the seek-heavy video path on every packet, and that path is deliberately single-threaded. This does not reopen the async-video-decode question — it is a separate stream with no frame-ordering contract.
 - Video playback never skips frames (timer clamps steps to 1 for video) — heavy files slow down rather than drop frames. Deliberate: ordering over rate, except under the audio master clock above.
 - Windows ships as **portable ZIP only** — no installer until packaging/playback stabilize (`docs/release-notes-alpha.md`).
-- **Scrub shows a half-res preview above 1920px wide** (July 2026, threshold corrected Aug 2026): sws conversion dominates 4K frame cost; the viewer upscales to fit. The landing frame (slider release) is always full-res accurate via Step mode, and half-res frames never enter the frame cache — **cache fills are forced full-res even in Scrub mode** (`!isCacheFill` in the half-res branch), because an entry may later serve a paused step or the exact landing frame. Don't "fix" scrub softness by removing this at 4K — fix it by making conversion faster.
+- **Scrub shows a reduced-resolution preview above 1920px wide** (July 2026, threshold corrected Aug 2026, target size corrected Aug 2026 — see the byte-budget entry above): sws conversion dominates 4K frame cost. Half resolution is now a *ceiling*; the actual target is the size the viewer will draw at. The landing frame (slider release) is always full-res accurate via Step mode. Preview-resolution frames **do** enter the cache but are tagged `previewRes`, and `tryReverseCache` refuses them for anything but a Scrub — the old rule forced cache fills to full res so they could serve a step, which paid double for entries that were declined anyway. Don't "fix" scrub softness by removing this at 4K — fix it by making conversion faster.
 
   **The threshold is `> 1920`, not `>= 1920`.** At exactly 1080p halving was a *pessimisation*: a full-res convert is 1920x1080 → 1920x1080, which sws does unscaled, while halving adds a 1920→960 resample costing more than the smaller output saves. Measured on the same file in one session: full-res `sws 0.57/0.72ms` against half-res `sws 2.50/5.07ms`. 1080p was being caught by a rule written for 4K, which throttled the drag shuttle to roughly a third of its rate *and* showed a soft preview for it. Correcting the bound took shuttle cost 3.60 → **1.79ms/frame** at 1080p with full-res previews. **4K H.264 has not been re-measured** — full-res 4K 8-bit conversion is only ~2.9ms, so the same inversion may apply there; 4K ProRes 10-bit (~15ms) is where halving is clearly right.
 - **Transport widgets must not take keyboard focus** (`setFocusPolicy(Qt::NoFocus)` on the slider): keyboard belongs to frame stepping and J-K-L. If a new widget steals arrows/space, this is why.
+- **A slider press is a jump; only movement after it shuttles** (Aug 2026, `c3335ec`): the slider does an absolute set on a groove click, so the value arrives before the pointer has moved anywhere — and the drag shuttle then walked every frame between the playhead and the click target before the release landed it. On 4K ProRes 4444 that is a run of ~25ms decodes in front of a frame the user pointed straight at, which is what "slow to lock onto the selected frame" was. `scrubJumpPending_` makes the first flush after a press land exactly through Step. Measured from a cold playhead, a click is now one seek and one decode, `walk 0f`.
+
+  The release also skips re-decoding a frame the press already landed (`scrubShownExact_`), since a click arrives as press-then-release on the same value. **Only when the frame is known exact** — a shuttled or preview-resolution frame must still be re-landed, so this can never leave a soft picture as the landing.
+- **Play at the end of a file restarts it** (Aug 2026, `c3335ec`): playback stops on the last frame and leaves it there, so a second Play had nothing to advance to and the button read as dead. `playbackAtEnd_` is set both when the playhead reaches `maxFrame` and when the decoder is exhausted at the tail — that is the end of the file as far as the viewer is concerned even when the frame count disagrees — and is cleared in `refreshHud` by any move off the frame playback stopped on, which is the one place every transport action passes through. The rewind happens in the Play action, not in the tick, so the playhead is never moved while stopping.
 - **The timeline slider does absolute seek on click** (Aug 2026, `9a214f2`): Qt's default binds groove-click to `SH_Slider_PageSetButtons`, so clicking the track nudged the playhead by `pageStep` (10) frames instead of going there. A `QProxyStyle` swaps `SH_Slider_AbsoluteSetButtons`/`SH_Slider_PageSetButtons` so QSlider's own machinery maps the click and continues into a drag — don't hand-roll the position math, the style path keeps groove/handle geometry and RTL correct.
 - **Conversion contexts are a small LRU set, not one shared context** (Aug 2026, `5e57d86`): three configurations are live during a scrub cycle — full-res accurate (exact frame), full-res fast (cache fills), half-res fast (drag preview). One shared context rebuilt on every alternation, costing **~8–9ms on every slider release**. Keying two slots on geometry alone is *not* enough (the full slot still thrashes on the fast/accurate flag — measured 12 rebuilds over three drags). Four slots keyed on the complete tuple settle to 3–4 rebuilds ever, then pure reuse.
 - **The frame cache is consulted in both directions for random access** (Aug 2026, `0728db3`): it used to be checked only when a request moved backward, so a forward scrub onto a frame decoded moments earlier still seeked and re-walked the GOP. Sequential playback is still excluded — it must keep advancing the decoder rather than being served from behind. Biggest single win: a slider click issues press *and* release for the same frame, and the release is now a cache hit instead of a second full GOP walk.
 - **Cache eviction stays FIFO** (Aug 2026, `9513965`): LRU (promote-on-hit) was prototyped and measured against FIFO with capacity, fill policy and lookup held identical. On 4K H.264 — the only place the cache actually fills and evicts — both gave **hit 60.0% (9/15), 11 inserts, 5 evictions**; LRU recorded 9 promotions and changed nothing, because the scrub working set exceeds capacity rather than a hot subset being evicted early. At 1080p nothing is evicted at all (17/24 occupancy on a 9-target pattern), so the policy is unreachable. Don't re-try LRU without first making the working set smaller than capacity.
-- **The viewer filters the fit-to-window resample** (Aug 2026): `SmoothPixmapTransform` was off, so any window not exactly the source resolution point-sampled the frame — dropping whole pixel rows and stair-stepping every diagonal. A tester caught it against QuickTime. Filtering is on whenever the frame is resampled and **off at 1:1**, where it could only soften pixels being inspected. `TRACE_NEAREST_SCALE=1` restores the old path; HUD `display` shows `1:1` / `filtered` / `NEAREST`. Note Qt's raster filter is bilinear: fine to ~2x downscale, weaker beyond it. If quality at large downscale ratios is not enough, the fix is to convert to the display size **in swscale** (which is both higher quality and cheaper than converting full-res then scaling) — that needs the frame cache keyed on output size and cleared on resize.
+- **The viewer filters the fit-to-window resample** (Aug 2026): `SmoothPixmapTransform` was off, so any window not exactly the source resolution point-sampled the frame — dropping whole pixel rows and stair-stepping every diagonal. A tester caught it against QuickTime. Filtering is on whenever the frame is resampled and **off at 1:1**, where it could only soften pixels being inspected. `TRACE_NEAREST_SCALE=1` restores the old path; HUD `display` shows `1:1` / `filtered` / `NEAREST`. Note Qt's raster filter is bilinear: fine to ~2x downscale, weaker beyond it. Qt's raster filter is bilinear: fine to ~2x downscale, weaker beyond it. **Scrub previews no longer go through it** — they convert to the display size in swscale and draw 1:1 (see the byte-budget entry above), which is both cheaper and higher quality. The **landing frame still does**: a Step converts full-res and Qt scales it, which on the validation window is a 6.4x downscale. Measured, preview and landing local contrast are within 0.7%, so there is no visible inversion today — but if landing quality is ever the complaint, converting Step to display size too is the fix, and the cache-clear-on-resize machinery it needs already exists.
 - **swscale is told the source colorimetry** (Aug 2026): it was never given any, so it used its BT.601 default for every file — the wrong matrix for essentially everything Trace opens, which flattened skin tones and shifted saturated colour. Range was likewise assumed limited, washing out full-range files. Matrix and range are now read off the decoded frame (falling back to the codec context, then to the standard "HD and up is 709" heuristic) and applied per sws slot via `sws_setColorspaceDetails`, which recomputes tables rather than rebuilding a context. Colour details are slot state, not per-call — they are part of what a slot caches. HUD `color` line shows the matrix (with `*` when inferred) and range. **BT.2020 gets the right matrix but no tonemap**: HDR/PQ content will still look wrong, and that is a known gap, not a regression.
 - **Cross-platform picture comparisons are not evidence on their own** (Aug 2026): macOS QuickTime colour-manages to the display profile; Trace on Windows does not. Any Mac-vs-Windows screenshot pair shows a tint difference for that reason alone. Ask for same-machine, same-display comparisons before treating a colour report as a bug.
 - **Approximate scrub previews are rejected** (Aug 2026): capping the GOP walk during drag was prototyped twice and never shipped. On a 30-frame GOP a cap of 8 shows a frame ~21 frames (~0.9s) behind the pointer — unacceptable for a review tool. Exact frame identity during scrub is the constraint; make the cache better instead.
@@ -181,63 +194,86 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
 3. **GPU-backed presentation / D3D11** — the likely next major performance initiative. It is also where the exact-cadence problem belongs: video presents one frame per timer tick, so the rate ceiling is `1000/round(1000/fps)`, and closing it needs a real presentation clock (vsync / waitable swapchain), not another scheduler experiment.
 4. **LucidLink read-ahead — optional follow-up, not started work.** See the read-ahead section above: two designs measured worse. First try full-request buffered serving instead of partial reads, then benchmark. Do not treat as in-progress.
 5. ~~**Audio, first pass — needs validation on Windows**~~ **Validated and fixed 2026-08-07**, on the local Windows toolchain against the `Trace_Testing_Assets` set. The three open questions are answered: (a) the device-latency correction is adequate — a fixed term measured neutral against the EMA, and residual sync is ≤62ms worst case at a 100ms buffer; (b) no underruns during playback on any file including 4K ProRes 422 HQ — the only silence padding is at end of stream once the audio track runs out, and the ring is now derived at ≥2x the device buffer rather than a fixed 0.5s; (c) the bounded catch-up no longer fires at all in normal playback — **skips are 0** on every file measured. Results: 1080p H.264 **99.1%** of real time (240/240 frames), 4K H.264 **98.3%** (120/120), 4K ProRes 422 HQ **98.4%** (168/168, against a recorded baseline of 164 frames / 95.0%), 4K ProRes 4444 no-audio control **98.3%** (261/261). Remaining residual is 3–5 *holds* per 10s clip with no frame dropped, which is the 41ms tick against a 41.667ms frame — a presentation-clock problem, and item 3's to solve. **Still not done: the LucidLink regression** (`start()` now takes a bounded ≤150ms UI-thread wait to prime the ring; ~10–13ms locally, unmeasured on a cold remote source) and J-K-L off-speed audio, then scrub audio.
-6. **4K scrub throughput — the cache is sized in the wrong currency, and ProRes is decode-bound.** Backward dragging shuttles everywhere now and is excellent at 1080p (90% cache hits, uniform pacing). What is left is 4K:
+6. ~~**4K scrub throughput — the cache is sized in the wrong currency**~~ **Resolved 2026-08-07** (`b5a56af`), except for ProRes 4444. Eviction is by bytes now and previews convert to the displayed size; see the scrub entries in Decisions for the measured table. 4K H.264 backward went 31.3 → 0.69ms/frame, ProRes 422 backward 13.1 → 7.5ms, and everything except 4444 reaches `lag 0-1f` on a 1.5s full-clip sweep.
 
-   - **4K H.264 backward is still slow** (23.5ms/frame, ~56% hits). The binding constraint is cache *capacity*, which is computed as `192MB / (w*h*4)` — the **full-res** frame size — giving 6 slots at 4K. But a Scrub entry above 1920px is half-res and therefore a quarter of that footprint, so roughly 4x as many would fit inside the same budget. Six slots cannot serve a backward walk through a 30-frame GOP however good the hit logic is. The fix is to evict by **bytes** rather than by entry count, so mixed-resolution entries are budgeted honestly.
-   - **4K ProRes scrub cannot go much faster.** Measured per frame: decode 4.1ms + half-res sws 6.7ms + paint 0.4ms ≈ 11.2ms, so ~90 frames/sec, about 3.7x playback. A request for "4x faster" is not reachable — decode alone is 4.1ms and FFmpeg's ProRes decoder has no `lowres` path, so the only lever left is skipping frames, which the shuttle deliberately never does. Quarter-res previews would buy roughly 4ms of the sws term and nothing else.
+   **What is left is 4K ProRes 4444, and it is decode-bound**: 15.4ms of its 17.7ms/frame is the ProRes decoder itself, so no cache or conversion work can reach it and FFmpeg's ProRes decoder has no `lowres` path. ~56 frames/sec, about 2.3x playback, against the owner's "~4x on a fast drag". The only remaining levers are skipping frames — which the shuttle deliberately never does — or decoding off the UI thread. Treat "4x on 4444" as a product decision to take explicitly rather than a bug to fix.
 
-   Reverse *playback* (as opposed to dragging) beyond the cache is the same underlying problem — H.264 needs GOP-aware backward buffering.
+   Reverse *playback* (as opposed to dragging) beyond the cache is still the same underlying problem — H.264 needs GOP-aware backward buffering.
 7. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`). **EXR does not open today**: OpenImageIO is not installed in vcpkg and not built in CI, so `TRACE_WITH_OIIO` is undefined in both.
 
-## Where scrub stands (end of 2026-08-07 session)
+## Where scrub stands (2026-08-07, second session)
 
-Forward dragging is signed off ("feeling really nice"). Everything below is
-open, and the owner's summary was that fast scrub still feels off and there is
-"a lot to improve upon" -- treat the current state as a good foundation, not as
-done.
+Forward dragging was already signed off ("feeling really nice"). This session
+addressed the owner's report that **ProRes HQ, ProRes 4444, 4K MP4 and 4K 60fps
+MP4 were all slow to respond to fast drags**, that 4K MP4 backward was
+"stuttery and slow", and that clicking the timeline on 4K ProRes 4444 was slow
+to lock on. 1080p MP4 and the PNG sequence were reported good and are unchanged.
 
 **The product spec, in the owner's words:** click jumps to a point; dragging
 displays every frame consecutively and never jumps; a fast drag should feel
 like ~4x playback, a medium drag ~2x, easing to a stop; the slider should
 always feel smooth. Frames are never skipped during a drag at any speed --
-overrun shows up as lag and is walked off.
+overrun shows up as lag and is walked off. All of that still holds.
+
+**Where each case now sits.** 1.5s continuous sweeps across the whole clip in a
+1280x760 window; ms/frame is the shuttle rate, lag is frames behind the pointer
+at the moment it stops:
+
+| file | before | after |
+|---|---|---|
+| 4K H.264 backward | 31.32ms, lag 50f, 57.1% hits | **0.69ms, lag 0f, 87.9% hits** |
+| 4K H.264 forward | 10.95ms, lag 2f | 11.33ms, lag 1f |
+| 4K 60fps H.264 backward | — | **2.87ms, lag 0f, 90.4% hits** |
+| 4K ProRes 422 HQ backward | 13.08ms, lag 49f, 0% hits | **7.50ms, lag 1f** |
+| 4K ProRes 422 HQ forward | 12.09ms, lag 45f | **8.91ms, lag 1f** |
+| 4K ProRes 4444 backward | 25.38ms, lag 171f | 17.71ms, lag 156f |
+| 4K ProRes 4444 forward | — | 18.24ms, lag 156f |
+| 1080p H.264 (untouched path) | — | 2.82ms, lag 0f |
+
+**The one case still short of spec is 4K ProRes 4444**, and it is decode-bound:
+15.4ms of its 17.7ms/frame is FFmpeg's ProRes decoder, which has no `lowres`
+path. That is ~2.3x playback against the owner's ~4x. Nothing in the cache or
+the conversion path can reach it. The honest options are to decode off the UI
+thread (which reopens the async-decode question the project has twice reverted)
+or to skip frames on the heaviest media as an explicit product decision. Do not
+promise 4x on 4444 without one of those.
 
 **Known open items, in the order they are likely worth attacking:**
 
-1. **Cache eviction should be by bytes, not entry count.** This is the single
-   highest-value fix identified. Capacity is `192MB / (w*h*4)` using the
-   *full-res* frame size, giving 6 entries at 4K -- but a half-res Scrub entry
-   is a quarter of that footprint, so roughly 24 would fit the same budget. Six
-   cannot serve a backward walk through a 30-frame GOP however good the hit
-   logic is. This is what makes 4K H.264 backward drag steppy (23.5ms/frame,
-   ~56% hits).
-2. **4K ProRes scrub is decode-bound and cannot be made much faster.** ~11.2ms
-   per frame (decode 4.1 + half-res sws 6.7 + paint 0.4), so ~90 frames/sec,
-   about 3.7x playback. The owner asked for 4x faster; that is not reachable
-   without skipping frames. FFmpeg's ProRes decoder has no `lowres` path.
-   Quarter-res previews would buy ~4ms of the sws term and nothing else. If
-   speed matters more than every-frame on heavy ProRes, that is a product
-   decision to take explicitly rather than a bug to fix.
-3. **Backward drag smoothness beyond the cache fix.** Even with more capacity,
-   a miss costs a seek plus a GOP walk (~22ms) against ~0.5ms for a hit, so the
-   cost is inherently lumpy. Pacing was the obvious answer and was rejected on
-   feel (see the shuttle entry in Decisions). GOP-aware backward buffering --
-   decode a GOP forward into the cache and serve the drag from it in reverse --
-   is the real fix.
-4. **The HUD's `target`/`shown` go stale on cache hits**, because the cache-hit
-   path returns before `previewTargetFrame`/`previewDisplayedFrame` are set. Not
-   harmful, but it misleads while debugging a drag -- fix it before the next
-   scrub investigation rather than during one.
+1. **4K ProRes 4444 fast drag** — see above. Needs a decision, not a fix.
+2. **Backward *playback* (not dragging) beyond the cache** is still GOP-walk
+   bound on long-GOP H.264. The drag path is fast now because it walks
+   sequentially and the cache absorbs the misses; reverse playback does not
+   share that. GOP-aware backward buffering is the real fix.
+3. **The landing frame is the slowest single conversion in the app.** A Step
+   lands 4K ProRes 4444 in ~55ms (decode 22 + full-res accurate sws 32). The
+   drag preview beside it costs ~2ms. Converting the landing frame to display
+   size too would be both faster and sharper -- the viewer only ever fits to
+   window, so no pixel the user can see is lost -- but it changes what the
+   *inspected* frame is made of, so it wants an explicit decision. Measured
+   check that this is not already a problem: preview and landing local contrast
+   are within 0.7% of each other, so there is no visible sharpness inversion
+   today.
+4. **1080p is deliberately excluded from display-size previews** (the `> 1920`
+   gate). Its sws is already ~1ms so there is little to win, and the path is
+   signed off. Worth revisiting only with a measurement.
+5. **The HUD's `target`/`shown` go stale on cache hits**, because the cache-hit
+   path returns before `previewTargetFrame`/`previewDisplayedFrame` are set.
+   Still true, still only a debugging nuisance.
 
-**Tuning knobs added this session**, all defaulting to shipped behaviour:
-`TRACE_SCRUB_PACE`, `TRACE_AUDIO_BUFFER_MS`, `TRACE_AUDIO_SLEW`,
-`TRACE_AUDIO_FIXED_LATENCY`, `TRACE_NO_AUDIO`.
+**Tuning knobs**, all defaulting to shipped behaviour: `TRACE_SCRUB_FILL_MS`
+(seek-walk cache fill budget during a drag, default 60ms),
+`TRACE_PREVIEW_DISPLAY_SIZE=0` (back to plain half-res previews),
+`TRACE_SCRUB_PACE`, `TRACE_SEEK_CACHE_WINDOW`, `TRACE_AUDIO_BUFFER_MS`,
+`TRACE_AUDIO_SLEW`, `TRACE_AUDIO_FIXED_LATENCY`, `TRACE_NO_AUDIO`.
 
 **Measurement note:** the HUD is unreadable in a normal screenshot on the
 5120x1440 panel -- it downsamples too far. Capture the Trace window at native
 resolution instead (GetWindowRect + Graphics.CopyFromScreen). Synthetic drags
 that teleport the pointer and pause overstate how well the shuttle keeps up;
-use a continuous sweep with a spin-wait for realistic pacing.
+use a continuous sweep with a spin-wait for realistic pacing. Find the timeline
+groove by scanning for the RGB(55,55,55) track rather than assuming a y offset:
+the transport sits above a HUD whose height depends on the media.
 
 ## Working conventions
 
