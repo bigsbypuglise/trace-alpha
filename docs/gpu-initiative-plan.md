@@ -547,3 +547,230 @@ by the landed index; and make cancellation checkable *inside* the GOP walk, sinc
 that is the only loop long enough to matter. The `MediaIoSource` rule stands — a
 superseded read runs to completion and is reported stale, never abandoned
 mid-buffer, because the destination belongs to FFmpeg.
+
+---
+
+## 14. Step 5 — the async scrub worker (GATE D design)
+
+### 14.1 The control measurement, taken first
+
+§7 named `kScrubWalkBudgetMs` and the zero-interval re-arm as the two knobs that
+decide how much of the UI thread a synchronous shuttle takes, and said they were
+worth an A/B *before* async as a cheap control. That A/B has been run, on the
+reversal gesture set, measured with the new `ui gap` instrument (`e343c55`) — a
+1ms timer that can only fire when the event loop is running, so the interval
+between two firings is exactly how long the thread was unable to deliver a mouse
+move or a repaint.
+
+| file | walk budget | re-arm | **worst UI gap** | gaps >16ms | paints |
+|---|---|---|---|---|---|
+| 4K H.264 | 8ms *(shipped)* | 0ms | **115.6ms** | 3 of 1676 | 442 |
+| 4K H.264 | 2ms | 0ms | **112.0ms** | 3 of 1374 | 398 |
+| 4K H.264 | 8ms | 12ms | **113.1ms** | 3 of 1887 | 388 |
+| 1080p H.264 | 8ms *(shipped)* | 0ms | **86.6ms** | 25 of 442 | 826 |
+| 1080p H.264 | 2ms | 0ms | **81.3ms** | 23 of 508 | 672 |
+
+**Quartering the budget moves the worst UI-thread block by 3%.** The reason is
+structural and it is the finding that justifies the whole step: the budget is
+checked *between* frames, so it bounds the loop but cannot subdivide a single
+`decodeFrameAt`. The worst block is one call — a cache miss forcing a seek plus a
+GOP walk — and no scheduler policy on the UI thread can reach inside it. The
+budget only bounds how many *cheap* frames a slice chains, which is exactly why
+1080p (1.7ms/frame, several frames per slice) moves a little and 4K (one
+expensive frame per slice) does not move at all.
+
+Two things worth carrying forward from the same table:
+
+- **1080p is the worse case for responsiveness, not 4K.** Average UI gap is
+  6.53ms against 1.70ms, and 5.7% of samples exceed 16ms against 0.2%. Cheap
+  frames mean the slice runs to its full budget and re-arms immediately, so the
+  thread is nearly saturated; expensive frames mean one decode and a return to
+  the event loop. This is very likely the owner's "1080p backward is still a lil
+  glitchy" on a file whose throughput numbers are excellent.
+- **Release latency is 91ms on 4K H.264 and 0.1ms on 1080p.** The landing is a
+  seek plus a GOP walk and is deliberately synchronous; it is reported separately
+  so it is never confused with the drag.
+
+The async win can now be booked honestly, because the scheduler tweak it might
+have been confused with has been measured and does nothing.
+
+### 14.2 Decoder ownership
+
+**Today.** One `VideoDecoderFFmpeg`, owned by the UI thread, called only from it.
+`storageBusy_` is a re-entrancy guard against the UI thread re-entering its own
+decode when a remote read pumps the event loop. No other thread touches it.
+
+**Proposed: a lease, not a move.** The decoder stays a member of `MainWindow` and
+stays on the UI thread by default. For the duration of a drag it is *leased* to
+one worker thread, and while leased the UI thread does not touch it at all —
+not `decodeFrameAt`, not `perfStats()`, not `ioStats()`, not `currentFrame()`.
+Exactly one owner at any instant, and the transition points are all on the UI
+thread, all at moments when the UI thread is provably not inside a decoder call.
+
+The alternative — moving the decoder permanently to a worker and having playback
+call in synchronously — was rejected: it would put a thread round trip inside the
+validated audio-mastered playback tick, and the brief forbids rewriting playback.
+
+`metadata_` is the one thing read while leased. It is written only by `open()`,
+which cannot run while a lease is out, so it is immutable for the lease's
+lifetime. Everything else the HUD wants is **snapshotted by the worker and
+published with the result**; `refreshHud` reads the snapshot. That removes the
+whole class of "benign" counter races rather than arguing about them.
+
+### 14.3 Ownership transitions
+
+| event | transition | cost |
+|---|---|---|
+| **scrub start** — first drag slice, `flushVideoScrub` decides the walk is due | UI→Worker. UI sets the decoder's request mode and direction, sets its stall pump to null, marks the lease held, posts the request. | none |
+| **scrub end** — release, or the drag converges and no request is outstanding | Worker→UI via `reclaimDecoder()`: raise cancel, wait for the worker to park at a checkpoint, restore the stall pump, clear the lease. | one cancellation checkpoint |
+| **playback start** | `reclaimDecoder()` first, then playback proceeds exactly as today. | same |
+| **media switch / close** | `reclaimDecoder()` before `videoDecoder_.close()`. Generation bump means any result already produced is stale and can never be inserted against new media. | same |
+| **shutdown** | `reclaimDecoder()`, then stop and join the worker. The worker holds no decoder when parked, so the join is bounded by one checkpoint. | same |
+
+The stall pump is nulled while leased because it pumps *the calling thread's*
+event loop and touches widgets. On the worker a remote read simply blocks the
+worker, which is the correct behaviour and the entire point. The `MediaIoSource`
+rule is unchanged: a read already in flight runs to completion and is reported
+stale.
+
+`reclaimDecoder()` is a bounded UI-thread wait, and that is worth stating
+plainly rather than hiding: it is not zero. It is bounded by one cancellation
+checkpoint — roughly one packet decode — which is *less* than the UI thread
+already pays per frame of the synchronous walk today, and it happens on release
+and media transitions rather than per frame.
+
+### 14.4 The latest-target slot
+
+Depth 1, replaced rather than queued, as §6 requires:
+
+```
+worker state, one mutex:
+    std::optional<Request> pending_;    // overwritten by post(), never queued
+    Request                active_;      // what the worker is decoding now
+    std::atomic<long long> latestGeneration_;   // read by the cancel checkpoint
+```
+
+`post(frame, generation)` overwrites `pending_` and stores `latestGeneration_`.
+The worker takes `pending_` into `active_` at the top of its loop, so a target
+that is superseded before the worker gets to it is simply never decoded.
+
+**A subtlety that would have been a bug.** `requestGeneration_` bumps on every
+change of *pointer* target, which during a drag is every slider move. The
+worker's target is not the pointer — it is `activeScrubFrame_ + direction`, the
+next frame of the shuttle, and that does **not** change when the pointer moves.
+Testing staleness against `requestGeneration_` directly would therefore abandon a
+perfectly good in-flight walk step on every mouse move.
+
+The fix is not a second counter. Requests are stamped with the value of
+`requestGeneration_` *at the moment they are posted*, and the staleness test is
+`active_.generation != latestGeneration_` — "has a newer request been posted to
+the worker", not "has the pointer moved". The number is still
+`requestGeneration_`; `latestGeneration_` only records which of its values was
+last handed to the worker.
+
+### 14.5 Generation flow
+
+```
+pointer moves            -> queueVideoScrubFrame -> supersedeInFlightRequests()
+                            ++requestGeneration_          (unchanged, §13)
+
+walk target changes      -> worker.post(frame, requestGeneration_)
+                            latestGeneration_ = requestGeneration_
+
+decode checkpoint        -> active_.generation != latestGeneration_ ? abandon
+    (inside the GOP walk)
+
+result published         -> {requestedFrame, generation, VideoFrame, telemetry}
+
+UI delivery boundary     -> generation != worker.latestGeneration() ? drop
+                            ++supersededResults_        (the existing `drop`)
+```
+
+Release, play, media switch and shutdown all go through `reclaimDecoder()`,
+which bumps `requestGeneration_` and pushes the new value into
+`latestGeneration_` — so every result already in flight is stale by construction
+and **no preview can appear after the exact landing**. That is the invariant, and
+it is enforced by the same counter that already exists rather than by ordering.
+
+### 14.6 Safe cancellation points inside the GOP walk
+
+`decodeUntilTarget`'s outer `while (true)`, at the very top, before the
+drained check. At that point:
+
+- no `AVPacket` is owned — every path unrefs before looping
+- `impl_->frame` is not being written
+- the codec is between send/receive cycles, not mid-transition
+- no swscale conversion is in progress
+
+It is reached **once per packet**, which on long-GOP H.264 is once per ~0.5–3ms —
+the granularity that makes cancellation latency small enough to matter. The inner
+receive loop is deliberately *not* instrumented: it normally yields one frame then
+EAGAIN and returns to the outer loop anyway, so a check there buys nothing and
+adds a point where the codec state is less obviously quiescent.
+
+A cache-fill conversion during a Scrub seek walk can delay the next checkpoint by
+one conversion (~1.9ms at 4K preview resolution). Accepted, and measured.
+
+**Abandonment is not failure.** `decodeUntilTarget` returns three states rather
+than a bool. `Abandoned` must not take the recovery-seek path — `recov` is a
+correctness counter that has to stay 0, and an abandoned walk is not a
+mispositioned decoder. Decoder state after an abandon is coherent:
+`lastDecodedFrame` reflects what was actually decoded, `currentFrame_` is
+untouched because no frame was produced, and the next request re-evaluates
+`needSeek` from both.
+
+### 14.7 VideoFrame across the thread boundary
+
+Nothing to add. This is what step 2 bought:
+
+- `shared_ptr<FrameBuffer>` has an atomic refcount, so handing a frame across
+  threads is a refcount bump and dropping a stale one is a single decrement.
+- The convert pool's free test is `use_count() == 1`. A count of 1 means the pool
+  is the only holder, so no other thread has a reference to copy *from*; the
+  worst a concurrent decrement by the UI thread can cause is a missed reuse, and
+  the pool then allocates or picks another slot.
+- The viewer and the frame cache keep their own references, so a buffer the UI is
+  still displaying can never be handed back to swscale.
+- The pool container itself, and `reverseCache`, are decoder-internal and
+  therefore covered by the lease.
+
+The worker decodes into a member `VideoFrame` so the pool sees a steady number of
+outstanding references across requests, exactly as `videoFrameBuffer_` does on
+the UI side today.
+
+### 14.8 The six prior failure modes
+
+| §6 defect | how this design avoids it |
+|---|---|
+| 1. second decoder on the same file | One decoder, leased. The worker has no decoder of its own and cannot construct one; it holds a pointer that is only valid while the lease is out. |
+| 2. FIFO queue, no generation | Depth-1 slot, overwritten. Every request carries a generation, tested at a checkpoint inside the walk and again at the UI delivery boundary. |
+| 3. results keyed by the landed index | The result carries the **requested** frame and the delivered `VideoFrame::frameIndex`. §13 already made `target`/`shown`/`delta` read off the frame; the worker publishes both so a disagreement is visible rather than papered over. |
+| 4. stale insert after reset | There is no `ready_` map to insert into. A result is published to a single slot and is dropped at the boundary if its generation is not the latest. `reclaimDecoder()` bumps the generation *before* the worker can park, so anything produced during the wait is already stale. |
+| 5. eviction picks the lowest frame index | The cache is untouched by this step. Eviction stays FIFO by bytes (`9513965`, `b5a56af`). |
+| 6. `stop()` joins mid-GOP-walk | The join is preceded by cancellation and bounded by one checkpoint. The worker holds no decoder when parked. |
+
+### 14.9 What stays synchronous, and why
+
+Only the **drag shuttle** moves. The press landing, the release landing, frame
+stepping, playback and the image-sequence path all keep the exact code they have
+today.
+
+That is deliberate on the release landing in particular: making it synchronous is
+what makes "no older preview may appear afterwards" trivially true, because the
+UI thread reclaims the decoder — which bumps the generation and invalidates every
+in-flight result — *before* it decodes the exact frame. The 91ms it costs on 4K
+H.264 is a measured, single, wanted decode, not a stall.
+
+**Cache hits now cost a thread round trip.** With the decoder leased, the UI
+thread cannot consult the cache without taking the lease back, and a second
+UI-side index would be a second source of truth about what is cached. The hit
+itself is still the ~0.5ms fast path it was — it is not routed through a seek —
+but delivery costs one hop through the event loop. This is the one place the
+design pays something, and it is measured rather than assumed.
+
+### 14.10 Expected files changed
+
+`src/core/VideoDecoderFFmpeg.{h,cpp}` (cancel predicate, three-state walk result,
+abandon counters) · `src/core/ScrubDecodeWorker.{h,cpp}` (new) ·
+`src/app/MainWindow.{h,cpp}` (lease, chain, telemetry snapshot, HUD) ·
+`app/CMakeLists.txt` · this file · `CLAUDE.md` · `scripts/measure/`.
