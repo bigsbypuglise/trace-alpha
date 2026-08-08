@@ -1,12 +1,13 @@
 #pragma once
 
 #include <QWidget>
-#include <QImage>
 #include <QSize>
 #include <QString>
 #include <QElapsedTimer>
+#include <memory>
 
 #include "core/VideoFrame.h"
+#include "render/VideoRenderer.h"
 
 namespace trace::ui {
 
@@ -18,25 +19,28 @@ struct ViewerPerfStats {
     double avgPaintMs = 0.0;
     long long samples = 0;
 
-    double lastDrawImageMs = 0.0;   // QPainter::drawImage only
+    double lastDrawImageMs = 0.0;   // the blit only
     double avgDrawImageMs = 0.0;
-    double lastPaintTotalMs = 0.0;  // paintEvent entry -> after ~QPainter
+    double lastPaintTotalMs = 0.0;  // paintEvent entry -> after the flush
     double avgPaintTotalMs = 0.0;
     double lastUpdateToPaintMs = 0.0; // update() request -> paintEvent entry
     double avgUpdateToPaintMs = 0.0;
     long long paintCount = 0;
     long long updateCount = 0;
-    // Set when a paint is served without a new setImage() since the last one.
+    // Set when a paint is served without a new setFrame() since the last one.
     long long paintsWithoutNewImage = 0;
 
     // Whether the last frame was resampled to fit, and the size it was drawn
     // at: the scale factor is what decides whether filtering is good enough or
-    // the downscale needs to move into swscale.
+    // the downscale needs to move into the conversion.
     bool lastDrawWasScaled = false;
     bool lastDrawWasFiltered = false;
     QSize lastDrawSize;
 };
 
+// Hosts a VideoRenderer and owns the scheduling around it: when a repaint is
+// asked for, how long it took to arrive, and which frame is current. What the
+// pixels do on the way to the screen belongs to the renderer.
 class ViewerWidget final : public QWidget {
     Q_OBJECT
 public:
@@ -46,21 +50,18 @@ public:
     void clearImage();
     void setCenterText(const QString& text);
     const ViewerPerfStats& perfStats() const { return perfStats_; }
-    // What is currently on screen. The renderer boundary will want the frame
-    // rather than the pixels; until then it is also the honest answer to "which
-    // frame is displayed", which the HUD has had to infer.
     const trace::core::VideoFrame& frame() const { return frame_; }
+    QString rendererName() const;
 
 protected:
     void paintEvent(QPaintEvent* event) override;
+    void resizeEvent(QResizeEvent* event) override;
 
 private:
-    // The frame holds the buffer alive; image_ is a zero-copy read-only view
-    // over it, built once per frame rather than per paint.
+    std::unique_ptr<trace::render::VideoRenderer> renderer_;
+    // Kept here as well as in the renderer so "which frame is displayed" is
+    // answerable without asking the backend.
     trace::core::VideoFrame frame_;
-    QImage image_;
-    bool hasImage_ = false;
-    QString centerText_ = "Drop media or File > Open";
     ViewerPerfStats perfStats_{};
     // Single monotonic source for this widget, so update()->paint latency is
     // measured against one clock rather than two independent timers.

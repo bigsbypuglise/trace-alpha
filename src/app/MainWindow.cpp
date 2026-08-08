@@ -1392,14 +1392,17 @@ void MainWindow::refreshHud(const QString& action) {
             // Colour and resampling state: a picture that looks wrong is either
             // a matrix/range mismatch or a scaled presentation, and both are
             // otherwise invisible.
-            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6")
+            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | renderer %7")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
                 .arg(perf.srcFullRange ? "full" : "limited")
                 .arg(drawPerf.lastDrawSize.width())
                 .arg(drawPerf.lastDrawSize.height())
                 .arg(!drawPerf.lastDrawWasScaled ? "1:1"
-                     : drawPerf.lastDrawWasFiltered ? "filtered" : "NEAREST");
+                     : drawPerf.lastDrawWasFiltered ? "filtered" : "NEAREST")
+                // Which backend is actually presenting. A GPU path that quietly
+                // fell back to cpu would otherwise be invisible.
+                .arg(viewer_->rendererName());
 
             const QString l2 = QString("dec %1/%2 | sws %3/%4 | ctx %5/%6 | detach %7/%8 | alloc %9 | memcpy %10 | handoff %11 | draw %12 | total %13 | budget %14ms")
                 .arg(QString::number(perf.lastDecodeMs, 'f', 2))

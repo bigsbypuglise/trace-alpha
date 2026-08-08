@@ -36,6 +36,10 @@ add_executable(Trace
   ../src/app/MainWindow.cpp
   ../src/ui/ViewerWidget.h
   ../src/ui/ViewerWidget.cpp
+  ../src/render/VideoRenderer.h
+  ../src/render/VideoRenderer.cpp
+  ../src/render/CpuImageRenderer.h
+  ../src/render/CpuImageRenderer.cpp
   ../src/ui/TransportOverlay.h
   ../src/ui/TransportOverlay.cpp
   ../src/ui/TransportBar.h
