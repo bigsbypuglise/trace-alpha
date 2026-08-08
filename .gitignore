@@ -1,5 +1,8 @@
 # Build outputs
 build/
+# Side build trees, e.g. configuring without the vcpkg toolchain to prove the
+# TRACE_WITH_FFMPEG / TRACE_WITH_AUDIO guards still compile with those absent.
+build-*/
 out/
 cmake-build-*/
 
