@@ -1,4 +1,9 @@
-param([double]$Seconds = 1.5, [switch]$Backward, [switch]$Reversals)
+# -SnapRelease releases the button the instant the sweep ends, with no settling
+# pause. That is the only gesture that reliably catches a decode still in
+# flight, which is what exercises cooperative cancellation: with the usual
+# 400ms pause the shuttle converges and goes idle first, so a release has
+# nothing to cancel and `abandoned`/`cancel` read 0 however well they work.
+param([double]$Seconds = 1.5, [switch]$Backward, [switch]$Reversals, [switch]$SnapRelease)
 
 Add-Type -AssemblyName System.Drawing
 Add-Type @"
@@ -87,7 +92,7 @@ if ($Reversals) {
   Sweep $a $b $Seconds
 }
 
-Start-Sleep -Milliseconds 400
+if (-not $SnapRelease) { Start-Sleep -Milliseconds 400 }
 [W]::mouse_event([W]::UP, 0, 0, 0, [IntPtr]::Zero)
 Start-Sleep -Milliseconds 600
 Write-Output "done"

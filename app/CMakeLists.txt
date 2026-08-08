@@ -69,6 +69,8 @@ add_executable(Trace
   ../src/core/FrameSource.h
   ../src/core/VideoFrameSource.h
   ../src/core/VideoFrameSource.cpp
+  ../src/core/ScrubDecodeWorker.h
+  ../src/core/ScrubDecodeWorker.cpp
   ../src/core/ImageSequenceFrameSource.h
   ../src/core/ImageSequenceFrameSource.cpp
   resources.qrc

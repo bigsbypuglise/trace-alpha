@@ -111,6 +111,18 @@ double scrubWalkBudgetMs() {
     return ms;
 }
 
+// Whether random-access scrub decode runs on the worker. Default on; the
+// switch exists because the synchronous walk is the validated path and a
+// regression should be one env var away from being isolated, not a revert.
+bool asyncScrubEnabled() {
+    static const bool on = [] {
+        const QByteArray raw = qgetenv("TRACE_ASYNC_SCRUB");
+        if (raw == "0") return false;
+        return true;
+    }();
+    return on;
+}
+
 int scrubRearmMs() {
     static const int ms = [] {
         const QByteArray raw = qgetenv("TRACE_SCRUB_REARM_MS");
@@ -125,6 +137,16 @@ int scrubRearmMs() {
 }
 
 } // namespace
+
+MainWindow::~MainWindow() {
+    // Explicit, and before any member is destroyed. Cancellation is raised
+    // first and the join is bounded by one checkpoint inside the GOP walk, so
+    // quitting mid-drag on heavy media does not hang on a decode. The reverted
+    // attempt joined a worker that could be anywhere in a walk with nothing to
+    // interrupt it.
+    reclaimDecoder();
+    scrubWorker_.stop();
+}
 
 MainWindow::MainWindow() {
     setWindowTitle("Trace");
@@ -634,6 +656,8 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
 
 void MainWindow::syncScrubPreviewSize() {
     if (!viewer_) return;
+    // Clears the frame cache inside the decoder, so it needs the decoder back.
+    reclaimDecoder();
     // Device pixels, not logical: on a scaled display the widget is drawn at
     // more pixels than its logical size, and converting to the logical size
     // would put the softness back that this exists to remove.
@@ -651,7 +675,22 @@ void MainWindow::syncTransportBar() {
 
     suppressSliderSignal_ = true;
     timelineSlider_->setMaximum(maxFrame);
-    timelineSlider_->setValue(static_cast<int>(std::clamp(st.currentFrame, 0LL, st.maxFrame < 0 ? 0LL : st.maxFrame)));
+    // While the user is holding the handle, the handle belongs to the user.
+    //
+    // This wrote the *decoded* frame back into the slider on every HUD
+    // refresh, which during a drag is several times a second -- so the handle
+    // was repeatedly yanked from under the pointer to wherever the picture had
+    // got to, and the next mouse move dragged it back. That is precisely the
+    // "slider not keeping up with the pull" report, and it is not event-loop
+    // starvation: the handle was being moved somewhere else on purpose.
+    //
+    // It also corrupted the landing. sliderReleased lands on
+    // timelineSlider_->value(), so if the last write before mouse-up was a
+    // yank rather than a pointer move, the release lands on the frame the
+    // decoder happened to reach instead of the one the user pointed at.
+    if (!timelineSlider_->isSliderDown()) {
+        timelineSlider_->setValue(static_cast<int>(std::clamp(st.currentFrame, 0LL, st.maxFrame < 0 ? 0LL : st.maxFrame)));
+    }
     suppressSliderSignal_ = false;
 
     const bool hasPlayableRange = st.maxFrame > 0;
@@ -687,7 +726,54 @@ long long MainWindow::supersedeInFlightRequests() {
     // reported stale. The generation bump is what makes the decode spanning it
     // get discarded.
     if (storageBusy_) videoDecoder_.cancelOutstandingIo();
+    // Deliberately does NOT push the new generation at the scrub worker.
+    //
+    // This is called on every pointer move, and the shuttle's target is not
+    // the pointer -- it is the next frame after the one on screen, which does
+    // not change as the pointer travels. Telling the worker that its target
+    // had moved every time the mouse did was measured: 111 abandoned walks and
+    // 141 stale results out of 404 posted, seeks up from 28 to 118, cache hits
+    // halved and only a third of the frames painted. The worker is superseded
+    // where the target genuinely changes -- reclaimDecoder, which is release,
+    // play, media switch and shutdown.
     return requestGeneration_;
+}
+
+void MainWindow::grantDecoderLease() {
+    if (decoderLeased_) return;
+    // The stall pump keeps the CALLING thread's event loop alive during a slow
+    // remote read. On the worker there is no event loop to keep alive and the
+    // widgets it touches belong to this thread, so it comes off for the
+    // duration of the lease. A remote read simply blocks the worker instead,
+    // which is the correct behaviour and the entire point of the exercise.
+    videoDecoder_.setStallPump(nullptr);
+    decoderLeased_ = true;
+}
+
+double MainWindow::reclaimDecoder() {
+    if (!decoderLeased_) return 0.0;
+    // Order matters. Bump the generation FIRST: anything the worker publishes
+    // between here and it parking is then already stale by construction, which
+    // is what makes "no older preview can appear after the exact landing" a
+    // property of the counter rather than of the ordering of two callbacks.
+    scrubWorker_.supersede(supersedeInFlightRequests());
+    const double waitMs = scrubWorker_.revokeLease();
+    decoderLeased_ = false;
+    videoDecoder_.setStallPump([this](double waitedMs) {
+        pumpDuringStorageStall(waitedMs);
+    });
+    // The worker's last snapshot is whatever it published; refresh from the
+    // live decoder now that reading it is this thread's business again.
+    captureDecoderTelemetry();
+    return waitMs;
+}
+
+void MainWindow::captureDecoderTelemetry() {
+    if (decoderLeased_) return;
+    hudPerf_ = videoDecoder_.perfStats();
+    for (int i = 0; i < static_cast<int>(trace::core::IoPhase::Count); ++i) {
+        hudIo_[i] = videoDecoder_.ioStats(static_cast<trace::core::IoPhase>(i));
+    }
 }
 
 void MainWindow::openPath(const QString& path) {
@@ -698,6 +784,12 @@ void MainWindow::openPath(const QString& path) {
         supersedeInFlightRequests();
         return;
     }
+    // Before anything else touches the decoder. Bumps the generation, so a
+    // frame the worker is producing for the OUTGOING media can never be
+    // inserted against the incoming media, and waits for it to park so
+    // close() below is not racing a decode.
+    reclaimDecoder();
+    scrubWorker_.stop();
     playTimer_.stop();
     stopAudio();
     audio_.close();
@@ -749,6 +841,9 @@ void MainWindow::openPath(const QString& path) {
             item.kind = MediaKind::VideoFile;
             item.frameCount = videoDecoder_.metadata().frameCount;
             frameSource_ = std::make_unique<trace::core::VideoFrameSource>(&videoDecoder_);
+            // Parked until a drag posts to it. Started per media so it never
+            // holds a pointer to a decoder that has been closed.
+            scrubWorker_.start(&videoDecoder_, this, [this]() { onScrubResult(); });
             playback_.resetForNewMedia(item.frameCount > 0 ? item.frameCount - 1 : -1);
             playback_.setCurrentFrame(0);
         } else {
@@ -865,6 +960,12 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     // Re-entrancy: reached from a timer tick or key press delivered while the
     // event loop was being pumped inside another decode. One decode at a time.
     if (storageBusy_) return false;
+    // Every synchronous decode -- step, playback, press landing, release
+    // landing -- takes the decoder back first. This is the single choke point
+    // that makes "the UI thread never touches a leased decoder" true rather
+    // than a convention observed at a dozen call sites. It is free when no
+    // lease is out, which is every frame of ordinary playback.
+    reclaimDecoder();
     error.clear();
     if (!currentMedia_.has_value() || !frameSource_) {
         error = "No media selected";
@@ -1174,6 +1275,136 @@ void MainWindow::queueVideoScrubFrame(long long frameIndex) {
     scrubTimer_.start(kScrubCoalesceMs);
 }
 
+void MainWindow::postScrubStep(long long frame, int direction) {
+    if (!isVideoScrubActive() || frame < 0) return;
+    // One request in flight at a time. This is not a queue depth limit for its
+    // own sake: the shuttle's next target is derived from the frame that was
+    // last PRESENTED, so there is nothing meaningful to ask for until the
+    // outstanding one lands. The chain re-posts from onScrubResult.
+    if (scrubWorker_.busy()) return;
+    // The UI thread is inside a decode of its own (a remote read pumping the
+    // event loop re-entered us). Leave it; the coalescing timer comes back.
+    if (storageBusy_) {
+        if (!scrubTimer_.isActive()) scrubTimer_.start(kScrubCoalesceMs);
+        return;
+    }
+    grantDecoderLease();
+
+    trace::core::ScrubRequest request;
+    request.frame = frame;
+    request.direction = direction;
+    // Stamped with the generation as it stands NOW. The worker's staleness
+    // test is against the generation last posted to it rather than against
+    // this counter directly, and the difference is load-bearing:
+    // requestGeneration_ bumps on every pointer move, while the shuttle's
+    // target only changes when the direction reverses. Testing the counter
+    // itself would abandon a perfectly good walk step on every mouse move.
+    request.generation = requestGeneration_;
+    scrubInFlightDir_ = direction;
+    scrubWorker_.post(request);
+}
+
+void MainWindow::onScrubResult() {
+    trace::core::ScrubResult result;
+    bool presentedAny = false;
+    bool hardError = false;
+    scrubInFlightDir_ = 0;
+
+    while (scrubWorker_.takeResult(result)) {
+        // Telemetry first, and unconditionally: a dropped result still says
+        // what the decoder did, and the HUD should show the work that was
+        // done rather than only the work that was used.
+        hudPerf_ = result.perf;
+        for (int i = 0; i < static_cast<int>(trace::core::IoPhase::Count); ++i) {
+            hudIo_[i] = result.io[i];
+        }
+
+        // The delivery boundary. The worker checked staleness before
+        // publishing, but the generation can move in the gap between that
+        // check and this callback being serviced -- a release, a play, a new
+        // file -- and the check that matters is the last one before the frame
+        // reaches the viewer.
+        if (result.generation != scrubWorker_.latestGeneration()) {
+            ++supersededResults_;
+            continue;
+        }
+        if (result.abandoned) {
+            // Not an error and not a frame: the target moved while this was
+            // being decoded. Counted with the stale drops because that is what
+            // it is -- work thrown away because the user moved on.
+            ++supersededResults_;
+            continue;
+        }
+        if (!result.ok) {
+            if (!result.error.isEmpty()) statusBar()->showMessage(result.error, 3000);
+            hardError = true;
+            continue;
+        }
+
+        // Present. Identical to the synchronous walk's loop body, minus the
+        // decode: the frame is already here.
+        videoFrameBuffer_ = result.frame;
+        lastRequestedFrame_ = result.requestedFrame;
+        lastDeliveredFrame_ = result.frame.frameIndex;
+        playback_.setCurrentFrame(result.frame.frameIndex);
+        viewer_->setFrame(videoFrameBuffer_);
+
+        const qint64 nowNs = scrubPresentClock_.isValid()
+            ? scrubPresentClock_.nsecsElapsed() : 0;
+        if (!scrubPresentClock_.isValid()) scrubPresentClock_.start();
+        // repaint(), not update(): update() coalesces, and a chain of them
+        // would decode every frame and display only the last, which is a jump
+        // and is the behaviour the shuttle exists to remove.
+        viewer_->repaint();
+        if (scrubLastPresentNs_ >= 0) {
+            const double gapMs =
+                static_cast<double>(nowNs - scrubLastPresentNs_) / 1'000'000.0;
+            const QScreen* scr = screen();
+            const double refreshHz = (scr && scr->refreshRate() > 1.0)
+                ? scr->refreshRate() : 60.0;
+            const double refreshMs = 1000.0 / refreshHz;
+            scrubPaintGapLastMs_ = gapMs;
+            scrubPaintGapMaxMs_ = std::max(scrubPaintGapMaxMs_, gapMs);
+            scrubPaintGapSumMs_ += gapMs;
+            ++scrubPaintGapSamples_;
+            if (gapMs < refreshMs) ++scrubPaintsWasted_;
+            if (gapMs > refreshMs * 2.0) ++scrubPaintStalls_;
+        }
+        scrubLastPresentNs_ = nowNs;
+
+        activeScrubFrame_ = result.frame.frameIndex;
+        // Shuttled, so possibly a preview-resolution frame: the release must
+        // land this properly even if it is already the one on screen.
+        scrubShownExact_ = false;
+        presentedAny = true;
+
+        // Measured rather than derived from VideoPerfStats averages, which
+        // pool seek-walk decodes and read several times the true sequential
+        // cost. Same EMA as the synchronous walk so the HUD figure is
+        // comparable across the two paths.
+        scrubWalkPerFrameMs_ += 0.35 * (result.decodeMs - scrubWalkPerFrameMs_);
+        scrubWalkPerFrameMs_ = std::max(0.05, scrubWalkPerFrameMs_);
+    }
+
+    // Chain. Any outcome that did not advance the picture re-posts the same
+    // frame, so a dropped or abandoned result resumes the shuttle rather than
+    // silently ending it -- which would leave the picture stranded behind a
+    // pointer that has stopped moving.
+    if (scrubbing_ && pendingScrubFrame_ >= 0 && activeScrubFrame_ >= 0
+        && pendingScrubFrame_ != activeScrubFrame_) {
+        if (hardError) {
+            // Do not spin on a decode that is failing for real. Let the
+            // coalescing timer retry at its own pace.
+            if (!scrubTimer_.isActive()) scrubTimer_.start(kScrubCoalesceMs);
+        } else {
+            const int dir = pendingScrubFrame_ > activeScrubFrame_ ? 1 : -1;
+            postScrubStep(activeScrubFrame_ + dir, dir);
+        }
+    }
+
+    if (presentedAny || hardError) refreshHud("Scrub");
+}
+
 void MainWindow::flushVideoScrub(bool forceExact) {
     // Storage is mid-read. Re-arm rather than drop the scrub: the pending
     // frame is already the newest target, so latest-target-wins is preserved
@@ -1255,6 +1486,44 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     const long long walkFrom = activeScrubFrame_;
 
     QString error;
+    if (dragging && walkFrom >= 0 && targetFrame != walkFrom && asyncScrubEnabled()) {
+        // Asynchronous shuttle. Same rule as the synchronous walk below and
+        // the same frames in the same order -- one frame at a time toward the
+        // pointer, never a jump -- but the decode happens on the worker and
+        // this thread returns to the event loop immediately.
+        //
+        // The ease and the walk budget are gone from this path rather than
+        // ported. Both existed only to decide when the synchronous loop should
+        // yield: `desired` capped how many consecutive frames one slice
+        // covered and `kScrubWalkBudgetMs` capped its time, but neither
+        // changed WHICH frames were shown, because the loop always stepped by
+        // one. Yielding is now free and happens after every frame, so there is
+        // nothing left for them to schedule. What they were really buying --
+        // "accelerate when far behind, settle gently on arrival" -- falls out
+        // of the pipeline by itself: the chain runs as fast as frames can be
+        // decoded and stops when it reaches the pointer.
+        const int dir = targetFrame > walkFrom ? 1 : -1;
+
+        // The pointer has crossed the picture. Whatever is in flight is now a
+        // frame on the far side of where the user is going, so continuing to
+        // decode it is pure waste -- and if it missed the cache it is a seek
+        // plus a GOP walk, up to ~100ms of it, in front of a reversal the user
+        // has already made. Supersede so the checkpoint inside the walk gives
+        // up; the chain re-posts in the new direction when the abandoned
+        // result comes back.
+        //
+        // This is the ONLY place a pointer move invalidates work in flight,
+        // and the condition is deliberately narrow: not "the pointer moved"
+        // -- which is every mouse event and was measured abandoning 62% of all
+        // walks -- but "the pointer is now on the other side of the picture".
+        if (scrubWorker_.busy() && scrubInFlightDir_ != 0 && scrubInFlightDir_ != dir) {
+            scrubWorker_.supersede(supersedeInFlightRequests());
+        }
+        postScrubStep(walkFrom + dir, dir);
+        refreshHud("Scrub");
+        return;
+    }
+
     if (dragging && walkFrom >= 0 && targetFrame != walkFrom) {
         // A drag NEVER jumps, in either direction. Frames are shown
         // consecutively however far the pointer has run ahead, and the picture
@@ -1458,8 +1727,16 @@ void MainWindow::refreshHud(const QString& action) {
 
     if (currentMedia_.has_value()) {
         if (currentMedia_->kind == MediaKind::VideoFile) {
+            // metadata_ is written only by open(), which cannot run while a
+            // lease is out, so it is immutable for the lease's lifetime and
+            // safe to read directly. Everything else comes from the snapshot:
+            // while the worker holds the decoder its counters are being
+            // written by that thread, and the HUD has no business reading
+            // them. Refreshed from the live decoder here whenever this thread
+            // owns it, which is every case except mid-drag.
+            captureDecoderTelemetry();
             const auto& vm = videoDecoder_.metadata();
-            const auto& perf = videoDecoder_.perfStats();
+            const auto& perf = hudPerf_;
             const auto& drawPerf = viewer_->perfStats();
             const double reverseHitRate = perf.reverseCacheLookups > 0
                 ? (100.0 * static_cast<double>(perf.reverseCacheHits) / static_cast<double>(perf.reverseCacheLookups))
@@ -1604,9 +1881,9 @@ void MainWindow::refreshHud(const QString& action) {
             // Storage + I/O. The whole point of splitting playback from seek is
             // that averaging them cannot answer whether ordinary forward
             // playback is read-starved.
-            const auto ioPlay = videoDecoder_.ioStats(trace::core::IoPhase::Playback);
-            const auto ioSeek = videoDecoder_.ioStats(trace::core::IoPhase::Seek);
-            const auto ioOpen = videoDecoder_.ioStats(trace::core::IoPhase::Open);
+            const auto& ioPlay = hudIo_[static_cast<int>(trace::core::IoPhase::Playback)];
+            const auto& ioSeek = hudIo_[static_cast<int>(trace::core::IoPhase::Seek)];
+            const auto& ioOpen = hudIo_[static_cast<int>(trace::core::IoPhase::Open)];
 
             const QString lio1 = QString("src %1 | %2 | %3 MB | %4 Mbps | iobuf %5 KB")
                 .arg(perf.sourceStorage)
@@ -1800,8 +2077,25 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(uiServiceSamples_)
                 .arg(QString::number(scrubReleaseLatencyMs_, 'f', 1));
 
+            // The worker. `cancel` is the number that decides whether
+            // cooperative cancellation is worth having: a 100ms walk that is
+            // eventually discarded is still bad if the pointer moved 90ms ago.
+            // `ckpt` is the decoder's contribution to it -- the longest gap
+            // between consecutive chances to notice -- so a bad `cancel` can
+            // be attributed to the checkpoint granularity or to the wait
+            // itself rather than guessed at.
+            const QString l7d = QString("worker %1 | posted %2 coalesced %3 | abandoned %4 stale %5 | cancel %6/%7ms | ckpt %8ms")
+                .arg(asyncScrubEnabled() ? (decoderLeased_ ? "LEASED" : "async") : "OFF")
+                .arg(scrubWorker_.requestsPosted())
+                .arg(scrubWorker_.requestsCoalesced())
+                .arg(perf.walksAbandoned)
+                .arg(scrubWorker_.resultsStale())
+                .arg(QString::number(scrubWorker_.lastCancelWaitMs(), 'f', 2))
+                .arg(QString::number(scrubWorker_.maxCancelWaitMs(), 'f', 2))
+                .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2));
+
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
-                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l8 + "\n" + l9
+                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
@@ -1945,6 +2239,9 @@ trace::core::VideoFrameSource* MainWindow::videoFrameSource() {
 }
 
 void MainWindow::prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction, bool clearQueue) {
+    // Sets decoder state, so it needs the decoder back. Never reached from the
+    // async drag path, which passes its mode and direction in the request.
+    reclaimDecoder();
     auto* videoSource = videoFrameSource();
     if (!videoSource) return;
     videoSource->setRequestMode(mode);

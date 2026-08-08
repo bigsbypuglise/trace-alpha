@@ -1306,7 +1306,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     qint64 lastCheckpointNs = -1;
     double maxCheckpointGapMs = 0.0;
     auto decodeUntilTarget = [&](long long target) -> WalkResult {
+        // Reset per call, not per request: the recovery path runs this twice
+        // and the second run's first gap would otherwise be measured against
+        // the first run's last checkpoint, with a seek in between.
         checkpointClock.start();
+        lastCheckpointNs = -1;
         while (true) {
             const qint64 checkNs = checkpointClock.nsecsElapsed();
             if (lastCheckpointNs >= 0) {

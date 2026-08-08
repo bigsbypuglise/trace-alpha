@@ -15,6 +15,7 @@
 #include "core/VideoDecoderFFmpeg.h"
 #include "core/FrameSource.h"
 #include "core/VideoFrameSource.h"
+#include "core/ScrubDecodeWorker.h"
 #include "core/AudioOutput.h"
 
 QT_BEGIN_NAMESPACE
@@ -38,6 +39,7 @@ class MainWindow final : public QMainWindow {
     Q_OBJECT
 public:
     MainWindow();
+    ~MainWindow() override;
 
     // Opens a media path supplied on the command line, exactly as File > Open
     // would. Invalid or missing paths are ignored so a bad argument never
@@ -87,6 +89,37 @@ private:
     // Returns the new generation.
     long long supersedeInFlightRequests();
 
+    // The decoder lease. There is one VideoDecoderFFmpeg and exactly one owner
+    // of it at any instant: this thread by default, the scrub worker for the
+    // duration of a drag. While the lease is out the UI thread touches nothing
+    // on the decoder -- not decodeFrameAt, not perfStats, not ioStats -- which
+    // is why the HUD reads a snapshot the worker publishes with each result.
+    void grantDecoderLease();
+    // Raise cancellation, wait for the worker to park outside the decoder, and
+    // take ownership back. Bounded by one cancellation checkpoint, which is
+    // less than the UI thread already pays per frame of a synchronous walk.
+    // Returns the wait in ms; 0 when no lease was out.
+    double reclaimDecoder();
+    bool decoderLeased_ = false;
+
+    // One step of the async shuttle. Posts the next walk frame if nothing is
+    // already in flight; the chain continues from onScrubResult.
+    void postScrubStep(long long frame, int direction);
+    void onScrubResult();
+    // Which way the request currently in flight was walking. 0 when nothing is
+    // outstanding. Compared against the direction the pointer now implies, so
+    // a reversal can abandon a walk that is heading away from it -- the one
+    // case where a pointer move is allowed to invalidate work in flight.
+    int scrubInFlightDir_ = 0;
+
+    // Decoder telemetry as of the last time it was safe to read. Refreshed
+    // from the live decoder when this thread owns it, and from the worker's
+    // published snapshot when it does not, so refreshHud has one source and
+    // never races the worker.
+    void captureDecoderTelemetry();
+    trace::core::VideoPerfStats hudPerf_;
+    trace::core::IoPhaseStats hudIo_[static_cast<int>(trace::core::IoPhase::Count)];
+
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
     trace::ui::TransportBar* transportBar_ = nullptr;
@@ -100,6 +133,11 @@ private:
     trace::core::StillImageLoader stillLoader_;
     trace::core::FrameCache frameCache_{1};
     trace::core::VideoDecoderFFmpeg videoDecoder_;
+    // Declared after the decoder so it is destroyed BEFORE it: the worker holds
+    // a pointer to the decoder, and a member destroyed in the other order could
+    // outlive what it points at. The destructor stops it explicitly as well --
+    // this ordering is the backstop, not the mechanism.
+    trace::core::ScrubDecodeWorker scrubWorker_;
     trace::core::AudioOutput audio_;
     std::unique_ptr<trace::core::FrameSource> frameSource_;
     QTimer playTimer_;
