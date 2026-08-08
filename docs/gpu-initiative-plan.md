@@ -5,8 +5,10 @@ validated on the local Windows toolchain: `VideoFrame` replaced bare `QImage` at
 the four seams (`03d840e`), the `VideoRenderer` boundary exists with
 `CpuImageRenderer` as its only implementation (`5765c19`), generation plumbing
 landed (`75a3412`, §13), and random-access scrub decode now runs on a worker
-with latest-target-wins (`f77d472`, §14). No GPU backend yet. **Next is step 6 —
-GATE B**, the first native D3D11 surface.
+with latest-target-wins (`f77d472`, §14). Step 5.5 followed (§15): the drag
+preview samples on all-intra media, and directional prefetch was measured and
+declined. No GPU backend yet. **Next is step 6 — GATE B**, the first native
+D3D11 surface.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
