@@ -305,13 +305,25 @@ decode-bound). 4K MP4 "decent" but threw a decode error on fast scrub (fixed,
 `2523d77`). Overall verdict was that the throughput gain did not convert into
 the smoothness expected -- which was correct, and is the entry below.
 
-**Owner test after the async scrub worker (2026-08-08, at `f77d472`):**
-"feeling really good". General verdict on the build rather than a per-format
-sign-off -- it is not yet confirmed which files were tried, so **4K ProRes 422
-HQ has not been separately re-confirmed as the bar at this commit**, and the
-heavy cases (4444, 4K MP4) have no owner verdict either way. Recorded as what it
-is: the async path did not break the feel, which after a change that moved
-decode onto another thread is the result that mattered most.
+**Owner test after the async scrub worker (2026-08-08, at `f77d472`): SIGNED
+OFF across the whole test set.** "Big improvements across the board", on all
+seven files -- so 4K ProRes 422 HQ holds as the bar, and every case that had a
+complaint against it improved.
+
+**Read that carefully before concluding anything about throughput, because the
+throughput did not change.** 4K ProRes 4444 shuttles at 15.72ms/frame against
+17.71ms before -- inside the noise -- and it is still decode-bound with no
+`lowres` path in FFmpeg's ProRes decoder. What improved on the heavy files is
+responsiveness and *handle tracking*, and on 4444 the second one is probably the
+larger part: the picture lags ~156 frames there, which is exactly how far the
+slider handle was being yanked back from the pointer on every HUD refresh. The
+file that felt worst was the file the yank hurt most.
+
+So: **"4x on 4444" is still an open product decision, not a solved problem.**
+The remaining honest options are unchanged -- decode off the UI thread in a way
+that produces more than one frame per request, or skip frames on the heaviest
+media as an explicit choice. Do not let this sign-off be read as retiring that
+question.
 
 **Owner re-test after the GPU-initiative refactor (2026-08-07, at `75a3412`):**
 4K ProRes 422 HQ **still feeling great** -- the quality bar held across four
@@ -360,9 +372,13 @@ perfectly on lag while stalling for 100ms.
    way remote reads already are.
 3. **4K ProRes 4444 fast drag** -- decode-bound at 15.4ms/frame of a 17.7ms
    total, ~2.3x playback against the owner's ~4x. FFmpeg's ProRes decoder has
-   no `lowres` path, so this needs decoding off the UI thread (which reopens
-   the async-decode question the project has twice reverted) or an explicit
-   product decision to skip frames on the heaviest media. Not a bug to fix.
+   no `lowres` path. **Unchanged by Gate D**: the async worker moved the decode
+   off the UI thread but still produces one frame per request, so the shuttle
+   rate is the same (15.72ms/f measured after). The owner's improved verdict on
+   this file is responsiveness and handle tracking, not throughput -- see the
+   sign-off note above. Closing the rate gap still needs either a worker that
+   runs ahead of the request chain, or an explicit product decision to skip
+   frames on the heaviest media. Not a bug to fix.
 4. **Backward *playback* (not dragging)** beyond the cache is still GOP-walk
    bound on long-GOP H.264. The drag path is fast because it walks sequentially
    and the cache absorbs misses; reverse playback does not share that.
