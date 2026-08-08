@@ -359,13 +359,15 @@ struct VideoDecoderFFmpeg::Impl {
     struct CachedFrame {
         long long frame = -1;
         QImage image;
-        // Half-res entries are fine to *shuttle* through during a drag -- the
-        // drag is already showing half-res previews at this resolution -- but
-        // must never serve a Step or an exact landing, where the frame is being
-        // inspected. Tagging them is what lets 4K backward drags hit the cache
-        // at all: previously no Scrub preview was stored, so every backward
-        // step at 4K missed and paid a seek plus a GOP walk.
-        bool halfRes = false;
+        // Set when the entry was converted at preview resolution -- reduced to
+        // the displayed size, or to half, whichever is smaller. Such an entry
+        // is fine to *shuttle* through during a drag, which is showing frames
+        // at that resolution anyway, but must never serve a Step or an exact
+        // landing, where the frame is being inspected. Tagging rather than
+        // withholding is what lets 4K backward drags hit the cache at all:
+        // previously no Scrub preview was stored, so every backward step at 4K
+        // missed and paid a seek plus a GOP walk.
+        bool previewRes = false;
     };
     // Eviction is FIFO. LRU (promote-on-hit) was prototyped and measured: on
     // 4K H.264, where the cache actually fills and evicts, it produced an
@@ -400,12 +402,35 @@ struct VideoDecoderFFmpeg::Impl {
         convertPool.emplace_back(w, h, fmt);
         return &convertPool.back();
     }
-    // Sized at open() from frame footprint: a 4K RGB32 frame is ~33MB, a
-    // 1080p one ~8MB, so a fixed count either wastes memory or wastes seeks.
+    // The cache is budgeted in BYTES, not in entries, because its entries are
+    // not all the same size: above 1920px a scrub preview is half resolution
+    // and therefore a *quarter* of the footprint of a full-res frame. Counting
+    // entries priced every one of them at the full-res worst case, so a 4K file
+    // got 6 slots and then sat at 47MB of a 192MB budget while a backward drag
+    // missed on almost every frame -- six slots cannot serve a walk back
+    // through a thirty-frame GOP however good the hit logic is. Same budget,
+    // priced honestly, holds ~24.
+    long long reverseCacheBudgetBytes = 192LL * 1024 * 1024;
+    // Running total, so a push costs one addition rather than a walk of the
+    // whole deque.
+    long long reverseCacheBytes = 0;
+    // Worst-case entry count at full resolution. No longer the eviction rule,
+    // but still the right bound for things that must be sized before any frame
+    // exists: the conversion pool, and how far a seek walk may fill.
     int reverseCacheCapacity = 12;
     // -1 = adapt per request from measured conversion cost (see below).
     // Overridden by TRACE_SEEK_CACHE_WINDOW for A/B.
     int seekWalkCacheWindowOverride = -1;
+    // How much conversion a *drag* may spend filling the cache on one seek
+    // walk, against 18ms for a Step landing. Higher fills more of the GOP per
+    // seek (fewer seeks, more hits) at the cost of a longer pause on the frame
+    // that pays for it. TRACE_SCRUB_FILL_MS to A/B.
+    double scrubWalkCacheBudgetMs = 60.0;
+    // Size the viewer draws at, or 0 when unknown. Used only as a *ceiling* on
+    // scrub preview conversion, never as a floor: a preview is never made
+    // larger than half resolution, and never larger than it will be shown.
+    int previewDisplayW = 0;
+    int previewDisplayH = 0;
 #endif
 };
 
@@ -429,6 +454,29 @@ void VideoDecoderFFmpeg::clearForwardQueue() {
     // frames per timer tick in bursts, causing a rhythmic stutter on 4K
     // ProRes. Playback now decodes exactly one frame per request.
     perfStats_.forwardQueueDepth = 0;
+}
+
+void VideoDecoderFFmpeg::setScrubPreviewSize(QSize size) {
+#ifdef TRACE_WITH_FFMPEG
+    if (!impl_) return;
+    // TRACE_PREVIEW_DISPLAY_SIZE=0 pins previews back to the plain half-res
+    // rule, so the display-size conversion can be A/B'd on feel and sharpness
+    // against the behaviour it replaced without a rebuild.
+    static const bool useDisplaySize = envInt("TRACE_PREVIEW_DISPLAY_SIZE", 1) != 0;
+    const int w = useDisplaySize ? std::max(0, size.width()) : 0;
+    const int h = useDisplaySize ? std::max(0, size.height()) : 0;
+    if (w == impl_->previewDisplayW && h == impl_->previewDisplayH) return;
+    impl_->previewDisplayW = w;
+    impl_->previewDisplayH = h;
+    // Preview entries were converted at the old size. They would still draw --
+    // the viewer scales whatever it is given -- but a drag would then run
+    // through frames of visibly different sharpness, which reads as the picture
+    // breaking up rather than as a resize. Drop them and let the drag refill.
+    impl_->reverseCache.clear();
+    impl_->reverseCacheBytes = 0;
+#else
+    Q_UNUSED(size);
+#endif
 }
 
 void VideoDecoderFFmpeg::setPlaybackDirection(int direction) {
@@ -503,6 +551,7 @@ void VideoDecoderFFmpeg::close() {
     impl_->seekResolvePending = false;
     impl_->seekTargetFrame = -1;
     impl_->reverseCache.clear();
+    impl_->reverseCacheBytes = 0;
 #endif
     currentFrame_ = -1;
     metadata_ = {};
@@ -651,13 +700,18 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     impl_->keepAlpha = envFlagSet("TRACE_KEEP_ALPHA");
     // A/B the landing-latency tradeoff: 0 = fastest landing, no free
     // backward steps; 12 = old behavior (full cache, slowest landing).
-    // Reverse cache capacity scales with frame footprint so the memory cost
-    // stays bounded: ~7 frames at 4K, the full 32 at 1080p.
+    // The cache is bounded by bytes; this only derives the worst-case entry
+    // count (every entry full resolution) for the things that need a number
+    // before any frame has been converted.
     {
         const long long frameBytes = static_cast<long long>(w) * h * 4;
-        const long long budgetBytes = 192LL * 1024 * 1024;
+        impl_->reverseCacheBudgetBytes = 192LL * 1024 * 1024;
+        impl_->reverseCacheBytes = 0;
+        // Worst case: every entry full resolution. Half-res scrub entries cost
+        // a quarter of this, so the byte budget will hold about four times as
+        // many of them -- which is the point.
         const int byFootprint = frameBytes > 0
-            ? static_cast<int>(budgetBytes / frameBytes)
+            ? static_cast<int>(impl_->reverseCacheBudgetBytes / frameBytes)
             : 12;
         impl_->reverseCacheCapacity = std::clamp(byFootprint, 4, 32);
     }
@@ -666,10 +720,24 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     // detach path allocated and threw away each frame, so this is not extra
     // steady-state memory.
     impl_->convertPool.clear();
-    impl_->convertPoolLimit = impl_->reverseCacheCapacity + 4;
+    // The pool's buffers ARE the cache's images, so it must be able to cover a
+    // cache full of the smallest entries the budget allows -- half-res above
+    // 1920px, four to a full-res frame -- plus the viewer's copy and the frame
+    // in flight. Undersizing it is not a correctness problem (the converter
+    // falls back to a private buffer) but it reintroduces a per-frame
+    // allocation exactly during a drag, which is when it is least affordable.
+    {
+        const long long px = static_cast<long long>(w) * h;
+        const long long smallest = (w > 1920) ? px : px * 4;
+        const int maxEntries = smallest > 0
+            ? static_cast<int>(impl_->reverseCacheBudgetBytes / smallest)
+            : impl_->reverseCacheCapacity;
+        impl_->convertPoolLimit = std::clamp(maxEntries, 4, 128) + 4;
+    }
     impl_->inputEofReached = false;
     impl_->drainPacketSent = false;
     impl_->decoderFullyDrained = false;
+    impl_->scrubWalkCacheBudgetMs = std::max(0, envInt("TRACE_SCRUB_FILL_MS", 60));
     impl_->seekWalkCacheWindowOverride = envInt("TRACE_SEEK_CACHE_WINDOW", -1);
     if (impl_->seekWalkCacheWindowOverride >= 0) {
         impl_->seekWalkCacheWindowOverride =
@@ -808,30 +876,45 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     if (impl_->forceAccurateConvert) wantFastConvert = false;
 
     auto reportCacheState = [&]() {
-        perfStats_.cacheCapacity = impl_->reverseCacheCapacity;
         perfStats_.cacheOccupancy = static_cast<int>(impl_->reverseCache.size());
-        long long bytes = 0;
-        for (const auto& e : impl_->reverseCache) bytes += e.image.sizeInBytes();
-        perfStats_.cacheBytes = bytes;
+        perfStats_.cacheBytes = impl_->reverseCacheBytes;
+        perfStats_.cacheBudgetBytes = impl_->reverseCacheBudgetBytes;
+        // How many more entries of the size currently being stored would fit.
+        // Reported rather than fixed, because it depends on whether the drag is
+        // filling the cache with half-res previews or full-res frames.
+        const long long avg = impl_->reverseCache.empty()
+            ? 0
+            : impl_->reverseCacheBytes / static_cast<long long>(impl_->reverseCache.size());
+        perfStats_.cacheCapacity = avg > 0
+            ? static_cast<int>(impl_->reverseCacheBudgetBytes / avg)
+            : impl_->reverseCacheCapacity;
     };
 
     auto pushReverseCache = [&](long long cachedFrame, const QImage& image,
-                                bool halfRes = false) {
+                                bool previewRes = false) {
         if (cachedFrame < 0 || image.isNull()) return;
 
         if (!impl_->reverseCache.empty() && impl_->reverseCache.back().frame == cachedFrame) {
             // A full-res entry always wins: it can serve every caller, a
             // half-res one cannot. Never downgrade an existing entry.
-            if (!halfRes || impl_->reverseCache.back().halfRes) {
+            if (!previewRes || impl_->reverseCache.back().previewRes) {
+                impl_->reverseCacheBytes -= impl_->reverseCache.back().image.sizeInBytes();
                 impl_->reverseCache.back().image = image;
-                impl_->reverseCache.back().halfRes = halfRes;
+                impl_->reverseCache.back().previewRes = previewRes;
+                impl_->reverseCacheBytes += image.sizeInBytes();
             }
             return;
         }
 
-        impl_->reverseCache.push_back({cachedFrame, image, halfRes});
+        impl_->reverseCache.push_back({cachedFrame, image, previewRes});
+        impl_->reverseCacheBytes += image.sizeInBytes();
         ++perfStats_.cacheInserts;
-        while (static_cast<int>(impl_->reverseCache.size()) > impl_->reverseCacheCapacity) {
+        // Evict by footprint. The last entry is never dropped: it is the one
+        // just decoded, and an empty cache is worse than an over-budget one by
+        // a single frame.
+        while (impl_->reverseCacheBytes > impl_->reverseCacheBudgetBytes
+               && impl_->reverseCache.size() > 1) {
+            impl_->reverseCacheBytes -= impl_->reverseCache.front().image.sizeInBytes();
             impl_->reverseCache.pop_front();
             ++perfStats_.cacheEvictions;
         }
@@ -840,12 +923,36 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
 
     // Only a Scrub preview may be served a half-res entry; everything else is
     // inspecting the frame and must get full resolution.
-    const bool acceptHalfRes = (mode == RequestMode::Scrub);
+    const bool acceptPreviewRes = (mode == RequestMode::Scrub);
+    // What this request will actually produce. Mirrors the resolution branch in
+    // convertCurrentFrame; kept as one value so a frame cannot be stored at one
+    // resolution and tagged as another.
+    const bool producesPreviewRes = (mode == RequestMode::Scrub) && (metadata_.width > 1920);
+    // Entries of the size this request stores that fit the byte budget. A
+    // preview is a quarter of a full-res frame at worst and much less than that
+    // when it is converted to the displayed size, so this has to price the size
+    // actually being produced -- assuming the full-res worst case is exactly
+    // the mistake the byte budget exists to correct.
+    auto entriesThatFit = [&](bool previewRes) {
+        long long bytes = static_cast<long long>(metadata_.width) * metadata_.height * 4;
+        if (previewRes) {
+            bytes /= 4;
+            if (impl_->previewDisplayW > 0 && impl_->previewDisplayH > 0) {
+                const QSize fit = QSize(metadata_.width, metadata_.height)
+                    .scaled(impl_->previewDisplayW, impl_->previewDisplayH, Qt::KeepAspectRatio);
+                const long long shown =
+                    static_cast<long long>(fit.width()) * fit.height() * 4;
+                if (shown > 0) bytes = std::min(bytes, shown);
+            }
+        }
+        if (bytes <= 0) return impl_->reverseCacheCapacity;
+        return std::clamp(static_cast<int>(impl_->reverseCacheBudgetBytes / bytes), 1, 256);
+    };
     auto tryReverseCache = [&](long long wantedFrame) -> bool {
         ++perfStats_.reverseCacheLookups;
         for (auto it = impl_->reverseCache.begin(); it != impl_->reverseCache.end(); ++it) {
             if (it->frame != wantedFrame) continue;
-            if (it->halfRes && !acceptHalfRes) return false;
+            if (it->previewRes && !acceptPreviewRes) return false;
             ++perfStats_.reverseCacheHits;
             outImage = it->image;
             currentFrame_ = wantedFrame;
@@ -921,7 +1028,12 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.avgMemcpyMs += (memcpyMs - perfStats_.avgMemcpyMs) / n;
     };
 
-    auto convertCurrentFrame = [&](QImage& image, bool fastOverride = false, bool isCacheFill = false) {
+    // isCacheFill no longer changes the conversion -- previews and the fills
+    // that back them are made at the same size now -- but it still decides
+    // which timer the cost lands in, so "cvt" stays the cost of the frame
+    // actually shown rather than that plus speculative fills.
+    auto convertCurrentFrame = [&](QImage& image, bool fastOverride = false,
+                                   bool isCacheFill = false) {
         ++convertCalls;
         const bool useFast = fastOverride || wantFastConvert;
         const int w = impl_->frame->width > 0 ? impl_->frame->width : impl_->codec->width;
@@ -939,15 +1051,24 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             perfStats_.srcPixelFormat += QStringLiteral(" (a-skip)");
         }
 
-        // Scrub preview converts at half resolution for large sources: the
-        // sws conversion dominates per-frame cost at 4K and the viewer
-        // upscales to fit anyway. The landing frame (Step mode, sent on
+        // Scrub previews convert at reduced resolution for large sources: the
+        // sws conversion dominates per-frame cost at 4K and the viewer scales
+        // to fit anyway. The landing frame (Step mode, sent on
         // slider release) is always converted at full resolution.
         int dstW = w;
         int dstH = h;
-        // Cache fills are always full resolution: an entry may later serve a
-        // paused step or the exact landing frame, and a half-res entry would
-        // show soft. Only the frame actually presented mid-drag is halved.
+        // Everything converted to serve a drag is halved above 1920px --- the
+        // frame presented AND the frames cached on the way to it. Cache fills
+        // used to be forced full-res so an entry could later serve a paused
+        // step, but entries carry a previewRes tag now and stepping refuses them
+        // anyway, so the full-res conversion was being paid for and then
+        // declined. It was expensive enough to be the real limit on backward
+        // dragging: the seek-walk fill spends a time budget, so pricing each
+        // fill at a full-res 4K convert (~15ms) bought one or two frames where
+        // a half-res one (~7ms) buys twice as many.
+        //
+        // Step and Playback fills are untouched and stay full resolution, so
+        // reverse *stepping* still caches frames it can reuse.
         //
         // Threshold is `> 1920`, not `>= 1920`: at exactly 1080p halving is a
         // pessimisation. A full-res convert is 1920x1080 -> 1920x1080, which
@@ -958,9 +1079,29 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // conversion really does dominate, and 1080p was being caught by it --
         // which throttled the drag shuttle to roughly a third of its rate and
         // showed a soft preview for the privilege.
-        if (mode == RequestMode::Scrub && !isCacheFill && w > 1920) {
+        if (mode == RequestMode::Scrub && w > 1920) {
             dstW = (w / 2) & ~1;
             dstH = (h / 2) & ~1;
+            // Half resolution is a ceiling, not a target. What the drag
+            // actually needs is the size the frame will be drawn at: producing
+            // 2048x1152 to show it in a 640x360 widget converts four times the
+            // pixels that end up on screen, and then hands the surplus to Qt's
+            // raster bilinear, which is the weaker resampler of the two. sws is
+            // the dominant per-frame cost at 4K, so this is the cheap half of
+            // the frame getting cheaper *and* sharper at the same time.
+            //
+            // Only ever downward: if the viewer is large, the half-res ceiling
+            // still applies, so a fullscreen 4K window is unaffected.
+            if (impl_->previewDisplayW > 0 && impl_->previewDisplayH > 0) {
+                const QSize fit = QSize(w, h).scaled(
+                    impl_->previewDisplayW, impl_->previewDisplayH, Qt::KeepAspectRatio);
+                if (fit.width() > 0 && fit.width() < dstW) {
+                    dstW = fit.width() & ~1;
+                    dstH = fit.height() & ~1;
+                }
+            }
+            dstW = std::max(2, dstW);
+            dstH = std::max(2, dstH);
         }
 
         QElapsedTimer wrapTimer;
@@ -1063,7 +1204,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         image = *target;
 
         perfStats_.fullFrameCopiesPerFrame = 1;
-        perfStats_.dstPixelFormat = dstW != w ? QStringLiteral("RGB32/BGRA half") : QStringLiteral("RGB32/BGRA");
+        // Carry the actual conversion size: "half" stopped being the whole
+        // story once previews are converted straight to the displayed size.
+        perfStats_.dstPixelFormat = (dstW != w)
+            ? QStringLiteral("RGB32/BGRA %1x%2").arg(dstW).arg(dstH)
+            : QStringLiteral("RGB32/BGRA");
     };
 
     // Decode linearly until the target frame is produced. Exactly one output
@@ -1165,7 +1310,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                     if (deltaToTarget <= cacheWindow) {
                         QImage cached;
                         convertCurrentFrame(cached, /*fastOverride=*/true, /*isCacheFill=*/true);
-                        pushReverseCache(decodedFrame, cached);
+                        pushReverseCache(decodedFrame, cached, producesPreviewRes);
                         ++walkCacheConverts;
                     }
 
@@ -1181,17 +1326,12 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 perfStats_.previewApproximate = false;
                 perfStats_.previewTargetFrame = target;
                 perfStats_.previewDisplayedFrame = decodedFrame;
-                // Half-res scrub previews must not enter the reverse cache: a
-                // later backward step would show a soft frame while paused.
-                // But a Scrub frame is only halved above 1920px (see the
-                // conversion branch), so at 1080p the presented frame is
-                // full-res and belongs in the cache like any other -- which is
-                // what makes a backward drag over ground just covered forwards
-                // a run of cache hits instead of a run of seeks. Mirrors the
-                // half-res condition exactly so the two cannot drift apart.
-                const bool presentedHalfRes =
-                    (mode == RequestMode::Scrub) && (metadata_.width > 1920);
-                pushReverseCache(decodedFrame, outImage, presentedHalfRes);
+                // Tagged rather than withheld: a soft entry is exactly what the
+                // next backward drag step wants and exactly what a paused step
+                // must not be given, and tryReverseCache enforces that. At or
+                // below 1920px nothing is halved, so the entry is full-res and
+                // serves everything.
+                pushReverseCache(decodedFrame, outImage, producesPreviewRes);
                 return true;
             }
 
@@ -1345,14 +1485,31 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     // free and saves whole seeks; at 14ms (4K) each entry is real delay.
     // So spend a fixed time budget rather than a fixed frame count.
     if (!didSeek) {
-        cacheWindow = impl_->reverseCacheCapacity;
+        cacheWindow = entriesThatFit(producesPreviewRes);
     } else if (impl_->seekWalkCacheWindowOverride >= 0) {
         cacheWindow = impl_->seekWalkCacheWindowOverride;
     } else {
-        constexpr double kWalkCacheBudgetMs = 18.0;
+        // Who is waiting decides how much to buy.
+        //
+        // A Step or Playback seek is a landing: one frame is wanted, now, and
+        // every speculative conversion is delay in front of it. Buy few.
+        //
+        // A Scrub seek happens mid-drag, and the frames walked past are
+        // precisely the ones the drag is about to ask for -- a backward drag
+        // asks for them in reverse, one per slice. There the conversions are
+        // not latency in front of one frame, they are the next dozen frames,
+        // and declining them means paying the whole seek and GOP walk again for
+        // each. Measured on 4K H.264 backward at the 18ms landing budget: one
+        // or two frames cached per walk, 57% hits, 31ms a frame. Buy many.
+        const double budgetMs = (mode == RequestMode::Scrub)
+            ? impl_->scrubWalkCacheBudgetMs
+            : 18.0;
         const double convertMs = perfStats_.avgConvertMs > 0.0 ? perfStats_.avgConvertMs : 4.0;
-        const int affordable = static_cast<int>(kWalkCacheBudgetMs / convertMs);
-        cacheWindow = std::clamp(affordable, 1, impl_->reverseCacheCapacity);
+        const int affordable = static_cast<int>(budgetMs / convertMs);
+        // Bound by what the budget holds at the size THIS request stores, not
+        // at the full-res worst case: capping a half-res fill at the full-res
+        // count would throw away three quarters of the budget.
+        cacheWindow = std::clamp(affordable, 1, entriesThatFit(producesPreviewRes));
     }
 
     if (!decodeUntilTarget(frameIndex)) {

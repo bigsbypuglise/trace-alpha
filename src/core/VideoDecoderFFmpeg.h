@@ -71,11 +71,16 @@ struct VideoPerfStats {
     long long staleSuccessPrevented = 0;
 
     // Frame cache accounting.
+    // cacheCapacity is how many entries of the size currently being stored fit
+    // the byte budget, so it moves as a drag fills the cache with half-res
+    // previews rather than full-res frames. Eviction is by cacheBytes against
+    // cacheBudgetBytes; the count is reported, not enforced.
     int cacheCapacity = 0;
     int cacheOccupancy = 0;
     long long cacheInserts = 0;
     long long cacheEvictions = 0;
     long long cacheBytes = 0;
+    long long cacheBudgetBytes = 0;
 
     long long seekSamples = 0;
     long long samples = 0;
@@ -145,6 +150,13 @@ public:
     void setPlaybackDirection(int direction);
     void clearForwardQueue();
     void setHandoffTiming(double handoffMs);
+    // Pixel size the viewer will actually draw a frame at. Only scrub previews
+    // use it: converting straight to the displayed size is both cheaper and
+    // sharper than converting large and letting Qt's raster bilinear take up
+    // the slack. Pass an empty size to go back to the plain half-res rule.
+    // Changing it clears the frame cache, whose preview entries are stored at
+    // whatever size was in force when they were made.
+    void setScrubPreviewSize(QSize size);
 
     long long currentFrame() const { return currentFrame_; }
     const VideoMetadata& metadata() const { return metadata_; }
