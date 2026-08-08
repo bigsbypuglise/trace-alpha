@@ -1211,6 +1211,38 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             : QStringLiteral("RGB32/BGRA");
     };
 
+    // Reposition the demuxer and codec at or before `target`. Factored out
+    // because the failure path needs it too: a decode that fails without having
+    // seeked can be recovered by seeking and retrying, and duplicating the
+    // flush-and-reset sequence is how the drain flags would drift apart.
+    auto seekToFrame = [&](long long target) -> bool {
+        const int64_t relTs = av_rescale_q(target, frameTb, impl_->streamTimeBase);
+        const int64_t targetTs = impl_->streamStartTs + relTs;
+
+        QElapsedTimer seekTimer;
+        seekTimer.start();
+        if (av_seek_frame(impl_->fmt, impl_->streamIndex, targetTs, AVSEEK_FLAG_BACKWARD) < 0) {
+            return false;
+        }
+        avcodec_flush_buffers(impl_->codec);
+        // Flushing refills the codec from the new position, so the stream is
+        // no longer at EOF and the drain must be able to run again.
+        impl_->inputEofReached = false;
+        impl_->drainPacketSent = false;
+        impl_->decoderFullyDrained = false;
+        const double seekMs = static_cast<double>(seekTimer.nsecsElapsed()) / 1'000'000.0;
+        perfStats_.lastSeekMs = seekMs;
+        ++perfStats_.seekSamples;
+        const double seekN = static_cast<double>(perfStats_.seekSamples);
+        perfStats_.avgSeekMs += (seekMs - perfStats_.avgSeekMs) / seekN;
+        // The landed frame's identity is resolved from its PTS by the caller's
+        // walk; until then the decoder has no known position.
+        impl_->lastDecodedFrame = -1;
+        impl_->seekResolvePending = true;
+        impl_->seekTargetFrame = target;
+        return true;
+    };
+
     // Decode linearly until the target frame is produced. Exactly one output
     // frame is converted per request (plus near-target frames cached for
     // reverse stepping). No forward fill: steady per-tick cost avoids the
@@ -1388,8 +1420,25 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     // it was the seek that was expensive. Genuine jumps -- backward moves, or a
     // forward gap larger than the caller's walk budget -- still seek via the
     // conditions below.
+    // Can the decoder reach this frame by simply continuing forward? Only if it
+    // has a known position and the target is still ahead of that position.
+    //
+    // `currentFrame_` is NOT a safe proxy for where the decoder is. A cache hit
+    // sets it without advancing the decoder at all, so after a backward drag
+    // served from cache the two diverge by however far the drag ran -- and the
+    // next forward request looked "sequential" while the decoder was still
+    // parked at the tail of the file with its drain packet sent. decodeUntilTarget
+    // then had nothing left to give and the drag died with "No decodable frame
+    // at target position". That was reachable before, but rare: it needs a run
+    // of backward cache hits, and the hit rate at 4K used to be near zero.
+    // Raising it to ~88% made a fast scrub with direction changes hit this
+    // within a couple of gestures.
+    const bool decoderCanReachByWalking =
+        impl_->lastDecodedFrame >= 0 && frameIndex > impl_->lastDecodedFrame;
+
     const bool needSeek =
         (currentFrame_ < 0) ||
+        !decoderCanReachByWalking ||
         (frameIndex < currentFrame_) ||
         (mode == RequestMode::Step && std::llabs(frameIndex - currentFrame_) > 1) ||
         // Re-request of the currently shown frame outside playback: seek so
@@ -1408,6 +1457,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         if (seekLogEnabled()) {
             const char* reason =
                 (currentFrame_ < 0) ? "InitialOpen" :
+                !decoderCanReachByWalking ? "DecoderBehindOrAtTarget" :
                 (frameIndex < currentFrame_) ? "BackwardRequest_CacheMiss" :
                 (mode == RequestMode::Step && std::llabs(frameIndex - currentFrame_) > 1) ? "StepJump" :
                 (mode != RequestMode::Playback && frameIndex == currentFrame_) ? "RerequestOutsidePlayback" :
@@ -1434,26 +1484,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         }
         ++impl_->seekCounter;
 #endif
-        const int64_t relTs = av_rescale_q(frameIndex, frameTb, impl_->streamTimeBase);
-        const int64_t targetTs = impl_->streamStartTs + relTs;
-
-        QElapsedTimer seekTimer;
-        seekTimer.start();
-        if (av_seek_frame(impl_->fmt, impl_->streamIndex, targetTs, AVSEEK_FLAG_BACKWARD) < 0) {
+        if (!seekToFrame(frameIndex)) {
             error = "Seek failed";
             return false;
         }
-        avcodec_flush_buffers(impl_->codec);
-        // Flushing refills the codec from the new position, so the stream is
-        // no longer at EOF and the drain must be able to run again.
-        impl_->inputEofReached = false;
-        impl_->drainPacketSent = false;
-        impl_->decoderFullyDrained = false;
-        const double seekMs = static_cast<double>(seekTimer.nsecsElapsed()) / 1'000'000.0;
-        perfStats_.lastSeekMs = seekMs;
-        ++perfStats_.seekSamples;
-        const double seekN = static_cast<double>(perfStats_.seekSamples);
-        perfStats_.avgSeekMs += (seekMs - perfStats_.avgSeekMs) / seekN;
 
         // Every seek is frame-exact, Scrub included. Resolve the first decoded
         // frame from its PTS and decode forward to the true target. On
@@ -1468,9 +1502,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // one frame and name it another, and telemetry that asserts its own
         // correctness is how it survived unnoticed. Dragging gets its frames
         // from the caller's forward walk now, not from mislabelled seeks.
-        impl_->lastDecodedFrame = -1;
-        impl_->seekResolvePending = true;
-        impl_->seekTargetFrame = frameIndex;
+        // (seekToFrame arms the resolve; this note is why it does.)
     }
 
     // How many frames to convert and cache on the way to the target.
@@ -1513,6 +1545,20 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     }
 
     if (!decodeUntilTarget(frameIndex)) {
+        // Failing without having seeked means the decoder was not where the
+        // walk assumed. The condition above should prevent that, but a decode
+        // failure is user-visible and a seek is cheap next to being wrong, so
+        // recover rather than report: reposition and decode the frame properly.
+        // A failure *after* a seek is honest -- the frame genuinely is not in
+        // the stream -- and still returns false rather than a stale image.
+        if (!didSeek && seekToFrame(frameIndex)) {
+            ++perfStats_.recoveredDecodeFailures;
+            if (decodeUntilTarget(frameIndex)) {
+                updatePerfStats();
+                error.clear();
+                return true;
+            }
+        }
         error = "No decodable frame at target position";
         return false;
     }

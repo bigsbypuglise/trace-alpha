@@ -69,6 +69,10 @@ struct VideoPerfStats {
     long long drainPacketsSent = 0;
     long long drainFramesRecovered = 0;
     long long staleSuccessPrevented = 0;
+    // Decodes that failed with the decoder mispositioned and succeeded after a
+    // recovery seek. Should stay 0: anything above it means some path is still
+    // moving currentFrame_ without moving the decoder.
+    long long recoveredDecodeFailures = 0;
 
     // Frame cache accounting.
     // cacheCapacity is how many entries of the size currently being stored fit
