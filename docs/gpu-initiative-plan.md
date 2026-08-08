@@ -1,6 +1,10 @@
 # Trace GPU / smooth-presentation initiative — active plan
 
-**Status: Gate A complete (architecture audit). No renderer code written yet.**
+**Status: GATE A COMPLETE IN CODE (2026-08-07).** Steps 1–3 of §8 are committed
+and validated on the local Windows toolchain: `VideoFrame` has replaced bare
+`QImage` at the four seams (`03d840e`), and the `VideoRenderer` boundary exists
+with `CpuImageRenderer` as its only implementation (`5765c19`). No GPU backend
+yet. Next up is step 4 (generation-numbered requests), then step 5 — **GATE D**.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -13,7 +17,14 @@ which of its premises are stale.
 
 ---
 
-## 1. Audit — the current AVFrame → pixel path
+## 1. Audit — the AVFrame → pixel path
+
+> **This section is the audit as of `71872a2`, i.e. before steps 2–3 landed.** It
+> is kept because it is the reasoning the design rests on, and because the four
+> seams it identifies are exactly what was changed. For what the code does now,
+> read §4 and §12: `QImage` has been replaced by `VideoFrame` at all four seams,
+> the convert pool holds `FrameBuffer`s rather than `QImage`s, and the paint has
+> moved into `CpuImageRenderer`.
 
 ```
 av_read_frame / avcodec_receive_frame
@@ -120,9 +131,10 @@ Three native-HWND hazards that *do* apply and must be handled in the prototype:
 
 1. **Drag-and-drop.** `MainWindow::dragEnterEvent` / `dropEvent` implement drop-to-open. A
    native child HWND can swallow drops over the video area.
-2. **`setCenterText`** ("Drop media or File > Open") is painted by ViewerWidget when there is
-   no image. With no frame there is nothing to present — decide whether D3D draws it or the
-   Qt widget stays until first frame.
+2. ~~**`setCenterText`**~~ **Settled in `5765c19`:** the renderer owns the whole
+   paint, placeholder included, because two painters cannot share one paint event
+   and a D3D11 backend will not be using `QPainter` at all. Whichever backend is
+   installed draws it. See §12.
 3. **Resize flicker** — `IDXGISwapChain::ResizeBuffers` driven from Qt's `resizeEvent`, with
    `WA_PaintOnScreen` / `WA_NoSystemBackground` to stop Qt erasing the surface.
 
@@ -130,16 +142,50 @@ Three native-HWND hazards that *do* apply and must be handled in the prototype:
 
 **Decoded frames stay CPU-resident. GPU textures are presentation scratch, never frame identity.**
 
+**As shipped in `03d840e`** (`src/core/VideoFrame.h`); it differs from the sketch
+this section originally carried, in three ways that are worth keeping:
+
 ```cpp
-// Refcounted, renderer-agnostic. Replaces bare QImage at the four seams in §1.
 struct VideoFrame {
-    std::shared_ptr<FrameBuffer> buffer;  // recycled, from the existing convert pool
-    long long frameIndex;
-    int width, height;
-    AVPixelFormat format;                 // BGRA today; planar YUV in Phase 5
-    ColorInfo color;                      // matrix + range, already tracked per sws slot
+    std::shared_ptr<FrameBuffer> buffer;  // recycled, from the old convert pool
+    long long frameIndex = -1;
+    ColorInfo color;                      // matrix + range + whether inferred
+    bool previewRes = false;              // fit to shuttle past, not to inspect
 };
 ```
+
+- **`PixelLayout`, not `AVPixelFormat`.** The sketch put an FFmpeg type in the
+  struct, but this header is reached from `FrameSource.h` and therefore from the
+  image-sequence path, which must compile with `TRACE_WITH_FFMPEG` undefined.
+  `PixelLayout` has one value today (`BGRA8`); planar YUV joins it when something
+  can produce one. The layout lives on `FrameBuffer`, with `width`/`height`,
+  rather than being duplicated on the frame.
+- **`previewRes` moved onto the frame.** It was a field of the decoder's private
+  cache entry, predicted at the call site by an expression that had to agree with
+  the resolution branch inside the converter — and the two read different widths
+  (container metadata vs the decoded frame). The converter sets it now from the
+  size it actually converted at, so an entry cannot be stored at one resolution
+  and labelled another. The old prediction survives only to size the seek-walk
+  fill window, which has to be decided before any frame exists.
+- **`FrameBuffer` has two origins**: `allocate()` for swscale destinations, and
+  `adopt(QImage)` for the still/sequence path, where pixels come from OIIO or
+  QImage rather than a conversion. `adopt` detaches on the way in so the buffer
+  is the sole owner, which is the same no-aliasing guarantee `allocate` gets for
+  free.
+
+**The detach hazard is now structural, not managed.** The pool used to hand back
+only entries reporting `isDetached()` because `QImage::bits()` deep-copied ~38MB
+at 4K whenever the buffer was still referenced. swscale writes to
+`buffer->data()` now, which cannot detach; the pool's free test is
+`use_count() == 1`. The `detach` HUD counters are retained and read **0.00 by
+construction** — kept so a regression back to the old behaviour would still be
+visible.
+
+**A failed conversion reports failure.** `convertCurrentFrame` returns bool and
+clears the output frame on entry. The output is frequently the same object across
+requests, so the previous behaviour left the *previous* frame in it and the
+caller then stamped it with the new index — one frame on screen under another's
+name, which is exactly what `e76eabb` exists to prevent.
 
 - `QImage` becomes a **view** the CPU renderer constructs over `buffer` (zero-copy via the
   `QImage(uchar*, w, h, bytesPerLine, format)` ctor plus a cleanup functor holding the
@@ -273,10 +319,10 @@ Each is independently reviewable and revertable. Gates in **bold**.
 1. `docs: supersede the GPU spec with the audited initiative plan` — this file. *(done)*
 2. `refactor(core): introduce VideoFrame and retire bare QImage at the frame seams`
    — the four interfaces in §1; CPU renderer constructs a QImage view. No behaviour change.
-   **Full CPU regression pass. Stop and validate.**
+   **Full CPU regression pass. Stop and validate.** *(done, `03d840e` — see §12)*
 3. `refactor(renderer): introduce the CPU/GPU renderer boundary` — `VideoRenderer` interface,
    `CpuImageRenderer` as the only implementation, `TRACE_RENDERER` selector.
-   **Stop and validate. → GATE A complete in code.**
+   **Stop and validate. → GATE A complete in code.** *(done, `5765c19`)*
 4. `refactor(scrub): add generation-numbered frame requests` — IDs and stale-drop plumbing,
    still synchronous. Pure bookkeeping, no threading.
 5. `perf(scrub): move random-access decode to a worker with latest-target-wins` — **GATE D.**
@@ -366,7 +412,10 @@ path — but do not remove it, the CPU path still needs it.
 ### Matrix selection
 
 Read `AVFrame::colorspace` and `AVFrame::color_range`; the decoder already tracks both and
-exposes them in the HUD `color` line.
+exposes them in the HUD `color` line. **As of `03d840e` this is also carried on the frame**
+as `ColorInfo` (`matrix`, `fullRange`, `inferred`), mapped from the sws coefficient choice so
+there is one decision rather than two — the GPU path needs it as shader constants, where
+swscale is not the thing doing the conversion.
 
 - `AVCOL_SPC_BT709` → BT.709
 - `AVCOL_SPC_BT470BG` / `AVCOL_SPC_SMPTE170M` → BT.601
@@ -400,3 +449,52 @@ BT.2020  R = y + 1.4746*v
 Pass the 3x3 and the two normalization terms as **shader constants**, not compiled variants.
 BT.2020 gets the correct matrix but **no tonemap** — HDR/PQ content will still look wrong.
 That is a known gap carried over from the CPU path, not a new regression.
+
+---
+
+## 12. The renderer boundary, as built (`5765c19`)
+
+`src/render/VideoRenderer.h` — `initialize(host)`, `setFrame`, `clearFrame`,
+`setPlaceholderText`, `resize`, `paint(host)`, `name()`, `stats()`.
+`CpuImageRenderer` holds the existing path verbatim; `ViewerWidget` hosts it.
+
+Three decisions here that the audit left open:
+
+- **The renderer owns the whole paint, including the no-frame placeholder.** Two
+  painters cannot share one paint event, and a D3D11 backend will not be drawing
+  through `QPainter` at all, so the host must not draw alongside it. This settles
+  §3 hazard 2 — D3D draws it, or rather, whichever backend is installed does.
+- **No `QPainter` in the interface.** `paint(QWidget*)` lets the CPU backend
+  construct its own painter and a GPU backend ignore the host and present to its
+  swapchain, rather than passing a painter one of them would have to ignore.
+- **`ViewerWidget` keeps the scheduling, the renderer keeps the pixels.** The
+  widget owns when a repaint was requested and how long it took to arrive
+  (`updateCount`, `lastUpdateToPaintMs`, `paintsWithoutNewImage`) because those
+  are properties of the host's event loop, not of any backend. `RenderStats` is
+  folded into `ViewerPerfStats` after each paint so the HUD reads one struct.
+
+`TRACE_RENDERER` defaults to `cpu`; an unknown value warns on stderr and falls
+back. The HUD `renderer` field names what is actually presenting — **a GPU path
+that quietly never engages while the app looks fine is the failure mode this is
+built against**, and it is the same reason CI should assert the renderer
+initializes rather than merely that the app launches.
+
+### Validation record for steps 2–3
+
+1080p H.264 validation clip, local Windows toolchain, 1296x799 window. Both
+commits measured; the figures below are step 3 and are unchanged from step 2.
+
+| | result | recorded baseline |
+|---|---|---|
+| playback | 99.4% real time, 225 frames, rep 4 skip 0, `clk-upd 1/1` | 99.1%, rep 3–5, skip 0 |
+| forward drag | `shown 239 delta 0`, 1.72ms/f, `lag 0f`, 235/236 painted, 3 seeks, 0 stalls | 1.79ms/f, `lag 0f` |
+| backward drag | `shown 5 delta 0`, rev-hit 91.6%, `lag 0f` | 91–94% hits |
+| reversals | `shown 5 delta 0`, rev-hit 93.4%, 760/761 painted, `lag 0f` | — |
+| all of the above | `detach 0.00`, `stale-blocked 0`, `recov 0` | must stay 0 |
+| PNG sequence | steps and cache-hits to the exact frame | — |
+
+**Run the reversal set, not just a sweep.** A single smooth drag scores perfectly
+on every number above and still misses correctness bugs: `2523d77` only appeared
+under hard direction reversals held under one continuous press, running into both
+ends of the clip. The reversal run is also the useful stress of buffer recycling —
+it turned over ~730 cache evictions with `recov 0`.
