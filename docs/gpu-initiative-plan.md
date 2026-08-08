@@ -849,9 +849,114 @@ for reversals and releases to land inside a decode.
    the caller, and the caller during a drag is the worker — which is the point.
    The `ui gap` line is the authoritative UI-responsiveness number now.
 
-### 14.13 Expected files changed
+### 14.13 Expected files changed (superseded by §15 for step 5.5)
 
 `src/core/VideoDecoderFFmpeg.{h,cpp}` (cancel predicate, three-state walk result,
 abandon counters) · `src/core/ScrubDecodeWorker.{h,cpp}` (new) ·
 `src/app/MainWindow.{h,cpp}` (lease, chain, telemetry snapshot, HUD) ·
 `app/CMakeLists.txt` · this file · `CLAUDE.md` · `scripts/measure/`.
+
+---
+
+## 15. Step 5.5 — directional scrub-ahead (measured, and mostly answered "no")
+
+Step 5 moved decode off the UI thread. It did not make decode faster, so the
+picture could still trail the pointer badly on heavy media. This step asked
+whether speculative prefetch closes that gap. **The answer, measured first, is
+that the gap has two unrelated causes and prefetch addresses neither.**
+
+### 15.1 The lag model, measured before building anything
+
+0.5s full-clip sweeps, instrumented by `49a6120`. `supply` is what the decoder
+supplied over what the hand asked for; `p2p` is how long ago the pointer was
+where the picture now is.
+
+| file | dir | ptr f/s | dec f/s | supply | behind end/max | p2p | walk max | seeks | rev-hit |
+|---|---|---|---|---|---|---|---|---|---|
+| 1080p H.264 | FWD | 254.5 | 273.5 | 107% | 0 / 102 | 310ms | 0f | 1 | 78.6% |
+| 1080p H.264 | REV | 249.6 | 148.0 | **59%** | 90 / 159 | 600ms | **29f** | 11 | 91.4% |
+| 4K H.264 | FWD | 123.5 | 210.2 | 170% | 0 / 27 | 47ms | 0f | 2 | 69.2% |
+| 4K H.264 | REV | 124.4 | 90.0 | **72%** | 32 / 87 | 507ms | **29f** | 10 | 85.4% |
+| ProRes 422 HQ | FWD | 176.5 | 143.1 | 81% | 30 / 89 | 478ms | 0f | 2 | 42.9% |
+| ProRes 422 HQ | REV | 177.1 | 138.5 | 78% | 29 / 98 | 499ms | 0f | 125 | 2.3% |
+| ProRes 4444 | FWD | 272.0 | 52.4 | **19%** | 179 / 201 | 729ms | 0f | 2 | **0.0%** |
+| ProRes 4444 | REV | 273.8 | 51.8 | **19%** | 180 / 201 | 738ms | 0f | 46 | **0.0%** |
+
+**ProRes is a pure throughput deficit.** `walk max 0f` everywhere: every frame is
+a keyframe, a seek lands on the target, no intermediate frames are ever produced
+and there is therefore nothing to cache — which is why `rev-hit` reads 0.0%, and
+why that is not a cache-policy failure but a cache with no input. Seeks are free:
+4444 forward performs 2 and backward performs 46, at the same 52 f/s. The
+179-frame lag is exactly what 19% supply predicts. Prefetch decodes the same
+frames earlier, not faster, so it cannot help. The only lever is decoding fewer.
+
+**H.264 is miss cost, not per-frame cost.** Forward ends `behind 0` with `walk
+max 0f` and 1–2 seeks — pure sequential decode. Backward drops to 59–72% on the
+*same frames*, with `walk max 29f` and 7–8 stalls. 4K H.264 runs 210 f/s forward
+and 90 f/s backward; the entire difference is the occasional seek plus GOP walk.
+
+**One reframing.** These sweeps are 2.5×–11× playback, well beyond the ~4× the
+owner asked for. At 4× (96 f/s) the same capacities give 1080p 154–284%, 4K
+H.264 forward 219%, 422 HQ 144–149%, 4K H.264 backward 94%, **4444 54%**. Only
+4444 is genuinely short at the stated target.
+
+### 15.2 What was built
+
+**Velocity-adaptive preview sampling** (`77738f0`, gate corrected in `f08f015`),
+for the throughput-deficit half. See CLAUDE.md for the rule, the estimator
+choices and the four failed gate inferences. Result: 4444 `p2p 729 → 22ms`, max
+lag `201 → 32f`; 422 HQ `p2p 478 → 7ms`.
+
+**A wider seek-walk cache fill**, 60ms → 240ms (`f08f015`), for the miss-cost
+half. Step 5 is what made this available: the budget was set when the walk ran
+synchronously and a 240ms fill froze the window for 240ms.
+
+### 15.3 Directional prefetch was NOT built, and this is why
+
+The obvious design — spend idle worker time decoding ahead of the drag — has no
+idle worker time to spend in the only case that needs it. H.264 backward
+measures 59–74% supply, which means the worker is saturated for the whole
+gesture; there is no slack. Where slack exists (H.264 forward, 107–170%) the
+picture already ends `behind 0` with zero stalls, so there is nothing to buy.
+
+The lever that does exist is not *when* the worker spends its time but *what it
+spends it on*: a wider fill per seek converts one expensive miss into a run of
+future hits, which is the same benefit prefetch was supposed to deliver, using
+time the worker was already using. That is §15.2's second change.
+
+**Do not revisit speculative lookahead without first showing measured idle
+worker time coinciding with stalls.** As of this step that combination does not
+occur on any file in the test set.
+
+### 15.4 Final matrix
+
+All rows: `delta 0`, `detach 0.00`, `stale-blocked 0`, `recov 0`.
+
+| file | gesture | sampling | p2p | behind end/max | stalls |
+|---|---|---|---|---|---|
+| ProRes 4444 | fast fwd | ON, stride 5 | **22ms** | 0 / 48f | 1 of 21 |
+| ProRes 4444 | reversals | ON, stride 3 | **7ms** | 0 / 48f | 6 of 136 |
+| ProRes 422 HQ | reversals | ON, stride 2 | **4ms** | 0 / 20f | 1 of 148 |
+| 4K H.264 | reversals | GATED | 6ms | 0 / 32f | 2 of 408 |
+| 1080p H.264 | reversals | GATED | 499ms | 22 / 108f | 13 of 555 |
+
+The two gated rows match the Step 5 baseline within noise (4K `rev-hit 98.0%`,
+`stalls 2 of 408` against `2 of 432`), which is the requirement: nothing about a
+file that must not sample may change. Step ±5 after a sampled 4444 drag returns
+to the landed frame exactly, three times over.
+
+### 15.5 Open after step 5.5
+
+1. **1080p backward is now the weakest case** — `supply 60%`, 13 stalls, `p2p
+   499ms`. It cannot sample (long-GOP) and gains little from a wider fill,
+   because nothing is halved at 1080p so 24 full-res entries exhaust the byte
+   budget and it is bytes rather than time that binds. Converting *Step* and
+   cache-fill conversions to display size, as scrub previews already are, would
+   multiply its effective cache depth. That is the one untried lever.
+2. **The press landing** remains the largest UI-thread block in a drag (90–125ms
+   on 4K H.264). Untouched here on purpose; step 5.6 if it is worth doing.
+3. **Owner validation of the sampled preview is required and has not happened.**
+   Every figure above says the picture is closer to the pointer. None of them
+   says whether a preview that shows every 5th frame *reads* as smooth shuttling
+   or as strobing. That is exactly the split this project has recorded twice:
+   the harness says the mechanism works, only the owner says the bar holds.
