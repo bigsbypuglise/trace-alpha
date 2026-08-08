@@ -93,6 +93,37 @@ double scrubPaceFraction() {
     return frac;
 }
 
+// The two knobs that decide how much of the UI thread a synchronous shuttle
+// slice takes: how long one slice may spend decoding, and how soon the next
+// slice is re-armed once it is still behind the pointer. Both are settable so
+// the async win can be measured against a scheduler tweak rather than confused
+// with one -- shipped defaults are the values that were already hard-coded.
+double scrubWalkBudgetMs() {
+    static const double ms = [] {
+        const QByteArray raw = qgetenv("TRACE_SCRUB_WALK_MS");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const double v = raw.toDouble(&ok);
+            if (ok && v >= 0.0 && v <= 200.0) return v;
+        }
+        return 8.0;
+    }();
+    return ms;
+}
+
+int scrubRearmMs() {
+    static const int ms = [] {
+        const QByteArray raw = qgetenv("TRACE_SCRUB_REARM_MS");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const int v = raw.toInt(&ok);
+            if (ok && v >= 0 && v <= 200) return v;
+        }
+        return 0;
+    }();
+    return ms;
+}
+
 } // namespace
 
 MainWindow::MainWindow() {
@@ -390,6 +421,25 @@ MainWindow::MainWindow() {
         flushVideoScrub(false);
     });
 
+    // Measures the UI thread from outside the work it is doing. A 1ms timer can
+    // only fire when the event loop is running, so the interval between two
+    // consecutive firings is exactly how long the thread was unavailable to
+    // deliver a mouse move or a repaint. Started per drag, not left running.
+    uiServiceTimer_.setSingleShot(false);
+    uiServiceTimer_.setTimerType(Qt::PreciseTimer);
+    uiServiceTimer_.setInterval(1);
+    connect(&uiServiceTimer_, &QTimer::timeout, this, [this]() {
+        const qint64 nowNs = uiServiceClock_.nsecsElapsed();
+        if (uiServiceLastNs_ >= 0) {
+            const double gapMs = static_cast<double>(nowNs - uiServiceLastNs_) / 1'000'000.0;
+            uiServiceGapMaxMs_ = std::max(uiServiceGapMaxMs_, gapMs);
+            uiServiceGapSumMs_ += gapMs;
+            ++uiServiceSamples_;
+            if (gapMs > kUiServiceGapMs) ++uiServiceGapsOver_;
+        }
+        uiServiceLastNs_ = nowNs;
+    });
+
     statusBar()->showMessage("Ready");
     refreshHud("Idle");
 }
@@ -515,6 +565,7 @@ void MainWindow::setupTransportControls() {
         if (suppressSliderSignal_) return;
         scrubbing_ = true;
         scrubJumpPending_ = true;
+        startUiServiceMeasurement();
         playback_.pause();
         playTimer_.stop();
         stopAudio();
@@ -525,10 +576,15 @@ void MainWindow::setupTransportControls() {
     connect(timelineSlider_, &QSlider::sliderReleased, this, [this]() {
         if (suppressSliderSignal_) return;
         scrubbing_ = false;
+        stopUiServiceMeasurement();
 
         if (isVideoScrubActive()) {
+            QElapsedTimer releaseTimer;
+            releaseTimer.start();
             queueVideoScrubFrame(static_cast<long long>(timelineSlider_->value()));
             flushVideoScrub(true);
+            scrubReleaseLatencyMs_ =
+                static_cast<double>(releaseTimer.nsecsElapsed()) / 1'000'000.0;
             refreshHud("Scrub Release");
             return;
         }
@@ -651,6 +707,10 @@ void MainWindow::openPath(const QString& path) {
     scrubShownExact_ = false;
     scrubPaintGapLastMs_ = scrubPaintGapMaxMs_ = scrubPaintGapSumMs_ = 0.0;
     scrubPaintGapSamples_ = scrubPaintsWasted_ = scrubPaintStalls_ = 0;
+    stopUiServiceMeasurement();
+    uiServiceGapMaxMs_ = uiServiceGapSumMs_ = 0.0;
+    uiServiceSamples_ = uiServiceGapsOver_ = 0;
+    scrubReleaseLatencyMs_ = 0.0;
     scrubLastPresentNs_ = -1;
     pendingScrubFrame_ = -1;
     activeScrubFrame_ = -1;
@@ -1074,6 +1134,23 @@ void MainWindow::pumpDuringStorageStall(double waitedMs) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 8);
 }
 
+void MainWindow::startUiServiceMeasurement() {
+    // Reset per gesture: the interesting figure is the worst gap during *this*
+    // drag, not the worst since the app launched.
+    uiServiceGapMaxMs_ = 0.0;
+    uiServiceGapSumMs_ = 0.0;
+    uiServiceSamples_ = 0;
+    uiServiceGapsOver_ = 0;
+    uiServiceLastNs_ = -1;
+    uiServiceClock_.start();
+    uiServiceTimer_.start();
+}
+
+void MainWindow::stopUiServiceMeasurement() {
+    uiServiceTimer_.stop();
+    uiServiceLastNs_ = -1;
+}
+
 bool MainWindow::isVideoScrubActive() const {
     return currentMedia_.has_value() && currentMedia_->kind == MediaKind::VideoFile;
 }
@@ -1204,7 +1281,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         const long long desired = std::max<long long>(1,
             static_cast<long long>(std::ceil(static_cast<double>(gap) * kScrubEase)));
 
-        constexpr double kScrubWalkBudgetMs = 8.0;
+        const double kScrubWalkBudgetMs = scrubWalkBudgetMs();
         // Decode cadence and paint cadence are separate things, and conflating
         // them is what made a fast drag feel bad while every throughput number
         // said it was fine.
@@ -1311,7 +1388,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         // further behind. Zero-interval still goes through the event loop, so
         // pointer moves and repaints are serviced between slices.
         if (activeScrubFrame_ != targetFrame) {
-            scrubTimer_.start(0);
+            scrubTimer_.start(scrubRearmMs());
         }
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         refreshHud("Scrub");
@@ -1707,8 +1784,24 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(scrubPaintStalls_)
                 .arg(scrubPaintGapSamples_);
 
+            // Responsiveness of the thread rather than of the picture. `ui gap`
+            // is measured by a 1ms timer that only fires when the event loop is
+            // running, so its worst interval is how long the window could not
+            // deliver a mouse move or repaint -- which is what the slider handle
+            // trailing the pointer actually is. `release` is the one blocking
+            // decode that is meant to be there.
+            const double uiGapAvg = uiServiceSamples_ > 0
+                ? uiServiceGapSumMs_ / static_cast<double>(uiServiceSamples_) : 0.0;
+            const QString l7c = QString("ui | gap %1/%2ms (avg/max) | over %3ms: %4 of %5 | release %6ms")
+                .arg(QString::number(uiGapAvg, 'f', 2))
+                .arg(QString::number(uiServiceGapMaxMs_, 'f', 1))
+                .arg(QString::number(kUiServiceGapMs, 'f', 0))
+                .arg(uiServiceGapsOver_)
+                .arg(uiServiceSamples_)
+                .arg(QString::number(scrubReleaseLatencyMs_, 'f', 1));
+
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
-                 + "\n" + l7 + "\n" + l7b + "\n" + l8 + "\n" + l9
+                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {

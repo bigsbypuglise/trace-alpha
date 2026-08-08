@@ -205,6 +205,34 @@ private:
     long long scrubPaintGapSamples_ = 0;
     long long scrubPaintsWasted_ = 0;
     long long scrubPaintStalls_ = 0;
+
+    // How long the event loop went unserviced, which is a different question
+    // from how long a paint took to arrive. Every other scrub metric is
+    // measured from inside the work; this one is measured from outside it, by a
+    // 1ms timer that can only fire when the UI thread is back in the event
+    // loop. A gap here is, literally, a stretch during which no mouse move was
+    // delivered, no repaint happened and the slider handle could not move --
+    // the owner's "slider not keeping up with the pull".
+    //
+    // It runs only during a drag: a 1ms timer left running would add wakeups to
+    // the validated playback path for no reason.
+    QTimer uiServiceTimer_;
+    QElapsedTimer uiServiceClock_;
+    qint64 uiServiceLastNs_ = -1;
+    double uiServiceGapMaxMs_ = 0.0;
+    double uiServiceGapSumMs_ = 0.0;
+    long long uiServiceSamples_ = 0;
+    // Gaps long enough to be seen as the handle detaching from the pointer.
+    // One display refresh at 60Hz; deliberately not tied to the actual panel
+    // rate, so the figure is comparable across machines.
+    static constexpr double kUiServiceGapMs = 16.0;
+    long long uiServiceGapsOver_ = 0;
+    void startUiServiceMeasurement();
+    void stopUiServiceMeasurement();
+    // Release -> exact frame on screen. The one place a blocking decode is the
+    // right answer, so it is reported separately from the drag rather than
+    // pooled into its worst gap.
+    double scrubReleaseLatencyMs_ = 0.0;
     bool suppressSliderSignal_ = false;
     // Set when a playback run stopped because there was nothing further to
     // show -- either the playhead reached the last frame, or the decoder ran
