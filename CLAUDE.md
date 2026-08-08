@@ -305,6 +305,14 @@ decode-bound). 4K MP4 "decent" but threw a decode error on fast scrub (fixed,
 `2523d77`). Overall verdict was that the throughput gain did not convert into
 the smoothness expected -- which was correct, and is the entry below.
 
+**Owner test after the async scrub worker (2026-08-08, at `f77d472`):**
+"feeling really good". General verdict on the build rather than a per-format
+sign-off -- it is not yet confirmed which files were tried, so **4K ProRes 422
+HQ has not been separately re-confirmed as the bar at this commit**, and the
+heavy cases (4444, 4K MP4) have no owner verdict either way. Recorded as what it
+is: the async path did not break the feel, which after a change that moved
+decode onto another thread is the result that mattered most.
+
 **Owner re-test after the GPU-initiative refactor (2026-08-07, at `75a3412`):**
 4K ProRes 422 HQ **still feeling great** -- the quality bar held across four
 commits that rewrote frame ownership, the conversion buffers and the paint path.
