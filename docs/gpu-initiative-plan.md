@@ -20,7 +20,8 @@ av_read_frame / avcodec_receive_frame
   -> AVFrame (yuv420p / yuv422p10le / yuva444p12le ...)
   -> alphaStrippedFormat() re-describes planar YUVA as alpha-less
   -> sws_scale into a RECYCLED QImage borrowed from Impl::convertPool
-       (Format_RGB32, i.e. BGRA; half-res at >=1920px wide in Scrub mode)
+       (Format_RGB32, i.e. BGRA; in Scrub mode above 1920px wide, converted to
+        the DISPLAYED size -- capped at half res, never upscaled)
   -> VideoDecoderFFmpeg::decodeFrameAt(long long, QImage& out, QString&, RequestMode)
   -> VideoFrameSource::frameAt(...)                 [FrameSource interface]
   -> MainWindow::loadCurrentFrame(...)
@@ -36,7 +37,8 @@ context slots keyed on the full tuple (geometry + fast/accurate flag), with colo
 applied per slot via `sws_setColorspaceDetails`.
 
 **Where QImage ownership begins:** `Impl::convertPool`, a `std::deque<QImage>` sized
-`reverseCacheCapacity + 4`. It exists because `QImage::bits()` was detaching and deep-copying
+from the byte budget divided by the *smallest* entry the source can produce, clamped to
+`[4, 128] + 4`. It exists because `QImage::bits()` was detaching and deep-copying
 ~37.7 MB per frame while the viewer and cache still referenced the buffer. Frames leave the
 decoder as implicitly-shared QImages; the pool only reuses a buffer no one else still holds.
 
@@ -44,20 +46,28 @@ decoder as implicitly-shared QImages; the pool only reuses a buffer no one else 
 (c) `reverseCache` entries. Any of the three can be the last owner. This is the single most
 important constraint on the GPU design — see §4.
 
-**Cache representation today:**
+**Cache representation today** (updated 2026-08-07, `b5a56af`):
 
 ```cpp
-struct CachedFrame { long long frame; QImage image; };
+struct CachedFrame { long long frame; QImage image; bool previewRes; };
 std::deque<CachedFrame> reverseCache;   // FIFO, evict from front
 ```
 
-Capacity is footprint-derived at open: `192MB / (w*h*4)`, clamped to `[4, 32]`.
+Eviction is by **bytes, not entry count**: a running `reverseCacheBytes` against a
+192MB budget. This matters to the GPU design because **entries are not all the same
+size** — a Scrub preview is converted to the displayed size and can be a fiftieth of
+a full-res frame — and `previewRes` entries are refused for Step/landing requests,
+which is what keeps a soft frame from ever being inspected. Any GPU-side frame cache
+inherits both properties: mixed-resolution entries priced honestly, and a tag saying
+what an entry is fit to serve.
 
-| source | frame bytes | capacity |
+Observed occupancy at a 1280x760 window (previews ~640x360, 0.9MB):
+
+| source | full-res frame | entries held |
 |---|---|---|
-| 1920x1080 | 8.29 MB | **24** |
-| 3840x2160 | 33.18 MB | **6** |
-| 4096x2304 | 37.75 MB | **5** |
+| 1920x1080 | 8.29 MB | 24 (full-res path, not halved at 1920) |
+| 3840x2160 | 33.18 MB | **~150 previews** (191.6 MB) |
+| 4096x2304 | 37.75 MB | **~104 previews** (191.6 MB) |
 
 > The initiative brief said "~32 at 1080p / ~7 at 4K". That is wrong, and it came from a
 > stale comment at `VideoDecoderFFmpeg.cpp:648`. The clamp ceiling is 32 but the footprint
@@ -230,14 +240,31 @@ This is Gate D material. **Not implementing it yet.**
 
 ## 7. Impact on the existing scrub path
 
-`queueVideoScrubFrame` sets `pendingScrubFrame_`; a 12 ms single-shot `scrubTimer_` coalesces;
-`flushVideoScrub` decodes **synchronously on the UI thread** and re-arms the timer if the
-target moved while it was decoding.
+`queueVideoScrubFrame` sets `pendingScrubFrame_`; a 12 ms single-shot `scrubTimer_` coalesces
+the *first* update; `flushVideoScrub` decodes **synchronously on the UI thread**. A drag is a
+walk: it steps the decoder through every frame between the picture and the pointer, spending up
+to `kScrubWalkBudgetMs` (8 ms) per slice and re-arming at **zero interval** while it is still
+behind — the coalescing interval deliberately does not throttle catch-up.
 
 The *shape* of latest-wins already exists (`activeScrubFrame_` skips unchanged targets, and the
 re-arm handles a target that moved mid-decode). What is missing is the ability to **abandon an
 in-flight decode**. That is the whole delta, and it is why the async work is a contained change
 rather than a rewrite.
+
+**Two measured facts from 2026-08-07 that the async design should aim at, because they are the
+current scrub complaints and neither is a rendering problem:**
+
+- **Stalls, not burstiness, are what a drag feels like.** A fast scrub carries 7–8 gaps of
+  30–116 ms (4K H.264) and 21 (1080p), each one a cache miss forcing a seek plus a GOP walk
+  against ~0.5 ms for a hit. Paint scheduling cannot reach them — pacing was measured twice and
+  rejected (see CLAUDE.md). Moving decode off the UI thread lets a miss be absorbed instead of
+  blocking, which is the strongest argument for async that exists, and it is independent of the
+  renderer.
+- **The slider handle itself trails the pointer** on heavy media, because the walk loop
+  saturates the UI thread and mouse-move events queue behind decode work. This is a scheduling
+  problem, not a painting one, and async is its actual fix. `kScrubWalkBudgetMs` and the
+  zero-interval re-arm are the two knobs that decide how much of the thread the shuttle takes —
+  worth an A/B *before* async, as a cheap control.
 
 ## 8. Commit plan
 
@@ -276,10 +303,18 @@ not depend on any GPU decision.
 - **10-bit output is separate from 10-bit processing.** GPU high-bit-depth conversion avoids
   banding, but true 10-bit display needs an `R10G10B10A2` swapchain and a display in 10-bit
   mode. Do not conflate them in Phase 11 claims.
-- **Cheap CPU control for scaling quality.** Converting to display size *in swscale* is both
-  cheaper and higher quality than full-res convert plus Qt's bilinear (already noted in
-  CLAUDE.md). Worth measuring as a control so Phase 7 cannot claim a win that was really just
-  "we stopped using a bad filter."
+- **The cheap CPU control for scaling quality has already been taken — do not let a GPU phase
+  claim it.** Converting to display size *in swscale* shipped for scrub previews on 2026-08-07
+  (`b5a56af`): `sws 7.08 -> 1.87ms` on 4K ProRes 422 HQ, and the viewer now draws previews 1:1
+  instead of bilinear-downscaling them. Phase 7 must measure against **this** baseline, not
+  against the old full-res-convert-plus-Qt-bilinear path, or it will book a win that was
+  really "we stopped using a bad filter" — which is exactly what this bullet was written to
+  prevent, before the fix existed.
+
+  What is genuinely left for the GPU here is the **landing frame** (Step mode), which still
+  converts full-res and lets Qt scale it — a 6.4x downscale in the validation window. Measured
+  local contrast between preview and landing is within 0.7%, so this is not currently a visible
+  defect, but it is the remaining CPU-side scaling cost and the honest target for a GPU claim.
 
 ---
 
