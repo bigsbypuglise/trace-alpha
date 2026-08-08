@@ -38,7 +38,7 @@ $g.CopyFromScreen($r.L, $r.T, 0, 0, $bmp.Size)
 # window chrome contains short runs of similar greys that a first-match scan
 # latches onto instead.
 $grooveY = -1; $x0 = -1; $x1 = -1; $best = 0
-$yFrom = [int]($winH * 0.25); $yTo = [int]($winH * 0.85)
+$yFrom = [int]($winH * 0.25); $yTo = [int]($winH * 0.94)
 for ($y = $yFrom; $y -lt $yTo; $y++) {
   $run = 0; $start = -1
   for ($x = 0; $x -lt $winW; $x++) {

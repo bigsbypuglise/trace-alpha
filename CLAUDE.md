@@ -72,6 +72,18 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   Do **not** put `AVPixelFormat` (or any FFmpeg type) in this header: it is reached from `FrameSource.h` and therefore from the image-sequence path, which must compile with `TRACE_WITH_FFMPEG` undefined. `PixelLayout` is Trace's own enum.
 - **Superseded requests are dropped in exactly one place** (Aug 2026, `75a3412`): `MainWindow::requestGeneration_` is monotonic and bumped by `supersedeInFlightRequests()` on **every change of target** — not only when storage is busy, because "the target moved" is the condition the async worker acts on and it must mean the same thing whether or not a read is outstanding. `loadCurrentFrame` captures the generation, and discards the result if it changed while the request was in flight. This is `ioCancelCount_` generalised: it was already this counter in all but name, but it only counted remote-I/O cancellations. HUD `gen N drop M` splits the two questions — `gen` counts target changes and climbs through any drag, `drop` counts results actually thrown away. **`drop` is the one to watch**: 0 on local media, non-zero on a slow remote source, and after step 5 a fast drag on heavy media that leaves it at 0 means the worker is not being superseded and something is wrong.
+- **Random-access scrub decode runs on a worker, and the decoder is LEASED to it** (Aug 2026, `f77d472`, `src/core/ScrubDecodeWorker.*`, plan §14). There is one `VideoDecoderFFmpeg` and exactly one owner of it at any instant: the UI thread by default, the worker for the duration of a drag. Ownership comes back through **one** function, `reclaimDecoder()`, which is called from `loadCurrentFrame` and `prepareVideoRequest` as well as the explicit transitions — so "the UI thread never touches a leased decoder" is a property of one choke point rather than a convention observed at a dozen call sites. **Playback is untouched and still decodes synchronously**; the worker reads `posted 0` through a playback run, which is the check that it has not crept in.
+
+  While the lease is out the HUD reads a telemetry snapshot the worker publishes with each result. `metadata()` is the one thing read live, because only `open()` writes it and `open()` cannot run while a lease is out.
+
+  **The drag is a pipeline**: one frame requested at a time, chained on delivery, still one frame at a time toward the pointer, still never a jump. `kScrubEase` and `kScrubWalkBudgetMs` are gone from this path rather than ported — both only decided when the *synchronous* loop should yield, and neither ever changed which frames were shown, because the loop always stepped by one. `TRACE_ASYNC_SCRUB=0` restores the synchronous walk.
+
+  **`supersedeInFlightRequests()` deliberately does NOT tell the worker.** It fires on every pointer move, and the shuttle's target is not the pointer — it is the next frame after the one on screen, which does not move as the pointer travels. Wiring it through was measured: **111 abandoned walks and 141 stale results out of 404 posted**, seeks 28 → 118, cache hits halved, a third of the frames painted. The one case where a pointer move may invalidate work in flight is a reversal, and the test is narrow: not "the pointer moved" but **"the pointer is now on the other side of the picture"**.
+
+  **Cooperative cancellation lives at the top of `decodeUntilTarget`'s outer loop** and nowhere else — the only point inside the walk where no `AVPacket` is owned, `impl_->frame` is not being written, the codec is between send and receive and no conversion is running. It is reached once per packet. `decodeUntilTarget` returns three states, because "the frame is not there" and "the frame is no longer wanted" are different and only the first may take the recovery seek; running it on an abandonment would move `recov` off 0.
+
+  **Cancellation is rarer than it looks like it should be, and that is correct.** One request is in flight at a time and the target only changes on a reversal, so most drags on most files supersede nothing — the in-flight window is one frame wide. `drop` near 0 on light media is not an alarm; `drop` at 0 on **ProRes 4444** is, because that is the file that lags far enough behind the pointer for a release or reversal to land inside a decode.
+- **The slider handle belongs to the user while the user is holding it** (Aug 2026, `f77d472`): `syncTransportBar` wrote the *decoded* frame back into the slider on every HUD refresh — several times a second during a drag — so the handle was yanked out from under the pointer and the next mouse move dragged it back. **That is the "slider not keeping up with the pull" report, and it was never event-loop starvation**: the handle was being moved somewhere else on purpose. It also corrupted the landing, because `sliderReleased` lands on `timelineSlider_->value()`: a fast 1080p reversal set landed on frame 30 instead of the 3 the user pointed at. Guarded on `isSliderDown()`.
 - **Presentation goes through `VideoRenderer`** (Aug 2026, `5765c19`, `src/render/`): `CpuImageRenderer` is the only backend and holds the existing paint verbatim. **The renderer owns the whole paint, including the no-frame placeholder** — two painters cannot share one paint event, and a D3D11 backend will not use `QPainter` at all. There is deliberately no `QPainter` in the interface; `paint(QWidget*)` lets the CPU backend make its own and a GPU one ignore the host. `ViewerWidget` keeps only what is the host's business (when a repaint was asked for, how long it took to arrive) and folds `RenderStats` into `ViewerPerfStats` so the HUD reads one struct. `TRACE_RENDERER` selects the backend, defaults to `cpu`, and warns on stderr before falling back; the HUD `renderer` field names what is actually presenting, because **a GPU path that quietly never engages while the app looks fine is the failure mode to design against**.
 - **The decoder must be drained at end of stream** (Aug 2026, `e76eabb`): `av_read_frame` returning EOF is not the same as having no frames left — frame-threaded codecs hold up to `thread_count` frames in flight. Without the null flush packet the tail of every long-GOP file was never displayed (15 frames of a 96-frame clip on a 32-core box), and `frameAt` returned *true* carrying the previous image, so the viewer repeated the last frame while the counter ran on and each request past it paid a pointless seek. `frameAt` now returns false when the codec is exhausted and the frame was not produced — never substitute a stale image for a missing one. Drain state resets on open and on the flush after a seek.
 - **Forward-fill queue was removed** (July 2026): it decoded up to 4 frames per timer tick in bursts and caused rhythmic stutter on 4K ProRes. Don't re-add synchronous read-ahead.
@@ -215,7 +227,13 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
 
 1. ~~4K ProRes 4444 playback is at the limit of the sync design~~ **Resolved 2026-08-07**: the ~38ms figure was dominated by a bug, not by codec cost. `QImage::bits()` was detaching — a full ~37.7MB deep copy of the previous frame, every frame, of data `sws_scale` then overwrote — because the viewer and reverse cache still referenced the buffer. A recycling conversion-buffer pool removed it. Playback is now **~23.7fps (~99% of real time), late 0**, with per-frame work at ~33ms against a 41.67ms budget, i.e. **~8ms of idle headroom**. The remaining gap to 24.000 is *not* CPU cost: video presents one frame per timer tick, `round(1000/24) = 42ms`, so the hard ceiling is **1000/42 = 23.81fps** and we measure 99.4–99.8% of it. Exact 24.000 needs a presentation clock with sub-ms resolution (vsync / waitable swapchain) — fold it into the GPU renderer pass. Three scheduler alternatives were measured and reverted; see the comparison table at the timer setup in `MainWindow.cpp` and don't re-try them.
 2. ~~**H.264 scrub is cache-bound, not decode-bound**~~ **Largely resolved 2026-08-07 by the drag shuttle** — see the scrub entries in Decisions. The measurement stands (seek costs 1–3ms; exact scrub cost scales with the GOP walk, 0f ≈ 34ms to 29f ≈ 61ms; a cache hit serves in 0.33–0.55ms) but the conclusion drawn from it does not: the fix was to stop *seeking* during a drag rather than to make the cache better. Walking forward costs ~1.8ms/frame against ~34–61ms for a seek-and-walk, so a drag that used to pay a seek per update now pays 2 seeks for an entire sweep. Levers (a)–(c) from the original entry are no longer the priority. **What is left here is backward dragging**, which still seeks past the reverse-cache window — folded into item 6.
-3. **GPU-backed presentation / D3D11 — STARTED 2026-08-07, Gate A complete in code.** The plan and every decision live in `docs/gpu-initiative-plan.md`; read that first, it wins over anything summarised here. Two steps are committed and validated: `VideoFrame` replaced bare `QImage` at the four frame seams (`03d840e`), and the `VideoRenderer` boundary exists with `CpuImageRenderer` as its only implementation (`5765c19`). Step 4's generation plumbing is in as well (`75a3412`). **No GPU backend yet.** Next is step 5, the async scrub worker — **GATE D**; it is renderer-independent and deliberately precedes the D3D11 work, because it addresses the half of the product complaint (stalls) that GPU presentation cannot fix. This is still where the exact-cadence problem belongs: video presents one frame per timer tick, so the rate ceiling is `1000/round(1000/fps)`, and closing it needs a real presentation clock (vsync / waitable swapchain), not another scheduler experiment.
+3. **GPU-backed presentation / D3D11 — Gate A and GATE D complete (2026-08-08).** The plan and every decision live in `docs/gpu-initiative-plan.md`; read that first, it wins over anything summarised here. Steps 2–5 are committed and validated: `VideoFrame` replaced bare `QImage` at the four frame seams (`03d840e`), the `VideoRenderer` boundary exists with `CpuImageRenderer` as its only implementation (`5765c19`), generation plumbing landed (`75a3412`), and random-access scrub decode now runs on a worker with latest-target-wins (`ff55d4e` + `f77d472`, plan §14). **No GPU backend yet.** Next is step 6 — **GATE B**, the first native D3D11 surface. That is still where the exact-cadence problem belongs: video presents one frame per timer tick, so the rate ceiling is `1000/round(1000/fps)`, and closing it needs a real presentation clock (vsync / waitable swapchain), not another scheduler experiment.
+
+   **What Gate D bought, measured on the reversal gesture set.** 1080p worst UI-thread block **86.6 → 45.8ms**, gaps over 16ms **25 of 442 (5.7%) → 3 of 1305 (0.2%)**; 4K H.264 gaps over 16ms **3 → 1**. Playback unchanged at 99.1% with the worker never engaging. The 4K *worst* gap barely moved (115.6 → 111.1ms) and that is honest: **the survivor is the press landing**, which must be exact because a click jumps to where you pointed, and on 4K H.264 that is a seek plus a GOP walk. It is now the largest UI-thread block left in a scrub gesture.
+
+   **What it did not buy**: async moved the block off the UI thread, it did not make a cache miss cheaper. The *picture* still stalls where the decoder does — 4K H.264 keeps paint gaps of 30–100ms on a miss. Prefetching ahead of the drag direction while the worker is idle is the fix, and the worker now exists to do it.
+
+   **Control result worth not re-deriving**: quartering `kScrubWalkBudgetMs` moves the worst UI block by 3% and re-arming at 12ms instead of 0 by 2%. The budget is checked *between* frames, so it bounds the loop but cannot subdivide one `decodeFrameAt` — and the worst block is one call. Do not attack this with scheduler tuning. Knobs `TRACE_SCRUB_WALK_MS` / `TRACE_SCRUB_REARM_MS` exist for the A/B.
 4. **LucidLink read-ahead — optional follow-up, not started work.** See the read-ahead section above: two designs measured worse. First try full-request buffered serving instead of partial reads, then benchmark. Do not treat as in-progress.
 5. ~~**Audio, first pass — needs validation on Windows**~~ **Validated and fixed 2026-08-07**, on the local Windows toolchain against the `Trace_Testing_Assets` set. The three open questions are answered: (a) the device-latency correction is adequate — a fixed term measured neutral against the EMA, and residual sync is ≤62ms worst case at a 100ms buffer; (b) no underruns during playback on any file including 4K ProRes 422 HQ — the only silence padding is at end of stream once the audio track runs out, and the ring is now derived at ≥2x the device buffer rather than a fixed 0.5s; (c) the bounded catch-up no longer fires at all in normal playback — **skips are 0** on every file measured. Results: 1080p H.264 **99.1%** of real time (240/240 frames), 4K H.264 **98.3%** (120/120), 4K ProRes 422 HQ **98.4%** (168/168, against a recorded baseline of 164 frames / 95.0%), 4K ProRes 4444 no-audio control **98.3%** (261/261). Remaining residual is 3–5 *holds* per 10s clip with no frame dropped, which is the 41ms tick against a 41.667ms frame — a presentation-clock problem, and item 3's to solve. **Still not done: the LucidLink regression** (`start()` now takes a bounded ≤150ms UI-thread wait to prime the ring; ~10–13ms locally, unmeasured on a cold remote source) and J-K-L off-speed audio, then scrub audio.
 6. ~~**4K scrub throughput — the cache is sized in the wrong currency**~~ **Resolved 2026-08-07** (`b5a56af`), except for ProRes 4444. Eviction is by bytes now and previews convert to the displayed size; see the scrub entries in Decisions for the measured table. 4K H.264 backward went 31.3 → 0.69ms/frame, ProRes 422 backward 13.1 → 7.5ms, and everything except 4444 reaches `lag 0-1f` on a 1.5s full-clip sweep.
@@ -307,20 +325,31 @@ perfectly on lag while stalling for 100ms.
 
 **Known open items, in the order they are likely worth attacking:**
 
-1. **Stalls are the stutter.** Measured on a fast scrub: 4K H.264 carries 7-8
-   gaps of 30-116ms in a multi-gesture run, 1080p carries 21. Those are cache
-   misses forcing a seek plus a GOP walk (~30ms against ~0.5ms for a hit), and
-   they are what "stable but not smooth" is. **Paint scheduling cannot reach
-   them** -- see the pacing entry in Decisions, which was measured and
-   rejected. The fix is to make misses rarer: prefetch ahead of the drag
-   direction while the shuttle is idle between slices, rather than making a
-   miss cheaper.
-2. **The slider handle itself trails the pointer** on heavy media -- the
-   owner's "slider not keeping up with the pull". Reproduced: the walk loop
-   saturates the UI thread, so mouse-move events queue behind decode work. This
-   is separate from picture lag and nothing so far has addressed it. The walk
-   budget (`kScrubWalkBudgetMs`, 8ms) and the zero-interval re-arm are the two
-   places that decide how much of the thread the shuttle takes.
+1. **Stalls are the stutter, and Gate D did not remove them.** Measured on a
+   fast scrub: 4K H.264 carries 7-8 gaps of 30-116ms in a multi-gesture run,
+   1080p carries 21. Those are cache misses forcing a seek plus a GOP walk
+   (~30ms against ~0.5ms for a hit). **Paint scheduling cannot reach them** --
+   see the pacing entry in Decisions, measured and rejected -- and neither can
+   the async worker, which moved the block off the UI thread without making a
+   miss any cheaper. The fix is to make misses rarer: **prefetch ahead of the
+   drag direction while the worker is idle**, which is now cheap to build
+   because the worker exists and the lease already answers who owns the decoder.
+   ProRes 422 HQ measures `stalls 0 of 438`, so the bar is reachable.
+2. ~~**The slider handle itself trails the pointer**~~ **Fixed 2026-08-08**
+   (`f77d472`) -- and the diagnosis in this entry was wrong, which is the part
+   worth keeping. It was recorded as event-loop starvation: "the walk loop
+   saturates the UI thread, so mouse-move events queue behind decode work".
+   Starvation was real and is much reduced, but it was not what moved the
+   handle. `syncTransportBar` was writing the *decoded* frame back into the
+   slider on every HUD refresh, so the handle was deliberately yanked off the
+   pointer several times a second. Two plausible causes for one symptom, and
+   the measurement (`ui gap`) was needed to tell them apart -- the theory that
+   sounded right accounted for gaps of tens of ms, while the handle was moving
+   hundreds of frames.
+2b. **The press landing is the largest UI-thread block left in a drag** --
+   90-125ms on 4K H.264. It must stay exact, so it cannot be approximated; but
+   it could be issued to the worker and awaited with the event loop alive, the
+   way remote reads already are.
 3. **4K ProRes 4444 fast drag** -- decode-bound at 15.4ms/frame of a 17.7ms
    total, ~2.3x playback against the owner's ~4x. FFmpeg's ProRes decoder has
    no `lowres` path, so this needs decoding off the UI thread (which reopens
@@ -341,11 +370,31 @@ perfectly on lag while stalling for 100ms.
    values were not wrong, they were **old**, which is harder to notice and worse
    in a line whose entire job is to say which frame is on screen.
 
-**Tuning knobs**, all defaulting to shipped behaviour: `TRACE_SCRUB_FILL_MS`
-(seek-walk cache fill budget during a drag, default 60ms),
+**Tuning knobs**, all defaulting to shipped behaviour: `TRACE_ASYNC_SCRUB=0`
+(back to the synchronous walk), `TRACE_SCRUB_WALK_MS` / `TRACE_SCRUB_REARM_MS`
+(the synchronous walk's budget and re-arm, for the control A/B),
+`TRACE_SCRUB_FILL_MS` (seek-walk cache fill budget during a drag, default 60ms),
 `TRACE_PREVIEW_DISPLAY_SIZE=0` (back to plain half-res previews),
 `TRACE_SCRUB_PACE`, `TRACE_SEEK_CACHE_WINDOW`, `TRACE_AUDIO_BUFFER_MS`,
 `TRACE_AUDIO_SLEW`, `TRACE_AUDIO_FIXED_LATENCY`, `TRACE_NO_AUDIO`.
+
+**The HUD line to reach for on a "feels wrong" report is now `ui`, not
+`smooth`.** `ui gap` is measured by a 1ms timer that can only fire when the
+event loop is running, so its worst interval is how long the window could not
+deliver a mouse move or repaint -- the thread, measured from outside the work it
+is doing. `smooth` says when frames landed; `ui` says whether the app was alive.
+They answer different halves of "stable but not smooth" and the slider-yank bug
+above is what happens when you only have one of them. Note `uiblock seek` on the
+`resp` line measures the *worker* while a lease is out, not the UI.
+
+**Lifecycle gestures have a harness now**: `scripts/measure/lifecycle.ps1`
+covers step +/-5 determinism after a release, play-after-release, opening
+another file mid-drag, and quitting mid-drag. Those are the transitions where an
+ownership bug shows up as a hang, a stale frame or a wrong landing rather than
+as a bad number, and no throughput harness reaches them.
+`scrub.ps1 -SnapRelease` releases with no settling pause -- the only gesture
+that reliably catches a decode in flight, and therefore the only one that
+exercises cancellation at all.
 
 **Measurement note:** the HUD is unreadable in a normal screenshot on the
 5120x1440 panel -- it downsamples too far. Capture the Trace window at native

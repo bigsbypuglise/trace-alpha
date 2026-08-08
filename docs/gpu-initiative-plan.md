@@ -1,11 +1,12 @@
 # Trace GPU / smooth-presentation initiative — active plan
 
-**Status: GATE A COMPLETE IN CODE (2026-08-07).** Steps 1–3 of §8 are committed
-and validated on the local Windows toolchain: `VideoFrame` has replaced bare
-`QImage` at the four seams (`03d840e`), and the `VideoRenderer` boundary exists
-with `CpuImageRenderer` as its only implementation (`5765c19`). Step 4's
-generation plumbing is in too (`75a3412`, §13). No GPU backend yet. **Next is
-step 5 — GATE D**, the async scrub worker, which is where the real risk lives.
+**Status: GATE D PASSED (2026-08-08).** Steps 1–5 of §8 are committed and
+validated on the local Windows toolchain: `VideoFrame` replaced bare `QImage` at
+the four seams (`03d840e`), the `VideoRenderer` boundary exists with
+`CpuImageRenderer` as its only implementation (`5765c19`), generation plumbing
+landed (`75a3412`, §13), and random-access scrub decode now runs on a worker
+with latest-target-wins (`f77d472`, §14). No GPU backend yet. **Next is step 6 —
+GATE B**, the first native D3D11 surface.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -327,6 +328,7 @@ Each is independently reviewable and revertable. Gates in **bold**.
 4. `refactor(scrub): add generation-numbered frame requests` — IDs and stale-drop plumbing,
    still synchronous. Pure bookkeeping, no threading. *(done, `75a3412` — see §13)*
 5. `perf(scrub): move random-access decode to a worker with latest-target-wins` — **GATE D.**
+   *(done, `f77d472` — see §14; decoder-side cancellation landed first in `ff55d4e`)*
 6. `feat(gpu): add experimental native D3D11 video surface` — **GATE B** (frame, stride,
    aspect, resize, fallback).
 7. `feat(gpu): add planar YUV upload and shader colour conversion` — **GATE C.**
@@ -768,7 +770,86 @@ itself is still the ~0.5ms fast path it was — it is not routed through a seek 
 but delivery costs one hop through the event loop. This is the one place the
 design pays something, and it is measured rather than assumed.
 
-### 14.10 Expected files changed
+### 14.10 Validation record — GATE D PASSED (2026-08-08, `f77d472`)
+
+Local Windows toolchain, 1296x812 window. Correctness gates held everywhere:
+`delta 0`, `detach 0.00`, `stale-blocked 0`, `recov 0`, no stale or out-of-order
+frame presented.
+
+| | result |
+|---|---|
+| 1080p playback, 10s | 99.1% real time, 240/240 frames, rep 4 skip 0, `clk-upd 1/1`; **worker `posted 0`** |
+| 1080p reversals | ui gap 2.22/**45.8**ms, **3 of 1305** over 16ms; rev-hit 93.6%, 23 seeks, 594 paints |
+| 1080p fast back | `abandoned 1 stale 1 cancel 2.07ms`; rev-hit 89.3% |
+| 4K H.264 reversals | ui gap 1.63/**111.1**ms, **1 of 1751** over 16ms; rev-hit 98.0% |
+| 4K H.264 fast fwd | **stalls 0 of 93**; `target 120 shown 120` |
+| 4K H.264 fast back | rev-hit 83.8%, ui gap 1.63/93.2ms |
+| 4K ProRes 422 HQ reversals | **stalls 0 of 438**, max paint gap **17.0ms**; rev-hit 94.7%; ui gap 1.84/31.3ms |
+| 4K ProRes 4444 reversals | `cancel 12.88ms`, `stale 4`, `drop 3`; ui gap 1.64/44.9ms |
+| PNG sequence | reversals + step cycles exact; path untouched |
+| step ±5, three cycles | landed 61, ends 61 |
+| play after release | plays, audio `MASTER`, skip 0; runs to end and Space restarts |
+| open another file mid-drag | new media at frame 0, `posted 0 stale 0 drop 0`, no outgoing frame shown |
+| quit mid-drag on 4444 | **exited in 53ms** |
+
+Against the synchronous baseline, on the same gesture:
+
+| | sync | async |
+|---|---|---|
+| 1080p worst UI gap | 86.6ms | **45.8ms** |
+| 1080p gaps >16ms | 25 of 442 (5.7%) | **3 of 1305 (0.2%)** |
+| 4K worst UI gap | 115.6ms | 111.1ms |
+| 4K gaps >16ms | 3 of 1676 | **1 of 1751** |
+
+**The 4K worst-gap figure has not moved and that is not a failure to report
+away.** The surviving gap is the *press landing* — a click must jump exactly to
+where it was pointed, so that decode is deliberately synchronous and on 4K
+H.264 it is a seek plus a GOP walk. The two mid-drag stalls that were there are
+gone. It is now the single largest UI-thread block left in a scrub gesture and
+is the obvious next thing to attack; see 14.12.
+
+### 14.11 What the mechanisms actually did, and where
+
+Each was exercised rather than assumed, and the media that exercises each one is
+worth recording because most gestures on most files exercise none of them:
+
+- **Latest-target-wins at the UI boundary** — `drop 3` on ProRes 4444.
+- **Staleness detected before publishing** — `stale 1–4`, several files.
+- **`revokeLease()` waiting out an in-flight decode** — 12.88ms on 4444. That is
+  one ProRes frame and therefore the floor: every frame is a keyframe, a seek
+  lands on the target, and there is no walk to interrupt.
+- **The checkpoint inside the GOP walk abandoning one** — 4K H.264, backward
+  drag, `TRACE_SEEK_CACHE_WINDOW=0` so misses dominate: **a walk that would have
+  run ~70ms given up in 0.04ms**. Also fires unforced on 1080p fast backward
+  (`abandoned 1`, `cancel 2.07ms`).
+
+**Cancellation is rarer than the design anticipated, for a good reason.** Only
+one request is in flight at a time, and the shuttle's target is the next frame
+after the one on screen — so it changes on a direction reversal, not as the
+pointer travels. Most drags on most files supersede nothing, and that is the
+mechanism working: the in-flight window is one frame wide. `drop` staying near 0
+on light media is therefore *not* the alarm §13 expected it to be; the alarm is
+`drop` staying 0 on **ProRes 4444**, which lags far enough behind the pointer
+for reversals and releases to land inside a decode.
+
+### 14.12 Open after Gate D
+
+1. **The press landing is now the biggest UI-thread block in a drag** —
+   90–125ms on 4K H.264, 13–32ms on ProRes. It has to be exact and it has to be
+   the frame the user pointed at, so it cannot simply be made approximate; but
+   it could be issued to the worker and awaited with the event loop alive, the
+   way remote reads already are.
+2. **The picture still stalls where the decoder does.** Async moved the block
+   off the UI thread; it did not make a cache miss cheaper. 4K H.264 still
+   carries paint gaps in the 30–100ms range on a miss. Prefetching ahead of the
+   drag direction while the worker is idle is the fix, and it is now cheap to
+   build because the worker exists.
+3. **`uiblock seek` in the HUD measures the worker, not the UI, while a lease is
+   out.** `MediaIoSource` attributes a read with no stall pump as fully blocking
+   the caller, and the caller during a drag is the worker — which is the point.
+   The `ui gap` line is the authoritative UI-responsiveness number now.
+
+### 14.13 Expected files changed
 
 `src/core/VideoDecoderFFmpeg.{h,cpp}` (cancel predicate, three-state walk result,
 abandon counters) · `src/core/ScrubDecodeWorker.{h,cpp}` (new) ·
