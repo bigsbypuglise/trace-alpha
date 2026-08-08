@@ -57,17 +57,29 @@ constexpr double kScrubEase = 0.5;
 // as a burst that the panel samples once. Lower values allow bursting again in
 // exchange for closing the pointer gap faster.
 //
-// DEFAULT IS 0 -- pacing OFF. It was written to fix backward drags arriving as
-// a burst-then-freeze, and it does even the motion out, but it was tried on the
-// Windows box and made fast scrub feel worse overall: it costs forward roughly
-// 20 frames of lag at a 6x drag because the re-arm round trip caps the paced
-// rate near 140fps rather than the panel's 240. Forward smoothness is the thing
-// that was signed off, so it wins by default until pacing is cheap enough not
-// to trade against it. Do not turn this on again without re-testing fast
-// forward drag specifically.
+// Minimum interval between scrub repaints, as a fraction of a display refresh.
 //
-// TRACE_SCRUB_PACE: 0 off (default), 1.0 one frame per refresh, values between
-// trade smoothness against lag.
+// DEFAULT IS 0 -- paint every decoded frame. Pacing was re-tried in Aug 2026
+// with a better mechanism (it no longer breaks out of the walk, so it does not
+// throttle the decoder the way the first attempt did) against a new metric,
+// and the measurement did not support turning it on:
+//
+//   4K H.264 fast scrub   wasted 98% -> 43%,  stalls 7 -> 8,   max gap 102 -> 116ms
+//   1080p    fast scrub   wasted 97% -> 26%,  stalls 21 -> 34, max gap 78 -> 85ms
+//
+// It does what it claims -- far fewer frames painted into a refresh interval
+// that could never show them -- and that turns out not to be worth anything.
+// A paint costs 0.23-0.36ms, so ~600 wasted paints is ~200ms across an entire
+// multi-gesture run, and suppressing them left the stall count unchanged at 4K
+// and clearly worse at 1080p.
+//
+// The lesson is about which quantity matters: burstiness is not what a drag
+// feels like, STALLS are -- the 30-116ms gaps where a cache miss forces a seek
+// and a GOP walk. Nothing about paint scheduling can reach those. Don't come
+// back to pacing; make misses cheaper or rarer.
+//
+// TRACE_SCRUB_PACE: 0 paint every decoded frame (default), 1.0 one frame per
+// display refresh, values between.
 double scrubPaceFraction() {
     static const double frac = [] {
         const QByteArray raw = qgetenv("TRACE_SCRUB_PACE");
@@ -628,6 +640,9 @@ void MainWindow::openPath(const QString& path) {
     scrubbing_ = false;
     scrubJumpPending_ = false;
     scrubShownExact_ = false;
+    scrubPaintGapLastMs_ = scrubPaintGapMaxMs_ = scrubPaintGapSumMs_ = 0.0;
+    scrubPaintGapSamples_ = scrubPaintsWasted_ = scrubPaintStalls_ = 0;
+    scrubLastPresentNs_ = -1;
     pendingScrubFrame_ = -1;
     activeScrubFrame_ = -1;
     playbackClock_.invalidate();
@@ -1174,10 +1189,28 @@ void MainWindow::flushVideoScrub(bool forceExact) {
             static_cast<long long>(std::ceil(static_cast<double>(gap) * kScrubEase)));
 
         constexpr double kScrubWalkBudgetMs = 8.0;
-        // One frame per display refresh, no faster. Painting quicker than the
-        // panel refreshes does not show more frames -- it overwrites them
-        // before a refresh samples them -- and it is what made a run of cache
-        // hits arrive as a burst followed by a freeze on the next miss.
+        // Decode cadence and paint cadence are separate things, and conflating
+        // them is what made a fast drag feel bad while every throughput number
+        // said it was fine.
+        //
+        // The decoder should walk as fast as it can: that is what closes the
+        // gap to the pointer. The *painting* should happen no faster than the
+        // panel refreshes, because a repaint inside one refresh interval simply
+        // overwrites the previous one and nothing is shown. Measured on 4K
+        // H.264 with a scripted fast scrub: 616 of 627 paints -- 98% -- landed
+        // sooner than the display could sample the one before, and the motion
+        // arrived as bursts separated by stalls of up to 102ms.
+        //
+        // Skipping those repaints does not skip frames from the viewer's point
+        // of view: every frame is still decoded, in order, and the display
+        // samples that sequence at its own rate. It samples it *evenly* now
+        // rather than catching whichever frame happened to be in the buffer at
+        // scan-out. The frames not painted were never visible either way.
+        //
+        // This is NOT the old TRACE_SCRUB_PACE, which broke out of the walk and
+        // re-armed a timer per frame -- that throttled the decoder too and
+        // measured 151 paints against 631, 45/sec, with the drag unable to
+        // finish a sweep. Nothing here interrupts the walk.
         const QScreen* scr = screen();
         const double refreshHz = (scr && scr->refreshRate() > 1.0)
             ? scr->refreshRate() : 60.0;
@@ -1188,32 +1221,52 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         walkTimer.start();
         prepareVideoRequest(mode, dir, true);
         long long walked = 0;
-        int reArmMs = 0;
         const long long steps = std::min(gap, desired);
         for (long long i = 1; i <= steps; ++i) {
             const long long f = walkFrom + dir * i;
             // A remote read pumped the event loop and something re-entered;
             // drop out and let the re-armed timer resume from here.
             if (storageBusy_) break;
-            // Too soon for the display to have shown the previous frame: end
-            // the slice and come back exactly when it is due, rather than
-            // spinning or painting into the void.
-            if (scrubLastPresentNs_ >= 0) {
-                const double sinceMs =
-                    static_cast<double>(scrubPresentClock_.nsecsElapsed() - scrubLastPresentNs_)
-                    / 1'000'000.0;
-                if (sinceMs < minPresentIntervalMs) {
-                    reArmMs = static_cast<int>(std::ceil(minPresentIntervalMs - sinceMs));
-                    break;
-                }
-            }
             playback_.setCurrentFrame(f);
             if (!loadCurrentFrame(error, mode)) break;
-            // repaint(), not update(): update() coalesces, so a loop of them
-            // would decode every frame and display only the last -- which is
-            // the behaviour this exists to remove.
-            viewer_->repaint();
-            scrubLastPresentNs_ = scrubPresentClock_.nsecsElapsed();
+
+            // Decode always; paint only when the display could show it. The
+            // walk is never interrupted for pacing -- it just declines to draw
+            // frames that would be overwritten before a refresh sampled them.
+            // The last frame of the slice is always drawn, so whatever the
+            // decoder reached is what is on screen when the slice ends.
+            const qint64 nowNs = scrubPresentClock_.nsecsElapsed();
+            bool paintDue = true;
+            if (scrubLastPresentNs_ >= 0 && minPresentIntervalMs > 0.0) {
+                const double sinceMs =
+                    static_cast<double>(nowNs - scrubLastPresentNs_) / 1'000'000.0;
+                paintDue = sinceMs >= minPresentIntervalMs;
+            }
+            // Arrived: this is the frame the pointer is on and no further slice
+            // will run, so it must be drawn whether or not a refresh is due.
+            // Mid-walk frames are not force-drawn even at slice end -- a
+            // converged shuttle does one frame per slice, so forcing there
+            // painted every frame again and put the wasted rate straight back
+            // to 90%.
+            const bool arrived = (f == targetFrame);
+            if (paintDue || arrived) {
+                // repaint(), not update(): update() coalesces, so a loop of them
+                // would decode every frame and display only the last -- which is
+                // a jump, and is the behaviour the shuttle exists to remove.
+                viewer_->repaint();
+                if (scrubLastPresentNs_ >= 0) {
+                    const double gapMs =
+                        static_cast<double>(nowNs - scrubLastPresentNs_) / 1'000'000.0;
+                    scrubPaintGapLastMs_ = gapMs;
+                    scrubPaintGapMaxMs_ = std::max(scrubPaintGapMaxMs_, gapMs);
+                    scrubPaintGapSumMs_ += gapMs;
+                    ++scrubPaintGapSamples_;
+                    const double refreshMs = 1000.0 / refreshHz;
+                    if (gapMs < refreshMs) ++scrubPaintsWasted_;
+                    if (gapMs > refreshMs * 2.0) ++scrubPaintStalls_;
+                }
+                scrubLastPresentNs_ = nowNs;
+            }
             activeScrubFrame_ = f;
             // Shuttled, so possibly a half-res preview: the release must land
             // this frame properly even if it is already the one on screen.
@@ -1242,7 +1295,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         // further behind. Zero-interval still goes through the event loop, so
         // pointer moves and repaints are serviced between slices.
         if (activeScrubFrame_ != targetFrame) {
-            scrubTimer_.start(reArmMs);
+            scrubTimer_.start(0);
         }
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         refreshHud("Scrub");
@@ -1606,8 +1659,26 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(pendingScrubFrame_ >= 0 && activeScrubFrame_ >= 0
                          ? std::llabs(pendingScrubFrame_ - activeScrubFrame_) : 0LL);
 
+            // Smoothness rather than throughput: the gap between consecutive
+            // paints, how many landed too fast for the display to have shown
+            // the previous one, and how many were slow enough to read as a
+            // hitch. A drag can be perfect on `shuttle`/`lag` and bad here.
+            const double gapAvg = scrubPaintGapSamples_ > 0
+                ? scrubPaintGapSumMs_ / static_cast<double>(scrubPaintGapSamples_) : 0.0;
+            const double wastedPct = scrubPaintGapSamples_ > 0
+                ? 100.0 * static_cast<double>(scrubPaintsWasted_)
+                      / static_cast<double>(scrubPaintGapSamples_) : 0.0;
+            const QString l7b = QString("smooth | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | stalls %6 of %7")
+                .arg(QString::number(scrubPaintGapLastMs_, 'f', 1))
+                .arg(QString::number(gapAvg, 'f', 1))
+                .arg(QString::number(scrubPaintGapMaxMs_, 'f', 1))
+                .arg(QString::number(wastedPct, 'f', 0))
+                .arg(scrubPaintsWasted_)
+                .arg(scrubPaintStalls_)
+                .arg(scrubPaintGapSamples_);
+
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
-                 + "\n" + l7 + "\n" + l8 + "\n" + l9
+                 + "\n" + l7 + "\n" + l7b + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {

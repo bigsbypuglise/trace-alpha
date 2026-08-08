@@ -185,6 +185,21 @@ private:
     // are paced to one per refresh interval so each one is actually seen.
     QElapsedTimer scrubPresentClock_;
     qint64 scrubLastPresentNs_ = -1;
+    // Smoothness, as opposed to throughput. Frames-per-second and lag can both
+    // look excellent while the motion feels bad, because they say nothing about
+    // *when* frames land: a slice that paints twelve frames in 8ms and then
+    // stalls 30ms on a miss scores perfectly and reads as a stutter. These
+    // measure the interval between consecutive paints during a drag.
+    //   wasted  - painted sooner than the display could possibly show the
+    //             previous one, so the previous frame was overwritten unseen
+    //   stalls  - gaps longer than two refresh intervals, which is what the eye
+    //             actually registers as a hitch
+    double scrubPaintGapLastMs_ = 0.0;
+    double scrubPaintGapMaxMs_ = 0.0;
+    double scrubPaintGapSumMs_ = 0.0;
+    long long scrubPaintGapSamples_ = 0;
+    long long scrubPaintsWasted_ = 0;
+    long long scrubPaintStalls_ = 0;
     bool suppressSliderSignal_ = false;
     // Set when a playback run stopped because there was nothing further to
     // show -- either the playhead reached the last frame, or the decoder ran
