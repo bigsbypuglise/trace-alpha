@@ -314,6 +314,51 @@ private:
     void resetScrubLagModel();
     void notePointerTarget(long long frame);
     void notePresentedScrubFrame(long long frame);
+
+    // Preview sampling. Short-window estimates, kept separate from the
+    // gesture-cumulative figures above: those are for reading afterwards, these
+    // have to steer while the drag is running and a cumulative average adapts
+    // far too slowly to a reversal or a change of speed.
+    //
+    // Demand is short-window: a drag that starts slow and then whips must raise
+    // the stride now, not average it away.
+    double ctrlPointerFps_ = 0.0;
+    qint64 ctrlLastPointerNs_ = -1;
+    // Capacity is deliberately NOT a short window, and not a cost average
+    // either. An EMA of per-request cost is dominated by whichever of hits and
+    // misses happened to come last -- measured reading 0.17ms after a run of
+    // cache hits on a file whose true mixed cost is ~5ms, which collapses the
+    // stride exactly when a heavy stretch begins. Frames actually presented per
+    // second over the whole gesture is stable, includes hits and misses in
+    // their real proportion, and is close to invariant under striding, because
+    // one presented frame costs one decode whatever the stride.
+    // (scrubDecodeFps_ above is that measure; capacity reads it.)
+    // How many source frames the next request advances. 1 is the shipped
+    // behaviour -- every frame, in order -- and is what the controller returns
+    // whenever the decoder can keep up.
+    long long scrubStride_ = 1;
+    long long scrubFramesSkipped_ = 0;
+    long long scrubSampledSteps_ = 0;
+    // What random access costs on this media: the mean number of frames a
+    // request has had to walk to reach its target, accumulated over the media
+    // rather than decayed. An EMA was tried and is wrong here for the same
+    // reason as above -- it reads whatever the last few requests did, so it
+    // collapses to near zero during a run of cache hits and reports a long-GOP
+    // file as having free random access. A latch was tried too and is wrong in
+    // the other direction: ProRes seeks occasionally land short and walk a few
+    // frames, and one such walk disabled sampling for the session.
+    long long mediaWalkFramesTotal_ = 0;
+    long long mediaWalkRequests_ = 0;
+    double mediaWalkPerRequest() const {
+        return mediaWalkRequests_ > 0
+            ? static_cast<double>(mediaWalkFramesTotal_) / static_cast<double>(mediaWalkRequests_)
+            : 0.0;
+    }
+    // Above this, a strided step is expected to leave the region the decoder
+    // has already opened and pay for a new one. One frame is deliberately
+    // strict: on an all-intra file the true mean is a small fraction.
+    static constexpr double kRandomAccessWalkLimit = 1.0;
+    long long computeScrubStride(long long gap) const;
     bool suppressSliderSignal_ = false;
     // Set when a playback run stopped because there was nothing further to
     // show -- either the playhead reached the last frame, or the decoder ran

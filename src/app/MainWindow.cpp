@@ -123,6 +123,39 @@ bool asyncScrubEnabled() {
     return on;
 }
 
+// Preview sampling during an active drag. Default on.
+//
+// This is the one place Trace's "never skip a frame" rule is deliberately not
+// in force, and the boundary is exact: it applies to the ACTIVE DRAG PREVIEW
+// only. The release landing, stepping, playback and every exact request are
+// untouched -- responsiveness beats completeness while the hand is moving,
+// exactness beats speed the moment it stops.
+bool scrubSamplingEnabled() {
+    static const bool on = [] { return qgetenv("TRACE_SCRUB_SAMPLE") != "0"; }();
+    return on;
+}
+
+// Ceiling on how far one preview step may advance. Bounded so a momentary bad
+// estimate cannot turn a drag into a slideshow of distant frames.
+int scrubMaxStride() {
+    static const int n = [] {
+        const QByteArray raw = qgetenv("TRACE_SCRUB_MAX_STRIDE");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const int v = raw.toInt(&ok);
+            if (ok && v >= 1 && v <= 256) return v;
+        }
+        return 16;
+    }();
+    return n;
+}
+
+// How much faster than the pointer the preview walks, as a fraction. Matching
+// the pointer's rate exactly holds the lag constant at whatever it already is;
+// this is what closes it. Small on purpose -- a large value converges quickly
+// and then overshoots into the pointer, which reads as the picture twitching.
+constexpr double kScrubCatchUp = 0.25;
+
 int scrubRearmMs() {
     static const int ms = [] {
         const QByteArray raw = qgetenv("TRACE_SCRUB_REARM_MS");
@@ -818,6 +851,10 @@ void MainWindow::openPath(const QString& path) {
     // Re-seed per media: a 1080p estimate would let a 4K file walk far enough
     // to fall behind the pointer on its first drag.
     scrubWalkPerFrameMs_ = 1.0;
+    // Learned from the seeks this media actually performs; assumed free until
+    // then, so an all-intra file is never penalised for a property it lacks.
+    mediaWalkFramesTotal_ = 0;
+    mediaWalkRequests_ = 0;
 
     trace::core::MediaItem item;
     item.path = path.toStdString();
@@ -1251,7 +1288,58 @@ void MainWindow::resetScrubLagModel() {
     scrubPointerToPreviewMaxMs_ = 0.0;
     scrubWalkMaxFrames_ = 0;
     scrubSeeksAtGestureStart_ = hudPerf_.seekSamples;
+    ctrlPointerFps_ = 0.0;
+    ctrlLastPointerNs_ = -1;
+    scrubStride_ = 1;
+    scrubFramesSkipped_ = 0;
+    scrubSampledSteps_ = 0;
     scrubGestureClock_.start();
+}
+
+long long MainWindow::computeScrubStride(long long gap) const {
+    if (gap <= 1) return 1;
+    if (!scrubSamplingEnabled()) return 1;
+
+    // Sampling is only free where random access is free.
+    //
+    // On an all-intra codec a seek lands on the target and a strided step costs
+    // exactly what an adjacent one costs, so showing every Nth frame is a
+    // straight N-fold saving. On long-GOP it is the opposite: adjacent backward
+    // steps are cache hits inside a GOP the decoder has already walked (~0.5ms),
+    // and a strided step jumps out of that run and pays a seek plus a fresh GOP
+    // walk (~46ms). Skipping frames there raises the cost per frame by far more
+    // than it lowers the number of frames.
+    //
+    // Measured on 4K H.264 backward with this gate absent: cache hits 85.4% ->
+    // 13.3%, decode 90.0 -> 13.9 f/s, 76 paints -> 14, stalls 7 of 73 -> 9 of
+    // 10. And it runs away, because a higher stride lowers the measured decode
+    // rate, which raises the stride: 1080p backward reached stride 14.
+    //
+    // The test is measured rather than keyed on codec name, and it is a mean
+    // rather than a latch. A single walk is not evidence: ProRes seeks land
+    // short occasionally and walk a handful of frames, and latching on the
+    // first one disabled sampling for the rest of the session -- measured on a
+    // 4444 reversal set, where one 8-frame walk took pointer-to-preview from
+    // 22ms back to 1784ms. What matters is whether walking is the norm.
+    if (mediaWalkPerRequest() > kRandomAccessWalkLimit) return 1;
+    // No estimate yet -- the first frames of a gesture walk consecutively,
+    // which is also the right answer for a drag that turns out to be slow.
+    // Three presented frames is enough for the rate to mean anything and short
+    // enough that sampling engages within the first few tens of ms.
+    if (scrubPresentedFrames_ < 3 || scrubDecodeFps_ <= 0.0 || ctrlPointerFps_ <= 0.0) return 1;
+
+    const double decodeFps = scrubDecodeFps_;
+    // How many frames the pointer travels in the time one frame is decoded.
+    // At or below 1 the decoder is keeping up and nothing may be skipped: this
+    // is the guard that keeps every light-media case on the shipped path.
+    const double perDecode = ctrlPointerFps_ / decodeFps;
+    if (perDecode <= 1.0) return 1;
+
+    long long stride = static_cast<long long>(std::ceil(perDecode * (1.0 + kScrubCatchUp)));
+    stride = std::clamp<long long>(stride, 1, scrubMaxStride());
+    // Never step past the pointer. Overshooting would put the picture ahead of
+    // the hand, which reads as the image leading rather than following.
+    return std::min(stride, gap);
 }
 
 void MainWindow::notePointerTarget(long long frame) {
@@ -1262,13 +1350,28 @@ void MainWindow::notePointerTarget(long long frame) {
     // back has asked for every frame twice and the decoder had to follow it
     // both ways. Net would report a reversal as standing still.
     if (scrubLastPointerFrame_ >= 0) {
-        scrubPointerFramesTotal_ += std::llabs(frame - scrubLastPointerFrame_);
+        const long long moved = std::llabs(frame - scrubLastPointerFrame_);
+        scrubPointerFramesTotal_ += moved;
         const int dir = frame > scrubLastPointerFrame_ ? 1
                       : frame < scrubLastPointerFrame_ ? -1 : 0;
         if (dir != 0) {
             if (scrubDirection_ != 0 && dir != scrubDirection_) ++scrubReversals_;
             scrubDirection_ = dir;
         }
+        // Short-window pointer rate for the sampling controller. Deliberately
+        // not the cumulative figure: a drag that starts slow and then whips
+        // must raise the stride now, not average it away.
+        if (ctrlLastPointerNs_ >= 0 && moved > 0) {
+            const double dtS = static_cast<double>(nowNs - ctrlLastPointerNs_) / 1'000'000'000.0;
+            if (dtS > 0.0005) {
+                const double fps = static_cast<double>(moved) / dtS;
+                ctrlPointerFps_ = ctrlPointerFps_ > 0.0
+                    ? ctrlPointerFps_ + 0.3 * (fps - ctrlPointerFps_) : fps;
+            }
+        }
+        if (moved > 0) ctrlLastPointerNs_ = nowNs;
+    } else {
+        ctrlLastPointerNs_ = nowNs;
     }
     scrubLastPointerFrame_ = frame;
 
@@ -1296,19 +1399,32 @@ void MainWindow::notePresentedScrubFrame(long long frame) {
         scrubLagMaxFrames_ = std::max(scrubLagMaxFrames_, scrubLagLastFrames_);
     }
 
-    // How long ago the hand was where the picture now is. Scanned for the
-    // OLDEST sample at this frame rather than the nearest: on a drag that has
-    // passed this frame and come back, the honest answer is when the user
-    // first asked for it, which is when they started waiting.
-    for (const auto& sample : pointerTrail_) {
-        if (sample.frame != frame) continue;
-        const double ms = static_cast<double>(nowNs - sample.ns) / 1'000'000.0;
+    // How long ago the hand was where the picture now is. Scanned NEWEST-first:
+    // on a gesture that crosses the same frame several times the user is asking
+    // for it now, not on the first pass, and measuring from the first pass
+    // charges this frame with the whole history of the drag -- a 4444 reversal
+    // set reported 1537ms that way against 22ms on a single sweep, which is an
+    // artefact of the metric and not of the picture. Nearest rather than exact,
+    // because a sampled preview shows frames the pointer stepped over.
+    long long bestDelta = -1;
+    qint64 bestNs = 0;
+    for (auto it = pointerTrail_.rbegin(); it != pointerTrail_.rend(); ++it) {
+        const auto& sample = *it;
+        const long long delta = std::llabs(sample.frame - frame);
+        if (bestDelta < 0 || delta < bestDelta) {
+            bestDelta = delta;
+            bestNs = sample.ns;
+        }
+    }
+    if (bestDelta >= 0) {
+        const double ms = static_cast<double>(nowNs - bestNs) / 1'000'000.0;
         scrubPointerToPreviewMs_ = ms;
         scrubPointerToPreviewMaxMs_ = std::max(scrubPointerToPreviewMaxMs_, ms);
-        break;
     }
 
     scrubWalkMaxFrames_ = std::max(scrubWalkMaxFrames_, hudPerf_.lastWalkFrames);
+    mediaWalkFramesTotal_ += hudPerf_.lastWalkFrames;
+    ++mediaWalkRequests_;
 }
 
 void MainWindow::startUiServiceMeasurement() {
@@ -1378,6 +1494,17 @@ void MainWindow::postScrubStep(long long frame, int direction) {
     // itself would abandon a perfectly good walk step on every mouse move.
     request.generation = requestGeneration_;
     scrubInFlightDir_ = direction;
+    // What this step actually skipped over, recorded where the decision is
+    // made rather than recomputed from the result -- the two can differ if the
+    // request lands off-target and only the honest one is worth reporting.
+    if (activeScrubFrame_ >= 0) {
+        const long long step = std::llabs(frame - activeScrubFrame_);
+        scrubStride_ = std::max<long long>(1, step);
+        if (step > 1) {
+            scrubFramesSkipped_ += step - 1;
+            ++scrubSampledSteps_;
+        }
+    }
     scrubWorker_.post(request);
 }
 
@@ -1462,6 +1589,11 @@ void MainWindow::onScrubResult() {
         // comparable across the two paths.
         scrubWalkPerFrameMs_ += 0.35 * (result.decodeMs - scrubWalkPerFrameMs_);
         scrubWalkPerFrameMs_ = std::max(0.05, scrubWalkPerFrameMs_);
+
+        // Decode cost for the sampling controller. Cost is averaged and the
+        // rate derived from it, not the other way round: a cache hit is 0.1ms,
+        // i.e. 10000 f/s, and averaging rates would let one hit dominate and
+        // collapse the stride back to 1 just as a heavy run begins.
     }
 
     // Chain. Any outcome that did not advance the picture re-posts the same
@@ -1476,7 +1608,9 @@ void MainWindow::onScrubResult() {
             if (!scrubTimer_.isActive()) scrubTimer_.start(kScrubCoalesceMs);
         } else {
             const int dir = pendingScrubFrame_ > activeScrubFrame_ ? 1 : -1;
-            postScrubStep(activeScrubFrame_ + dir, dir);
+            const long long stride =
+                computeScrubStride(std::llabs(pendingScrubFrame_ - activeScrubFrame_));
+            postScrubStep(activeScrubFrame_ + dir * stride, dir);
         }
     }
 
@@ -1597,7 +1731,8 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         if (scrubWorker_.busy() && scrubInFlightDir_ != 0 && scrubInFlightDir_ != dir) {
             scrubWorker_.supersede(supersedeInFlightRequests());
         }
-        postScrubStep(walkFrom + dir, dir);
+        const long long stride = computeScrubStride(std::llabs(targetFrame - walkFrom));
+        postScrubStep(walkFrom + dir * stride, dir);
         refreshHud("Scrub");
         return;
     }
@@ -2175,6 +2310,26 @@ void MainWindow::refreshHud(const QString& action) {
             // their hand was where the picture now is.
             const double lagRatio = scrubPointerFps_ > 0.1
                 ? scrubDecodeFps_ / scrubPointerFps_ : 0.0;
+            // Sampling state. `stride 1` is the shipped every-frame behaviour;
+            // anything above it means the decoder could not keep up and the
+            // preview is showing every Nth frame instead of falling behind.
+            // `skipped` is only ever frames the ACTIVE DRAG stepped over -- the
+            // landing, stepping and playback never sample.
+            // `ra-walk` is the gate: the running mean of frames a request had
+            // to walk to reach its target. Below 1 random access is cheap and
+            // sampling is allowed; above it a strided step would leave the
+            // region the decoder already opened and pay for a new one.
+            const QString l7f = QString("sample %1 | stride %2 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f")
+                .arg(!scrubSamplingEnabled() ? "OFF"
+                     : mediaWalkPerRequest() > kRandomAccessWalkLimit ? "GATED"
+                     : scrubStride_ > 1 ? "ON" : "idle")
+                .arg(scrubStride_)
+                .arg(scrubFramesSkipped_)
+                .arg(scrubSampledSteps_)
+                .arg(QString::number(ctrlPointerFps_, 'f', 1))
+                .arg(QString::number(scrubDecodeFps_, 'f', 1))
+                .arg(QString::number(mediaWalkPerRequest(), 'f', 2));
+
             const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3%% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
                 .arg(QString::number(scrubPointerFps_, 'f', 1))
                 .arg(QString::number(scrubDecodeFps_, 'f', 1))
@@ -2199,7 +2354,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2));
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
-                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l8 + "\n" + l9
+                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
