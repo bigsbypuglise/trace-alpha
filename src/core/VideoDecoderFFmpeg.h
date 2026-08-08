@@ -1,8 +1,9 @@
 #pragma once
 
 #include <QString>
+#include <QSize>
 #include "core/MediaIoSource.h"
-#include <QImage>
+#include "core/VideoFrame.h"
 
 namespace trace::core {
 
@@ -150,7 +151,7 @@ public:
     void close();
     bool isOpen() const;
 
-    bool decodeFrameAt(long long frameIndex, QImage& outImage, QString& error, RequestMode mode = RequestMode::Playback);
+    bool decodeFrameAt(long long frameIndex, VideoFrame& outFrame, QString& error, RequestMode mode = RequestMode::Playback);
     void setPlaybackDirection(int direction);
     void clearForwardQueue();
     void setHandoffTiming(double handoffMs);

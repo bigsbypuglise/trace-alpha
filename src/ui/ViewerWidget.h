@@ -6,6 +6,8 @@
 #include <QString>
 #include <QElapsedTimer>
 
+#include "core/VideoFrame.h"
+
 namespace trace::ui {
 
 struct ViewerPerfStats {
@@ -40,15 +42,22 @@ class ViewerWidget final : public QWidget {
 public:
     explicit ViewerWidget(QWidget* parent = nullptr);
 
-    void setImage(const QImage& image);
+    void setFrame(const trace::core::VideoFrame& frame);
     void clearImage();
     void setCenterText(const QString& text);
     const ViewerPerfStats& perfStats() const { return perfStats_; }
+    // What is currently on screen. The renderer boundary will want the frame
+    // rather than the pixels; until then it is also the honest answer to "which
+    // frame is displayed", which the HUD has had to infer.
+    const trace::core::VideoFrame& frame() const { return frame_; }
 
 protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
+    // The frame holds the buffer alive; image_ is a zero-copy read-only view
+    // over it, built once per frame rather than per paint.
+    trace::core::VideoFrame frame_;
     QImage image_;
     bool hasImage_ = false;
     QString centerText_ = "Drop media or File > Open";

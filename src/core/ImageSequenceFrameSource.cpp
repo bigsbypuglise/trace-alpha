@@ -2,7 +2,7 @@
 
 namespace trace::core {
 
-bool ImageSequenceFrameSource::frameAt(long long frameIndex, QImage& outImage, QString& error) {
+bool ImageSequenceFrameSource::frameAt(long long frameIndex, VideoFrame& outFrame, QString& error) {
     if (!loader_) {
         error = "Image loader unavailable";
         return false;
@@ -16,8 +16,20 @@ bool ImageSequenceFrameSource::frameAt(long long frameIndex, QImage& outImage, Q
 
     LoadedImageInfo info;
     if (!loader_->load(path, info, error)) return false;
+
+    // `info` is local and its image is freshly loaded, so this moves rather than
+    // copies: adopt() only has to detach when the caller kept a reference.
+    auto buffer = FrameBuffer::adopt(std::move(info.image));
+    if (!buffer) {
+        error = "Unsupported image format";
+        return false;
+    }
+
     currentFrame_ = frameIndex;
-    outImage = info.image;
+    outFrame = VideoFrame{};
+    outFrame.buffer = std::move(buffer);
+    outFrame.frameIndex = frameIndex;
+    // Stills arrive already in RGB; there is no YUV matrix to record.
     return true;
 }
 

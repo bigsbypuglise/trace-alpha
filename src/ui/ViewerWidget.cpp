@@ -25,17 +25,21 @@ ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
     clock_.start();
 }
 
-void ViewerWidget::setImage(const QImage& image) {
-    image_ = image;
+void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
+    frame_ = frame;
+    // Zero-copy: a read-only QImage view over the frame's buffer, whose cleanup
+    // functor keeps the buffer alive for as long as the view exists. Built here
+    // rather than in paintEvent so a repaint that is not a new frame (resize,
+    // expose, overlay damage) costs nothing extra.
+    image_ = frame_.toQImage();
     hasImage_ = !image_.isNull();
-    // Shallow assignment above; timestamp the repaint request so the queued
-    // update()->paintEvent latency can be separated from paint cost itself.
     updateRequestedNs_ = clock_.nsecsElapsed();
     ++perfStats_.updateCount;
     update();
 }
 
 void ViewerWidget::clearImage() {
+    frame_ = trace::core::VideoFrame{};
     image_ = QImage();
     hasImage_ = false;
     update();

@@ -60,6 +60,8 @@ add_executable(Trace
   ../src/core/AudioOutput.cpp
   ../src/core/MediaIoSource.h
   ../src/core/MediaIoSource.cpp
+  ../src/core/VideoFrame.h
+  ../src/core/VideoFrame.cpp
   ../src/core/FrameSource.h
   ../src/core/VideoFrameSource.h
   ../src/core/VideoFrameSource.cpp

@@ -1,16 +1,17 @@
 #pragma once
 
-#include <QImage>
 #include <QString>
 #include <unordered_map>
 #include <optional>
+
+#include "core/VideoFrame.h"
 
 namespace trace::core {
 
 struct CachedFrame {
     long long frameIndex = -1;
     QString path;
-    QImage image;
+    VideoFrame frame;
     int width = 0;
     int height = 0;
     int channels = 0;

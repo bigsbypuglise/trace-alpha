@@ -6,13 +6,13 @@
 
 namespace trace::core {
 
-bool VideoFrameSource::frameAt(long long frameIndex, QImage& outImage, QString& error) {
+bool VideoFrameSource::frameAt(long long frameIndex, VideoFrame& outFrame, QString& error) {
     if (!decoder_) {
         error = "Video source unavailable";
         return false;
     }
     currentFrame_ = frameIndex;
-    return decoder_->decodeFrameAt(frameIndex, outImage, error, requestMode_);
+    return decoder_->decodeFrameAt(frameIndex, outFrame, error, requestMode_);
 }
 
 double VideoFrameSource::fps() const {

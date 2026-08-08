@@ -107,6 +107,24 @@ const char* swsCoefficientsName(int cs) {
     }
 }
 
+// The same choice expressed for the frame rather than for swscale. It travels
+// with the pixels because the GPU path needs it as shader constants, where
+// swscale is not the thing doing the conversion.
+ColorInfo colorInfoFor(int coefficients, bool fullRange, bool inferred) {
+    ColorInfo info;
+    switch (coefficients) {
+        case SWS_CS_ITU709:     info.matrix = ColorInfo::Matrix::BT709; break;
+        case SWS_CS_ITU601:     info.matrix = ColorInfo::Matrix::BT601; break;
+        case SWS_CS_BT2020:     info.matrix = ColorInfo::Matrix::BT2020; break;
+        case SWS_CS_FCC:        info.matrix = ColorInfo::Matrix::Fcc; break;
+        case SWS_CS_SMPTE240M:  info.matrix = ColorInfo::Matrix::Smpte240m; break;
+        default:                info.matrix = ColorInfo::Matrix::Unspecified; break;
+    }
+    info.fullRange = fullRange;
+    info.inferred = inferred;
+    return info;
+}
+
 // Returns false when swscale rejects the request (it does so for conversions
 // with no YUV side, e.g. RGB sources -- nothing to correct there).
 bool applyColorspaceDetails(SwsContext* ctx, int coefficients, bool srcFullRange) {
@@ -356,51 +374,47 @@ struct VideoDecoderFFmpeg::Impl {
     int64_t lastDecodedPts = AV_NOPTS_VALUE;
     int64_t prevDecodedPts = AV_NOPTS_VALUE;
 
-    struct CachedFrame {
-        long long frame = -1;
-        QImage image;
-        // Set when the entry was converted at preview resolution -- reduced to
-        // the displayed size, or to half, whichever is smaller. Such an entry
-        // is fine to *shuttle* through during a drag, which is showing frames
-        // at that resolution anyway, but must never serve a Step or an exact
-        // landing, where the frame is being inspected. Tagging rather than
-        // withholding is what lets 4K backward drags hit the cache at all:
-        // previously no Scrub preview was stored, so every backward step at 4K
-        // missed and paid a seek plus a GOP walk.
-        bool previewRes = false;
-    };
     // Eviction is FIFO. LRU (promote-on-hit) was prototyped and measured: on
     // 4K H.264, where the cache actually fills and evicts, it produced an
     // identical hit rate (9/15 either way, 9 promotions) because the scrub
     // working set exceeds capacity rather than a hot subset being evicted.
     // At 1080p nothing is evicted at all, so the policy cannot matter there.
-    std::deque<CachedFrame> reverseCache;
+    //
+    // A VideoFrame carries its own index and previewRes tag, so the entry type
+    // is the frame itself; holding one is a refcount on its buffer.
+    std::deque<VideoFrame> reverseCache;
 
-    // Conversion targets are recycled. Writing into a QImage the viewer or
-    // the reverse cache still references makes bits() detach — a full ~38MB
-    // deep copy at 4K, every frame, of data sws_scale is about to overwrite.
-    // A pool entry whose only holder is the pool reports isDetached(), so it
-    // is safe to write in place. Buffers are reused rather than reallocated
-    // so the pages stay committed and warm.
-    std::deque<QImage> convertPool;
+    // Conversion targets are recycled so the pages stay committed and warm.
+    //
+    // A buffer is free when the pool is its only holder -- use_count() == 1.
+    // This replaces the old QImage::isDetached() test, and with it the reason
+    // the test existed: QImage::bits() detaches, so writing into a pooled
+    // QImage the viewer or the cache still referenced deep-copied ~38MB at 4K,
+    // every frame, of data sws_scale was about to overwrite in full. sws now
+    // writes to buffer->data(), which cannot detach, so that cost is gone by
+    // construction rather than avoided by picking the right entry.
+    std::deque<std::shared_ptr<FrameBuffer>> convertPool;
     int convertPoolLimit = 16;
 
-    QImage* acquireConvertTarget(int w, int h, QImage::Format fmt) {
-        for (auto& img : convertPool) {
-            if (img.isDetached() && img.width() == w && img.height() == h && img.format() == fmt) {
-                return &img;
+    std::shared_ptr<FrameBuffer> acquireConvertTarget(int w, int h, PixelLayout layout) {
+        for (auto& buf : convertPool) {
+            if (buf.use_count() == 1 && buf->width() == w && buf->height() == h
+                && buf->layout() == layout) {
+                return buf;
             }
         }
         // Release unreferenced buffers of the wrong geometry so a resolution
         // or format change doesn't pin the pool at stale sizes.
         for (auto it = convertPool.begin(); it != convertPool.end();) {
-            const bool stale = it->isDetached()
-                && (it->width() != w || it->height() != h || it->format() != fmt);
+            const bool stale = it->use_count() == 1
+                && ((*it)->width() != w || (*it)->height() != h || (*it)->layout() != layout);
             it = stale ? convertPool.erase(it) : it + 1;
         }
         if (static_cast<int>(convertPool.size()) >= convertPoolLimit) return nullptr;
-        convertPool.emplace_back(w, h, fmt);
-        return &convertPool.back();
+        auto buffer = FrameBuffer::allocate(w, h, layout);
+        if (!buffer) return nullptr;
+        convertPool.push_back(buffer);
+        return buffer;
     }
     // The cache is budgeted in BYTES, not in entries, because its entries are
     // not all the same size: above 1920px a scrub preview is half resolution
@@ -853,7 +867,7 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 #endif
 }
 
-bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, QString& error, RequestMode mode) {
+bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFrame, QString& error, RequestMode mode) {
 #ifdef TRACE_WITH_FFMPEG
     if (!isOpen()) {
         error = "Video decoder not open";
@@ -890,31 +904,30 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             : impl_->reverseCacheCapacity;
     };
 
-    auto pushReverseCache = [&](long long cachedFrame, const QImage& image,
-                                bool previewRes = false) {
-        if (cachedFrame < 0 || image.isNull()) return;
+    auto pushReverseCache = [&](const VideoFrame& frame) {
+        if (frame.frameIndex < 0 || frame.isNull()) return;
 
-        if (!impl_->reverseCache.empty() && impl_->reverseCache.back().frame == cachedFrame) {
+        if (!impl_->reverseCache.empty()
+            && impl_->reverseCache.back().frameIndex == frame.frameIndex) {
             // A full-res entry always wins: it can serve every caller, a
             // half-res one cannot. Never downgrade an existing entry.
-            if (!previewRes || impl_->reverseCache.back().previewRes) {
-                impl_->reverseCacheBytes -= impl_->reverseCache.back().image.sizeInBytes();
-                impl_->reverseCache.back().image = image;
-                impl_->reverseCache.back().previewRes = previewRes;
-                impl_->reverseCacheBytes += image.sizeInBytes();
+            if (!frame.previewRes || impl_->reverseCache.back().previewRes) {
+                impl_->reverseCacheBytes -= impl_->reverseCache.back().sizeInBytes();
+                impl_->reverseCache.back() = frame;
+                impl_->reverseCacheBytes += frame.sizeInBytes();
             }
             return;
         }
 
-        impl_->reverseCache.push_back({cachedFrame, image, previewRes});
-        impl_->reverseCacheBytes += image.sizeInBytes();
+        impl_->reverseCache.push_back(frame);
+        impl_->reverseCacheBytes += frame.sizeInBytes();
         ++perfStats_.cacheInserts;
         // Evict by footprint. The last entry is never dropped: it is the one
         // just decoded, and an empty cache is worse than an over-budget one by
         // a single frame.
         while (impl_->reverseCacheBytes > impl_->reverseCacheBudgetBytes
                && impl_->reverseCache.size() > 1) {
-            impl_->reverseCacheBytes -= impl_->reverseCache.front().image.sizeInBytes();
+            impl_->reverseCacheBytes -= impl_->reverseCache.front().sizeInBytes();
             impl_->reverseCache.pop_front();
             ++perfStats_.cacheEvictions;
         }
@@ -924,9 +937,11 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     // Only a Scrub preview may be served a half-res entry; everything else is
     // inspecting the frame and must get full resolution.
     const bool acceptPreviewRes = (mode == RequestMode::Scrub);
-    // What this request will actually produce. Mirrors the resolution branch in
-    // convertCurrentFrame; kept as one value so a frame cannot be stored at one
-    // resolution and tagged as another.
+    // What this request is expected to produce. Used only to size the seek-walk
+    // fill window below, which has to be decided before any frame exists -- the
+    // authoritative tag is set by convertCurrentFrame from the size it actually
+    // converted at and travels on the frame, so a wrong guess here costs a
+    // slightly mis-sized window and can no longer mislabel an entry.
     const bool producesPreviewRes = (mode == RequestMode::Scrub) && (metadata_.width > 1920);
     // Entries of the size this request stores that fit the byte budget. A
     // preview is a quarter of a full-res frame at worst and much less than that
@@ -951,10 +966,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     auto tryReverseCache = [&](long long wantedFrame) -> bool {
         ++perfStats_.reverseCacheLookups;
         for (auto it = impl_->reverseCache.begin(); it != impl_->reverseCache.end(); ++it) {
-            if (it->frame != wantedFrame) continue;
+            if (it->frameIndex != wantedFrame) continue;
             if (it->previewRes && !acceptPreviewRes) return false;
             ++perfStats_.reverseCacheHits;
-            outImage = it->image;
+            outFrame = *it;
             currentFrame_ = wantedFrame;
             error.clear();
             reportCacheState();
@@ -1032,8 +1047,16 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     // that back them are made at the same size now -- but it still decides
     // which timer the cost lands in, so "cvt" stays the cost of the frame
     // actually shown rather than that plus speculative fills.
-    auto convertCurrentFrame = [&](QImage& image, bool fastOverride = false,
-                                   bool isCacheFill = false) {
+    // Returns false when no frame was produced. The caller must not present or
+    // cache the output in that case: `frame` is frequently the same object
+    // across requests (MainWindow holds one per media), so leaving the previous
+    // frame in it and labelling it with the new index would put one frame on
+    // screen under another's name -- the failure the drain fix (e76eabb) exists
+    // to prevent. Clearing on entry makes the stale frame unreachable rather
+    // than merely unused.
+    auto convertCurrentFrame = [&](VideoFrame& frame, bool fastOverride = false,
+                                   bool isCacheFill = false) -> bool {
+        frame = VideoFrame{};
         ++convertCalls;
         const bool useFast = fastOverride || wantFastConvert;
         const int w = impl_->frame->width > 0 ? impl_->frame->width : impl_->codec->width;
@@ -1057,6 +1080,12 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // slider release) is always converted at full resolution.
         int dstW = w;
         int dstH = h;
+        // Set by the branch below rather than predicted alongside it. The tag
+        // travels on the frame, so an entry can no longer be stored at one
+        // resolution and labelled another -- previously two separate
+        // expressions had to agree, and they read different widths (the decoded
+        // frame's here, the container metadata's at the call site).
+        bool previewResolution = false;
         // Everything converted to serve a drag is halved above 1920px --- the
         // frame presented AND the frames cached on the way to it. Cache fills
         // used to be forced full-res so an entry could later serve a paused
@@ -1080,6 +1109,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         // which throttled the drag shuttle to roughly a third of its rate and
         // showed a soft preview for the privilege.
         if (mode == RequestMode::Scrub && w > 1920) {
+            previewResolution = true;
             dstW = (w / 2) & ~1;
             dstH = (h / 2) & ~1;
             // Half resolution is a ceiling, not a target. What the drag
@@ -1139,48 +1169,41 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.swsSlotsInUse = impl_->swsSlotsInUse();
 
         if (!slot || !slot->ctx) {
-            return;
+            return false;
         }
 
         // AV_PIX_FMT_BGRA writes bytes B,G,R,A; on little-endian that is
         // exactly QImage::Format_RGB32's 0xffRRGGBB layout (alpha ignored).
-        constexpr QImage::Format kFrameFormat = QImage::Format_RGB32;
+        constexpr PixelLayout kFrameLayout = PixelLayout::BGRA8;
 
-        // Convert into a buffer nothing else holds, then hand it out by
-        // shallow assignment. Writing straight into `image` would deep-copy
-        // the previous frame on every bits() call, since the viewer and the
-        // reverse cache still reference it.
+        // Convert into a buffer nothing else holds. The pool hands back one
+        // whose only holder is the pool itself; the frame published below is
+        // what gives anyone else a reference.
         QElapsedTimer allocTimer;
         allocTimer.start();
-        QImage* target = impl_->acquireConvertTarget(dstW, dstH, kFrameFormat);
-        QImage fallback;
+        std::shared_ptr<FrameBuffer> target = impl_->acquireConvertTarget(dstW, dstH, kFrameLayout);
         if (!target) {
             // More outstanding references than the pool expects. Correctness
             // must not depend on pool sizing, so use a private buffer.
-            fallback = QImage(dstW, dstH, kFrameFormat);
-            target = &fallback;
+            target = FrameBuffer::allocate(dstW, dstH, kFrameLayout);
         }
         convertAllocNs += allocTimer.nsecsElapsed();
 
-        if (target->isNull()) {
-            return;
+        if (!target) {
+            return false;
         }
 
-        // QImage::bits() is non-const: it detaches, deep-copying the whole
-        // buffer whenever the image is still shared (viewer, reverse cache).
-        // Time that separately from the trivial pointer setup it used to be
-        // lumped in with, so the cost is attributable rather than guessed at.
-        const bool wasShared = !target->isDetached();
-        QElapsedTimer detachTimer;
-        detachTimer.start();
-        uint8_t* const dstBits = target->bits();
-        const qint64 thisDetachNs = detachTimer.nsecsElapsed();
-        convertWrapNs += thisDetachNs;
-        detachNs += thisDetachNs;
-        perfStats_.lastImageWasShared = wasShared;
+        // Writing through the buffer cannot detach: the pool only yields one it
+        // solely owns, and a VideoFrame holding it is a refcount rather than a
+        // copy-on-write alias. The old pooled-QImage path had to time bits()
+        // because it could deep-copy ~38MB here; these two counters are kept so
+        // a regression back to that behaviour would still be visible, and they
+        // now read zero by construction.
+        perfStats_.lastImageWasShared = false;
+        uint8_t* const dstBits = target->data();
 
         uint8_t* dstData[4] = { dstBits, nullptr, nullptr, nullptr };
-        int dstLinesize[4] = { static_cast<int>(target->bytesPerLine()), 0, 0, 0 };
+        int dstLinesize[4] = { target->bytesPerLine(), 0, 0, 0 };
 
         QElapsedTimer timer;
         timer.start();
@@ -1199,9 +1222,13 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         if (isCacheFill) cacheConvertNs += swsNs;
         else convertNs += swsNs;
 
-        // Shallow: shares the pooled buffer with the caller. The pool will not
-        // reuse this entry again until every holder has released it.
-        image = *target;
+        // Publish. Holding the frame is a refcount on the pooled buffer, so the
+        // pool will not reuse it until every holder -- viewer, cache, an
+        // in-flight request -- has released it. The frame index is filled in by
+        // the caller, which is the only place that knows which frame this is.
+        frame.buffer = std::move(target);
+        frame.color = colorInfoFor(coefficients, srcFullRange, matrixInferred);
+        frame.previewRes = previewResolution;
 
         perfStats_.fullFrameCopiesPerFrame = 1;
         // Carry the actual conversion size: "half" stopped being the whole
@@ -1209,6 +1236,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
         perfStats_.dstPixelFormat = (dstW != w)
             ? QStringLiteral("RGB32/BGRA %1x%2").arg(dstW).arg(dstH)
             : QStringLiteral("RGB32/BGRA");
+        return true;
     };
 
     // Reposition the demuxer and codec at or before `target`. Factored out
@@ -1340,9 +1368,12 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                     // stepping or for the exact landing frame.
                     const long long deltaToTarget = target - decodedFrame;
                     if (deltaToTarget <= cacheWindow) {
-                        QImage cached;
-                        convertCurrentFrame(cached, /*fastOverride=*/true, /*isCacheFill=*/true);
-                        pushReverseCache(decodedFrame, cached, producesPreviewRes);
+                        VideoFrame cached;
+                        if (convertCurrentFrame(cached, /*fastOverride=*/true,
+                                                /*isCacheFill=*/true)) {
+                            cached.frameIndex = decodedFrame;
+                            pushReverseCache(cached);
+                        }
                         ++walkCacheConverts;
                     }
 
@@ -1353,7 +1384,15 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 // emitted in presentation order, so an overshoot means the
                 // exact target does not exist in the stream; showing the
                 // first frame at/after the target keeps ordering stable.
-                convertCurrentFrame(outImage);
+                if (!convertCurrentFrame(outFrame)) {
+                    // The frame was decoded but could not be converted. Report
+                    // the miss rather than returning the previous frame under
+                    // this one's index.
+                    error = "Frame conversion failed";
+                    ++perfStats_.staleSuccessPrevented;
+                    return false;
+                }
+                outFrame.frameIndex = decodedFrame;
                 currentFrame_ = decodedFrame;
                 perfStats_.previewApproximate = false;
                 perfStats_.previewTargetFrame = target;
@@ -1363,7 +1402,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
                 // must not be given, and tryReverseCache enforces that. At or
                 // below 1920px nothing is halved, so the entry is full-res and
                 // serves everything.
-                pushReverseCache(decodedFrame, outImage, producesPreviewRes);
+                pushReverseCache(outFrame);
                 return true;
             }
 
@@ -1374,7 +1413,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
             }
         }
         // The requested frame was not produced. Returning true here (because
-        // outImage still held the *previous* frame) is what made the viewer
+        // outFrame still held the *previous* frame) is what made the viewer
         // repeat the tail frame and re-seek once per tick past EOF.
         ++perfStats_.staleSuccessPrevented;
         return false;
@@ -1572,7 +1611,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, QImage& outImage, Q
     return true;
 #else
     Q_UNUSED(frameIndex);
-    Q_UNUSED(outImage);
+    Q_UNUSED(outFrame);
     Q_UNUSED(mode);
     error = "FFmpeg support not enabled at build time.";
     return false;

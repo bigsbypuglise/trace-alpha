@@ -251,7 +251,10 @@ private:
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;
-    QImage videoFrameBuffer_;
+    // The video frame most recently pulled from the decoder. Held across
+    // requests so the decoder's conversion pool sees a steady number of
+    // outstanding references rather than one that collapses between frames.
+    trace::core::VideoFrame videoFrameBuffer_;
 };
 
 } // namespace trace::app

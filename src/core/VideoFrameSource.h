@@ -9,7 +9,7 @@ class VideoFrameSource final : public FrameSource {
 public:
     explicit VideoFrameSource(VideoDecoderFFmpeg* decoder) : decoder_(decoder) {}
 
-    bool frameAt(long long frameIndex, QImage& outImage, QString& error) override;
+    bool frameAt(long long frameIndex, VideoFrame& outFrame, QString& error) override;
     double fps() const override;
     long long currentFrame() const override { return currentFrame_; }
     void setCurrentFrame(long long frame) override { currentFrame_ = frame; }

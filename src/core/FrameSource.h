@@ -1,7 +1,8 @@
 #pragma once
 
-#include <QImage>
 #include <QString>
+
+#include "core/VideoFrame.h"
 
 namespace trace::core {
 
@@ -9,7 +10,9 @@ class FrameSource {
 public:
     virtual ~FrameSource() = default;
 
-    virtual bool frameAt(long long frameIndex, QImage& outImage, QString& error) = 0;
+    // On success `outFrame` holds pixels the caller may keep for as long as it
+    // likes -- ownership is a refcount, not a borrow of decoder state.
+    virtual bool frameAt(long long frameIndex, VideoFrame& outFrame, QString& error) = 0;
     virtual double fps() const = 0;
     virtual long long currentFrame() const = 0;
     virtual void setCurrentFrame(long long frame) = 0;

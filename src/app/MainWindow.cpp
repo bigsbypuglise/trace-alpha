@@ -649,7 +649,7 @@ void MainWindow::openPath(const QString& path) {
     playbackAccumulatorMs_ = 0.0;
     videoDecoder_.close();
     frameSource_.reset();
-    videoFrameBuffer_ = QImage();
+    videoFrameBuffer_ = trace::core::VideoFrame{};
     lastFrameHandoffMs_ = 0.0;
     avgFrameHandoffMs_ = 0.0;
     frameHandoffSamples_ = 0;
@@ -818,19 +818,18 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
             info.width = cached->width;
             info.height = cached->height;
             info.channels = cached->channels;
-            info.image = cached->image;
             currentImage_ = info;
-            viewer_->setImage(info.image);
+            viewer_->setFrame(cached->frame);
             syncTransportBar();
             return true;
         }
     }
 
-    QImage decodedImage;
-    QImage* targetImage = &decodedImage;
+    trace::core::VideoFrame decodedFrame;
+    trace::core::VideoFrame* targetFrame = &decodedFrame;
 
     if (currentMedia_->kind == MediaKind::VideoFile) {
-        targetImage = &videoFrameBuffer_;
+        targetFrame = &videoFrameBuffer_;
     }
 
     // Everything from here to the end of the decode may pump the event loop
@@ -852,7 +851,7 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
 
     const long long cancelsAtStart = ioCancelCount_;
 
-    if (!frameSource_->frameAt(frameIndex, *targetImage, error)) return false;
+    if (!frameSource_->frameAt(frameIndex, *targetFrame, error)) return false;
 
     // Superseded while storage was slow: the user seeked, opened another file
     // or closed media during the read. Presenting this now would put a frame
@@ -873,18 +872,12 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     info.filePath = sourcePath;
     info.fileName = QFileInfo(sourcePath).fileName();
     info.extension = QFileInfo(sourcePath).suffix().toLower();
-    info.width = targetImage->width();
-    info.height = targetImage->height();
+    info.width = targetFrame->width();
+    info.height = targetFrame->height();
     info.channels = 4;
 
-    if (currentMedia_->kind == MediaKind::VideoFile) {
-        currentImage_ = info;
-        viewer_->setImage(*targetImage);
-    } else {
-        info.image = *targetImage;
-        currentImage_ = info;
-        viewer_->setImage(info.image);
-    }
+    currentImage_ = info;
+    viewer_->setFrame(*targetFrame);
 
     lastFrameHandoffMs_ = static_cast<double>(handoffTimer.nsecsElapsed()) / 1'000'000.0;
     videoDecoder_.setHandoffTiming(lastFrameHandoffMs_);
@@ -896,7 +889,7 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
         trace::core::CachedFrame cf;
         cf.frameIndex = frameIndex;
         cf.path = info.filePath;
-        cf.image = info.image;
+        cf.frame = *targetFrame;
         cf.width = info.width;
         cf.height = info.height;
         cf.channels = info.channels;
@@ -925,7 +918,10 @@ void MainWindow::prefetchNeighbors() {
         trace::core::CachedFrame cf;
         cf.frameIndex = idx;
         cf.path = info.filePath;
-        cf.image = info.image;
+        // `info` is about to go out of scope, so this moves rather than copies.
+        cf.frame.buffer = trace::core::FrameBuffer::adopt(std::move(info.image));
+        cf.frame.frameIndex = idx;
+        if (!cf.frame.buffer) continue;
         cf.width = info.width;
         cf.height = info.height;
         cf.channels = info.channels;
