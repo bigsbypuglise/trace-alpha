@@ -287,6 +287,16 @@ decode-bound). 4K MP4 "decent" but threw a decode error on fast scrub (fixed,
 `2523d77`). Overall verdict was that the throughput gain did not convert into
 the smoothness expected -- which was correct, and is the entry below.
 
+**Owner re-test after the GPU-initiative refactor (2026-08-07, at `75a3412`):**
+4K ProRes 422 HQ **still feeling great** -- the quality bar held across four
+commits that rewrote frame ownership, the conversion buffers and the paint path.
+This matters as a validation-coverage note, not just a result: everything
+measured on this machine was the 1080p H.264 clip, so the reference format was
+confirmed by the owner rather than by the harness. **Any future change to the
+frame or render path needs the same split** -- the numbers say whether the
+mechanism still works, the owner says whether the bar still holds, and 1080p
+H.264 alone cannot answer the second.
+
 **The measurement mistake worth not repeating:** throughput (`shuttle ms/f`)
 and `lag` were both excellent on files that felt bad. They say how many frames
 were produced and how far behind the pointer the picture is; they say nothing
