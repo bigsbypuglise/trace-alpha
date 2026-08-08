@@ -3,8 +3,9 @@
 **Status: GATE A COMPLETE IN CODE (2026-08-07).** Steps 1–3 of §8 are committed
 and validated on the local Windows toolchain: `VideoFrame` has replaced bare
 `QImage` at the four seams (`03d840e`), and the `VideoRenderer` boundary exists
-with `CpuImageRenderer` as its only implementation (`5765c19`). No GPU backend
-yet. Next up is step 4 (generation-numbered requests), then step 5 — **GATE D**.
+with `CpuImageRenderer` as its only implementation (`5765c19`). Step 4's
+generation plumbing is in too (`75a3412`, §13). No GPU backend yet. **Next is
+step 5 — GATE D**, the async scrub worker, which is where the real risk lives.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -324,7 +325,7 @@ Each is independently reviewable and revertable. Gates in **bold**.
    `CpuImageRenderer` as the only implementation, `TRACE_RENDERER` selector.
    **Stop and validate. → GATE A complete in code.** *(done, `5765c19`)*
 4. `refactor(scrub): add generation-numbered frame requests` — IDs and stale-drop plumbing,
-   still synchronous. Pure bookkeeping, no threading.
+   still synchronous. Pure bookkeeping, no threading. *(done, `75a3412` — see §13)*
 5. `perf(scrub): move random-access decode to a worker with latest-target-wins` — **GATE D.**
 6. `feat(gpu): add experimental native D3D11 video surface` — **GATE B** (frame, stride,
    aspect, resize, fallback).
@@ -498,3 +499,51 @@ on every number above and still misses correctness bugs: `2523d77` only appeared
 under hard direction reversals held under one continuous press, running into both
 ends of the clip. The reversal run is also the useful stress of buffer recycling —
 it turned over ~730 cache evictions with `recov 0`.
+
+---
+
+## 13. Generation plumbing, as built (`75a3412`)
+
+What §6 demands of a third async attempt, and where each part now stands:
+
+| §6 requirement | status |
+|---|---|
+| Monotonic generation on every request, carried to the result | **done** — `MainWindow::requestGeneration_` |
+| Superseded results dropped at the boundary, never reaching the viewer | **done** — one check in `loadCurrentFrame` |
+| Key results by the requested index, never the landed index | **done** — read off `VideoFrame::frameIndex` |
+| Latest-wins target slot, depth 1, not a FIFO queue | already true — `pendingScrubFrame_` |
+| One decoder, one owning thread | step 5 |
+| Cooperative cancellation inside the GOP walk | step 5 |
+| Discarding a stale result costs one refcount decrement | done in step 2 |
+
+`supersedeInFlightRequests()` is the single entry point that invalidates work in
+flight. It **bumps on every change of target**, not only when storage is busy,
+because "the target moved" is the condition the worker acts on and it has to mean
+the same thing whether or not a read happens to be outstanding at that instant.
+`ioCancelCount_` was already this counter in all but name; it only counted
+remote-I/O cancellations, which is why it was not reusable as-is.
+
+**HUD `gen N drop M`.** `gen` counts target changes and climbs through any drag;
+`drop` counts results actually discarded for staleness. They are split because
+they answer different questions, and `drop` is the interesting one: 0 on local
+media today, non-zero on a slow remote source, and the number that says whether
+latest-target-wins is doing any work once decode moves off the UI thread. If
+step 5 lands and `drop` stays 0 during a fast drag on heavy media, the worker is
+not actually being superseded and something is wrong.
+
+**Fixed in passing:** `target`/`shown`/`delta` went stale on cache hits, because
+the hit path returns before the decoder's per-decode perf fields are written — so
+a drag running mostly on hits reported whatever the last real decode left behind.
+They come off the delivered frame now. Measured on the backward drag at ~92%
+hits: previously `target 5 | shown 5` with the playhead on frame 3, now
+`target 3 | shown 3`. The values were not wrong so much as old, which is worse in
+a line whose whole job is to say which frame is on screen.
+
+**What step 5 must not do**, restating §6 against what now exists: do not open a
+second `VideoDecoderFFmpeg` on the same file (the first reverted attempt did, and
+`frameFromPts`'s monotonic bump is per-decoder state, so two of them can disagree
+about which index a PTS maps to); do not queue requests FIFO; do not key results
+by the landed index; and make cancellation checkable *inside* the GOP walk, since
+that is the only loop long enough to matter. The `MediaIoSource` rule stands — a
+superseded read runs to completion and is reported stale, never abandoned
+mid-buffer, because the destination belongs to FFmpeg.
