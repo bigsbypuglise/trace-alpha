@@ -82,6 +82,11 @@ private:
     void pumpDuringStorageStall(double waitedMs);
     bool storageBusy() const { return storageBusy_; }
 
+    // Invalidates any request already in flight, so its result is discarded
+    // instead of presented. Call before changing what the user is looking at.
+    // Returns the new generation.
+    long long supersedeInFlightRequests();
+
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
     trace::ui::TransportBar* transportBar_ = nullptr;
@@ -242,9 +247,29 @@ private:
     double maxStorageWaitMs_ = 0.0;
     QElapsedTimer bufferingClock_;
     // A user action arrived while storage was busy; applied once it clears.
-    // Bumped whenever a user action supersedes in-flight storage work. A
-    // decode that spans a bump is discarded rather than presented.
-    long long ioCancelCount_ = 0;
+    // Monotonic. Bumped by anything that invalidates work already in flight:
+    // a new scrub target, opening or closing media. A result produced under an
+    // older generation is dropped at the boundary in loadCurrentFrame rather
+    // than presented after the user has moved on.
+    //
+    // Today the only way the generation can change mid-request is a remote read
+    // pumping the event loop, which is what this began as (`ioCancelCount_`).
+    // It is generalised and named for what it means because the async scrub
+    // worker needs exactly this and needs it enforced in one place: latest
+    // target wins, and a superseded result never reaches the viewer.
+    long long requestGeneration_ = 0;
+    // What the last completed request asked for, and what it actually
+    // delivered. Read off the returned frame rather than from decoder
+    // internals, so a cache hit reports as honestly as a fresh decode.
+    long long lastRequestedFrame_ = -1;
+    long long lastDeliveredFrame_ = -1;
+    // Results actually thrown away because the world moved while they were in
+    // flight. Distinct from the generation, which counts how often the target
+    // changed -- most of those supersede nothing because nothing was running.
+    // This is the number that should stay at 0 on local media and go non-zero
+    // on a slow remote source, and it is what to watch when decode moves off
+    // the UI thread.
+    long long supersededResults_ = 0;
     // Long enough that ordinary reads never flicker the indicator, short
     // enough that a real stall is acknowledged before it feels like a hang.
     static constexpr double kBufferingVisibleMs = 150.0;

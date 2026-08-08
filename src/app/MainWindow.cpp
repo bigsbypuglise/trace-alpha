@@ -624,13 +624,22 @@ void MainWindow::openFileDialog() {
     if (!path.isEmpty()) openPath(path);
 }
 
+long long MainWindow::supersedeInFlightRequests() {
+    ++requestGeneration_;
+    // A read already under way is never abandoned -- the destination buffer
+    // belongs to FFmpeg and is being written -- it is run to completion and
+    // reported stale. The generation bump is what makes the decode spanning it
+    // get discarded.
+    if (storageBusy_) videoDecoder_.cancelOutstandingIo();
+    return requestGeneration_;
+}
+
 void MainWindow::openPath(const QString& path) {
     // Opening another file while storage is slow: supersede the outstanding
     // read so nothing from the previous media is presented afterwards. The
     // guard below then refuses to re-enter until that decode has unwound.
     if (storageBusy_) {
-        ++ioCancelCount_;
-        videoDecoder_.cancelOutstandingIo();
+        supersedeInFlightRequests();
         return;
     }
     playTimer_.stop();
@@ -849,17 +858,28 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
         }
     });
 
-    const long long cancelsAtStart = ioCancelCount_;
+    // The generation this request belongs to. Everything below may pump the
+    // event loop, so the world can move underneath it.
+    const long long generation = requestGeneration_;
 
     if (!frameSource_->frameAt(frameIndex, *targetFrame, error)) return false;
 
-    // Superseded while storage was slow: the user seeked, opened another file
-    // or closed media during the read. Presenting this now would put a frame
-    // on screen that the user had already moved on from -- latest target wins.
-    if (ioCancelCount_ != cancelsAtStart) {
+    // Superseded mid-request: the user dragged on, seeked, opened another file
+    // or closed media while this was in flight. Presenting it now would put a
+    // frame on screen that the user has already moved on from -- latest target
+    // wins, and this is the one place that is enforced.
+    if (requestGeneration_ != generation) {
+        ++supersededResults_;
         error.clear();
         return false;
     }
+
+    // What was asked for against what came back. The decoder resolves the
+    // landed frame's identity from its PTS and stamps it on the frame, so this
+    // is measured rather than assumed -- and it is measured for cache hits too,
+    // which is what the HUD's target/shown could not previously report.
+    lastRequestedFrame_ = frameIndex;
+    lastDeliveredFrame_ = targetFrame->frameIndex;
 
     const QString sourcePath = frameSource_->sourcePathForFrame(frameIndex).isEmpty()
         ? QString::fromStdString(currentMedia_->path)
@@ -1059,12 +1079,12 @@ bool MainWindow::isVideoScrubActive() const {
 }
 
 void MainWindow::queueVideoScrubFrame(long long frameIndex) {
-    // The user has moved on. Supersede any read still in flight so its frame
-    // is discarded rather than presented after this one.
-    if (storageBusy_) {
-        ++ioCancelCount_;
-        videoDecoder_.cancelOutstandingIo();
-    }
+    // The user has moved on. Supersede anything still in flight so its frame is
+    // discarded rather than presented after this one. Bumped on every change of
+    // target, not only when storage is busy: "the target moved" is the
+    // condition the async worker will act on, and it must mean the same thing
+    // whether or not a read happens to be outstanding right now.
+    if (frameIndex != pendingScrubFrame_) supersedeInFlightRequests();
     pendingScrubFrame_ = frameIndex;
     playback_.setCurrentFrame(frameIndex);
 
@@ -1538,14 +1558,18 @@ void MainWindow::refreshHud(const QString& action) {
             // Responsiveness, which is what Pass 1 is judged on. `uiblock` is
             // the longest stretch the UI thread went without servicing events
             // during a read -- not how long the read took.
-            const QString lresp = QString("resp | uiblock play %1ms seek %2ms open %3ms | buffering %4 ev %5ms | waiting %6ms | cancels %7")
+            const QString lresp = QString("resp | uiblock play %1ms seek %2ms open %3ms | buffering %4 ev %5ms | waiting %6ms | gen %7 drop %8")
                 .arg(QString::number(ioPlay.callerBlockMaxMs, 'f', 1))
                 .arg(QString::number(ioSeek.callerBlockMaxMs, 'f', 1))
                 .arg(QString::number(ioOpen.callerBlockMaxMs, 'f', 1))
                 .arg(bufferingEvents_)
                 .arg(QString::number(bufferingMsTotal_, 'f', 0))
                 .arg(QString::number(maxStorageWaitMs_, 'f', 0))
-                .arg(ioCancelCount_);
+                // `gen` counts how often the target moved; `drop` counts results
+                // that were actually discarded for being stale. On local media
+                // gen climbs with every drag update and drop stays 0.
+                .arg(requestGeneration_)
+                .arg(supersededResults_);
 
             auto ioLine = [](const char* tag, const trace::core::IoPhaseStats& s) {
                 return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6%% "
@@ -1643,12 +1667,19 @@ void MainWindow::refreshHud(const QString& action) {
             // assigned -- Scrub wrote the requested index onto whatever
             // keyframe the seek landed on, so this line read `exact | delta 0`
             // while displaying a frame most of a GOP away.
+            //
+            // They are now read off the frame that was actually delivered
+            // rather than from the decoder's per-decode perf fields. Those went
+            // stale on a cache hit, because the hit path returns before they
+            // are written -- so a drag running on cache hits reported whatever
+            // the last real decode had left behind. The frame carries its own
+            // index, so a hit reports as honestly as a decode.
             const QString l7 = QString("scrub %1 | target %2 | shown %3 | delta %4 | walk %5f | dst %6 | shuttle %7ms/f lag %8f")
                 .arg(perf.previewApproximate ? "APPROX" : "exact")
-                .arg(perf.previewTargetFrame)
-                .arg(perf.previewDisplayedFrame)
-                .arg(perf.previewTargetFrame >= 0 && perf.previewDisplayedFrame >= 0
-                         ? perf.previewTargetFrame - perf.previewDisplayedFrame : 0)
+                .arg(lastRequestedFrame_)
+                .arg(lastDeliveredFrame_)
+                .arg(lastRequestedFrame_ >= 0 && lastDeliveredFrame_ >= 0
+                         ? lastRequestedFrame_ - lastDeliveredFrame_ : 0)
                 .arg(perf.lastWalkFrames)
                 .arg(perf.dstPixelFormat)
                 .arg(QString::number(scrubWalkPerFrameMs_, 'f', 2))
