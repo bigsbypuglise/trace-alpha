@@ -588,6 +588,7 @@ void MainWindow::setupTransportControls() {
         scrubbing_ = true;
         scrubJumpPending_ = true;
         startUiServiceMeasurement();
+        resetScrubLagModel();
         playback_.pause();
         playTimer_.stop();
         stopAudio();
@@ -1235,6 +1236,81 @@ void MainWindow::pumpDuringStorageStall(double waitedMs) {
     QCoreApplication::processEvents(QEventLoop::AllEvents, 8);
 }
 
+void MainWindow::resetScrubLagModel() {
+    pointerTrail_.clear();
+    scrubDirection_ = 0;
+    scrubReversals_ = 0;
+    scrubPointerFps_ = 0.0;
+    scrubPointerFramesTotal_ = 0;
+    scrubLastPointerFrame_ = -1;
+    scrubPresentedFrames_ = 0;
+    scrubDecodeFps_ = 0.0;
+    scrubLagMaxFrames_ = 0;
+    scrubLagLastFrames_ = 0;
+    scrubPointerToPreviewMs_ = 0.0;
+    scrubPointerToPreviewMaxMs_ = 0.0;
+    scrubWalkMaxFrames_ = 0;
+    scrubSeeksAtGestureStart_ = hudPerf_.seekSamples;
+    scrubGestureClock_.start();
+}
+
+void MainWindow::notePointerTarget(long long frame) {
+    if (!scrubGestureClock_.isValid()) return;
+    const qint64 nowNs = scrubGestureClock_.nsecsElapsed();
+
+    // Distance travelled, not net displacement: a drag that goes out and comes
+    // back has asked for every frame twice and the decoder had to follow it
+    // both ways. Net would report a reversal as standing still.
+    if (scrubLastPointerFrame_ >= 0) {
+        scrubPointerFramesTotal_ += std::llabs(frame - scrubLastPointerFrame_);
+        const int dir = frame > scrubLastPointerFrame_ ? 1
+                      : frame < scrubLastPointerFrame_ ? -1 : 0;
+        if (dir != 0) {
+            if (scrubDirection_ != 0 && dir != scrubDirection_) ++scrubReversals_;
+            scrubDirection_ = dir;
+        }
+    }
+    scrubLastPointerFrame_ = frame;
+
+    pointerTrail_.push_back(PointerSample{frame, nowNs});
+    while (pointerTrail_.size() > kPointerTrailMax) pointerTrail_.pop_front();
+
+    const double elapsedS = static_cast<double>(nowNs) / 1'000'000'000.0;
+    if (elapsedS > 0.05) {
+        scrubPointerFps_ = static_cast<double>(scrubPointerFramesTotal_) / elapsedS;
+    }
+}
+
+void MainWindow::notePresentedScrubFrame(long long frame) {
+    if (!scrubGestureClock_.isValid()) return;
+    const qint64 nowNs = scrubGestureClock_.nsecsElapsed();
+
+    ++scrubPresentedFrames_;
+    const double elapsedS = static_cast<double>(nowNs) / 1'000'000'000.0;
+    if (elapsedS > 0.05) {
+        scrubDecodeFps_ = static_cast<double>(scrubPresentedFrames_) / elapsedS;
+    }
+
+    if (pendingScrubFrame_ >= 0) {
+        scrubLagLastFrames_ = std::llabs(pendingScrubFrame_ - frame);
+        scrubLagMaxFrames_ = std::max(scrubLagMaxFrames_, scrubLagLastFrames_);
+    }
+
+    // How long ago the hand was where the picture now is. Scanned for the
+    // OLDEST sample at this frame rather than the nearest: on a drag that has
+    // passed this frame and come back, the honest answer is when the user
+    // first asked for it, which is when they started waiting.
+    for (const auto& sample : pointerTrail_) {
+        if (sample.frame != frame) continue;
+        const double ms = static_cast<double>(nowNs - sample.ns) / 1'000'000.0;
+        scrubPointerToPreviewMs_ = ms;
+        scrubPointerToPreviewMaxMs_ = std::max(scrubPointerToPreviewMaxMs_, ms);
+        break;
+    }
+
+    scrubWalkMaxFrames_ = std::max(scrubWalkMaxFrames_, hudPerf_.lastWalkFrames);
+}
+
 void MainWindow::startUiServiceMeasurement() {
     // Reset per gesture: the interesting figure is the worst gap during *this*
     // drag, not the worst since the app launched.
@@ -1264,6 +1340,7 @@ void MainWindow::queueVideoScrubFrame(long long frameIndex) {
     // whether or not a read happens to be outstanding right now.
     if (frameIndex != pendingScrubFrame_) supersedeInFlightRequests();
     pendingScrubFrame_ = frameIndex;
+    notePointerTarget(frameIndex);
     playback_.setCurrentFrame(frameIndex);
 
     // If a coalescing window is open, the timer picks up the latest pending
@@ -1373,6 +1450,7 @@ void MainWindow::onScrubResult() {
         scrubLastPresentNs_ = nowNs;
 
         activeScrubFrame_ = result.frame.frameIndex;
+        notePresentedScrubFrame(activeScrubFrame_);
         // Shuttled, so possibly a preview-resolution frame: the release must
         // land this properly even if it is already the one on screen.
         scrubShownExact_ = false;
@@ -1630,6 +1708,10 @@ void MainWindow::flushVideoScrub(bool forceExact) {
                 scrubLastPresentNs_ = nowNs;
             }
             activeScrubFrame_ = f;
+            // Measured on the synchronous path too, so the two stay comparable
+            // under TRACE_ASYNC_SCRUB=0 rather than the lag model only existing
+            // for one of them.
+            notePresentedScrubFrame(f);
             // Shuttled, so possibly a half-res preview: the release must land
             // this frame properly even if it is already the one on screen.
             scrubShownExact_ = false;
@@ -2084,6 +2166,28 @@ void MainWindow::refreshHud(const QString& action) {
             // between consecutive chances to notice -- so a bad `cancel` can
             // be attributed to the checkpoint granularity or to the wait
             // itself rather than guessed at.
+            // The lag model. `ptr` is what the hand asked for and `dec` is what
+            // the decoder supplied, both in source frames per second: their
+            // ratio is the whole of it. A deficit there cannot be prefetched
+            // away -- no scheduling makes a decoder faster -- whereas lag with
+            // dec >= ptr means the work is going to the wrong frames.
+            // `p2p` is the same story in the unit the user feels: how long ago
+            // their hand was where the picture now is.
+            const double lagRatio = scrubPointerFps_ > 0.1
+                ? scrubDecodeFps_ / scrubPointerFps_ : 0.0;
+            const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3%% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
+                .arg(QString::number(scrubPointerFps_, 'f', 1))
+                .arg(QString::number(scrubDecodeFps_, 'f', 1))
+                .arg(QString::number(lagRatio * 100.0, 'f', 0))
+                .arg(scrubLagLastFrames_)
+                .arg(scrubLagMaxFrames_)
+                .arg(QString::number(scrubPointerToPreviewMs_, 'f', 0))
+                .arg(QString::number(scrubPointerToPreviewMaxMs_, 'f', 0))
+                .arg(scrubWalkMaxFrames_)
+                .arg(perf.seekSamples - scrubSeeksAtGestureStart_)
+                .arg(scrubDirection_ > 0 ? "FWD" : scrubDirection_ < 0 ? "REV" : "--")
+                .arg(scrubReversals_);
+
             const QString l7d = QString("worker %1 | posted %2 coalesced %3 | abandoned %4 stale %5 | cancel %6/%7ms | ckpt %8ms")
                 .arg(asyncScrubEnabled() ? (decoderLeased_ ? "LEASED" : "async") : "OFF")
                 .arg(scrubWorker_.requestsPosted())
@@ -2095,7 +2199,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2));
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
-                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l8 + "\n" + l9
+                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {

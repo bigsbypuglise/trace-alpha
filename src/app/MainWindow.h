@@ -7,6 +7,7 @@
 #include <QString>
 #include <optional>
 #include <memory>
+#include <deque>
 #include "core/MediaItem.h"
 #include "core/ViewState.h"
 #include "core/PlaybackController.h"
@@ -271,6 +272,48 @@ private:
     // right answer, so it is reported separately from the drag rather than
     // pooled into its worst gap.
     double scrubReleaseLatencyMs_ = 0.0;
+
+    // The lag model. Step 5 made the UI responsive while the picture can still
+    // trail the pointer badly on heavy media, and "how far behind" is not one
+    // question but four: is the decoder simply too slow, is it working on the
+    // wrong frames, is the cache failing, or is the pointer just moving faster
+    // than anything could follow. These separate them.
+    //
+    // Every one of them resets per gesture: the interesting figure is this
+    // drag, not the worst since launch.
+    QElapsedTimer scrubGestureClock_;
+    // Where the pointer has been, and when. Kept so a presented frame can be
+    // asked the only question the user actually cares about -- how long ago
+    // was my hand here -- which no throughput number answers.
+    struct PointerSample { long long frame; qint64 ns; };
+    std::deque<PointerSample> pointerTrail_;
+    static constexpr size_t kPointerTrailMax = 1024;
+    // Direction inferred from recent pointer targets -- never from decoder
+    // position, which lags and would report a reversal late. +1/-1/0.
+    int scrubDirection_ = 0;
+    long long scrubReversals_ = 0;
+    // Pointer travel, in source frames per second. What the hand is asking for.
+    double scrubPointerFps_ = 0.0;
+    long long scrubPointerFramesTotal_ = 0;
+    long long scrubLastPointerFrame_ = -1;
+    // Frames actually put on screen per second during the gesture. What the
+    // decoder can supply. The ratio of these two IS the lag model.
+    long long scrubPresentedFrames_ = 0;
+    double scrubDecodeFps_ = 0.0;
+    // Frames behind the pointer: worst during the gesture, and where it ended.
+    long long scrubLagMaxFrames_ = 0;
+    long long scrubLagLastFrames_ = 0;
+    // How stale the picture is, in time rather than frames -- the figure that
+    // says "the image is a second behind your hand".
+    double scrubPointerToPreviewMs_ = 0.0;
+    double scrubPointerToPreviewMaxMs_ = 0.0;
+    // Longest GOP walk paid for during this gesture, and how many seeks it
+    // took. Distinguishes "the codec is slow" from "we keep re-walking".
+    long long scrubWalkMaxFrames_ = 0;
+    long long scrubSeeksAtGestureStart_ = 0;
+    void resetScrubLagModel();
+    void notePointerTarget(long long frame);
+    void notePresentedScrubFrame(long long frame);
     bool suppressSliderSignal_ = false;
     // Set when a playback run stopped because there was nothing further to
     // show -- either the playhead reached the last frame, or the decoder ran
