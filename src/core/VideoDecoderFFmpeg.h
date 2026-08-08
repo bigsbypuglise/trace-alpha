@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QSize>
+#include <functional>
 #include "core/MediaIoSource.h"
 #include "core/VideoFrame.h"
 
@@ -70,6 +71,16 @@ struct VideoPerfStats {
     long long drainPacketsSent = 0;
     long long drainFramesRecovered = 0;
     long long staleSuccessPrevented = 0;
+    // Walks given up because the caller's target moved while they were running.
+    // Distinct from a failure: the frame was not produced because it is no
+    // longer wanted, not because it could not be decoded. Must never take the
+    // recovery-seek path -- `recov` is a correctness counter and an abandoned
+    // walk is not a mispositioned decoder.
+    long long walksAbandoned = 0;
+    // Longest stretch a walk went between consecutive chances to notice a
+    // cancellation. This is the decoder's contribution to cancellation
+    // latency; the worker measures the rest.
+    double maxCheckpointGapMs = 0.0;
     // Decodes that failed with the decoder mispositioned and succeeded after a
     // recovery seek. Should stay 0: anything above it means some path is still
     // moving currentFrame_ without moving the decoder.
@@ -173,6 +184,27 @@ public:
     IoPhaseStats ioStats(IoPhase phase) const;
     StorageInfo storageInfo() const;
 
+    // Asked, at a decoder-safe boundary inside the GOP walk, whether the frame
+    // being decoded is still wanted. Returning true abandons the walk; the
+    // request then fails with `wasAbandoned` set rather than with an error, and
+    // no recovery seek is attempted.
+    //
+    // It is consulted once per packet, at the top of the walk loop, which is
+    // the only point where no AVPacket is owned, no AVFrame is being written
+    // and the codec is between send/receive. Do not move it: the value of the
+    // whole mechanism is that the state it interrupts is quiescent.
+    //
+    // Called on whichever thread is driving the decoder, so it must be cheap
+    // and must not touch the decoder.
+    using CancelPredicate = std::function<bool()>;
+    void setCancelPredicate(CancelPredicate predicate);
+
+    // Set when the last decodeFrameAt returned false because the walk was
+    // abandoned rather than because the frame could not be produced. The
+    // caller uses it to tell "you no longer want this" from "this is not
+    // there", which are different things and only one of them is a problem.
+    bool lastRequestWasAbandoned() const { return lastRequestAbandoned_; }
+
     // Installed by the owner so a slow remote read keeps the event loop
     // running instead of freezing it. See MediaIoSource::StallPump.
     void setStallPump(MediaIoSource::StallPump pump);
@@ -185,6 +217,7 @@ private:
     VideoMetadata metadata_;
     VideoPerfStats perfStats_;
     long long currentFrame_ = -1;
+    bool lastRequestAbandoned_ = false;
 };
 
 } // namespace trace::core

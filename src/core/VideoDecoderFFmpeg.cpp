@@ -360,6 +360,11 @@ struct VideoDecoderFFmpeg::Impl {
     bool seekResolvePending = false;
     long long seekTargetFrame = -1;
 
+    // Consulted once per packet inside the walk. Null means nothing can ask
+    // for a walk to stop, which is the state the whole synchronous path runs
+    // in and the reason installing this changes no behaviour by itself.
+    VideoDecoderFFmpeg::CancelPredicate cancelPredicate;
+
     // End-of-stream drain state. Frame-threaded decoders hold frames in
     // flight, so reaching input EOF is not the same as having no frames left.
     // Reset whenever the codec is flushed (seek) or recreated (open).
@@ -502,6 +507,14 @@ void VideoDecoderFFmpeg::setPlaybackDirection(int direction) {
 #endif
 }
 
+void VideoDecoderFFmpeg::setCancelPredicate(CancelPredicate predicate) {
+#ifdef TRACE_WITH_FFMPEG
+    if (impl_) impl_->cancelPredicate = std::move(predicate);
+#else
+    Q_UNUSED(predicate);
+#endif
+}
+
 IoPhaseStats VideoDecoderFFmpeg::ioStats(IoPhase phase) const {
 #ifdef TRACE_WITH_FFMPEG
     if (impl_) return impl_->io.stats(phase);
@@ -568,6 +581,7 @@ void VideoDecoderFFmpeg::close() {
     impl_->reverseCacheBytes = 0;
 #endif
     currentFrame_ = -1;
+    lastRequestAbandoned_ = false;
     metadata_ = {};
     perfStats_ = {};
 }
@@ -869,6 +883,9 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 
 bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFrame, QString& error, RequestMode mode) {
 #ifdef TRACE_WITH_FFMPEG
+    // Per request, so a caller reading it after a false return is reading this
+    // request's answer and not the previous one's.
+    lastRequestAbandoned_ = false;
     if (!isOpen()) {
         error = "Video decoder not open";
         return false;
@@ -1275,11 +1292,48 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     // frame is converted per request (plus near-target frames cached for
     // reverse stepping). No forward fill: steady per-tick cost avoids the
     // burst stutter the old queue caused on heavy codecs (4K ProRes).
-    auto decodeUntilTarget = [&](long long target) -> bool {
+    //
+    // Three outcomes, not two. "The frame is not there" and "the frame is no
+    // longer wanted" look identical to a bool and are completely different
+    // things: only the first is a decode failure, and only the first should
+    // provoke the recovery seek.
+    enum class WalkResult { Produced, Exhausted, Abandoned };
+    // How long the walk goes between consecutive chances to notice a
+    // cancellation. This is the decoder's contribution to cancellation
+    // latency, and it is the number that says whether the checkpoint is at the
+    // right granularity -- the worker measures the rest.
+    QElapsedTimer checkpointClock;
+    qint64 lastCheckpointNs = -1;
+    double maxCheckpointGapMs = 0.0;
+    auto decodeUntilTarget = [&](long long target) -> WalkResult {
+        checkpointClock.start();
         while (true) {
+            const qint64 checkNs = checkpointClock.nsecsElapsed();
+            if (lastCheckpointNs >= 0) {
+                maxCheckpointGapMs = std::max(maxCheckpointGapMs,
+                    static_cast<double>(checkNs - lastCheckpointNs) / 1'000'000.0);
+            }
+            lastCheckpointNs = checkNs;
+
+            // The one cancellation checkpoint, and the only place in this
+            // function where the decoder is quiescent enough for one: no
+            // AVPacket is owned (every path above unrefs before looping),
+            // impl_->frame is not being written, the codec is between
+            // send/receive cycles and no conversion is running. Reached once
+            // per packet, which on long-GOP H.264 is every ~0.5-3ms.
+            //
+            // Do not move this into the receive loop. That loop normally
+            // yields one frame and then EAGAIN, so it returns here anyway --
+            // a check there would buy no latency and would sit in the middle
+            // of a codec state transition.
+            if (impl_->cancelPredicate && impl_->cancelPredicate()) {
+                ++perfStats_.walksAbandoned;
+                return WalkResult::Abandoned;
+            }
+
             // Nothing left in the codec: the caller asked for a frame past the
             // real end of the stream.
-            if (impl_->decoderFullyDrained) return false;
+            if (impl_->decoderFullyDrained) return WalkResult::Exhausted;
 
             if (!impl_->drainPacketSent) {
                 QElapsedTimer readSendTimer;
@@ -1390,7 +1444,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
                     // this one's index.
                     error = "Frame conversion failed";
                     ++perfStats_.staleSuccessPrevented;
-                    return false;
+                    return WalkResult::Exhausted;
                 }
                 outFrame.frameIndex = decodedFrame;
                 currentFrame_ = decodedFrame;
@@ -1403,7 +1457,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
                 // below 1920px nothing is halved, so the entry is full-res and
                 // serves everything.
                 pushReverseCache(outFrame);
-                return true;
+                return WalkResult::Produced;
             }
 
             // Draining and the codec yielded nothing this pass: there is no
@@ -1416,7 +1470,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         // outFrame still held the *previous* frame) is what made the viewer
         // repeat the tail frame and re-seek once per tick past EOF.
         ++perfStats_.staleSuccessPrevented;
-        return false;
+        return WalkResult::Exhausted;
     };
 
     ++impl_->requestCounter;
@@ -1583,7 +1637,23 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         cacheWindow = std::clamp(affordable, 1, entriesThatFit(producesPreviewRes));
     }
 
-    if (!decodeUntilTarget(frameIndex)) {
+    const WalkResult walk = decodeUntilTarget(frameIndex);
+    perfStats_.maxCheckpointGapMs =
+        std::max(perfStats_.maxCheckpointGapMs, maxCheckpointGapMs);
+
+    // Abandoned is not failed. The frame was not produced because the caller
+    // stopped wanting it, which is neither an error to report nor a
+    // mispositioned decoder to recover from -- running the recovery seek here
+    // would move `recov` off 0, and `recov` is a correctness counter whose
+    // whole value is that it stays there.
+    if (walk == WalkResult::Abandoned) {
+        lastRequestAbandoned_ = true;
+        updatePerfStats();
+        error.clear();
+        return false;
+    }
+
+    if (walk != WalkResult::Produced) {
         // Failing without having seeked means the decoder was not where the
         // walk assumed. The condition above should prevent that, but a decode
         // failure is user-visible and a seek is cheap next to being wrong, so
@@ -1592,7 +1662,14 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         // the stream -- and still returns false rather than a stale image.
         if (!didSeek && seekToFrame(frameIndex)) {
             ++perfStats_.recoveredDecodeFailures;
-            if (decodeUntilTarget(frameIndex)) {
+            const WalkResult retry = decodeUntilTarget(frameIndex);
+            if (retry == WalkResult::Abandoned) {
+                lastRequestAbandoned_ = true;
+                updatePerfStats();
+                error.clear();
+                return false;
+            }
+            if (retry == WalkResult::Produced) {
                 updatePerfStats();
                 error.clear();
                 return true;
