@@ -23,6 +23,7 @@
 #include <algorithm>
 #include <cmath>
 
+#include "ui/OverlaySpike.h"
 #include "ui/ViewerWidget.h"
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
@@ -521,6 +522,13 @@ void MainWindow::setupUi() {
     // foundation is signed off.
     layout->addWidget(overlay_, 0);
     setCentralWidget(central);
+
+    // TEMPORARY, env-gated, ships inert. Decides whether the child-HWND viewer
+    // surface can host a floating interface before the GPU work commits to it.
+    // See src/ui/OverlaySpike.h.
+    if (const int spike = qgetenv("TRACE_OVERLAY_SPIKE").toInt(); spike > 0) {
+        trace::ui::installOverlaySpike(viewer_, spike);
+    }
 }
 
 void MainWindow::setupMenus() {
@@ -1265,10 +1273,18 @@ void MainWindow::startPlaybackRun() {
 //
 // Ordering is load-bearing and the caller has already done the first half:
 // flushVideoScrub(true) landed the exact frame, and the reclaimDecoder() inside
-// that landing bumped the request generation and told the worker, so no older
-// preview-resolution frame can be painted after it. Resuming before the landing
-// would also start audio at the preview position, because
+// that landing bumped the request generation AND pushed it at the worker, so no
+// older preview-resolution frame can be painted after it. Resuming before the
+// landing would also start audio at the preview position, because
 // startAudioForPlayback() takes its offset from the current frame.
+//
+// There is deliberately no supersedeInFlightRequests() call here, and adding
+// one would not do the job anyway. That function bumps requestGeneration_ but
+// deliberately does NOT tell the worker (see its own comment), while
+// onScrubResult drops on scrubWorker_.latestGeneration() -- so a bare call
+// would leave an in-flight worker result perfectly deliverable. The pairing
+// that actually closes the window is scrubWorker_.supersede(...), and
+// reclaimDecoder() is the one place that performs it.
 void MainWindow::resumePlaybackAfterScrub() {
     if (!userPlayIntent_) return;
     if (!frameSource_ || !frameSource_->canPlay()) return;

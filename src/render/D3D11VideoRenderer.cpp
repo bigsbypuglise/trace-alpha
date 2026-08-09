@@ -19,6 +19,23 @@ namespace trace::render {
 namespace {
 
 constexpr float kBlack[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+// Developer-only. Clears the back buffer to red instead of black, which
+// separates the two things a black video rect can mean: "nothing is being
+// presented" from "black pixels are being presented correctly".
+//
+// This is the diagnostic that located the GATE B fault in a single run. The red
+// appeared with a black strip exactly the size and position of the video
+// viewport, which cleared present, compositing, letterboxing and viewport
+// arithmetic all at once and moved the search to the texture -- where the
+// source frame turned out to be genuinely black. Kept because the ambiguity it
+// resolves is permanent: black is both a legitimate picture and the colour of
+// failure. See scripts/measure/visual.ps1, which asserts on it.
+constexpr float kDiagRed[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+
+bool clearDiagnosticEnabled() {
+    static const bool on = !qgetenv("TRACE_D3D11_CLEAR_DIAG").isEmpty();
+    return on;
+}
 
 QString hrText(const char* what, HRESULT hr) {
     return QStringLiteral("%1 failed (hr 0x%2)")
@@ -262,8 +279,15 @@ bool D3D11VideoRenderer::initialize(QWidget* host, QString& error) {
     if (!createDevice(error)) return false;
     // winId() realises the native window; ViewerWidget has set WA_NativeWindow
     // so this is the widget's own HWND, and the surface becomes a child of it.
-    if (!createSurfaceWindow(reinterpret_cast<void*>(host->winId()), pixels, error)) return false;
-    if (!createSwapChain(surface_, pixels, error)) return false;
+    // TEMPORARY SPIKE KNOB: present into the host widget's own HWND instead of
+    // a child window, to test that variant's overlay compatibility. Removed
+    // once the surface design is settled.
+    if (qgetenv("TRACE_D3D11_HOSTHWND").isEmpty()) {
+        if (!createSurfaceWindow(reinterpret_cast<void*>(host->winId()), pixels, error)) return false;
+        if (!createSwapChain(surface_, pixels, error)) return false;
+    } else {
+        if (!createSwapChain(reinterpret_cast<void*>(host->winId()), pixels, error)) return false;
+    }
     if (!createPipeline(error)) return false;
     if (!ensureRenderTarget(error)) return false;
 
@@ -480,7 +504,8 @@ void D3D11VideoRenderer::paint(QWidget* host) {
 
     ID3D11RenderTargetView* rtvs[] = {backBufferRtv_.Get()};
     context_->OMSetRenderTargets(1, rtvs, nullptr);
-    context_->ClearRenderTargetView(backBufferRtv_.Get(), kBlack);
+    context_->ClearRenderTargetView(backBufferRtv_.Get(),
+                                    clearDiagnosticEnabled() ? kDiagRed : kBlack);
 
     if (textureSrv_) {
         QElapsedTimer drawTimer;

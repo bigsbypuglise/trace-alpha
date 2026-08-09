@@ -48,6 +48,8 @@ bool ViewerWidget::adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> r
     setAttribute(Qt::WA_NativeWindow, nativeSurface_);
     setAttribute(Qt::WA_NoSystemBackground, nativeSurface_);
     setAttribute(Qt::WA_OpaquePaintEvent, nativeSurface_);
+    hostHwndSpike_ = nativeSurface_ && !qgetenv("TRACE_D3D11_HOSTHWND").isEmpty();
+    setAttribute(Qt::WA_PaintOnScreen, hostHwndSpike_);
 
     if (!renderer->initialize(this, error)) {
         // Leave no half-applied native state behind for the fallback to inherit.
@@ -63,6 +65,10 @@ bool ViewerWidget::adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> r
 
 QString ViewerWidget::rendererName() const {
     return renderer_ ? renderer_->name() : QStringLiteral("none");
+}
+
+QPaintEngine* ViewerWidget::paintEngine() const {
+    return hostHwndSpike_ ? nullptr : QWidget::paintEngine();
 }
 
 void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {

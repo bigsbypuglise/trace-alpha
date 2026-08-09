@@ -56,6 +56,7 @@ public:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    QPaintEngine* paintEngine() const override;
 
 private:
     // Applies the widget-level contract a backend asks for, then initializes
@@ -67,6 +68,7 @@ private:
     // attributes can be undone if a backend fails to initialize and the CPU
     // fallback is adopted in its place.
     bool nativeSurface_ = false;
+    bool hostHwndSpike_ = false;
     // Kept here as well as in the renderer so "which frame is displayed" is
     // answerable without asking the backend.
     trace::core::VideoFrame frame_;

@@ -107,6 +107,8 @@ add_executable(Trace
   ../src/app/MainWindow.cpp
   ../src/ui/ViewerWidget.h
   ../src/ui/ViewerWidget.cpp
+  ../src/ui/OverlaySpike.h
+  ../src/ui/OverlaySpike.cpp
   ../src/render/VideoRenderer.h
   ../src/render/VideoRenderer.cpp
   ../src/render/CpuImageRenderer.h

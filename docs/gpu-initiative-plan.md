@@ -1,6 +1,10 @@
 # Trace GPU / smooth-presentation initiative — active plan
 
-**Status: GATE B PASSED (2026-08-09).** Steps 1–6 of §8 are committed and
+**Status: GATE B IMPLEMENTED, NOT SIGNED OFF (2026-08-09).** The surface works
+and is visually equivalent to the CPU path at the shipping DPI (§18.2), but
+**the child-HWND design cannot host ordinary Qt overlay widgets** (§18.4) and
+that is a blocker for the planned floating interface. Do not start GATE C until
+the overlay strategy is chosen. Steps 1–6 of §8 are committed and
 validated on the local Windows toolchain: `VideoFrame` replaced bare `QImage` at
 the four seams (`03d840e`), the `VideoRenderer` boundary exists (`5765c19`),
 generation plumbing landed (`75a3412`, §13), random-access scrub decode runs on
@@ -13,10 +17,10 @@ Steps 5 and 5.5 are **owner-signed-off** (2026-08-09, §15.5 item 3). GATE B is
 harness-validated only (§17.4); **owner validation of the rendered picture has
 not happened**, and 4K ProRes 422 HQ remains the bar.
 
-**Next is step 7 — GATE C**, planar YUV upload and shader colour conversion.
-That is where conversion cost actually moves: today the frame is still converted
-by swscale on the CPU and uploaded as BGRA. Carry the two deferred scrub defects
-in as regression tripwires (§15.5).
+**Next is NOT step 7.** Two things gate it: the overlay strategy (§18.4) and
+owner visual sign-off (§18.2). GATE C — planar YUV upload and shader colour
+conversion — is where conversion cost actually moves, and it stays queued behind
+those. Carry the two deferred scrub defects in as regression tripwires (§15.5).
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -1320,3 +1324,141 @@ summary.
 4. **Fullscreen is untested** through the native surface. It is a Qt window
    state change with the layout intact (§3), so the surface should simply
    follow its parent, but that is an expectation rather than a measurement.
+
+---
+
+## 18. GATE B validation round two (2026-08-09) — visual, surface, overlay, scheduling
+
+Requested after §17: the automated numbers established that the right frame
+reaches the surface, not that the picture is right or that the surface can host
+an interface. This section is that second pass.
+
+### 18.1 The black-first-frame hazard is now designed out of the tools
+
+`scripts/measure/visual.ps1` replaces ad-hoc captures for anything visual. It
+steps to a **named** frame rather than capturing wherever the app opened,
+measures luma spread and non-black fraction inside the video band only (the HUD
+below it would otherwise supply the "content" on its own), and classifies:
+
+- uniform **red** → FAIL, "the swapchain cleared and never drew";
+- uniform **dark** → **INDETERMINATE**, never a pass and never a fail, with the
+  message saying to check the clip's frame before concluding anything;
+- otherwise → PASS with the measured spread.
+
+`ab.ps1` drives both renderers to the same frame; `abdiff.ps1` pixel-diffs the
+pair. The red clear is retained as `TRACE_D3D11_CLEAR_DIAG=1`.
+
+**`abdiff.ps1` insets 8px from the window edge**, and that is not cosmetic: the
+first run reported 0.46–0.87% of pixels differing on every clip, and the whole
+difference was a 4px strip at x 1290–1293 of a 1296px capture — the resize
+border, where the desktop behind shows through and two captures taken moments
+apart legitimately differ.
+
+### 18.2 CPU/GPU visual A/B
+
+Same build, same clip, same frame, `TRACE_RENDERER` the only variable.
+
+| clip | frame | cpu | d3d11 | pixel diff (video band) |
+|---|---|---|---|---|
+| 1080p H.264 9x16 vertical | 60 | PASS spread 245 | PASS spread 245 | 31 px (0.064%), max Δ **6** |
+| 4K H.264 | 40 | PASS spread 255 | PASS spread 255 | 0 px, max Δ **1** |
+| 4K ProRes 422 HQ | 40 | PASS spread 228 | PASS spread 228 | 0 px, max Δ **1** |
+| 4K ProRes 4444 | 40 | PASS spread 254 | PASS spread 255 | 0 px, max Δ **2** |
+| PNG sequence | 30 | PASS spread 248 | PASS spread 249 | — |
+
+At the shipping DPI the two backends are **the same picture**. Frame identity,
+orientation, aspect, letterbox geometry and black level all match by
+construction, because the pixels match.
+
+**At 1.5x DPI they do not.** `QT_SCALE_FACTOR=1.5` (a per-process knob — no
+system setting was changed) gives 4209 differing pixels of 108k sampled
+(**3.9%**, max Δ **75**), and the bounding box is x 488–1445, y 94–580, i.e.
+**inside the video**, spanning the whole rect. The video is at the same position
+and the same size in both. This is a scaling-quality difference between Qt's
+raster bilinear and the D3D11 sampler under a 4x downscale, not a geometry or
+identity fault — but it is a real visible difference and it needs an eye, not a
+number.
+
+It also exposed a **HUD units inconsistency**: at 1.5x the CPU backend reports
+`display 640x360` (logical) and D3D11 reports `display 960x540` (device pixels)
+for the same on-screen rectangle. D3D11's is the honest figure. They agree at
+dpr 1, which is why this never showed before.
+
+### 18.3 Window and surface lifecycle — PASSED
+
+`scripts/measure/surface.ps1`, 4K H.264 at frame 40, every step checked for
+"went black" rather than left to be noticed:
+
+initial, small (700x560), large (1800x950), **eight rapid resizes**, maximize,
+restore, minimize+restore, **fullscreen**, exit fullscreen — all report content,
+none black. Child `TraceD3D11Surface` window census after all of it: **exactly
+1** (0 on the cpu control, as it must be). Window geometry identical before and
+after fullscreen (1430x854). Shutdown clean in **105 ms** (cpu control 57 ms).
+
+Fullscreen specifically: swapchain resized to the 2560x1440 client area, video
+correctly positioned, `display 1751x985` — exactly 16:9 — `delta 0`,
+`renderer d3d11`.
+
+**Not testable on this machine:** multi-monitor and mixed-monitor DPI. The box
+has a single display (`\.\DISPLAY1 2560x1440`, primary). High-DPI was exercised
+via `QT_SCALE_FACTOR` only, which scales Qt but not the physical panel.
+
+### 18.4 The overlay spike — the child HWND CANNOT host ordinary Qt widgets
+
+This is the finding that matters most, and it is a design blocker rather than a
+defect. `src/ui/OverlaySpike.*`, `TRACE_OVERLAY_SPIKE=1|2|3`, places a centred
+label, a clickable button and a translucent panel over the video rect and logs
+every hover, press, click and wheel it receives.
+
+| surface | overlay widgets | visible | mouse input | translucent |
+|---|---|---|---|---|
+| cpu (no native surface) | plain Qt children | **yes** | **yes** | **yes** |
+| child HWND (shipped) | plain Qt children | **NO** | **NO** | — |
+| child HWND | native siblings (`WA_NativeWindow`) | yes | yes | **NO** |
+| child HWND | native + `WA_TranslucentBackground` | yes | (n/t) | **NO**, and worse |
+| host HWND (`WA_PaintOnScreen`) | plain Qt children | **yes** | **yes** | **NO** |
+
+On the shipped child-HWND design, plain Qt children are not merely hidden — they
+are **not hit-testable**. `WindowFromPoint` over the button returns
+`TraceD3D11Surface`, and the app logs no hover and no press. The same build on
+`cpu` logs hover-enter, press and click. Making each control native
+(`WA_NativeWindow`) restores both visibility and full input, and the hit-test
+then resolves to the Qt window.
+
+**Translucency is lost on every native-surface variant**, including host-HWND.
+Neither design puts the video pixels anywhere Qt can blend against, so the
+translucent panel composites to opaque. `WA_TranslucentBackground` made it worse
+(the label lost its styled background too). This is a shared constraint and
+therefore does **not** discriminate between the surface designs — it has to be
+solved separately whichever is kept.
+
+### 18.5 Source-rate scheduling audit
+
+1. **Stored**: `VideoMetadata::fpsNum`/`fpsDen` (`VideoDecoderFFmpeg.h`), set
+   from `av_guess_frame_rate` at `VideoDecoderFFmpeg.cpp:825-827`. The decoder
+   also keeps `impl_->fpsQ` for PTS→index arithmetic.
+2. **Enters scheduling**: **nowhere.** Nothing reads the pair. Every consumer
+   goes through `FrameSource::fps()`, which returns `double`.
+3. **Rounded to integer**: yes, once —
+   `schedulerIntervalMs_ = floor(1000.0/fps)` (`MainWindow.cpp:1008`), the
+   QTimer interval. 23.976 → 41 ms.
+4. **Millisecond timer**: yes. `playTimer_.setInterval(schedulerIntervalMs_)`.
+5. **Fractional error**: **not accumulated.** `frameDurationMs` is a double, the
+   accumulator is fed `nsecsElapsed()` and carries its residue forward (capped
+   at 4 frames). The tick is a *bound*, not the rate. Residual error is the
+   double's representation of 24000/1001 — ~1e-16 relative, microseconds per
+   hour.
+6. **Owns the clock**: two mutually exclusive owners. With audio at 1x forward
+   and `clockReady()`, the disciplined audio clock is the **only** scheduler and
+   decides both when and which frame. Otherwise `playbackClock_` +
+   `playbackAccumulatorMs_`.
+7. **Present**: `Present(0, 0)` — sync interval **0**. Not vsync-throttled, not
+   phase-aligned. Presents are driven by the playback timer via Qt's paintEvent;
+   DWM composites at refresh, so the display shows at most one per refresh, but
+   nothing in Trace is aware of refresh phase.
+8. **Which gate**: **GATE E** (§8 item 11, "add DXGI presentation timing").
+
+**So `7b924be` is foundation only.** It must not be described as frame-rate
+lock: no scheduling path consumes the rational today, and the rate error it
+removes was already ~1e-16. What it buys is a *reference* — cadence jitter
+cannot honestly be measured against a rate that is itself rounded.
