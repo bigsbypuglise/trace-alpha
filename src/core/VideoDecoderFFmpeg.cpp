@@ -818,6 +818,12 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     AVRational fr = av_guess_frame_rate(impl_->fmt, stream, nullptr);
     if (fr.num <= 0 || fr.den <= 0) fr = AVRational{24, 1};
     impl_->fpsQ = fr;
+    // Both, and the rational first: the double is derived from it, not the
+    // other way round. av_q2d(24000/1001) is 23.976023976023978, which is the
+    // nearest double and not the rate -- keeping the pair means a consumer that
+    // needs exactness has it, without changing anything that reads `fps` today.
+    metadata_.fpsNum = fr.num;
+    metadata_.fpsDen = fr.den;
     metadata_.fps = av_q2d(fr);
 
     impl_->streamTimeBase = stream->time_base;

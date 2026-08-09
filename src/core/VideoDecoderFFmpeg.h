@@ -12,6 +12,18 @@ struct VideoMetadata {
     int width = 0;
     int height = 0;
     double fps = 24.0;
+    // The same rate as the container states it, kept exact. `fps` is av_q2d of
+    // this, and 24000/1001 has no exact double -- so every consumer working
+    // from the double (tick interval, timecode, seek arithmetic) inherits an
+    // approximation of a number the file states precisely. Presentation timing
+    // cannot be measured honestly against a rate that is already rounded, so
+    // the rational is retained here rather than reconstructed downstream.
+    //
+    // Deliberately int/int rather than AVRational: this header is reached from
+    // MainWindow.h and must compile with TRACE_WITH_FFMPEG undefined, so no
+    // FFmpeg type may appear in it.
+    int fpsNum = 24;
+    int fpsDen = 1;
     long long frameCount = -1;
     double durationSeconds = 0.0;
     QString codecName;
