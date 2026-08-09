@@ -387,7 +387,16 @@ bool D3D11VideoRenderer::initialize(QWidget* host, QString& error) {
         // that cannot build must not cost the user their picture.
         qWarning().noquote() << "Trace: overlay compositor disabled:" << overlayError;
     } else {
-        overlay_.setEnabled(!qgetenv("TRACE_OVERLAY_COMPOSITED").isEmpty());
+        const bool overlayOn = !qgetenv("TRACE_OVERLAY_COMPOSITED").isEmpty();
+        overlay_.setEnabled(overlayOn);
+        if (overlayOn) {
+            // Say so on stderr. This is a disposable architecture spike with
+            // placeholder art, and anyone who switches it on should be in no
+            // doubt that it is not a feature.
+            qWarning().noquote()
+                << "Trace: EXPERIMENTAL composited overlay enabled "
+                   "(spike, placeholder art, not the final interface).";
+        }
     }
 
     return true;

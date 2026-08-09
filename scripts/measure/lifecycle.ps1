@@ -148,6 +148,22 @@ function SigDiff($a, $b) {
 }
 
 Add-Type -AssemblyName System.Windows.Forms
+if ($PlayThroughDrag -or $PausedThroughDrag) {
+    # PRECONDITION: the app must be paused. Both gestures start by toggling or
+    # not toggling play, so inheriting a playing app inverts the expected
+    # outcome -- and it inverts BOTH gestures, which reads exactly like a
+    # product regression. Running the pair against one instance without a
+    # restart in between did precisely that once, and passed by luck the time
+    # before, so this is checked rather than assumed.
+    $a = PictureSig
+    Start-Sleep -Milliseconds 600
+    $b = PictureSig
+    if ((SigDiff $a $b) -ge 5.0) {
+        Write-Output "PRECONDITION FAIL: the app is already playing. Run restart.ps1 before each through-drag gesture; they are not composable on one instance."
+        exit 1
+    }
+}
+
 if ($PlayThroughDrag) {
     # Playing when the drag begins. This is the whole point of the gesture:
     # before step 5.6 the press ended the run and the release never restored it.

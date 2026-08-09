@@ -54,6 +54,12 @@ while the release is still resolving), `-WheelFirst`, `-ToEnd`.
 .\scripts\measure\lifecycle.ps1 -PausedThroughDrag              # expect still
 ```
 
+**Restart before EACH through-drag gesture.** They are not composable on one
+instance: each either toggles play or does not, so inheriting a playing app
+inverts the expected outcome of both, which reads exactly like a product
+regression. `lifecycle.ps1` now checks the precondition and fails with
+`PRECONDITION FAIL` rather than reporting a confident wrong answer.
+
 **Always run the control.** A check that can only ever report "moving" proves
 nothing; the two gestures differ in exactly one thing, whether Play was pressed.
 And when a gesture is written for a specific bug, run it against a build that

@@ -1,28 +1,25 @@
 # Trace GPU / smooth-presentation initiative — active plan
 
-**Status: GATE B IMPLEMENTED, NOT SIGNED OFF (2026-08-09).** The surface works
-and is visually equivalent to the CPU path at the shipping DPI (§18.2), but
-**the child-HWND design cannot host ordinary Qt overlay widgets** (§18.4). The
-surface stays as shipped and the overlay moves into the render pass instead --
-proven in §19, including translucency, full input, and zero playback cost. Do
-not start GATE C until the owner has judged the overlay and GATE B is signed
-off. Steps 1–6 of §8 are committed and
-validated on the local Windows toolchain: `VideoFrame` replaced bare `QImage` at
-the four seams (`03d840e`), the `VideoRenderer` boundary exists (`5765c19`),
-generation plumbing landed (`75a3412`, §13), random-access scrub decode runs on
-a worker with latest-target-wins (`f77d472`, §14), the drag preview samples on
-all-intra media (§15), play/pause survives a drag (§16), and **there is now a
-native D3D11 surface** (§17) — opt-in via `TRACE_RENDERER=d3d11`, with
-`CpuImageRenderer` still the default.
+**Status: GATE B IMPLEMENTED, PENDING SIGN-OFF (2026-08-09).** Steps 1-6 of §8
+are committed and validated on the local Windows toolchain. The native D3D11
+surface exists (§17) and is visually equivalent to the CPU path at the shipping
+DPI (§18.2); playback, scrub, resize, fullscreen and shutdown all measure at the
+CPU baseline (§17.4, §18.3).
 
-Steps 5 and 5.5 are **owner-signed-off** (2026-08-09, §15.5 item 3). GATE B is
-harness-validated only (§17.4); **owner validation of the rendered picture has
-not happened**, and 4K ProRes 422 HQ remains the bar.
+**GATE B is pending on exactly two things (§20.2): human visual review, and the
+HUD logical/device-pixel unit correction.** 4K ProRes 422 HQ is the bar.
 
-**Next is NOT step 7.** Two things gate it: the overlay strategy (§18.4) and
-owner visual sign-off (§18.2). GATE C — planar YUV upload and shader colour
-conversion — is where conversion cost actually moves, and it stays queued behind
-those. Carry the two deferred scrub defects in as regression tripwires (§15.5).
+The overlay question is **settled and the work is stopped** (§20.1): the child
+HWND stays, `WA_PaintOnScreen` is not promoted, and renderer-composited
+translucency is proven viable at no measured playback cost (§19). The final
+interface is built after GPU integration completes, not before.
+
+**`cpu` remains the default renderer and every experimental path is off unless
+its environment variable is set** — confirmed at runtime (§20.6).
+
+**Do not start GATE C** until GATE B is signed off. When it is, measure scrubbing
+separately (§20.7): full-resolution planar upload could silently make interactive
+previews worse, and playback throughput would not reveal it.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -1607,3 +1604,124 @@ prototype has been driven by an actual screen reader.**
    on motion, hidden/visible/hover/pressed and the 150-180ms fade are all
    covered, and `kFadeMs` is 165.
 4. GATE B still not signed off, and GATE C still not started.
+
+---
+
+## 20. Session close, 2026-08-09 — GATE B status and what carries forward
+
+### 20.1 The overlay question is ANSWERED and the work is STOPPED
+
+Architectural conclusion, settled:
+
+- **Keep the child HWND.** Supported Win32 behaviour, already through lifecycle
+  and fullscreen testing (§18.3).
+- **`WA_PaintOnScreen` is NOT promoted.** It works on this Qt/Windows build
+  (§17.2) and that remains useful evidence, but Qt documents it as X11-only and
+  that is not a stable contract for the long-term viewer architecture.
+- **Renderer-composited translucency is viable** — proven in §19, with real
+  alpha over the video, full native input, and keyboard staying with Qt by
+  construction.
+- **No measured playback cost**: 98.3% and 120/120 frames with the overlay held
+  visible for a whole 9s 4K run, identical to the same gesture with it off.
+- **Final interface implementation happens after GPU integration is complete.**
+
+**Development on the overlay is stopped here.** No further work on artwork,
+transport controls, fades, tooltips, accessibility proxies, high-contrast
+assets, menus or shuttle behaviour. What exists is a disposable spike, disabled
+by default, and it announces itself on stderr when switched on.
+
+The accessibility plan in §19.7 is a *plan* and is preserved for the interface
+phase. It has not been prototyped and must not be treated as a commitment.
+
+### 20.2 GATE B is pending on exactly two things
+
+1. **Human visual review.** Every number says the right frame is at the right
+   size; none says the picture looks right. 4K ProRes 422 HQ is the bar.
+2. **The HUD logical/device-pixel correction.** At 1.5x DPI the CPU backend
+   reports `display 640x360` (logical) and D3D11 reports `display 960x540`
+   (device) for the *same on-screen rectangle*. D3D11's is the honest figure.
+   They agree at dpr 1, which is why it went unnoticed until §18.2. This is a
+   reporting bug, not a rendering one, and it should be fixed before sign-off so
+   the field means one thing.
+
+Everything else GATE B asked for has passed: non-black frames render, CPU/GPU
+frame identity matches, aspect is correct, resize and fullscreen are reliable,
+performance is at the CPU baseline, there is no CPU-path regression, and
+shutdown is clean.
+
+### 20.3 The 150% scaling difference — for visual review, not yet explained
+
+At `QT_SCALE_FACTOR=1.5`, CPU and D3D11 differ on **3.9% of the sampled video
+band, max channel delta 75**, bounding box entirely inside the video. Same
+position, same size, same frame. At dpr 1 the two are effectively identical
+(max delta 1-2).
+
+It is a difference between Qt's raster bilinear and the D3D11 sampler under a 4x
+downscale. It is **not** a geometry, identity or colour-conversion fault. It
+needs an eye rather than a number, and it belongs in the GATE B visual A/B.
+
+Worth flagging as genuinely unexplained: the divergence is *larger* at 1.5x (4x
+downscale) than at dpr 1 (6x downscale), which is the opposite of the expected
+direction. Do not accept a hand-wave about filter quality without re-measuring.
+
+### 20.4 Real mixed-monitor DPI is UNTESTED
+
+The test box has a single display (`\.\DISPLAY1`, 2560x1440, primary). High-DPI
+was exercised only via `QT_SCALE_FACTOR`, which scales Qt without changing the
+panel. **Untested, and none of it is implied by the passes above:**
+
+- moving the window between monitors;
+- monitors at different DPI;
+- the per-monitor DPI-change message arriving mid-session;
+- fullscreen on a secondary monitor.
+
+The code paths exist (`devicePixelRatioF()` is read every paint, the surface is
+resized from it, the overlay atlas invalidates on DPI change) but have never run
+against a real transition.
+
+### 20.5 Source-rate audit — preserved verbatim
+
+1. **Exact rational metadata IS stored**: `VideoMetadata::fpsNum`/`fpsDen`,
+   set from `av_guess_frame_rate` (`VideoDecoderFFmpeg.cpp:825-827`).
+2. **Presentation is NOT frame-rate locked.** Nothing reads the pair. Every
+   consumer goes through `FrameSource::fps()`, a `double`. The tick interval is
+   `floor(1000.0/fps)` — an integer millisecond QTimer, 41ms for 23.976.
+3. **`Present(0, 0)` is NOT display-synchronized.** Sync interval 0: not
+   vsync-throttled, not phase-aligned. Presents are driven by the playback timer
+   through Qt's paintEvent; DWM composites at refresh, so at most one present is
+   seen per refresh, but nothing in Trace is aware of refresh phase.
+4. **Cadence and refresh synchronization remain GATE E** (§8 item 11).
+
+Note the accumulator does **not** drift: `frameDurationMs` is a double, the
+accumulator is fed `nsecsElapsed()` and carries its residue forward, so the tick
+bounds the rate rather than setting it. The rational's value is as an *unrounded
+reference* for measuring cadence at GATE E, not as a rate correction.
+
+### 20.6 Defaults, confirmed at runtime
+
+Launched with no environment variables at all:
+
+- `renderer cpu` in the HUD — **CPU remains the default renderer**;
+- no overlay drawn — **the composited overlay is disabled by default**;
+- stderr carries only Qt's own FFmpeg version notice — **no Trace diagnostic
+  runs unless explicitly enabled**.
+
+Every experimental gate is off unless its variable is set:
+`TRACE_RENDERER` (default cpu), `TRACE_OVERLAY_COMPOSITED`,
+`TRACE_OVERLAY_SPIKE`, `TRACE_D3D11_CLEAR_DIAG`, `TRACE_D3D11_HOSTHWND`.
+
+### 20.7 Next session — GATE B visual A/B, then GATE C
+
+Rendering validation, not interface development. Same machine, same monitor:
+**4K ProRes 422 HQ**, CPU versus D3D11, at 1:1, fit-to-window, 150% scaling and
+fullscreen, judging colour, black and white levels, text, diagonals and fine
+detail.
+
+If the picture is acceptable: fix the HUD units (§20.2), sign off GATE B, then
+start GATE C — planar YUV upload and GPU colour conversion.
+
+**Measure scrubbing separately in GATE C.** Full-resolution planar upload could
+silently make interactive previews worse: the scrub path currently converts to
+*display size* in swscale (`b5a56af`), and a GPU path that uploads full-res
+planes instead would move that cost rather than remove it. Playback throughput
+would not show it; the scrub harness would.
