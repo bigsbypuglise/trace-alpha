@@ -13,8 +13,8 @@ state now survives a drag — and retained the source frame rate as a rational.
 No GPU backend yet. **Next is step 6 — GATE B**, the first native D3D11 surface,
 carrying the two deferred scrub defects in as regression tripwires (§15.5).
 
-Step 5.6 is **committed but not yet validated**; §16.6 lists what must pass
-before GATE B starts.
+Step 5.6 is committed and **validated on the local toolchain (§16.6)**, negative
+control included. GATE B is clear to start.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -1096,10 +1096,71 @@ the reference for late-present or jitter, so this is a prerequisite for GATE E.
 must compile with `TRACE_WITH_FFMPEG` undefined — the same rule that keeps
 `AVPixelFormat` out of `VideoFrame.h` (§4).
 
-### 16.6 Validation required before GATE B
+### 16.6 Validation record — PASSED (2026-08-09)
 
-Not yet run. Owner's four confirmations plus what this codebase's own history
-says to check:
+Run on the local Windows toolchain against the `Trace_Testing_Assets` set. All
+rows `delta 0`, `detach 0.00`, `stale-blocked 0`, `recov 0`.
+
+**The harness could not exercise this gesture at all**, so `lifecycle.ps1` grew
+`-PlayThroughDrag` and its control `-PausedThroughDrag`, plus the `-KeyAtRelease`,
+`-WheelFirst` and `-ToEnd` modifiers. They decide by comparing the picture across
+a second of wall time rather than by reading the HUD, because "is it still
+playing" is a question about motion and the frame counter would need OCR.
+
+**The negative control was taken first**, by rebuilding `MainWindow` at `044b2ea`
+and running the same gesture: `PLAY-THROUGH-DRAG: FAIL - picture frozen after
+release (0%)`. Against 13.3% on the fixed build. The test detects the bug it was
+written for, which is the only thing that makes the passes below mean anything.
+
+| gesture | file | result |
+|---|---|---|
+| play → drag → release | 1080p H.264 | **PASS** 13.3% moved |
+| play → drag → release | 4K H.264 | **PASS** 41.4% |
+| play → drag → release | ProRes 4444 | **PASS** 20.1% |
+| play → drag → release | PNG sequence | **PASS** 94.9% |
+| paused → drag → release (control) | all four + still | **PASS** 0.0% every time |
+| play → drag → Space at release | 4K H.264 | **PASS** still — pause won |
+| paused → drag → Space at release | 4K H.264 | **PASS** 41.7% — play won |
+| play → wheel → drag → release | 1080p | **PASS** still — wheel cleared intent |
+| play → drag to END → release | 1080p | **PASS** still, 411/411 |
+
+Read against the numbered list:
+
+1. ✓ Resumed run reads `target 215 | shown 215 | delta 0`, `walk 0f`.
+2. ✓ The paused control is 0.0% moved on every file including a still.
+3. ✓ Both directions. Note *why* it holds: the landing blocks the UI thread, so
+   the keypress is queued behind it and is delivered after the resume — the
+   later command wins because it is genuinely later, not because of a race that
+   happened to resolve well.
+4. ✓ 1080p `clk 8.948s × 23.976 = 214.5 → frame 215`; 4K `clk 2.732s × 24.000 =
+   65.6 → frame 66`. Audio restarted at the **released** frame, not the
+   pre-scrub one — from frame 0 it would read ~0.2s. `MASTER`, `clk-upd 1/1`,
+   `sync -22.3ms` / `-23.5ms`, `rep 0 skip 0`, `late 0`.
+5. ✓ The resumed frame reads `dst RGB32/BGRA` with no size suffix on 4K H.264
+   and 4444 — full-res. A preview would read `RGB32/BGRA 202x360`. 1080p is not
+   evidence here (previews are already full-res below the 1920 threshold); 4K is.
+6. ✓ `-StepCycle` 209 → 209 over 3×(Right×5/Left×5). `-PlayAfter` ran.
+   `-KillMidDrag` exited in 56ms. `-SwitchMedia` loaded the incoming file at
+   frame 0, paused, `posted 0 stale 0`. `-SnapRelease` on 4444 gave **`drop 6`**,
+   non-zero as required — `drop 0` there would mean the worker is never being
+   superseded.
+7. ✓ Released on 411/411: `presented 1 frames | ticks 1 | presents 1`. The
+   resumed run started, ticked once, found nothing to advance to and stopped.
+   The file did not restart.
+8. ✓ PNG sequence 94.9% moved (the non-video branch of `sliderReleased`); still
+   image 0.0% and no crash.
+9. ✓ A pass here is also proof the filter fired: had the wheel not reached it,
+   the intent would have survived and the release would have resumed playback.
+
+**Scrub regression, against the §15.4 baselines**: 4K H.264 reversals
+`rev-hit 97.9% (236/241)` vs 98.0%, `stalls 2 of 402` vs 2 of 408, `sample
+GATED`, `ra-walk 8.67f/seek`. 4444 snap release `sample ON stride 5`,
+`rev-hit 0.0%`, `ra-walk 0.00f/seek`. Unchanged.
+
+<details>
+<summary>Original checklist, kept for what each item was for</summary>
+
+Owner's four confirmations plus what this codebase's own history says to check:
 
 1. Playing → drag → release → playback continues **from the released frame**,
    and the first presented frame equals the landing frame (`delta 0`).
@@ -1121,3 +1182,5 @@ says to check:
    restore.
 9. Wheel over the groove while playing → steps as before, and a later drag does
    **not** resurrect playback.
+
+</details>

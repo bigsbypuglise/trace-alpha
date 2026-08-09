@@ -35,6 +35,31 @@ held under one continuous press, running into both ends of the clip**. That is
 what `-Reversals` does. It is also the useful stress of buffer recycling: a run
 turns over several hundred cache evictions.
 
+## Lifecycle gestures
+
+`lifecycle.ps1` covers the transitions where the decoder changes hands, and
+where a bug shows up as a hang, a stale frame or a wrong landing rather than as
+a bad number: `-StepCycle`, `-PlayAfter`, `-SwitchMedia`, `-KillMidDrag`.
+
+`-PlayThroughDrag` and `-PausedThroughDrag` cover playback surviving a scrub
+(step 5.6). They decide by comparing the picture across a second of wall time,
+because "is it still playing" is a question about motion — the frame counter
+would need OCR. Modifiers: `-KeyAtRelease` (Space with no settle, so it lands
+while the release is still resolving), `-WheelFirst`, `-ToEnd`.
+
+```powershell
+.\scripts\measure\restart.ps1 -Clip $clip
+.\scripts\measure\lifecycle.ps1 -PlayThroughDrag -Out run.png   # expect moving
+.\scripts\measure\restart.ps1 -Clip $clip
+.\scripts\measure\lifecycle.ps1 -PausedThroughDrag              # expect still
+```
+
+**Always run the control.** A check that can only ever report "moving" proves
+nothing; the two gestures differ in exactly one thing, whether Play was pressed.
+And when a gesture is written for a specific bug, run it against a build that
+still has the bug before trusting a pass — `-PlayThroughDrag` reads 0% on
+`044b2ea` and 13.3% after the fix, which is what makes the pass mean something.
+
 ## Things that will waste an hour if you rediscover them
 
 - **Capture the window at native resolution.** The HUD is unreadable in a normal
