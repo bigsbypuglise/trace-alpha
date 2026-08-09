@@ -248,7 +248,7 @@ wired to anything — it has no visible effect.)
 The repo lives on the Mac and on Windows. **Run `git pull` before starting work
 on either machine.** That's the whole rule.
 
-Claude's sandbox cannot push (the proxy blocks github.com), so commits are made
+On the macOS sandbox the proxy blocks github.com, so commits are made
 locally and pushed by hand:
 
 ```powershell

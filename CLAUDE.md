@@ -32,7 +32,9 @@ FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt ru
 - **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
 - **Green must mean launchable** (Aug 2026): the workflow checks native tool exit codes (`windeployqt` failures used to pass silently), asserts FFmpeg was found at configure time, and verifies `Trace.exe` + Qt DLLs + `platforms/qwindows.dll` + av* DLLs exist before publishing. If a build goes green, the download starts.
 - vcpkg/FFmpeg and Qt are cached; the ~20+ min build only recurs on cache miss (7-day idle expiry). Bump `VCPKG_CACHE_VERSION` in the workflow to force a clean FFmpeg rebuild.
-- Claude's sandbox cannot push (proxy blocks github.com) — commit locally, then have Anj run `cd ~/Claude/Trace && git push origin main`
+- **Whether Claude can push depends on which machine the session is on — check, don't assume.** On the **Windows box** (repo at `C:\Users\andre\Documents\Claude_Cowork\Trace_Windows`) github.com **is reachable and Claude can push directly**; verified Aug 2026 by a read-only `git ls-remote` followed by a real push. On the **macOS sandbox** the proxy blocks github.com, so commits are made locally and Anj pushes from `~/Claude/Trace`.
+
+  **`~/Claude/Trace` is macOS-only and does not exist on the Windows box.** Handing that command to Anj there fails with "no such file or directory" — which happened silently across several sessions, until **23 commits had accumulated unpushed** and no CI run appeared. The instruction was copied out of this file without checking it applied to the machine in use. Before telling anyone to push, run `git remote -v` and `git rev-list --count @{u}..HEAD`, then either push directly or give a path that exists where the session is actually running.
 - Manual validation checklist: `docs/windows-validation-checklist.md`
 - Local build if a toolchain exists: `cmake -S . -B build && cmake --build build --config Release --target Trace`
 
