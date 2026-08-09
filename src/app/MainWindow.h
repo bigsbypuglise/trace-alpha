@@ -63,6 +63,8 @@ private:
     void setupMenus();
     void setupTransportControls();
     void syncTransportBar();
+    // Wires the renderer-composited overlay spike to the existing actions.
+    void installOverlayHooks();
     void openFileDialog();
     void openPath(const QString& path);
     bool loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpeg::RequestMode mode = trace::core::VideoDecoderFFmpeg::RequestMode::Playback);

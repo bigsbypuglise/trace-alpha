@@ -71,6 +71,10 @@ QPaintEngine* ViewerWidget::paintEngine() const {
     return hostHwndSpike_ ? nullptr : QWidget::paintEngine();
 }
 
+void ViewerWidget::setOverlayHooks(const trace::render::OverlayHooks& hooks) {
+    if (renderer_) renderer_->setOverlayHooks(hooks);
+}
+
 void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
     frame_ = frame;
     if (renderer_) renderer_->setFrame(frame);

@@ -529,6 +529,56 @@ void MainWindow::setupUi() {
     if (const int spike = qgetenv("TRACE_OVERLAY_SPIKE").toInt(); spike > 0) {
         trace::ui::installOverlaySpike(viewer_, spike);
     }
+
+    installOverlayHooks();
+}
+
+// Connects the renderer-composited overlay spike to the application.
+//
+// Every entry runs an action that already exists. The renderer owns where the
+// controls are and which one the pointer is over; it owns no playback state and
+// issues no command of its own -- which is why the overlay cannot drift out of
+// step with the transport bar, the menu or the keyboard.
+//
+// Scrubbing is the clearest case: rather than seeking, it drives the real
+// QSlider's press/move/release. The overlay therefore inherits the entire
+// existing scrub path -- the drag shuttle, the exact landing, and the step 5.6
+// play-state restore -- instead of reimplementing any part of it.
+void MainWindow::installOverlayHooks() {
+    if (!viewer_) return;
+
+    trace::render::OverlayHooks hooks;
+    hooks.playPause = [this]() { if (playPauseAction_) playPauseAction_->trigger(); };
+    hooks.stepBack = [this]() { if (prevFrameAction_) prevFrameAction_->trigger(); };
+    hooks.stepForward = [this]() { if (nextFrameAction_) nextFrameAction_->trigger(); };
+
+    hooks.setScrubbing = [this](bool down) {
+        if (timelineSlider_) timelineSlider_->setSliderDown(down);
+    };
+    hooks.seekToFraction = [this](double fraction) {
+        if (!timelineSlider_) return;
+        const int maxFrame = timelineSlider_->maximum();
+        timelineSlider_->setValue(static_cast<int>(std::lround(fraction * maxFrame)));
+    };
+
+    hooks.isPlaying = [this]() {
+        const auto mode = playback_.state().mode;
+        return mode == PlaybackMode::PlayingForward || mode == PlaybackMode::PlayingReverse;
+    };
+    hooks.positionFraction = [this]() {
+        const auto st = playback_.state();
+        if (st.maxFrame <= 0) return 0.0;
+        return static_cast<double>(st.currentFrame) / static_cast<double>(st.maxFrame);
+    };
+    hooks.rateText = [this]() {
+        const auto st = playback_.state();
+        const double speed = std::abs(st.speed);
+        if (speed <= 0.0001) return QStringLiteral("PAUSED");
+        return QStringLiteral("%1x").arg(speed, 0, 'g', 2);
+    };
+    hooks.requestRepaint = [this]() { if (viewer_) viewer_->update(); };
+
+    viewer_->setOverlayHooks(hooks);
 }
 
 void MainWindow::setupMenus() {

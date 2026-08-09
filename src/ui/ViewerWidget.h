@@ -52,6 +52,7 @@ public:
     const ViewerPerfStats& perfStats() const { return perfStats_; }
     const trace::core::VideoFrame& frame() const { return frame_; }
     QString rendererName() const;
+    void setOverlayHooks(const trace::render::OverlayHooks& hooks);
 
 protected:
     void paintEvent(QPaintEvent* event) override;

@@ -6,6 +6,7 @@
 #include <memory>
 
 #include "core/VideoFrame.h"
+#include "render/OverlayHooks.h"
 
 class QWidget;
 
@@ -74,6 +75,11 @@ public:
     // This is a widget-level contract, not a rendering detail, which is why it
     // is asked here rather than inferred from name().
     virtual bool usesNativeSurface() const { return false; }
+
+    // Wires the application's commands into a backend that draws its own
+    // controls. A no-op for backends that do not: the CPU path hosts ordinary
+    // Qt widgets, which need none of this.
+    virtual void setOverlayHooks(const OverlayHooks& hooks) { (void)hooks; }
 
     // Identifies the backend in the HUD, so a fallback is visible rather than
     // silent -- a GPU path that quietly never engages is the failure mode worth

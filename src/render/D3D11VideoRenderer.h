@@ -4,6 +4,7 @@
 #include <QSize>
 #include <QString>
 
+#include "render/OverlayCompositor.h"
 #include "render/VideoRenderer.h"
 
 #include <d3d11.h>
@@ -42,6 +43,11 @@ public:
     // of the widget.
     bool usesNativeSurface() const override { return true; }
 
+    // Renderer-composited transport overlay (spike). Enabled by
+    // TRACE_OVERLAY_COMPOSITED=1; the hooks keep every command in the
+    // application layer -- see OverlayHooks.
+    void setOverlayHooks(const OverlayHooks& hooks) override;
+
     QString name() const override { return name_; }
     const RenderStats& stats() const override { return stats_; }
 
@@ -69,6 +75,20 @@ private:
     // The window the swapchain owns. A child of the host widget's HWND rather
     // than the HWND itself.
     HWND surface_ = nullptr;
+    // Needed from the window procedure to ask Qt for a repaint when hover or
+    // fade changes the picture without a new video frame.
+    QWidget* host_ = nullptr;
+    OverlayCompositor overlay_;
+    bool mouseTracking_ = false;
+
+public:
+    // The window class needs a plain callback; it recovers the instance from
+    // GWLP_USERDATA and forwards. Public only because the class registration
+    // lives in an anonymous namespace in the .cpp.
+    static LRESULT CALLBACK surfaceProcThunk(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+
+private:
+    LRESULT handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, bool& handled);
 
     ComPtr<ID3D11Device> device_;
     ComPtr<ID3D11DeviceContext> context_;

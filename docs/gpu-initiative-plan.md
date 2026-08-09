@@ -2,9 +2,11 @@
 
 **Status: GATE B IMPLEMENTED, NOT SIGNED OFF (2026-08-09).** The surface works
 and is visually equivalent to the CPU path at the shipping DPI (§18.2), but
-**the child-HWND design cannot host ordinary Qt overlay widgets** (§18.4) and
-that is a blocker for the planned floating interface. Do not start GATE C until
-the overlay strategy is chosen. Steps 1–6 of §8 are committed and
+**the child-HWND design cannot host ordinary Qt overlay widgets** (§18.4). The
+surface stays as shipped and the overlay moves into the render pass instead --
+proven in §19, including translucency, full input, and zero playback cost. Do
+not start GATE C until the owner has judged the overlay and GATE B is signed
+off. Steps 1–6 of §8 are committed and
 validated on the local Windows toolchain: `VideoFrame` replaced bare `QImage` at
 the four seams (`03d840e`), the `VideoRenderer` boundary exists (`5765c19`),
 generation plumbing landed (`75a3412`, §13), random-access scrub decode runs on
@@ -1462,3 +1464,146 @@ solved separately whichever is kept.
 lock: no scheduling path consumes the rational today, and the rate error it
 removes was already ~1e-16. What it buys is a *reference* — cadence jitter
 cannot honestly be measured against a rate that is itself rounded.
+
+---
+
+## 19. Renderer-composited overlay spike (2026-08-09)
+
+**Disposable.** `src/render/OverlayCompositor.*`, `src/render/shaders/OverlayQuad.*`,
+`OverlayHooks.h`, enabled by `TRACE_OVERLAY_COMPOSITED=1` on the d3d11 path only.
+Placeholder geometry; delete or promote once the approach is accepted.
+
+Built because §18.4 closed the Qt-widget route: plain children over the child
+HWND are neither visible nor hit-testable, and every native-window variant loses
+translucency. The surface design stays as shipped — supported Win32 behaviour,
+already through lifecycle and fullscreen testing — and the overlay moves into
+the render pass instead.
+
+### 19.1 What was drawn, and it all works
+
+Translucent rounded panel, Play/Pause, Rewind, Fast-forward, timeline line and
+handle, and a rate indicator. Alpha-blended after the video, in the same pass.
+**Translucency is real** — the video reads through the panel, which is the thing
+no native-window arrangement could do.
+
+### 19.2 The caching design, which is the actual content of the spike
+
+Only **three** things re-rasterise the atlas: surface size, DPI, theme. Nothing
+else, ever.
+
+| change | cost |
+|---|---|
+| play → pause | different **source rect**, constant-buffer write |
+| timeline handle moves | different **destination rect**, constant-buffer write |
+| hover / press | tint multiplier, constant-buffer write |
+| fade 0 → 1 | tint alpha, constant-buffer write |
+| rate text "PAUSED" → "1x" | its **own small texture**, so the panel and icons are untouched |
+
+Every D3D resource — shaders, blend state, sampler, rasteriser, constant buffer,
+both textures — is created once. Nothing is allocated in the draw path, no frame
+is read back to the CPU, and `QWidget::render()` is never called.
+
+The atlas is `ARGB32_Premultiplied` with `ONE / INV_SRC_ALPHA`, which is what
+makes a single scalar multiply a correct fade.
+
+**One coordinate space**: device pixels of the surface window. Atlas raster,
+destination rects, hit regions and incoming `WM_MOUSE*` coordinates are all in
+it, so there is no conversion to get wrong.
+
+### 19.3 Cost — measured, not asserted
+
+4K H.264, overlay held visible for a full 9s playback run by jiggling the
+pointer, against the identical gesture with the overlay off:
+
+| | presented | frames | rep/skip | paints |
+|---|---|---|---|---|
+| overlay **off** | 98.3% | 120/120 | — | 120/121 |
+| overlay **on** | **98.3%** | **120/120** | 3 / 0 | 153/121 |
+
+Identical playback. The only difference is paint count, from repaints requested
+by pointer moves and fade ticks — and it moved the presented rate by nothing. A
+per-frame rasterise or upload could not hide inside that.
+
+### 19.4 Input — through the surface's own window procedure
+
+`WM_MOUSEMOVE`, `WM_LBUTTONDOWN/UP`, `WM_MOUSELEAVE` (via `TrackMouseEvent`),
+with `SetCapture` on press so a drag survives leaving the panel.
+
+**`WM_MOUSEACTIVATE` returns `MA_NOACTIVATE`.** The surface never takes
+activation, so keyboard stays with the Qt window by construction rather than
+being restored afterwards — stepping, J-K-L, Escape and the fullscreen shortcut
+are unaffected. Measured: after hovering, pressing, clicking three controls and
+dragging the timeline, `GetForegroundWindow()` is still the Qt main window and a
+subsequent Right-arrow steps the frame.
+
+Verified states: hidden → reveal on pointer motion → hover → pressed → click →
+drag → leave → auto-hide. Hover and press are measurable and *local*: the play
+icon reads 122 (idle) / 127 (hover) / 106 (pressed) while the panel corner is
+**96.4 in all three**, which is the per-quad tint working.
+
+### 19.5 Commands stay in the application layer
+
+The renderer owns geometry and hit regions. It owns **no playback state**.
+
+- Play/Pause → `playPauseAction_->trigger()`, the same QAction the transport
+  bar, the menu and the spacebar use.
+- Rewind / Fast-forward → `prevFrameAction_` / `nextFrameAction_`.
+- Timeline drag → drives the **real QSlider's** `setSliderDown(true)` /
+  `setValue()` / `setSliderDown(false)`.
+
+That last one is why the drag is worth looking at: the HUD during an overlay
+drag reads `worker LEASED`, `posted 104`, `dst RGB32/BGRA 640x360`,
+`shuttle 1.53ms/f lag 0f`. The overlay inherited the entire async scrub path —
+drag shuttle, preview resolution, exact landing, and the step 5.6 play-state
+restore — without reimplementing any of it. The main transport slider tracks it
+frame for frame, because both read one state.
+
+### 19.6 Recompute on DPI, resize and fullscreen — verified
+
+`QT_SCALE_FACTOR=1.5`: panel, icons and text re-rasterise at 1.5x and are
+**crisp, not upscaled**. Resize to 1750x980 and fullscreen at 2560x1440 both
+re-lay-out and re-centre correctly; `display 1751x985` stays exactly 16:9, so the
+video viewport and aspect maths are untouched by the overlay.
+
+### 19.7 Accessibility and tooltips — the plan, not the implementation
+
+Renderer-drawn controls have **no accessible object**, and nothing above changes
+that. This is the one place where the approach is genuinely weaker than Qt
+widgets, and it must not be waved through.
+
+The credible path is to keep a **parallel tree of input-transparent
+`QAccessibleWidget`s** — one zero-painting Qt widget per control, positioned on
+the same rects the compositor lays out, with `Qt::WA_TransparentForMouseEvents`
+so the surface keeps the hit-test:
+
+- **names** — `setAccessibleName()` / `setAccessibleDescription()` per proxy;
+- **shortcuts** — already on the QActions the hooks call, so
+  `QAccessible::Action` can be reported from the action, not invented;
+- **focus order** — the proxies are real widgets in a real tab chain, so
+  `setTabOrder()` works, and the compositor draws a focus ring from
+  `QWidget::hasFocus()` (another tint, no atlas change);
+- **tooltips** — `setToolTip()` on the proxy will not show, because the proxy
+  never receives mouse events; the compositor must draw the tooltip itself from
+  `hover_` plus a dwell timer, and the *text* comes from the proxy so there is
+  one source;
+- **checked/disabled** — read from the QAction (`isChecked()`, `isEnabled()`)
+  and expressed as a tint, exactly as hover and press already are.
+
+**Unresolved**: screen readers announce from the accessibility tree, which the
+proxies supply, but a magnifier or high-contrast mode will not affect
+renderer-drawn art. High-contrast in particular would need the atlas rebuilt on
+`QEvent::ThemeChange` — cheap, since theme is already one of the three
+invalidation triggers, but it has not been implemented or tested.
+
+**Do not call the renderer-composited approach final until a proxy-tree
+prototype has been driven by an actual screen reader.**
+
+### 19.8 Open
+
+1. Owner visual judgement of the overlay — placeholder art, so this is about
+   the *mechanism* reading as viable, not about the design.
+2. The accessibility proxy tree is a plan, not a prototype (§19.7).
+3. The fade test list in the request was truncated mid-item; auto-hide, reveal
+   on motion, hidden/visible/hover/pressed and the 150-180ms fade are all
+   covered, and `kFadeMs` is 165.
+4. GATE B still not signed off, and GATE C still not started.

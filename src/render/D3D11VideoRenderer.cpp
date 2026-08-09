@@ -1,9 +1,11 @@
 #include "render/D3D11VideoRenderer.h"
 
 #include <QColor>
+#include <QDebug>
 #include <QElapsedTimer>
 #include <QPainter>
 #include <QWidget>
+#include <windowsx.h>
 
 #include <algorithm>
 #include <cstring>
@@ -45,32 +47,11 @@ QString hrText(const char* what, HRESULT hr) {
 
 const wchar_t* kSurfaceClass = L"TraceD3D11Surface";
 
-LRESULT CALLBACK surfaceWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
-    switch (msg) {
-        case WM_ERASEBKGND:
-            // Every pixel comes from the swapchain. Letting Windows erase would
-            // flash the class brush between a resize and the next present.
-            return 1;
-        case WM_PAINT: {
-            // Validate the region without drawing. Presents are driven by Qt's
-            // paintEvent, so an unvalidated WM_PAINT would be re-posted forever
-            // and spin the message loop.
-            PAINTSTRUCT ps;
-            BeginPaint(hwnd, &ps);
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-        default:
-            break;
-    }
-    return DefWindowProcW(hwnd, msg, wp, lp);
-}
-
 bool registerSurfaceClass() {
     static const bool registered = [] {
         WNDCLASSEXW wc = {};
         wc.cbSize = sizeof(wc);
-        wc.lpfnWndProc = surfaceWndProc;
+        wc.lpfnWndProc = D3D11VideoRenderer::surfaceProcThunk;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
         wc.hbrBackground = nullptr;  // never erased; see WM_ERASEBKGND
@@ -82,6 +63,110 @@ bool registerSurfaceClass() {
 
 } // namespace
 
+
+// Recovers the instance and forwards. Set on the window at creation.
+LRESULT CALLBACK D3D11VideoRenderer::surfaceProcThunk(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+    auto* self = reinterpret_cast<D3D11VideoRenderer*>(GetWindowLongPtrW(hwnd, GWLP_USERDATA));
+    if (self) {
+        bool handled = false;
+        const LRESULT r = self->handleSurfaceMessage(hwnd, msg, wp, lp, handled);
+        if (handled) return r;
+    }
+    return DefWindowProcW(hwnd, msg, wp, lp);
+}
+
+// The surface's native input path. This is the supported route for a child
+// HWND: the window owns its own hit-testing, and Qt never sees these messages
+// because the child is above the widget and takes the hit-test itself (which is
+// exactly why plain Qt overlay widgets do not work here -- plan section 18.4).
+//
+// Coordinates arrive in this window's CLIENT space, which is device pixels of
+// the surface -- the same space the overlay lays itself out in. There is no
+// conversion, deliberately: one space, no opportunity to get it wrong.
+LRESULT D3D11VideoRenderer::handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp,
+                                                 bool& handled) {
+    switch (msg) {
+        case WM_ERASEBKGND:
+            // Every pixel comes from the swapchain. Letting Windows erase would
+            // flash the class brush between a resize and the next present.
+            handled = true;
+            return 1;
+
+        case WM_PAINT: {
+            // Validate the region without drawing. Presents are driven by Qt's
+            // paintEvent, so an unvalidated WM_PAINT would be re-posted forever
+            // and spin the message loop.
+            PAINTSTRUCT ps;
+            BeginPaint(hwnd, &ps);
+            EndPaint(hwnd, &ps);
+            handled = true;
+            return 0;
+        }
+
+        case WM_MOUSEACTIVATE:
+            // Do not take activation. Keyboard belongs to the Qt window --
+            // stepping, J-K-L, Escape and the fullscreen shortcut all live
+            // there, and a click on the video must not silently move focus out
+            // of it. This is what makes "keyboard focus returns" true by
+            // construction rather than by restoring it afterwards.
+            handled = true;
+            return MA_NOACTIVATE;
+
+        case WM_MOUSEMOVE: {
+            if (!mouseTracking_) {
+                // One-shot: Windows only sends WM_MOUSELEAVE if asked, and it
+                // must be re-armed after every leave.
+                TRACKMOUSEEVENT tme = {};
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                TrackMouseEvent(&tme);
+                mouseTracking_ = true;
+            }
+            overlay_.onMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            handled = true;
+            return 0;
+        }
+
+        case WM_MOUSELEAVE:
+            mouseTracking_ = false;
+            overlay_.onMouseLeave();
+            handled = true;
+            return 0;
+
+        case WM_LBUTTONDOWN:
+            // Capture so a drag that leaves the window still delivers moves and
+            // the release, which is what makes a timeline drag survive the
+            // pointer running off the panel.
+            SetCapture(hwnd);
+            overlay_.onMouseDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            handled = true;
+            return 0;
+
+        case WM_LBUTTONUP:
+            ReleaseCapture();
+            overlay_.onMouseUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            handled = true;
+            return 0;
+
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:
+            // Never activated, so this should not arrive -- but if it ever
+            // does, hand it to the Qt window rather than swallowing it, so
+            // Escape and the fullscreen shortcut keep working.
+            if (host_) {
+                PostMessageW(reinterpret_cast<HWND>(host_->window()->winId()), msg, wp, lp);
+                handled = true;
+                return 0;
+            }
+            break;
+
+        default:
+            break;
+    }
+    return 0;
+}
+
 D3D11VideoRenderer::~D3D11VideoRenderer() {
     // The context can hold references to the views being destroyed; clearing it
     // first means the swapchain is not released while still bound.
@@ -90,6 +175,9 @@ D3D11VideoRenderer::~D3D11VideoRenderer() {
         context_->Flush();
     }
     if (surface_) {
+        // Before DestroyWindow: a message delivered during teardown must not
+        // find a half-destroyed object through GWLP_USERDATA.
+        SetWindowLongPtrW(surface_, GWLP_USERDATA, 0);
         DestroyWindow(surface_);
         surface_ = nullptr;
     }
@@ -142,6 +230,7 @@ bool D3D11VideoRenderer::createSurfaceWindow(void* parentHwnd, QSize pixelSize, 
         error = QStringLiteral("CreateWindowEx failed (%1)").arg(GetLastError());
         return false;
     }
+    SetWindowLongPtrW(surface_, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(this));
     return true;
 }
 
@@ -291,7 +380,21 @@ bool D3D11VideoRenderer::initialize(QWidget* host, QString& error) {
     if (!createPipeline(error)) return false;
     if (!ensureRenderTarget(error)) return false;
 
+    host_ = host;
+    QString overlayError;
+    if (!overlay_.initialize(device_.Get(), context_.Get(), overlayError)) {
+        // Not fatal: the video path is what this backend is for, and an overlay
+        // that cannot build must not cost the user their picture.
+        qWarning().noquote() << "Trace: overlay compositor disabled:" << overlayError;
+    } else {
+        overlay_.setEnabled(!qgetenv("TRACE_OVERLAY_COMPOSITED").isEmpty());
+    }
+
     return true;
+}
+
+void D3D11VideoRenderer::setOverlayHooks(const OverlayHooks& hooks) {
+    overlay_.setHooks(hooks);
 }
 
 void D3D11VideoRenderer::releaseSizeDependent() {
@@ -527,6 +630,11 @@ void D3D11VideoRenderer::paint(QWidget* host) {
 
         drawMs = static_cast<double>(drawTimer.nsecsElapsed()) / 1'000'000.0;
     }
+
+    // After the video, before Present. Its own viewport and blend state; it
+    // restores neither, because every path into paint() sets both.
+    overlay_.setDevicePixelRatio(dpr);
+    overlay_.draw(pixels);
 
     stats_.lastDrawWasScaled = resampled;
     // Always filtered when resampled: unlike the CPU path there is no
