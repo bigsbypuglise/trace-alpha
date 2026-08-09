@@ -237,6 +237,7 @@ MainWindow::MainWindow() {
         if (playbackState.mode != PlaybackMode::PlayingForward && playbackState.mode != PlaybackMode::PlayingReverse) {
             playTimer_.stop();
             stopAudio();
+            userPlayIntent_ = false;
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
             return;
@@ -424,6 +425,9 @@ MainWindow::MainWindow() {
             playTimer_.stop();
             stopAudio();
             playback_.pause();
+            // Ran out of frames: there is nothing left to intend. A later scrub
+            // release must not resurrect a run that ended by itself.
+            userPlayIntent_ = false;
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
             // The decoder is exhausted at the tail: this is the end of the file
@@ -456,6 +460,7 @@ MainWindow::MainWindow() {
             playTimer_.stop();
             stopAudio();
             playback_.pause();
+            userPlayIntent_ = false;
             playbackClock_.invalidate();
             playbackAccumulatorMs_ = 0.0;
             if (direction > 0 && targetFrame >= maxFrame) {
@@ -553,6 +558,9 @@ void MainWindow::setupTransportControls() {
         playback_.pause();
         playTimer_.stop();
         stopAudio();
+        // Explicit stepping: the user has asked to inspect a frame, not to keep
+        // playing. Scrubbing after this must not restart playback.
+        userPlayIntent_ = false;
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
 
@@ -580,6 +588,7 @@ void MainWindow::setupTransportControls() {
         playback_.pause();
         playTimer_.stop();
         stopAudio();
+        userPlayIntent_ = false;
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
 
@@ -616,12 +625,22 @@ void MainWindow::setupTransportControls() {
     // slider kept focus after a drag, arrows would move the slider instead of
     // stepping frames.
     timelineSlider_->setFocusPolicy(Qt::NoFocus);
+    // A wheel notch over the groove is the one way into the valueChanged lambda
+    // below that is not part of a drag: QSlider steps the value with no press
+    // and no release, so nothing would ever restore playback afterwards and the
+    // intent flag would outlive the gesture. It is a stepping gesture, so it
+    // clears the intent -- the filter classifies it and then lets it through
+    // unchanged, so wheel-to-step still works exactly as before.
+    timelineSlider_->installEventFilter(this);
     connect(timelineSlider_, &QSlider::sliderPressed, this, [this]() {
         if (suppressSliderSignal_) return;
         scrubbing_ = true;
         scrubJumpPending_ = true;
         startUiServiceMeasurement();
         resetScrubLagModel();
+        // Suspends the mechanism only. userPlayIntent_ is deliberately not
+        // touched here or in valueChanged below, which is what makes a drag
+        // interrupt playback rather than end it.
         playback_.pause();
         playTimer_.stop();
         stopAudio();
@@ -641,6 +660,10 @@ void MainWindow::setupTransportControls() {
             flushVideoScrub(true);
             scrubReleaseLatencyMs_ =
                 static_cast<double>(releaseTimer.nsecsElapsed()) / 1'000'000.0;
+            // After the landing, never before it: the exact frame is on screen,
+            // full-res, and the decoder lease is back -- which playback needs,
+            // because playback decodes synchronously on this thread.
+            resumePlaybackAfterScrub();
             refreshHud("Scrub Release");
             return;
         }
@@ -653,6 +676,9 @@ void MainWindow::setupTransportControls() {
         } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
         }
+        // Image sequences and stills take this branch instead, and need the
+        // same restore: it is a separate code path, not a fallthrough.
+        resumePlaybackAfterScrub();
         refreshHud("Scrub");
     });
 
@@ -686,6 +712,13 @@ void MainWindow::setupTransportControls() {
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     syncScrubPreviewSize();
+}
+
+bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == timelineSlider_ && event->type() == QEvent::Wheel) {
+        userPlayIntent_ = false;
+    }
+    return QMainWindow::eventFilter(watched, event);
 }
 
 void MainWindow::syncScrubPreviewSize() {
@@ -826,6 +859,7 @@ void MainWindow::openPath(const QString& path) {
     scrubWorker_.stop();
     playTimer_.stop();
     stopAudio();
+    userPlayIntent_ = false;
     audio_.close();
     scrubTimer_.stop();
     scrubbing_ = false;
@@ -1160,6 +1194,7 @@ void MainWindow::togglePlayPause() {
         playTimer_.stop();
         stopAudio();
         playback_.pause();
+        userPlayIntent_ = false;
         playbackClock_.invalidate();
         playbackAccumulatorMs_ = 0.0;
     } else {
@@ -1184,37 +1219,72 @@ void MainWindow::togglePlayPause() {
             syncTransportBar();
         }
         playback_.togglePlayPause();
-        const int direction = playback_.state().mode == PlaybackMode::PlayingReverse ? -1 : 1;
-        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
-        startAudioForPlayback();
-        playbackClock_.start();
-        playbackAccumulatorMs_ = 0.0;
-        // Presented-rate window starts with the play action, so pausing and
-        // resuming measures the new run rather than averaging across the gap.
-        playbackRateClock_.start();
-        sessionClock_.start();
-        firstPresentNs_ = -1;
-        lastPresentNs_ = -1;
-        playbackFramesPresented_ = 0;
-        playbackRunElapsedS_ = 0.0;
-        frameCycleClock_.invalidate();
-        cycleSamples_ = 0;
-        lastHandlerMs_ = avgHandlerMs_ = 0.0;
-        lastPeriodMs_ = avgPeriodMs_ = maxPeriodMs_ = 0.0;
-        lastOutsideMs_ = avgOutsideMs_ = 0.0;
-        schedulerTickClock_.invalidate();
-        schedulerTicks_ = 0;
-        presentSamples_ = 0;
-        lastTickJitterMs_ = avgTickJitterMs_ = maxTickJitterMs_ = 0.0;
-        lastPresentLatencyMs_ = avgPresentLatencyMs_ = maxPresentLatencyMs_ = 0.0;
-        lastDriftMs_ = 0.0;
-        lastAvSyncMs_ = maxAvSyncMs_ = 0.0;
-        audioRepeatedFrames_ = audioSkippedFrames_ = 0;
-        lastClockUpdateMark_ = -1;
-        lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
-        playTimer_.start();
+        userPlayIntent_ = true;
+        startPlaybackRun();
     }
     syncTransportBar();
+}
+
+// The caller has already put playback_ into the mode it wants. This starts the
+// machinery for it and nothing else, so Play and resume-after-scrub run the
+// same setup rather than two copies of it that drift.
+void MainWindow::startPlaybackRun() {
+    const int direction = playback_.state().mode == PlaybackMode::PlayingReverse ? -1 : 1;
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
+    startAudioForPlayback();
+    playbackClock_.start();
+    playbackAccumulatorMs_ = 0.0;
+    // Presented-rate window starts with the play action, so pausing and
+    // resuming measures the new run rather than averaging across the gap.
+    playbackRateClock_.start();
+    sessionClock_.start();
+    firstPresentNs_ = -1;
+    lastPresentNs_ = -1;
+    playbackFramesPresented_ = 0;
+    playbackRunElapsedS_ = 0.0;
+    frameCycleClock_.invalidate();
+    cycleSamples_ = 0;
+    lastHandlerMs_ = avgHandlerMs_ = 0.0;
+    lastPeriodMs_ = avgPeriodMs_ = maxPeriodMs_ = 0.0;
+    lastOutsideMs_ = avgOutsideMs_ = 0.0;
+    schedulerTickClock_.invalidate();
+    schedulerTicks_ = 0;
+    presentSamples_ = 0;
+    lastTickJitterMs_ = avgTickJitterMs_ = maxTickJitterMs_ = 0.0;
+    lastPresentLatencyMs_ = avgPresentLatencyMs_ = maxPresentLatencyMs_ = 0.0;
+    lastDriftMs_ = 0.0;
+    lastAvSyncMs_ = maxAvSyncMs_ = 0.0;
+    audioRepeatedFrames_ = audioSkippedFrames_ = 0;
+    lastClockUpdateMark_ = -1;
+    lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
+    playTimer_.start();
+}
+
+// Scrubbing suspends playback; it does not end it. The intent flag is what
+// survives the drag, and this is the only place that reads it.
+//
+// Ordering is load-bearing and the caller has already done the first half:
+// flushVideoScrub(true) landed the exact frame, and the reclaimDecoder() inside
+// that landing bumped the request generation and told the worker, so no older
+// preview-resolution frame can be painted after it. Resuming before the landing
+// would also start audio at the preview position, because
+// startAudioForPlayback() takes its offset from the current frame.
+void MainWindow::resumePlaybackAfterScrub() {
+    if (!userPlayIntent_) return;
+    if (!frameSource_ || !frameSource_->canPlay()) return;
+    // The landing was deferred -- storage was mid-read, so flushVideoScrub
+    // re-armed instead of decoding. Resuming now would play from a frame the
+    // release has not landed yet. Staying paused is the safe half of that
+    // trade; the user can press Play once the frame arrives.
+    if (pendingScrubFrame_ >= 0) return;
+    // Released on the last frame. Restarting the file here would be a jump the
+    // user did not ask for; leave it landed. Play already handles the rewind.
+    if (playbackAtEnd_) return;
+    // Paused by the scrub lambdas, so this puts it back to 1x forward. Asked
+    // rather than assumed: togglePlayPause() on a state that is somehow already
+    // playing would pause it, which is the opposite of the job.
+    if (playback_.state().mode == PlaybackMode::Paused) playback_.togglePlayPause();
+    startPlaybackRun();
 }
 
 // Sound only at 1x forward. Off-speed J-K-L, reverse, scrubbing and stepping
@@ -2421,6 +2491,10 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             playback_.stepBackward();
             needsReload = true;
             prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
+            // Outside the isActive() guard: stepping is a request to inspect a
+            // frame whether or not playback happened to be running, and the
+            // intent must not survive it into a later scrub release.
+            userPlayIntent_ = false;
             if (playTimer_.isActive()) {
                 playTimer_.stop();
                 stopAudio();
@@ -2432,6 +2506,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             playback_.stepForward();
             needsReload = true;
             prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, false);
+            userPlayIntent_ = false;
             if (playTimer_.isActive()) {
                 playTimer_.stop();
                 stopAudio();
@@ -2443,6 +2518,8 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             if (frameSource_ && frameSource_->canPlay()) {
                 playback_.jogReverse();
                 stopAudio();  // reverse is silent; don't wait a tick for it
+                // Reverse is not the 1x forward run a scrub release restores.
+                userPlayIntent_ = false;
                 prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, -1, true);
                 playbackClock_.start();
                 playbackAccumulatorMs_ = 0.0;
@@ -2452,6 +2529,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             return;
         case Qt::Key_K:
             playback_.pause();
+            userPlayIntent_ = false;
             if (playTimer_.isActive()) {
                 playTimer_.stop();
                 stopAudio();
@@ -2463,6 +2541,11 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_L:
             if (frameSource_ && frameSource_->canPlay()) {
                 playback_.jogForward();
+                // L at 1x is ordinary forward play and is worth restoring after
+                // a drag; the shuttle speeds above it are not, for the same
+                // reason they are silent -- an off-speed run is a different
+                // gesture, and resuming it at 1x would be the wrong answer.
+                userPlayIntent_ = std::abs(playback_.state().speed) <= 1.0001;
                 prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, 1, false);
                 playbackClock_.start();
                 playbackAccumulatorMs_ = 0.0;

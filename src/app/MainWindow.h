@@ -52,6 +52,11 @@ protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    // Only for the timeline slider, and only to classify a wheel notch. See
+    // userPlayIntent_: a wheel over the groove is a stepping gesture that
+    // arrives as a bare valueChanged with no press and no release, so it is the
+    // one way into the scrub lambdas that is not part of a drag.
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
     void setupUi();
@@ -64,6 +69,18 @@ private:
     QString sequenceFramePath(long long frameIndex) const;
     void prefetchNeighbors();
     void togglePlayPause();
+    // Starts a playback run: request mode, audio, clocks and the whole set of
+    // cadence/telemetry counters, then the timer. The caller puts playback_ into
+    // the mode it wants first; this only starts the machinery for it.
+    //
+    // Extracted so Play and resume-after-scrub cannot drift apart. Resume needs
+    // every counter reset that Play does -- skipping them makes the HUD
+    // misreport the resumed run, and step 6's cadence work would start from
+    // poisoned counters.
+    void startPlaybackRun();
+    // Restores playback after a scrub gesture, iff the user never asked for it
+    // to stop. Called once the release has landed its exact frame.
+    void resumePlaybackAfterScrub();
     void refreshHud(const QString& action = {});
     // Tell the decoder how big a scrub preview needs to be, in device pixels.
     void syncScrubPreviewSize();
@@ -375,6 +392,25 @@ private:
     // position playback actually stopped at.
     bool playbackAtEnd_ = false;
     long long playbackEndFrame_ = -1;
+    // Intent, not mechanism: the user has asked for playback and has not asked
+    // for it to stop. Distinct from playTimer_.isActive(), which is whether the
+    // mechanism is currently running -- a scrub suspends the mechanism without
+    // touching the intent, which is what makes playback survive a drag.
+    //
+    // Set true only by Play (and by L at 1x, which is the same thing). Set
+    // false wherever the user asks for something other than 1x forward
+    // playback: pause, stepping, J-K-L off-speed or reverse, opening media,
+    // and running out of frames. The scrub path never writes it.
+    //
+    // Deliberately NOT a snapshot captured when the drag begins. A groove click
+    // sets the slider value before QSlider emits sliderPressed, so the pause in
+    // the valueChanged lambda has already run by the time a capture there could
+    // read the state -- it would record "was paused" for a click that began
+    // during playback, and gating the capture on isSliderDown() fails the same
+    // way. Carrying the intent instead makes the emission order irrelevant, and
+    // makes a Play or Pause pressed while the release is still resolving win:
+    // it flips the intent, and the restore reads the intent.
+    bool userPlayIntent_ = false;
     bool scrubbing_ = false;
     // A press is a jump, not the first step of a shuttle. The slider does an
     // absolute set on a groove click, so the value arrives before the pointer
