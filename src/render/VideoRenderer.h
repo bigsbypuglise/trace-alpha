@@ -65,6 +65,16 @@ public:
     virtual void resize(QSize size) = 0;
     virtual void paint(QWidget* host) = 0;
 
+    // True when the backend presents through a native surface rather than
+    // Qt's backing store. The host must then realise a native window for it to
+    // attach to and stop erasing the widget -- neither of which the renderer
+    // can do for itself, because they are properties of the widget and have to
+    // be set before initialize() runs.
+    //
+    // This is a widget-level contract, not a rendering detail, which is why it
+    // is asked here rather than inferred from name().
+    virtual bool usesNativeSurface() const { return false; }
+
     // Identifies the backend in the HUD, so a fallback is visible rather than
     // silent -- a GPU path that quietly never engages is the failure mode worth
     // designing against.
@@ -72,9 +82,19 @@ public:
     virtual const RenderStats& stats() const = 0;
 };
 
-// Builds the renderer selected by TRACE_RENDERER. Only "cpu" exists today and
-// it is the default; an unknown or unavailable value falls back to it, and
-// name() then reports what was actually created.
+// Builds the renderer selected by TRACE_RENDERER. "cpu" is the default and
+// always available; "d3d11" is opt-in and only exists in a Windows build. An
+// unknown or unavailable value warns and falls back to cpu, and name() then
+// reports what was actually created.
+//
+// This can only decline a backend it knows cannot run. A backend that fails in
+// initialize() is the host's problem to fall back from, because only the host
+// has the widget -- see ViewerWidget.
 std::unique_ptr<VideoRenderer> createRenderer();
+
+// The CPU backend, unconditionally. The fallback path needs to build one
+// directly after a GPU backend has failed to initialize, without going back
+// through TRACE_RENDERER and being handed the same failing backend again.
+std::unique_ptr<VideoRenderer> createCpuRenderer();
 
 } // namespace trace::render

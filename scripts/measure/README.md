@@ -62,6 +62,18 @@ still has the bug before trusting a pass — `-PlayThroughDrag` reads 0% on
 
 ## Things that will waste an hour if you rediscover them
 
+- **The 1080p validation clip opens on a black frame.** `Universe_rc07_I_9x16_Online.mp4`
+  frame 0 is solid black, and it is the default clip for most runs here. "The
+  video area is black at frame 0" is therefore **not** evidence of a rendering
+  fault — it cost a wrong diagnosis during GATE B (plan §17.2), where a working
+  D3D11 path was rebuilt on the theory that Qt was painting over it. Check
+  against `4_4K_H264_MP4\Splash_1.mp4`, whose first frame has content, before
+  concluding anything from a black picture.
+- **To tell "not presenting" from "presenting black", clear to a colour.** The
+  red clear is what located the fault in one run: the red appeared with a black
+  strip exactly where the video viewport was, which proved present, compositing
+  and letterboxing were already correct and moved the search to the pixels.
+
 - **Capture the window at native resolution.** The HUD is unreadable in a normal
   screenshot on a 5120x1440 panel — it downsamples too far. `capture.ps1` uses
   `GetWindowRect` + `CopyFromScreen` for this reason.

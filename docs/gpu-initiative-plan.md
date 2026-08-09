@@ -1,20 +1,22 @@
 # Trace GPU / smooth-presentation initiative — active plan
 
-**Status: GATE D PASSED (2026-08-08).** Steps 1–5 of §8 are committed and
+**Status: GATE B PASSED (2026-08-09).** Steps 1–6 of §8 are committed and
 validated on the local Windows toolchain: `VideoFrame` replaced bare `QImage` at
-the four seams (`03d840e`), the `VideoRenderer` boundary exists with
-`CpuImageRenderer` as its only implementation (`5765c19`), generation plumbing
-landed (`75a3412`, §13), and random-access scrub decode now runs on a worker
-with latest-target-wins (`f77d472`, §14). Step 5.5 followed (§15): the drag
-preview samples on all-intra media, and directional prefetch was measured and
-declined. **Steps 5 and 5.5 are owner-signed-off (2026-08-09, §15.5 item 3)**;
-step 5.6 (§16) then closed the one correctness gap that pass found — play/pause
-state now survives a drag — and retained the source frame rate as a rational.
-No GPU backend yet. **Next is step 6 — GATE B**, the first native D3D11 surface,
-carrying the two deferred scrub defects in as regression tripwires (§15.5).
+the four seams (`03d840e`), the `VideoRenderer` boundary exists (`5765c19`),
+generation plumbing landed (`75a3412`, §13), random-access scrub decode runs on
+a worker with latest-target-wins (`f77d472`, §14), the drag preview samples on
+all-intra media (§15), play/pause survives a drag (§16), and **there is now a
+native D3D11 surface** (§17) — opt-in via `TRACE_RENDERER=d3d11`, with
+`CpuImageRenderer` still the default.
 
-Step 5.6 is committed and **validated on the local toolchain (§16.6)**, negative
-control included. GATE B is clear to start.
+Steps 5 and 5.5 are **owner-signed-off** (2026-08-09, §15.5 item 3). GATE B is
+harness-validated only (§17.4); **owner validation of the rendered picture has
+not happened**, and 4K ProRes 422 HQ remains the bar.
+
+**Next is step 7 — GATE C**, planar YUV upload and shader colour conversion.
+That is where conversion cost actually moves: today the frame is still converted
+by swscale on the CPU and uploaded as BGRA. Carry the two deferred scrub defects
+in as regression tripwires (§15.5).
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -338,7 +340,7 @@ Each is independently reviewable and revertable. Gates in **bold**.
 5. `perf(scrub): move random-access decode to a worker with latest-target-wins` — **GATE D.**
    *(done, `f77d472` — see §14; decoder-side cancellation landed first in `ff55d4e`)*
 6. `feat(gpu): add experimental native D3D11 video surface` — **GATE B** (frame, stride,
-   aspect, resize, fallback).
+   aspect, resize, fallback). *(done — see §17)*
 7. `feat(gpu): add planar YUV upload and shader colour conversion` — **GATE C.**
 8. `perf(gpu): reuse textures and upload resources`
 9. `perf(gpu): add GPU scaling and telemetry`
@@ -1184,3 +1186,137 @@ Owner's four confirmations plus what this codebase's own history says to check:
    **not** resurrect playback.
 
 </details>
+
+---
+
+## 17. Step 6 — GATE B, the native D3D11 surface (`feat(gpu)`)
+
+The first native presentation path. Scope as §8 item 6: frame, stride, aspect,
+resize, fallback. It presents exactly what the CPU backend presents — swscale's
+BGRA — so the commit can be judged on "does a native surface show the right
+pixels at the right size" alone. Planar YUV upload and shader colour conversion
+are GATE C.
+
+Opt-in via `TRACE_RENDERER=d3d11`; `cpu` stays the default until GATE E.
+
+### 17.1 What it is
+
+A DXGI flip-model swapchain (`FLIP_DISCARD`, 2 buffers, `B8G8R8A8_UNORM`), one
+`D3D11_USAGE_DYNAMIC` texture uploaded per frame with `WRITE_DISCARD`, and a
+fullscreen triangle generated from `SV_VertexID` — no vertex buffer, no input
+layout.
+
+**Letterboxing is done with the viewport, not with vertices.** The clear paints
+the whole back buffer black and the viewport is set to the fitted rect, so the
+bars are free and aspect handling lives in exactly one expression. The shader
+never learns that letterboxing exists, which is what keeps GATE C a change of
+pixel shader and nothing else.
+
+**Flip model is chosen deliberately, not by default.** It is the mode that
+supports waitable swapchains and DXGI frame-latency control — the stated payoff
+of picking native D3D11 over QRhi (§5). `DISCARD` would have built the GATE E
+dead end in on day one.
+
+**Shaders are compiled by fxc at build time**, emitted as byte arrays via
+`/Fh /Vn` and linked into the exe. `d3dcompiler_47.dll` is not deployed by
+`windeployqt`, so a runtime `D3DCompile` would configure green and then fail to
+create a shader on a clean machine. `vs_4_0`/`ps_4_0`, so feature level 10.0
+and WARP stay in scope for CI. If fxc is not found the whole backend is left
+out of the build and the app is exactly what it was — a missing tool must not be
+a broken build.
+
+**The device falls back to WARP** and says so: the HUD reads `d3d11 (warp)`, so
+a machine that quietly went software is never mistaken for one measuring
+hardware.
+
+### 17.2 The surface is a child HWND — and the first reason recorded for that was wrong
+
+The renderer creates its own child window and presents into that, rather than
+into the host widget's HWND.
+
+**Both approaches were built and both work.** The other one — `WA_PaintOnScreen`
+plus a null `paintEngine()`, presenting into the widget's own HWND — was built
+first, showed a black video rect, and was replaced on the theory that Qt's
+backing store was painting over the region. **That theory was wrong, and the
+measurement that produced it was a trap worth recording**: the 1080p validation
+clip *opens on a black frame*. Every capture was a correct render of black.
+
+The bisect that found it: clear the back buffer to red instead of black. The red
+appeared, with a 202px black strip exactly where the video viewport was — which
+proved present, compositing, viewport and letterboxing were all already correct
+and moved the search to the texture. The upload log then read
+`px0 0 0 0 255`, i.e. the *source* frame was black. Re-run on a clip with a
+non-black first frame, the host-HWND approach presents perfectly.
+
+So the choice rests on narrower but real grounds:
+
+- `WA_PaintOnScreen` is documented **X11-only**. It happens to work on Windows;
+  nothing says it will keep doing so, and GATE E stacks waitable swapchains on
+  whatever this is built on.
+- Child-window compositing above the parent's client area, plus
+  `WS_CLIPCHILDREN` on the parent to exclude the region from the parent's own
+  painting, is documented Win32 behaviour.
+- Qt's widget model is left alone entirely. `ViewerWidget` needs no
+  `paintEngine()` override, so nothing about the app changes shape when the GPU
+  backend is off.
+
+**It also settles hazard 1 of §3 (drag-and-drop) by construction.** The surface
+window is not registered as an OLE drop target, so a drop over the video area
+falls through to the ancestor that is — the one Qt registered for MainWindow.
+Nothing needs forwarding.
+
+### 17.3 Fallback is the host's job, not the factory's
+
+`createRenderer()` can only decline a backend it *knows* cannot run. A GPU
+backend fails for reasons that only exist once there is a device and a window,
+and only `ViewerWidget` has the widget — so it adopts a renderer, and on failure
+adopts `createCpuRenderer()` instead and says loudly which one is presenting.
+
+`adoptRenderer()` applies the widget-level attributes **before** `initialize()`,
+because that call is what realises the HWND the backend takes. Splitting it into
+create/configure/initialize at the call site would make that ordering a
+convention rather than a property — the same shape as `reclaimDecoder()` (§14.2).
+
+### 17.4 Validation record — GATE B PASSED (2026-08-09)
+
+All rows `delta 0`, `detach 0.00`, `stale-blocked 0`, `recov 0`.
+
+| check | result |
+|---|---|
+| 4K H.264, 4K ProRes 4444, PNG sequence | correct picture, correct aspect, `renderer d3d11` |
+| 1080p 9x16 H.264 | correct — including the black frame 0 that caused §17.2 |
+| playback, 4K H.264 + audio | **98.3% of real time, 120/120, rep 3 skip 0** |
+| playback, same clip on `cpu` (control) | **98.3%, 120/120, rep 2 skip 0** |
+| scrub reversals, 4K H.264 | `rev-hit 97.9% (228/233)`, `stalls 2 of 394`, `sample GATED` |
+| same gesture on `cpu` (control) | `rev-hit 97.9% (236/241)`, `stalls 2 of 402` |
+| resize 900x700 and 1700x900 | swapchain and surface follow, aspect preserved |
+| `TRACE_RENDERER=vulkan` | warns, runs `cpu`, picture correct |
+| default (no env) | `renderer cpu`, unchanged |
+
+**Playback and scrub match the CPU baseline exactly**, which is the requirement:
+GATE B is about a native surface being correct, not about being faster.
+
+Paint cost did drop, and it is recorded here only so a later phase does not book
+it twice: 4K H.264 `paint 0.39/0.54 tot 0.54 draw 0.50` on cpu against
+`paint 0.01/0.04 tot 0.14 draw 0.00` on d3d11. That is presentation cost, which
+was never the bottleneck — the playback rate is identical, which is the honest
+summary.
+
+### 17.5 Open after GATE B
+
+1. **The deferred scrub defects are still the tripwires** (§15.5 item 3). The 4K
+   H.264 reversal gesture measures unchanged through the D3D11 path, so the
+   surface did not make the stall profile worse. The extreme-speed gestures the
+   owner reported have not been re-run by hand.
+2. **Owner validation has not happened.** Every number above is the harness. The
+   split this project has recorded four times now applies here too, and it
+   applies with particular force to a *rendering* change: nothing in the table
+   says the picture looks right, only that it is the right frame at the right
+   size. 4K ProRes 422 HQ remains the bar.
+3. **No planar YUV yet** — the frame is still converted by swscale on the CPU
+   and uploaded as BGRA, so the upload is 4 bytes per pixel of a frame the GPU
+   could have assembled from 1.5. That is GATE C and is where the conversion
+   cost actually moves.
+4. **Fullscreen is untested** through the native surface. It is a Qt window
+   state change with the layout intact (§3), so the surface should simply
+   follow its parent, but that is an expectation rather than a measurement.

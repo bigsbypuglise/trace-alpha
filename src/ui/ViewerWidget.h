@@ -58,7 +58,15 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
 
 private:
+    // Applies the widget-level contract a backend asks for, then initializes
+    // it. False leaves the widget in its non-native state, ready for a fallback.
+    bool adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> renderer, QString& error);
+
     std::unique_ptr<trace::render::VideoRenderer> renderer_;
+    // Mirrors the active renderer's usesNativeSurface(), so the widget-level
+    // attributes can be undone if a backend fails to initialize and the CPU
+    // fallback is adopted in its place.
+    bool nativeSurface_ = false;
     // Kept here as well as in the renderer so "which frame is displayed" is
     // answerable without asking the backend.
     trace::core::VideoFrame frame_;

@@ -30,6 +30,77 @@ if(TRACE_FFMPEG_FOUND AND FFMPEG_SWRESAMPLE_LIBRARY AND Qt6Multimedia_FOUND)
   set(TRACE_AUDIO_FOUND TRUE)
 endif()
 
+# --- Native D3D11 presentation (GATE B) -------------------------------------
+#
+# Windows + MSVC only, and opt-in at runtime via TRACE_RENDERER=d3d11. The
+# shaders are compiled HERE with fxc rather than at runtime with D3DCompile:
+# d3dcompiler_47.dll is not deployed by windeployqt, so a runtime compile would
+# configure green and then fail to create a shader on a clean machine.
+#
+# fxc ships with the Windows SDK. If it cannot be found the whole backend is
+# left out and the app builds exactly as it did before -- a missing tool must
+# not be a broken build.
+set(TRACE_D3D11_FOUND FALSE)
+set(TRACE_D3D11_SOURCES "")
+
+if(WIN32 AND MSVC)
+  find_program(TRACE_FXC fxc
+    HINTS
+      "$ENV{WindowsSdkVerBinPath}/x64"
+      "$ENV{WindowsSdkDir}/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+      "C:/Program Files (x86)/Windows Kits/10/bin/${CMAKE_VS_WINDOWS_TARGET_PLATFORM_VERSION}/x64"
+  )
+  if(NOT TRACE_FXC)
+    # Any SDK version will do for vs_4_0/ps_4_0; take the newest present.
+    file(GLOB TRACE_FXC_CANDIDATES "C:/Program Files (x86)/Windows Kits/10/bin/*/x64/fxc.exe")
+    if(TRACE_FXC_CANDIDATES)
+      list(SORT TRACE_FXC_CANDIDATES)
+      list(REVERSE TRACE_FXC_CANDIDATES)
+      list(GET TRACE_FXC_CANDIDATES 0 TRACE_FXC)
+    endif()
+  endif()
+endif()
+
+if(TRACE_FXC)
+  set(TRACE_SHADER_DIR "${CMAKE_CURRENT_BINARY_DIR}/shaders")
+  file(MAKE_DIRECTORY "${TRACE_SHADER_DIR}")
+
+  # /Fh emits a C header holding the compiled bytecode as a byte array named by
+  # /Vn, so the shaders are linked into the exe and there is no runtime file to
+  # find, deploy, or get out of step with the build.
+  function(trace_compile_shader src profile entryvar out)
+    add_custom_command(
+      OUTPUT "${TRACE_SHADER_DIR}/${out}"
+      COMMAND "${TRACE_FXC}" /nologo /T ${profile} /E main /Vn ${entryvar}
+              /Fh "${TRACE_SHADER_DIR}/${out}" "${CMAKE_CURRENT_SOURCE_DIR}/${src}"
+      MAIN_DEPENDENCY "${CMAKE_CURRENT_SOURCE_DIR}/${src}"
+      COMMENT "fxc ${profile} ${src}"
+      VERBATIM)
+  endfunction()
+
+  # vs_4_0/ps_4_0: feature level 10.0 and up, which keeps WARP in scope for CI.
+  trace_compile_shader(../src/render/shaders/FullscreenQuad.vs.hlsl vs_4_0
+                       g_TraceFullscreenQuadVS FullscreenQuad.vs.h)
+  trace_compile_shader(../src/render/shaders/TexturedQuad.ps.hlsl ps_4_0
+                       g_TraceTexturedQuadPS TexturedQuad.ps.h)
+
+  set(TRACE_D3D11_FOUND TRUE)
+  set(TRACE_D3D11_SOURCES
+    ../src/render/D3D11VideoRenderer.h
+    ../src/render/D3D11VideoRenderer.cpp
+    ../src/render/shaders/FullscreenQuad.vs.hlsl
+    ../src/render/shaders/TexturedQuad.ps.hlsl
+    "${TRACE_SHADER_DIR}/FullscreenQuad.vs.h"
+    "${TRACE_SHADER_DIR}/TexturedQuad.ps.h"
+  )
+  # .hlsl files are inputs to our own fxc rules; stop MSBuild running its
+  # built-in HLSL task over them as well, which picks its own profile and fails.
+  set_source_files_properties(
+    ../src/render/shaders/FullscreenQuad.vs.hlsl
+    ../src/render/shaders/TexturedQuad.ps.hlsl
+    PROPERTIES HEADER_FILE_ONLY TRUE VS_TOOL_OVERRIDE "None")
+endif()
+
 add_executable(Trace
   ../src/main.cpp
   ../src/app/MainWindow.h
@@ -40,6 +111,7 @@ add_executable(Trace
   ../src/render/VideoRenderer.cpp
   ../src/render/CpuImageRenderer.h
   ../src/render/CpuImageRenderer.cpp
+  ${TRACE_D3D11_SOURCES}
   ../src/ui/TransportOverlay.h
   ../src/ui/TransportOverlay.cpp
   ../src/ui/TransportBar.h
@@ -82,6 +154,16 @@ endif()
 
 target_include_directories(Trace PRIVATE ../src)
 target_link_libraries(Trace PRIVATE Qt6::Widgets)
+
+if(TRACE_D3D11_FOUND)
+  # The generated shader headers live in the build tree.
+  target_include_directories(Trace PRIVATE "${TRACE_SHADER_DIR}")
+  target_link_libraries(Trace PRIVATE d3d11 dxgi)
+  target_compile_definitions(Trace PRIVATE TRACE_WITH_D3D11=1)
+  message(STATUS "Trace: D3D11 renderer enabled (opt-in via TRACE_RENDERER=d3d11)")
+else()
+  message(STATUS "Trace: D3D11 renderer DISABLED (needs Windows + MSVC + fxc)")
+endif()
 
 if(OpenImageIO_FOUND)
   target_link_libraries(Trace PRIVATE OpenImageIO::OpenImageIO)
