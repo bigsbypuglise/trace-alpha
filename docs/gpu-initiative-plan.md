@@ -7,8 +7,14 @@ the four seams (`03d840e`), the `VideoRenderer` boundary exists with
 landed (`75a3412`, §13), and random-access scrub decode now runs on a worker
 with latest-target-wins (`f77d472`, §14). Step 5.5 followed (§15): the drag
 preview samples on all-intra media, and directional prefetch was measured and
-declined. No GPU backend yet. **Next is step 6 — GATE B**, the first native
-D3D11 surface.
+declined. **Steps 5 and 5.5 are owner-signed-off (2026-08-09, §15.5 item 3)**;
+step 5.6 (§16) then closed the one correctness gap that pass found — play/pause
+state now survives a drag — and retained the source frame rate as a rational.
+No GPU backend yet. **Next is step 6 — GATE B**, the first native D3D11 surface,
+carrying the two deferred scrub defects in as regression tripwires (§15.5).
+
+Step 5.6 is **committed but not yet validated**; §16.6 lists what must pass
+before GATE B starts.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -957,8 +963,161 @@ to the landed frame exactly, three times over.
    multiply its effective cache depth. That is the one untried lever.
 2. **The press landing** remains the largest UI-thread block in a drag (90–125ms
    on 4K H.264). Untouched here on purpose; step 5.6 if it is worth doing.
-3. **Owner validation of the sampled preview is required and has not happened.**
-   Every figure above says the picture is closer to the pointer. None of them
-   says whether a preview that shows every 5th frame *reads* as smooth shuttling
-   or as strobing. That is exactly the split this project has recorded twice:
-   the harness says the mechanism works, only the owner says the bar holds.
+3. ~~**Owner validation of the sampled preview is required and has not
+   happened.**~~ **SIGNED OFF 2026-08-09, against the full test set.** Every
+   figure above said the picture is closer to the pointer. None of them said
+   whether a preview that shows every 5th frame *reads* as smooth shuttling or
+   as strobing. **It reads as shuttling.** Sampling on intra-only media stays.
+
+   This is the third time the project has recorded the same split, and it held
+   again: the harness says the mechanism works, only the owner says the bar
+   holds. Note what was being validated is not a throughput number — it is
+   whether deliberately breaking the "never skip a frame" rule, in the one place
+   it is not in force, is perceptible. It is not.
+
+   **Two defects were assessed and deliberately deferred, not overlooked:**
+
+   - an occasional small hitch on 4K H.264 under extreme-speed scrub;
+   - ProRes 4444 pausing briefly and then catching up under extreme
+     back-and-forth.
+
+   Both are the known stall profile — a cache miss forcing a seek plus a GOP
+   walk — and §15.3 already records that directional prefetch was measured and
+   declined as the fix. **Owner instruction: do not continue chasing the rare
+   extreme-scrub hitch unless the next architecture work makes it worse.**
+
+   They are therefore **regression tripwires for GATE B, not work items**. After
+   the D3D11 surface lands, re-run the 4K H.264 and 4444 extreme gestures and
+   confirm neither got worse. A tripwire that is never re-run is just a deferred
+   bug, so this is part of the gate, not a note beside it.
+4. **Play/pause state did not survive a drag** — the one correctness gap the
+   owner found in the same pass. Fixed as step 5.6 (`473b90e`); see §16.
+
+---
+
+## 16. Step 5.6 — play/pause state across a drag (`473b90e`)
+
+The one correctness gap in the step 5/5.5 sign-off pass. Scrubbing did not
+*interrupt* playback, it *ended* it: the `sliderPressed` and `valueChanged`
+lambdas both paused unconditionally and nothing in `sliderReleased` restored.
+
+### 16.1 Why a snapshot cannot work
+
+The obvious fix — capture `playback_` state when the drag begins — is wrong, and
+the reason is an emission order that is easy to assume the other way round.
+
+With `SH_Slider_AbsoluteSetButtons` in force (`9a214f2`), `QSlider` sets the
+value from the click position **before** it calls `setSliderDown(true)`. So the
+first `valueChanged` of a groove click arrives *before* `sliderPressed`, and by
+the time `sliderPressed` could capture anything, the `valueChanged` lambda has
+already paused. A capture there records "was paused" for a click that began
+during playback. Gating the capture on `isSliderDown()` fails identically, and
+for the same reason.
+
+**The design does not depend on that ordering being what it is.** That is the
+point of it. The ordering was not verified against the Qt 6.10.2 source (the Src
+component is not installed on this box) and does not need to be — carrying an
+intent rather than a snapshot makes the question unreachable.
+
+### 16.2 Intent, not mechanism
+
+`userPlayIntent_` means *the user has asked for playback and has not asked for
+it to stop*. It is distinct from `playTimer_.isActive()`, which is whether the
+mechanism is currently running. A scrub suspends the mechanism and never writes
+the intent; `sliderReleased` restores iff the intent is set.
+
+- Set **true** by Play, and by `L` at 1x (which is the same thing). `L` above
+  1x sets it false, for the same reason off-speed shuttle is silent: an
+  off-speed run is a different gesture and resuming it at 1x is the wrong
+  answer.
+- Set **false** by pause, explicit stepping (buttons and arrow keys), `J`, `K`,
+  opening media, and running out of frames.
+- The scrub path never writes it.
+
+This is the shape of `reclaimDecoder()` (§14.2): one property enforced at one
+choke point rather than a convention observed at a dozen call sites. It also
+answers "what if Play or Pause is pressed while the release frame is still
+resolving?" **by construction** — the press flips the intent, the restore reads
+the intent, so the latest command wins and there is no race to lose.
+
+**The wheel is the one gesture that needed classifying.** A wheel notch over the
+groove enters `valueChanged` with no press and no release, so nothing would ever
+restore, and the intent would outlive the gesture and fire on some later drag.
+It is a stepping gesture, so an event filter clears the intent and lets the
+event through unchanged — wheel-to-step behaves exactly as before. Every other
+route into `valueChanged` is either part of a press/drag or a programmatic set
+guarded by `suppressSliderSignal_`.
+
+### 16.3 Resume ordering
+
+Resume runs **after** the landing, and two things in that order are load-bearing:
+
+1. `flushVideoScrub(true)` lands the exact, full-res frame. Playback decodes
+   synchronously on the UI thread, so the decoder lease must be back first —
+   and it is, because the landing goes through `loadCurrentFrame`, which calls
+   `reclaimDecoder()`.
+2. That same `reclaimDecoder()` **already** bumps the generation and pushes it
+   at the worker (§14.5), so no older preview-resolution frame can be painted
+   after the landing. No additional supersede call is needed at the release, and
+   a bare `supersedeInFlightRequests()` would not have done the job anyway — it
+   deliberately does not tell the worker, and `onScrubResult` drops on
+   `scrubWorker_.latestGeneration()`.
+
+Resuming any earlier would also start audio at the *preview* position, because
+`startAudioForPlayback()` takes its offset from `playback_.state().currentFrame`.
+
+Resume is declined in two cases: `playbackAtEnd_` (releasing on the last frame
+must not silently restart the file — Play owns the rewind, `c3335ec`), and a
+landing deferred by a storage stall (`pendingScrubFrame_ >= 0`, the LucidLink
+path where `flushVideoScrub` re-arms instead of decoding). The second stays
+paused rather than playing from a frame the release has not landed yet; that is
+the safe half of the trade and the user can press Play once the frame arrives.
+
+### 16.4 `startPlaybackRun()`
+
+`togglePlayPause` inlined ~40 lines resetting the cadence and telemetry counters
+(`playbackRateClock_`, `firstPresentNs_`, `schedulerTicks_`,
+`audioRepeatedFrames_`, `lastClockUpdateMark_`, …). Resume needs all of it, so
+it is extracted and called from both paths. Duplicating it would rot silently,
+and a resume that skipped it would make the HUD misreport the resumed run —
+which is precisely the state step 6's cadence measurements would start from.
+
+### 16.5 Rational frame rate (`7b924be`)
+
+Carried in the same step because it is independent of the GPU work and is a
+correctness issue today. `metadata_.fps` was `av_q2d(fr)` with the `AVRational`
+discarded on the spot, so 24000/1001 became a double and the tick interval, the
+timecode readout and seek arithmetic all worked from the approximation.
+`VideoMetadata` now carries `fpsNum`/`fpsDen` alongside it. Nothing reads the
+pair yet — behaviour is unchanged — but a rate that is already rounded cannot be
+the reference for late-present or jitter, so this is a prerequisite for GATE E.
+
+`int`/`int`, not `AVRational`: this header is reached from `MainWindow.h` and
+must compile with `TRACE_WITH_FFMPEG` undefined — the same rule that keeps
+`AVPixelFormat` out of `VideoFrame.h` (§4).
+
+### 16.6 Validation required before GATE B
+
+Not yet run. Owner's four confirmations plus what this codebase's own history
+says to check:
+
+1. Playing → drag → release → playback continues **from the released frame**,
+   and the first presented frame equals the landing frame (`delta 0`).
+2. Paused → drag → release → stays paused.
+3. Paused → drag → Play pressed mid-release → plays. Playing → drag → Pause
+   pressed mid-release → stays paused. Run on **4K H.264**, where the press
+   landing is 90–125ms and the window is wide enough to actually hit.
+4. Audio restarts at the released frame, not the pre-scrub one — HUD `sync`, and
+   `clk × fps` matching the frame index.
+5. No preview frame after the landing: the resumed first frame reads full-res,
+   not `previewRes`. `drop` non-zero on a snap release with 4444.
+6. `scripts/measure/lifecycle.ps1` in full — it exists for exactly these
+   transitions. `scrub.ps1 -SnapRelease` is the only gesture that reliably
+   catches a decode in flight, and therefore the only one that exercises
+   cancellation at all.
+7. Release on the last frame with intent true → stays there, does not restart.
+8. Playing → drag on an **image sequence** and on a **still** — the non-video
+   branch of `sliderReleased` is a separate code path and takes the same
+   restore.
+9. Wheel over the groove while playing → steps as before, and a later drag does
+   **not** resurrect playback.
