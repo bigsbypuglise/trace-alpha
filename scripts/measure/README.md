@@ -4,8 +4,28 @@ Drives a built `Trace.exe` with realistic gestures and captures the HUD, so
 "does this feel different" can be answered with the same numbers each time.
 Windows only; PowerShell 5.1.
 
+## Where the test media is
+
+`C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets\` on the Windows box.
+Written down because it is named in every measurement in this project and was
+recorded in none of them, so each session rediscovered it by searching the disk.
+
 ```powershell
-$clip = "D:\media\yourclip.mov"
+$TA = "C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets"
+$p4444 = "$TA\1_4K_ProRes_4444\TheraTears_Vial_VFX_v002.mov"          # least headroom
+$p422  = "$TA\2_4K_ProRes_422HQ\Barritas_16x9_Shot_040-080_v005_ALT_1.mov"  # the quality bar
+$h264  = "$TA\4_4K_H264_MP4\Splash_1.mp4"                             # long-GOP reference
+$hd    = "$TA\3_1080p_H264_MP4\Universe_rc07_I_9x16_Online.mp4"       # 412 frames; the only
+                                                                      # clip long enough to
+                                                                      # measure 30x honestly
+$fps60 = "$TA\7_4k_H264_60FPS_MP4\Jeep_Snowboard_Drone_60FPS.mp4"
+```
+
+`V:\` is live client production storage and is strictly read-only — never stage
+test media there.
+
+```powershell
+$clip = $h264
 .\scripts\measure\restart.ps1 -Clip $clip          # always start here
 .\scripts\measure\play.ps1 -Seconds 9              # playback run
 .\scripts\measure\capture.ps1 -Out playback.png
