@@ -1810,7 +1810,21 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     // landing plus a GOP walk (up to ~60ms on long-GOP H.264) to avoid decoding
     // two frames forward. Inside this window, walk. Playback only -- Step and
     // Scrub keep their existing seek behaviour.
-    constexpr long long kPlaybackForwardWalkLimit = 4;
+    // Widened for long-GOP, and only there. The forward shuttle asks for frames
+    // `stride` apart, and on a long-GOP codec walking that gap forward is much
+    // cheaper than the seek it would otherwise take: at 4K H.264 a walked frame
+    // is ~2.6ms against a ~30ms seek plus its own walk back up from the
+    // keyframe, so anything up to about a GOP is worth walking.
+    //
+    // Intra-only keeps 4, and must: there a seek lands directly on the target
+    // for the price of one decode, so walking 30 frames to avoid a free seek
+    // would cost 30 decodes. `intraOnly` is the codec's own answer -- the same
+    // discriminator the scrub sampling gate uses, and the only one of the five
+    // that has ever measured right.
+    //
+    // The audio catch-up path that this limit was originally written for jumps
+    // at most 3 frames, so it is unaffected in either direction.
+    const long long kPlaybackForwardWalkLimit = metadata_.intraOnly ? 4 : 48;
     const bool smallPlaybackForwardJump =
         mode == RequestMode::Playback &&
         currentFrame_ >= 0 &&

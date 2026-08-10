@@ -10,7 +10,8 @@
 #   1. finds the timeline groove by its unfilled track colour, as scrub.ps1 does
 #   2. CLICKS near the end of the groove, so reverse has somewhere to run from
 #      (a click is a jump and lands exactly; a drag would shuttle there)
-#   3. presses J -Presses times  ->  -1x, -2x, -4x (the ladder as it exists today)
+#   3. presses J (or L with -Forward) -Presses times, walking the 1x/2x/5x/10x/30x
+#      ladder
 #   4. either holds for -HoldSeconds, or with -Traverse waits until the picture
 #      stops changing, which is reverse arriving at frame 0
 #   5. presses K to stop
@@ -30,17 +31,23 @@
 #     clicks near the end, so the second run in a row would fail to find it.
 #   - J is silent by design (audio is 1x forward only), so nothing here needs
 #     TRACE_NO_AUDIO to be comparable across files.
-#   - the ladder today is 1x/2x/4x. -Presses 4 and above still reads -4x; that
-#     is the engine's current ceiling, not a harness limit.
+#   - the ladder is 1x/2x/5x/10x/30x and caps at 30x, in both directions.
+#   - FORWARD AT 1x IS NOT A SHUTTLE RUN. It is ordinary audio-mastered
+#     playback, deliberately untouched, so `shuttle idle` on a -Forward -Presses 1
+#     capture is correct rather than a failure to engage.
 
 param(
+    # Drive L (fast-forward) instead of J (rewind). Same gesture, mirrored: it
+    # starts near the HEAD of the clip so forward has somewhere to run.
+    [switch]$Forward,
     [ValidateRange(1, 8)][int]$Presses = 1,
     [double]$HoldSeconds = 8.0,
     # Wait for reverse to arrive at frame 0 instead of holding a fixed time.
     [switch]$Traverse,
     [double]$TraverseTimeout = 30.0,
     # Where on the groove to start the run, as a fraction of its length.
-    [double]$StartFraction = 0.95,
+    # Defaults to 0.95 for rewind and 0.05 for fast-forward.
+    [double]$StartFraction = -1,
     # Step +1 then -1 after stopping and report how far the picture moved. A
     # landing that is exact returns to the same picture; anything else does not.
     [switch]$StepCheck,
@@ -98,6 +105,7 @@ Write-Output "groove y=$grooveY x=$x0..$x1"
 $sy = $rect.T + $grooveY
 $sxA = $rect.L + $x0 + 6
 $sxB = $rect.L + $x1 - 6
+if ($StartFraction -lt 0) { $StartFraction = if ($Forward) { 0.05 } else { 0.95 } }
 $startX = [int]($sxA + ($sxB - $sxA) * $StartFraction)
 
 function PictureSig {
@@ -141,12 +149,17 @@ Write-Output "positioned at fraction $StartFraction"
 [R]::SetForegroundWindow($h) | Out-Null
 Start-Sleep -Milliseconds 200
 
-$speeds = @(1, 2, 4, 4, 4, 4, 4, 4)
-Write-Output ("pressing J x{0} -> expect -{1}x" -f $Presses, $speeds[$Presses - 1])
+# The ladder is 1x/2x/5x/10x/30x in both directions, and it is a ladder of
+# SAMPLING STRIDES rather than of tick rates -- one frame is presented per
+# source-frame period at every speed and the speed decides which frames.
+$speeds = @(1, 2, 5, 10, 30, 30, 30, 30)
+$key = if ($Forward) { "l" } else { "j" }
+$sign = if ($Forward) { "+" } else { "-" }
+Write-Output ("pressing {0} x{1} -> expect {2}{3}x" -f $key.ToUpper(), $Presses, $sign, $speeds[$Presses - 1])
 
 $sw = [Diagnostics.Stopwatch]::StartNew()
 for ($i = 0; $i -lt $Presses; $i++) {
-    [System.Windows.Forms.SendKeys]::SendWait("j")
+    [System.Windows.Forms.SendKeys]::SendWait($key)
     Start-Sleep -Milliseconds 60
 }
 

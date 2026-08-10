@@ -176,37 +176,96 @@ private:
     // and the reverse shuttle so both are measured by one instrument.
     void notePresentedPlaybackFrame(double frameDurationMs);
 
-    void startReverseRun(int stride);
+    void startShuttleRun(int direction, int stride);
+    // True while `frame` is still inside the media. The head and the tail are
+    // different expressions, which is why this is a function and not a `< 0`
+    // test repeated at three call sites.
+    bool shuttleTargetInRange(long long frame) const;
     // Reclaims the lease, drops the queue, and lands exactly on the frame that
     // was last PRESENTED -- never on the one the arithmetic had reached. Safe
     // to call when no run is active.
-    void endReverseRun(bool landExactly);
+    void endShuttleRun(bool landExactly);
     // Keeps the pipeline full: posts the next target while the queue is under
     // its high-water mark and nothing is in flight. Chained from onScrubResult.
-    void pumpReverseQueue();
+    void pumpShuttleQueue();
     // Pops one frame and puts it on screen. False when the queue is empty,
     // which is a starve and is held rather than decoded on this thread.
-    bool presentQueuedReverseFrame();
-    bool reverseRunActive_ = false;
+    bool presentQueuedShuttleFrame();
+    bool shuttleRunActive_ = false;
+    // +1 or -1. The shuttle is direction-agnostic: accelerated FORWARD had
+    // exactly the reverse fault -- speed carried in the tick rate with one frame
+    // per present, so achieved speed was capped by per-frame decode cost. ProRes
+    // 4444 asked for 2x and delivered 1.00x. One mechanism serves both, which is
+    // also what stops the two drifting apart.
+    int shuttleDir_ = -1;
+
+    // ---- The keyframe snap (owner-approved 2026-08-10) -------------------
+    //
+    // At high reverse speeds on a long-GOP codec, a target that falls mid-GOP
+    // costs a seek to the keyframe PLUS a walk up to it -- measured ~71ms on
+    // 1080p against a ~30ms intercept -- and that walk buys nothing, because at
+    // this speed only one frame per GOP is ever shown. Snapping the target ONTO
+    // the keyframe grid removes the walk entirely.
+    //
+    // This is the mechanism section 15's INTRA_ONLY gate exists to refuse, and
+    // the reason it is safe here is that the sample points are CHOSEN rather
+    // than arbitrary: a strided step that lands mid-GOP pays for a region the
+    // decoder has to open from scratch, and a snapped one lands where the
+    // decoder can already start.
+    //
+    // Owner decision: accurate 30x at a stable ~15 presentations/second, rather
+    // than a smoother picture at a lower speed. So the speed stays exact and the
+    // PRESENTATION RATE is what gives: one keyframe per present, paced so the
+    // content advances at exactly speed x fps.
+    //
+    // Learned EXACTLY, from keyframe POSITIONS rather than from a statistic
+    // over them. When a request for frame T seeks and walks W frames to reach
+    // it, the keyframe it landed on is at T - W: that is an exact observation of
+    // where a keyframe is, not an estimate of how far apart they are. Two of
+    // them give the spacing exactly.
+    //
+    // The first attempt used `max(walk) + 1` and it converged FROM BELOW and
+    // stopped short -- it read gop 41 on a file whose GOP is 48, so every
+    // "snapped" target missed the grid and still walked. A statistic over a
+    // quantity is not the quantity; the positions were available all along.
+    //
+    // This is a STRUCTURAL measurement -- where the keyframes are -- not a cost
+    // one, which is what separates it from the four scrub-gate inferences that
+    // all measured wrong.
+    long long shuttleGop_ = 0;
+    // A frame index known to BE a keyframe. The grid is anchored on it rather
+    // than on multiples of the spacing, so a file whose first keyframe is not at
+    // 0, or whose spacing changes partway, still snaps onto real keyframes.
+    long long shuttleKfAnchor_ = -1;
+    // Frames advanced per presented frame. Equals the stride normally, and the
+    // GOP when snapping. The presentation period is scaled by advance/stride, so
+    // the achieved speed stays exactly the commanded one either way.
+    long long shuttleAdvance_ = 1;
+    bool shuttleSnapping_ = false;
+    // Snap once a single presented frame per GOP is all the speed leaves room
+    // for. Below that the walk is amortised over several presented frames and is
+    // worth paying.
+    bool shuttleShouldSnap() const;
+    long long shuttleSnapTarget(long long ideal) const;
     // Frames advanced per presented frame. 1 today; the sampling ladder is what
     // makes it >1, and it is the COMMANDED speed rather than an estimate --
     // nothing the decoder does may feed back into it, which is what keeps it
     // clear of the runaway that killed three of section 15's four failed gates.
-    int reverseStride_ = 1;
-    long long reverseNextTarget_ = -1;
-    long long reverseLastPresented_ = -1;
+    int shuttleStride_ = 1;
+    long long shuttleNextTarget_ = -1;
+    long long shuttleLastPresented_ = -1;
     // The frame AND what was asked for to get it. Carrying both is what keeps
     // the HUD's `target`/`shown`/`delta` honest during a run: without the
     // request, `target` went on reading whatever the last scrub asked for and
     // `delta` reported a difference between two unrelated numbers. Telemetry
     // that asserts its own correctness is how the July 2026 scrub fault survived.
-    struct ReverseFrame {
+    struct ShuttleFrame {
         long long requested = -1;
         trace::core::VideoFrame frame;
     };
-    std::deque<ReverseFrame> reverseQueue_;
-    long long reverseStarves_ = 0;
-    long long reverseQueueMaxSeen_ = 0;
+    std::deque<ShuttleFrame> shuttleQueue_;
+    long long shuttleStarves_ = 0;
+    long long shuttleQueueMaxSeen_ = 0;
 
     // Decoder telemetry as of the last time it was safe to read. Refreshed
     // from the live decoder when this thread owns it, and from the worker's
