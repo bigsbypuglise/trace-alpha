@@ -247,8 +247,44 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   **It was masking the real reverse-playback weakness.** Reverse on 4K H.264 now measures **86.7% of real time**, `handler>budget 11 of 110 (max 111.1ms)`, `p95 123.6ms` — the GOP-walk cost the roadmap describes. Any reverse-playback figure taken between GATE E and 2026-08-10 measured the scheduler fault instead.
 
+- **ACCELERATED FAST-FORWARD HAD THE SAME FAULT AS REVERSE, and it is one shared fault
+  rather than four format bugs** (2026-08-10, `dd21fe9`, plan §11b.2). Reported by the owner
+  across every format; reproduced before theorising. **ProRes 4444 asked for 2x and delivered
+  1.00x**, then asked for 4x and delivered 1.33x — two rungs that looked identical and
+  neither of which was the number on the label; 4K H.264 managed 3.97x of 4x. The speed lived
+  in the **tick rate** with one frame presented per tick, so achieved speed was capped by
+  per-frame decode cost: ceilings 32 f/s on 4444, 95 f/s on 4K H.264. And `jogForward`
+  doubled and capped at **4x**, so 5x/10x/30x were unreachable everywhere.
+
+  The fix generalised the shuttle rather than patching the ladder. Achieved forward speed
+  after, all sixteen cells measured: **1080p 2.04/5.02/10.3/28.1x · 4K H.264
+  2.06/4.86/12.0x · 422 HQ 2.06/5.27/11.3x · 4444 1.89/5.17/10.8x**, at p50 41.7 / p99
+  43.2ms with `handler>budget 0` on every rung. **At exactly 1x nothing changed** — that is
+  ordinary audio-mastered playback on the validated path, and the shuttle never enters it.
+
+  The forward walk limit is 4 → **48 for long-GOP only**: a forward stride walks from where
+  the decoder already is at ~0.9–2.6ms a frame against a ~30ms seek. **Intra-only keeps 4
+  and must**, because there a seek lands on the target for the price of one decode.
+- **Reverse 30x snaps to the keyframe grid, and the grid is learned from POSITIONS**
+  (2026-08-10, `dd21fe9`, plan §11b.3). Owner decision: **accurate 30x at a stable ~15
+  presentations/second**, not a smoother picture at a lower speed. A mid-GOP target costs a
+  seek plus a walk that buys nothing when only one frame per GOP is shown; snapping removes
+  the walk, and the presentation period is scaled by `advance/stride` so the *content* rate
+  stays exactly the commanded speed and the *presentation* rate is what gives. 1080p at 30x:
+  **`gop 48` learned exactly, p50 66.3 / p99 68.2ms — 15.1 presents/s at a steady 30.2x**,
+  against ~20x with p95 166.8ms before.
+
+  **A statistic over a quantity is not the quantity.** The first cut learned the GOP as
+  `max(walk) + 1`, which converges *from below* and stopped at 41 on a file whose GOP is 48 —
+  so every "snapped" target missed the grid and still walked, while the HUD read `SNAP gop 41`
+  and nothing improved. A request for frame T that walked W frames landed on the keyframe at
+  `T − W`, which is an **exact position**, and two of them give the spacing exactly. The
+  positions were available all along. The grid is *anchored* on an observed keyframe rather
+  than taken modulo the spacing, so a file whose first keyframe is not at 0 still snaps onto
+  real ones.
 - **The reverse shuttle: queue the frames, and let the SPEED be the stride** (2026-08-10,
-  `e9fd236`, plan §11a.3). Two mechanisms, and the second is the one to remember.
+  `e9fd236`, plan §11a.3). Two mechanisms, and the second is the one to remember. **It is
+  bidirectional now** — see the fast-forward entry above.
 
   **Reverse decode runs on the scrub worker under the same lease, and results are QUEUED
   rather than presented on arrival.** The tick pops one per slot, so a ~130ms GOP walk is

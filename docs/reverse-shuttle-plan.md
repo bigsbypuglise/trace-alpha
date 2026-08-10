@@ -569,6 +569,99 @@ as before, and the only symptom was `posted 0` on the worker line.
    an engine change driven by the interface spec, not interface work, but it does
    alter what J does today and the owner should know.
 
+## 11b. Owner retest, the fast-forward fault, and the keyframe snap (2026-08-10)
+
+### 11b.1 Owner decisions taken
+
+- 4K H.264 reverse 1x **signed off** — feels smooth enough.
+- ProRes reverse **feels good**.
+- Reverse 30x: **accurate 30x with a stable ~15fps presentation**, not a smoother
+  picture at a lower speed. §11a.5 item 2 is answered.
+- **Stopping on the last visibly displayed frame is correct.** §9 item 2 answered;
+  it is what was implemented.
+
+### 11b.2 Accelerated fast-forward was broken, and it was the same fault
+
+Reported by the owner across every format. Reproduced before theorising:
+
+| forward | demanded | achieved | ceiling |
+|---|---|---|---|
+| ProRes 4444 | 2x | **1.00x** | 32 f/s |
+| ProRes 4444 | 4x | 1.33x | 32 f/s |
+| 4K H.264 | 4x | 3.97x | 95 f/s |
+
+**One fault, shared, not format-specific — only the threshold varies.** The speed
+lived in the tick rate and every present advanced exactly one frame
+(`steps = 1` for video), so the demanded present rate was `speed × fps` and the
+achieved speed was capped by per-frame decode cost. On 4444 two rungs of the
+ladder were visually identical and neither was the number on the label. Separately
+`jogForward` doubled and capped at 4x, so 5x/10x/30x were unreachable everywhere.
+
+It is exactly the fault the reverse shuttle had already fixed. The fix was to
+generalise that machinery rather than to patch the ladder: **the shuttle is now
+direction-agnostic**, and above 1x forward the stride carries the speed while
+presentation stays at one frame per source period. **At exactly 1x nothing
+changes** — ordinary audio-mastered playback on the validated path, which the
+shuttle never enters.
+
+**Achieved forward speed after, all 16 cells measured:**
+
+| | 2x | 5x | 10x | 30x |
+|---|---|---|---|---|
+| 1080p H.264 | **2.04x** | **5.02x** | **10.3x** | **28.1x** |
+| 4K H.264 | **2.06x** | **4.86x** | **12.0x** | clip-limited |
+| ProRes 422 HQ | **2.06x** | **5.27x** | **11.3x** | clip-limited |
+| ProRes 4444 | **1.89x** | **5.17x** | **10.8x** | ~30x |
+
+Cadence is p50 41.7 / p99 43.2ms almost everywhere, `handler>budget 0` on every
+rung, `starve 0` on most. The 121–169 frame clips traverse in under 0.2s at 30x,
+so only the 412-frame 1080p clip can measure that rung honestly.
+
+The forward walk limit is raised 4 → 48 **for long-GOP only**: a forward stride
+walks from where the decoder already is at ~0.9–2.6ms a frame against a ~30ms
+seek. Intra-only keeps 4 and must, because a seek there lands on the target for
+the price of one decode.
+
+### 11b.3 The keyframe snap, built to the owner's decision
+
+§7.3, now built and reverse-only. A mid-GOP target costs a seek plus a walk that
+buys nothing when only one frame per GOP is shown; snapping removes the walk, and
+the presentation period is scaled by `advance/stride` so the **content rate stays
+exactly the commanded speed** and the presentation rate is what gives.
+
+**1080p at 30x: `gop 48` learned exactly, cadence p50 66.3 / p99 68.2ms — 15.1
+presentations a second at a steady 30.2x**, against ~20x with p95 166.8ms and 6
+starves of 17 before. That is the owner's decision expressed as arithmetic:
+48 frames per present ÷ 719 frames per second = 66.8ms.
+
+**The grid is learned from keyframe POSITIONS, not from a statistic over them.**
+A request for frame T that walked W frames landed on the keyframe at `T − W` —
+exact. The first cut used `max(walk) + 1`, which converges **from below** and
+stopped at 41 on a file whose GOP is 48, so every "snapped" target missed the
+grid and still walked; the HUD read `SNAP gop 41` while nothing improved. **A
+statistic over a quantity is not the quantity, and the positions were available
+all along.** The grid is also *anchored* on an observed keyframe rather than
+taken modulo the spacing, so a file whose first keyframe is not at frame 0 still
+snaps onto real ones.
+
+### 11b.4 Verified
+
+Not regressed: forward 1x 4K H.264 99.1% and ProRes 4444 99.7%, both with
+`handler>budget 0` and worker `posted 0`; backward drag `rev-hit 94.0%`, seeks 6,
+hitch 4, `delta 0`; both lifecycle gestures PASS; **all six shuttle exit paths
+PASS** (K, step, Space, L, scrub, quit).
+
+### 11b.5 Open
+
+1. **30x is only measurable on the 412-frame clip.** Every other test file
+   traverses in under 0.2s at that speed. A longer clip would make the 30x row
+   trustworthy on all four formats.
+2. **The UI fast-forward button must start at 2x**, not 1x. The engine takes any
+   stride, so this is a call site rather than a change — but it is not built,
+   because the interface pass is deferred.
+3. **`outside` is still unattributed** (§10 item 3). It no longer binds: the
+   shuttle holds presentation at 24/s (or 15/s snapped) at every speed.
+
 ## 11. What the next session does, in order
 
 1. **Attribute `outside`** (§10 item 3). One instrumented run. It sets the presentation
