@@ -88,17 +88,25 @@ before building.**
 
 **What the misses needed was bytes.** The reverse-cache budget is 384MB now (was 192):
 1080p `hitch 8 → 2`, 4K H.264 `hitch 3 → 1` with worst gap 169.6 → 80ms. `TRACE_REVERSE_CACHE_MB`
-is the control. **Cost is memory: working set 396 → 598MB at 1080p, 677 → 902MB at 4K.
-The owner has NOT signed off on that footprint** — it is the first thing to put to him,
-along with whether a drag actually feels better, which no figure here answers.
+is the control and the fallback.
+
+**The footprint is APPROVED** (owner, 2026-08-10): working set 396 → 598MB at 1080p and
+677 → 902MB at 4K is acceptable for a professional 4K review application, and performance
+stays the priority. §26.5 is the owner-requested verification that followed — the cache is
+bounded (six consecutive scrub runs plateau; 382.2 of 384MB after 1357 inserts and 1245
+evictions), discarded on a file change (working set 920 → 254MB), and playback-neutral
+(identical rate, frames, doubling bucket and `handler>budget` across three files at both
+budgets). **Do not add adaptive caching or pool changes off the back of this** — that was
+explicitly declined.
 
 ## Candidate next work, in rough order
 
 Nothing here is started. Pick with the owner rather than assuming.
 
-1. **Owner validation of the scrub pass**, and the memory question above. Fourth time the
-   project has needed the harness/owner split: the numbers say misses are rarer, only the
-   owner says whether the bar holds.
+1. **The owner's subjective scrub test on the finished build is the one thing still open**
+   on the scrub pass. Every figure says misses are rarer and the worst gap is shorter; only
+   he says whether the bar holds. Fourth time the project has needed that split. If it
+   feels good the item is closed and the remaining GPU roadmap continues.
 2. **4K ProRes 4444 fast drag** — still decode-bound at ~15.4ms/frame, ~2.3x playback
    against the owner's stated ~4x. Not a bug; an explicit product decision about whether to
    skip frames on the heaviest media or run the worker ahead of the request chain. Note
@@ -106,7 +114,8 @@ Nothing here is started. Pick with the owner rather than assuming.
 3. **The convert pool is sized in pre-GATE-C currency** (§26.4 item 2). It prices the
    smallest entry as BGRA, so at 1080p it provisions ~50 buffers for a cache holding 129.
    `alloc` is 0.61–0.65ms of a 32ms frame at 4K — visible, not binding. Left alone on
-   purpose so it would not confound the budget measurement; it is now free to fix.
+   purpose so it would not confound the budget measurement. **The owner declined it as
+   part of the cache work**, so it needs raising with him rather than picking up.
 4. **Deferred GPU items 8, 9, 10** — texture/upload reuse, GPU scaling, 10-bit output.
    These buy headroom, and §23.4 established headroom is no longer the binding constraint
    on playback. Item 9's honest target is the Step landing (§9).

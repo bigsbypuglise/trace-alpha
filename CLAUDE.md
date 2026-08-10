@@ -114,7 +114,9 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   **That is most of the "2 of 394 → 44 of 375" mystery** §21.4 carried and §22.8 closed as window size plus machine state. Window size is real and its sweep stands; but §22.8 *recorded* the display changing to 5120x1440 @ 239Hz and filed it under machine state when it was the metric's own denominator. `2 of 394` is what this distribution looks like at a 33.3ms bar.
 
   `hitch` was **added**, not substituted: `stalls` is "slower than the panel could have shown it" and pairs with `wasted`; `hitch` is "the picture visibly stopped". `stalls` prints its own threshold now. **Third instance of the same failure** — GATE E's `jitter` read 34ms on a schedule within 1.8ms of its deadline. Check what a number is measured *against* before believing it.
-- **The reverse-cache budget is 384MB, and drag hitches were cache misses** (Aug 2026, `ac3ae21`, plan §26.3). Reversal drags at `win 1284x1067` on d3d11, 192 → 384MB: 1080p H.264 `hitch 8,8 → 3,2` with `seeks 11 → 4,3` and hit 96.8 → 98.9%; 4K H.264 `hitch 3 → 1,1`, worst gap **169.6 → 80/91ms**; 4444 `hitch 7 → 5`, worst gap 169.4 → 47.9ms. 768MB was measured and is past the knee. **Cost is memory and only memory** — working set 396 → 598MB at 1080p, 677 → 902MB at 4K H.264. Playback is untouched (4444 `TRACE_NO_AUDIO=1`: 99.8%, 0 doubled, 0 over budget — the §25.1 record exactly). `TRACE_REVERSE_CACHE_MB` is the control.
+- **The reverse-cache budget is 384MB, and drag hitches were cache misses** (Aug 2026, `ac3ae21`, plan §26.3). Reversal drags at `win 1284x1067` on d3d11, 192 → 384MB: 1080p H.264 `hitch 8,8 → 3,2` with `seeks 11 → 4,3` and hit 96.8 → 98.9%; 4K H.264 `hitch 3 → 1,1`, worst gap **169.6 → 80/91ms**; 4444 `hitch 7 → 5`, worst gap 169.4 → 47.9ms. 768MB was measured and is past the knee. **Cost is memory and only memory** — working set 396 → 598MB at 1080p, 677 → 902MB at 4K H.264. `TRACE_REVERSE_CACHE_MB` is the control and the fallback.
+
+  **The footprint is APPROVED and the behaviour is verified** (owner, 2026-08-10, plan §26.5): bounded (six consecutive multi-gesture scrub runs plateau at 907–928MB; the HUD reads 382.2 of 384MB after **1357 inserts and 1245 evictions**, never over), discarded on a file change (`close()` clears it and `open()` calls `close()` first — measured 920 → 254MB working set, cache back to `1/129`), and playback-neutral (identical presented rate, frame count, doubling bucket and `handler>budget` on 1080p H.264, 4K H.264 and 4444, at both budgets, two runs each). **Adaptive caching and convert-pool changes were explicitly declined** — don't add them off the back of this.
 
   **4444 moves least and that is structural**: every frame is a keyframe, a seek lands on the target, no intermediate frames exist, so there is nothing to cache. Don't try to fix its hit rate with more bytes.
 
@@ -470,9 +472,11 @@ perfectly on lag while stalling for 100ms.
    diagnosis in the original entry -- "cache misses forcing a seek plus a GOP
    walk" -- was right; the mechanism proposed to fix it was not.
 
-   **What is left is owner validation**: every figure says misses are rarer and
-   the worst gap shorter, none says whether a drag *feels* better. Fourth time
-   the project has needed that split.
+   **What is left is the owner's subjective scrub test on a finished build**:
+   every figure says misses are rarer and the worst gap shorter, none says
+   whether a drag *feels* better. Fourth time the project has needed that split.
+   The mechanism, the memory footprint and the verification are all approved
+   (plan §26.5); only the feel is outstanding.
 2. ~~**The slider handle itself trails the pointer**~~ **Fixed 2026-08-08**
    (`f77d472`) -- and the diagnosis in this entry was wrong, which is the part
    worth keeping. It was recorded as event-loop starvation: "the walk loop
