@@ -26,6 +26,15 @@ struct ScrubRequest {
     long long frame = -1;
     long long generation = -1;
     int direction = 1;
+    // What the decoder should treat this as. Scrub by default, so the drag path
+    // is unchanged by this field existing.
+    //
+    // The reverse shuttle posts Playback: a drag preview is deliberately
+    // reduced-resolution above 1920px, and continuous reverse is playback --
+    // the frame on screen is the frame, not a preview of one. It also puts
+    // reverse fills on the Playback fill budget rather than the drag's, which
+    // is the honest place for that decision to be made.
+    VideoDecoderFFmpeg::RequestMode mode = VideoDecoderFFmpeg::RequestMode::Scrub;
 };
 
 struct ScrubResult {

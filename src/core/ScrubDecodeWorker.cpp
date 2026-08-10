@@ -170,8 +170,7 @@ void ScrubDecodeWorker::run() {
         // the UI thread's videoFrameBuffer_ does. Copying it into the result
         // is a refcount bump.
         const bool ok = decoder_->decodeFrameAt(
-            request.frame, workerFrame_, error,
-            VideoDecoderFFmpeg::RequestMode::Scrub);
+            request.frame, workerFrame_, error, request.mode);
         result.decodeMs = static_cast<double>(decodeTimer.nsecsElapsed()) / 1'000'000.0;
 
         result.ok = ok;

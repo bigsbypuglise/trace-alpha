@@ -158,6 +158,56 @@ private:
     // case where a pointer move is allowed to invalidate work in flight.
     int scrubInFlightDir_ = 0;
 
+    // ---- Reverse shuttle -------------------------------------------------
+    //
+    // Continuous reverse runs decode on the SAME worker and under the SAME
+    // lease as the drag, and differ in one thing: the target is arithmetic
+    // rather than a pointer. At speed S the frame wanted next is always
+    // `lastAsked - S`, so the worker can be kept running ahead without
+    // speculating about anything -- which is why the lookahead declined for the
+    // drag at plan section 15.3 is the right answer here and the wrong one
+    // there. Measured idle at reverse 1x: 80% on 4K H.264, 93% on 1080p.
+    //
+    // Results land in a queue instead of being presented on arrival, and the
+    // playback tick pops one per slot. That is the whole cadence fix: a 130ms
+    // GOP walk is absorbed by the queue instead of landing inside a 41.67ms
+    // presentation slot.
+    // Present accounting for one presented frame, shared by forward playback
+    // and the reverse shuttle so both are measured by one instrument.
+    void notePresentedPlaybackFrame(double frameDurationMs);
+
+    void startReverseRun(int stride);
+    // Reclaims the lease, drops the queue, and lands exactly on the frame that
+    // was last PRESENTED -- never on the one the arithmetic had reached. Safe
+    // to call when no run is active.
+    void endReverseRun(bool landExactly);
+    // Keeps the pipeline full: posts the next target while the queue is under
+    // its high-water mark and nothing is in flight. Chained from onScrubResult.
+    void pumpReverseQueue();
+    // Pops one frame and puts it on screen. False when the queue is empty,
+    // which is a starve and is held rather than decoded on this thread.
+    bool presentQueuedReverseFrame();
+    bool reverseRunActive_ = false;
+    // Frames advanced per presented frame. 1 today; the sampling ladder is what
+    // makes it >1, and it is the COMMANDED speed rather than an estimate --
+    // nothing the decoder does may feed back into it, which is what keeps it
+    // clear of the runaway that killed three of section 15's four failed gates.
+    int reverseStride_ = 1;
+    long long reverseNextTarget_ = -1;
+    long long reverseLastPresented_ = -1;
+    // The frame AND what was asked for to get it. Carrying both is what keeps
+    // the HUD's `target`/`shown`/`delta` honest during a run: without the
+    // request, `target` went on reading whatever the last scrub asked for and
+    // `delta` reported a difference between two unrelated numbers. Telemetry
+    // that asserts its own correctness is how the July 2026 scrub fault survived.
+    struct ReverseFrame {
+        long long requested = -1;
+        trace::core::VideoFrame frame;
+    };
+    std::deque<ReverseFrame> reverseQueue_;
+    long long reverseStarves_ = 0;
+    long long reverseQueueMaxSeen_ = 0;
+
     // Decoder telemetry as of the last time it was safe to read. Refreshed
     // from the live decoder when this thread owns it, and from the worker's
     // published snapshot when it does not, so refreshHud has one source and

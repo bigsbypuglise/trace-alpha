@@ -217,6 +217,10 @@ MainWindow::~MainWindow() {
     // quitting mid-drag on heavy media does not hang on a decode. The reverted
     // attempt joined a worker that could be anywhere in a walk with nothing to
     // interrupt it.
+    //
+    // Quitting mid-reverse goes through the same door. No landing decode: there
+    // is nothing left to show it on.
+    endReverseRun(/*landExactly=*/false);
     reclaimDecoder();
     scrubWorker_.stop();
 }
@@ -296,6 +300,11 @@ MainWindow::MainWindow() {
 
         const auto playbackState = playback_.state();
         if (playbackState.mode != PlaybackMode::PlayingForward && playbackState.mode != PlaybackMode::PlayingReverse) {
+            // Something stopped playback without going through a key handler.
+            // The lease has to come back here too. Enumerating every path that
+            // ends a run rather than testing the one the harness drives is the
+            // section 29.2 lesson applied in advance.
+            endReverseRun(/*landExactly=*/true);
             playTimer_.stop();
             stopAudio();
             userPlayIntent_ = false;
@@ -312,7 +321,19 @@ MainWindow::MainWindow() {
         }
 
         const int direction = playbackState.mode == PlaybackMode::PlayingReverse ? -1 : 1;
-        const double speed = std::max(1.0, std::abs(playbackState.speed));
+        // The reverse shuttle carries its speed in the STRIDE, not in the tick
+        // rate: it presents one frame per source-frame period at every speed and
+        // changes which frames those are. So its period is the source period,
+        // undivided.
+        //
+        // Dividing it as well would ask for 30 presents per source frame period
+        // at 30x -- 720 frames a second, which no decoder on this box reaches and
+        // which the owner explicitly does not require. Holding the presentation
+        // rate constant is also what makes the cadence identical at 1x and 30x,
+        // which is the "stable, intentional" half of the goal.
+        const double speed = reverseRunActive_
+            ? 1.0
+            : std::max(1.0, std::abs(playbackState.speed));
         const double fps = std::max(1.0, frameSource_->fps());
 
         // GATE E: the frame period comes from the EXACT rational when the
@@ -489,6 +510,52 @@ MainWindow::MainWindow() {
             if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
         }
 
+        // Reverse shuttle: the frame for this slot is already decoded and
+        // waiting. Pop it, present it, return.
+        //
+        // Placed AFTER the timeline, jitter, accumulator and presentation-
+        // latency bookkeeping so a reverse run is measured by exactly the same
+        // instruments as a forward one, and BEFORE the target arithmetic for two
+        // reasons. The target of a reverse run is the queue rather than a sum;
+        // and loadCurrentFrame() calls reclaimDecoder(), which would revoke the
+        // worker's lease on every single tick and turn the pipeline back into a
+        // synchronous walk without changing a visible line of code.
+        //
+        // Forward playback never enters here and its path below is unchanged.
+        if (reverseRunActive_) {
+            if (presentQueuedReverseFrame()) {
+                notePresentedPlaybackFrame(frameDurationMs);
+            } else {
+                // Starved: the pipeline has not produced this slot's frame yet.
+                // HOLD -- do not decode on this thread. A starve is a cadence
+                // event worth counting, not an excuse to take the work back.
+                ++reverseStarves_;
+            }
+            // The run is over when the arithmetic has run past the head of the
+            // file and everything it produced has been shown.
+            //
+            // Reaching the head STOPS PLAYBACK, exactly as reaching the tail
+            // does going forward. Ending the run without stopping was a real
+            // bug and an instructive one: reverseRunActive_ went false while the
+            // mode stayed PlayingReverse, so the next tick took the ordinary
+            // synchronous path at the shuttle's speed -- period 41.71/30 =
+            // 1.39ms -- and decoded on the UI thread as fast as it could. The
+            // symptom was a cadence line reading `sched tick 1ms` and `p50
+            // 6.43ms` on a run that had presented perfectly, i.e. it showed up
+            // only in the tail of the measurement.
+            if (reverseNextTarget_ < 0 && reverseQueue_.empty() && !scrubWorker_.busy()) {
+                endReverseRun(/*landExactly=*/true);
+                playTimer_.stop();
+                stopAudio();
+                playback_.pause();
+                userPlayIntent_ = false;
+                playbackClock_.invalidate();
+                playbackAccumulatorMs_ = 0.0;
+            }
+            refreshHud("Reverse Play");
+            return;
+        }
+
         const long long beforeFrame = playbackState.currentFrame;
         long long unclampedTarget = beforeFrame + static_cast<long long>(direction) * steps;
 
@@ -574,49 +641,7 @@ MainWindow::MainWindow() {
             }
             if (!error.isEmpty()) statusBar()->showMessage(error, 2000);
         } else {
-            ++playbackFramesPresented_;
-            playbackRunElapsedS_ = static_cast<double>(playbackRateClock_.elapsed()) / 1000.0;
-            // First/last present span: N presented frames cover N-1 intervals,
-            // so rate from this span is the honest steady-state figure.
-            const qint64 nowNs = sessionClock_.isValid() ? sessionClock_.nsecsElapsed() : 0;
-            if (firstPresentNs_ < 0) firstPresentNs_ = nowNs;
-
-            // Cadence distribution, not just its mean. The presented rate reads
-            // 98-99% under two completely different faults and therefore cannot
-            // tell them apart, which is why a file can measure 99% and still
-            // visibly stutter:
-            //
-            //   the integer tick beat -- floor(1000/fps) is 41ms against a
-            //   41.667ms frame, so the accumulator falls 0.667ms short each
-            //   frame and roughly every 62nd frame needs two ticks. That is one
-            //   doubled (~83ms) frame every ~2.6s, REGULARLY spaced, on every
-            //   file. It is a presentation-clock problem and GATE E owns it.
-            //
-            //   per-frame cost overrun -- playback decodes synchronously with no
-            //   read-ahead, so a frame that misses the budget is late at once and
-            //   nothing absorbs it. Ragged, irregular, and specific to whichever
-            //   file is expensive. A presentation clock supplies phase, not
-            //   headroom, so GATE E does NOT fix this one.
-            //
-            // The spacing between long frames is what separates them: a beat is
-            // regular, an overrun is not. Sampling intervals BETWEEN PRESENTS
-            // rather than between ticks is deliberate -- a held frame produces no
-            // present, so the doubled interval only appears here.
-            if (lastPresentNs_ > 0) {
-                const double gapMs = static_cast<double>(nowNs - lastPresentNs_) / 1'000'000.0;
-                if (cadenceGapsMs_.size() < kCadenceSampleCap) {
-                    cadenceGapsMs_.push_back(gapMs);
-                    if (frameDurationMs > 0.0 && gapMs > frameDurationMs * 1.5) {
-                        cadenceLongAt_.push_back(playbackFramesPresented_);
-                    }
-                }
-            }
-            lastPresentNs_ = nowNs;
-            // Clock drift: ideal media time for the frames presented so far
-            // versus wall clock. Positive = ahead of real time, negative =
-            // behind. A scheduler holding rate keeps this flat near zero.
-            lastDriftMs_ = static_cast<double>(playbackFramesPresented_) * frameDurationMs
-                         - playbackRunElapsedS_ * 1000.0;
+            notePresentedPlaybackFrame(frameDurationMs);
             if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
                 prefetchNeighbors();
             }
@@ -857,6 +882,11 @@ void MainWindow::setupTransportControls() {
     timelineSlider_->installEventFilter(this);
     connect(timelineSlider_, &QSlider::sliderPressed, this, [this]() {
         if (suppressSliderSignal_) return;
+        // A drag needs the decoder, and a reverse run is holding the lease. End
+        // it without a landing decode: the press is about to land its own frame
+        // exactly, and paying for two landings would put a stale one in front of
+        // the one the user pointed at.
+        endReverseRun(/*landExactly=*/false);
         scrubbing_ = true;
         scrubJumpPending_ = true;
         startUiServiceMeasurement();
@@ -1093,6 +1123,11 @@ void MainWindow::openPath(const QString& path) {
     // frame the worker is producing for the OUTGOING media can never be
     // inserted against the incoming media, and waits for it to park so
     // close() below is not racing a decode.
+    //
+    // No landing decode: the outgoing media is about to be closed, and decoding
+    // a frame of it here would be work thrown away at best and a frame of the
+    // wrong file on screen at worst.
+    endReverseRun(/*landExactly=*/false);
     reclaimDecoder();
     scrubWorker_.stop();
     playTimer_.stop();
@@ -1437,6 +1472,11 @@ void MainWindow::prefetchNeighbors() {
 }
 
 void MainWindow::togglePlayPause() {
+    // Space out of a reverse run is both a stop and a direction change, and it
+    // lands: whichever branch below runs, it must start from the frame that was
+    // on screen rather than from where the reverse pipeline had run ahead to.
+    endReverseRun(/*landExactly=*/true);
+
     if (!frameSource_ || !frameSource_->canPlay()) {
         playback_.pause();
         syncTransportBar();
@@ -1543,6 +1583,189 @@ void MainWindow::beginPlaybackTimeline() {
     presentSlotLatencyMs_ = 0.0;
     presentRephaseCount_ = 0;
     playTimer_.start();
+}
+
+// ---- Reverse shuttle --------------------------------------------------------
+//
+// Reverse runs decode on the SAME worker and under the SAME lease as the drag.
+// The one thing that differs is that the target is arithmetic -- at stride S the
+// next frame wanted is always `lastAsked - S` -- so the worker can be run ahead
+// without speculating. That is why the lookahead declined for the drag path at
+// plan section 15.3 is the right answer here and the wrong one there, and it is
+// a re-derivation rather than a reversal: the drag's worker was measured
+// saturated at 59-74% supply, and reverse at 1x measures 80-93% IDLE.
+//
+// Results are queued rather than presented on arrival, and the playback tick
+// pops one per slot. That is the cadence fix in one sentence: a ~130ms GOP walk
+// is absorbed by the queue instead of landing inside a 41.67ms slot.
+
+// How many decoded frames to keep ahead of the presentation point.
+//
+// Sized from the measured worst case rather than guessed: the longest reverse
+// handler on 4K H.264 is ~132ms against a 41.67ms slot, so three frames covers
+// it at 1x and twelve at 4x. Eight is the compromise, and it is frames rather
+// than milliseconds because a frame is what the tick consumes. Memory is a
+// reference count, not a copy -- these buffers are reverse-cache entries.
+constexpr int kReverseQueueDepth = 8;
+
+// TRACE_REVERSE_ASYNC=0 keeps reverse on the synchronous UI-thread path. Its own
+// knob rather than sharing TRACE_ASYNC_SCRUB, so a reverse A/B does not also
+// change how dragging behaves -- the same reason TRACE_GPU_REDUCE is separate
+// from TRACE_PLANAR_UPLOAD.
+static bool reverseAsyncEnabled() {
+    static const bool on = [] { return qgetenv("TRACE_REVERSE_ASYNC") != "0"; }();
+    return on;
+}
+
+void MainWindow::startReverseRun(int stride) {
+    if (!reverseAsyncEnabled() || !asyncScrubEnabled()) return;
+    if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::VideoFile) return;
+    // A drag owns the decoder while it is happening; reverse waits its turn
+    // rather than fighting for the lease.
+    //
+    // `scrubbing_`, NOT isVideoScrubActive(): the latter reads like "a scrub is
+    // active" and means "the media is a video file", so it is true for every
+    // case this function exists to serve. Guarding on it silently disabled the
+    // whole pipeline while every other counter looked healthy -- `posted 0` on
+    // the worker line was the only visible symptom.
+    if (scrubbing_ || storageBusy_) return;
+
+    // Every press is a new run: a new speed or a new direction invalidates
+    // everything already produced, and the generation bump inside
+    // reclaimDecoder() is what makes that true by construction rather than by
+    // the order two callbacks happen to run in.
+    endReverseRun(/*landExactly=*/false);
+
+    reverseStride_ = std::max(1, stride);
+    reverseLastPresented_ = playback_.state().currentFrame;
+    reverseNextTarget_ = reverseLastPresented_ - reverseStride_;
+    reverseRunActive_ = true;
+    reverseStarves_ = 0;
+    reverseQueueMaxSeen_ = 0;
+    pumpReverseQueue();
+}
+
+void MainWindow::endReverseRun(bool landExactly) {
+    if (!reverseRunActive_) {
+        // Still safe to call: an inactive run has nothing to reclaim and the
+        // queue is already empty. Callers do not have to know which.
+        reverseQueue_.clear();
+        return;
+    }
+    reverseRunActive_ = false;
+    // Bumps the generation and waits for the worker to park, so nothing it
+    // produced during the wait can ever be presented afterwards. Same single
+    // choke point the drag release goes through.
+    reclaimDecoder();
+    reverseQueue_.clear();
+    reverseNextTarget_ = -1;
+
+    if (landExactly && reverseLastPresented_ >= 0) {
+        // Land on the frame that was ON SCREEN, never on the one the arithmetic
+        // had run ahead to. The queue may hold frames the user never saw, and
+        // stopping on one of those would move the picture after the user asked
+        // it to stop.
+        playback_.setCurrentFrame(reverseLastPresented_);
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
+        QString error;
+        loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step);
+    }
+    reverseLastPresented_ = -1;
+}
+
+void MainWindow::pumpReverseQueue() {
+    if (!reverseRunActive_) return;
+    if (reverseNextTarget_ < 0) return;
+    // One request in flight at a time -- the chain re-posts from onScrubResult,
+    // exactly as the drag does. Depth comes from the queue, not from stacking
+    // requests at the worker, so `latest wins` keeps meaning one thing.
+    if (scrubWorker_.busy()) return;
+    if (static_cast<int>(reverseQueue_.size()) >= kReverseQueueDepth) return;
+    if (storageBusy_) return;
+
+    grantDecoderLease();
+    trace::core::ScrubRequest request;
+    request.frame = reverseNextTarget_;
+    request.direction = -1;
+    request.generation = requestGeneration_;
+    // Playback, not Scrub: a drag preview is deliberately reduced-resolution
+    // above 1920px and continuous reverse is playback, so the frame on screen
+    // has to be the frame rather than a preview of one.
+    request.mode = trace::core::VideoDecoderFFmpeg::RequestMode::Playback;
+    scrubInFlightDir_ = -1;
+    reverseNextTarget_ -= reverseStride_;
+    if (reverseNextTarget_ < 0) reverseNextTarget_ = -1;
+    scrubWorker_.post(request);
+}
+
+bool MainWindow::presentQueuedReverseFrame() {
+    if (reverseQueue_.empty()) return false;
+    const ReverseFrame queued = reverseQueue_.front();
+    reverseQueue_.pop_front();
+    videoFrameBuffer_ = queued.frame;
+    // Identity comes off the frame itself, never off the arithmetic that asked
+    // for it. A frame that landed off-target is then visibly off-target in
+    // `target`/`shown`/`delta` rather than silently relabelled -- which is the
+    // e76eabb failure and the July 2026 scrub failure, both at once.
+    lastRequestedFrame_ = queued.requested;
+    lastDeliveredFrame_ = videoFrameBuffer_.frameIndex;
+    reverseLastPresented_ = videoFrameBuffer_.frameIndex;
+    playback_.setCurrentFrame(videoFrameBuffer_.frameIndex);
+    viewer_->setFrame(videoFrameBuffer_);
+    // update(), not repaint(): the tick presents exactly one frame per slot, so
+    // there is no chain of paints to coalesce and blocking on the paint here
+    // would put it inside the handler measurement.
+    viewer_->update();
+    // Refill behind the frame just consumed.
+    pumpReverseQueue();
+    return true;
+}
+
+// Present accounting for one presented frame. Extracted from the playback tick
+// so forward playback and the reverse shuttle are measured by ONE instrument
+// rather than by two that have to be kept in agreement -- the same reason
+// beginPlaybackTimeline() was extracted at section 29.3, and the same failure it
+// avoids: a second copy that silently stops matching.
+void MainWindow::notePresentedPlaybackFrame(double frameDurationMs) {
+    ++playbackFramesPresented_;
+    playbackRunElapsedS_ = static_cast<double>(playbackRateClock_.elapsed()) / 1000.0;
+    // First/last present span: N presented frames cover N-1 intervals, so rate
+    // from this span is the honest steady-state figure.
+    const qint64 nowNs = sessionClock_.isValid() ? sessionClock_.nsecsElapsed() : 0;
+    if (firstPresentNs_ < 0) firstPresentNs_ = nowNs;
+
+    // Cadence distribution, not just its mean. The presented rate reads 98-99%
+    // under two completely different faults and therefore cannot tell them
+    // apart, which is why a file can measure 99% and still visibly stutter:
+    //
+    //   the integer tick beat -- floor(1000/fps) is 41ms against a 41.667ms
+    //   frame, so the accumulator falls 0.667ms short each frame and roughly
+    //   every 62nd frame needs two ticks. That is one doubled (~83ms) frame
+    //   every ~2.6s, REGULARLY spaced, on every file. GATE E owns it.
+    //
+    //   per-frame cost overrun -- a frame that misses the budget is late at once
+    //   and nothing absorbs it. Ragged, irregular, and specific to whichever
+    //   file is expensive. A presentation clock supplies phase, not headroom, so
+    //   GATE E does NOT fix this one.
+    //
+    // The spacing between long frames is what separates them: a beat is regular,
+    // an overrun is not. Sampling intervals BETWEEN PRESENTS rather than between
+    // ticks is deliberate -- a held frame produces no present, so the doubled
+    // interval only appears here.
+    if (lastPresentNs_ > 0) {
+        const double gapMs = static_cast<double>(nowNs - lastPresentNs_) / 1'000'000.0;
+        if (cadenceGapsMs_.size() < kCadenceSampleCap) {
+            cadenceGapsMs_.push_back(gapMs);
+            if (frameDurationMs > 0.0 && gapMs > frameDurationMs * 1.5) {
+                cadenceLongAt_.push_back(playbackFramesPresented_);
+            }
+        }
+    }
+    lastPresentNs_ = nowNs;
+    // Clock drift: ideal media time for the frames presented so far versus wall
+    // clock. Positive = ahead of real time, negative = behind.
+    lastDriftMs_ = static_cast<double>(playbackFramesPresented_) * frameDurationMs
+                 - playbackRunElapsedS_ * 1000.0;
 }
 
 // GATE E step 1. Establishes the presentation timeline, and re-establishes it
@@ -2010,6 +2233,20 @@ void MainWindow::onScrubResult() {
         if (!result.ok) {
             if (!result.error.isEmpty()) statusBar()->showMessage(result.error, 3000);
             hardError = true;
+            continue;
+        }
+
+        // Reverse shuttle results are QUEUED, not presented. The playback tick
+        // owns when a frame goes on screen; this callback only owns keeping the
+        // pipeline fed. Presenting here would put reverse back on the decoder's
+        // cadence instead of the scheduler's, which is the whole thing the queue
+        // exists to prevent.
+        if (reverseRunActive_) {
+            reverseQueue_.push_back({result.requestedFrame, result.frame});
+            reverseQueueMaxSeen_ =
+                std::max<long long>(reverseQueueMaxSeen_,
+                                    static_cast<long long>(reverseQueue_.size()));
+            pumpReverseQueue();
             continue;
         }
 
@@ -2927,6 +3164,22 @@ void MainWindow::refreshHud(const QString& action) {
             // to walk to reach its target. Below 1 random access is cheap and
             // sampling is allowed; above it a strided step would leave the
             // region the decoder already opened and pay for a new one.
+            // The reverse pipeline. `q` is how many decoded frames are waiting
+            // ahead of the presentation point and is the number that says
+            // whether the queue is doing its job: a queue that sits at 0 is a
+            // pipeline that never got ahead, and `starve` counts the slots that
+            // had no frame to show. A run with starve 0 presented every slot it
+            // was asked for.
+            const QString l7g = QString("rev | %1 | stride %2 | q %3/%4 (max %5) | starve %6 | next %7 | last %8")
+                .arg(!reverseAsyncEnabled() ? "OFF" : reverseRunActive_ ? "RUN" : "idle")
+                .arg(reverseStride_)
+                .arg(static_cast<long long>(reverseQueue_.size()))
+                .arg(kReverseQueueDepth)
+                .arg(reverseQueueMaxSeen_)
+                .arg(reverseStarves_)
+                .arg(reverseNextTarget_)
+                .arg(reverseLastPresented_);
+
             const QString l7f = QString("sample %1 | stride %2 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
                 .arg(!scrubSamplingEnabled() ? "OFF"
                      : !videoDecoder_.metadata().intraOnly ? "GATED"
@@ -2962,7 +3215,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2));
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l5b + "\n" + l6
-                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l8 + "\n" + l9
+                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l7g + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
@@ -3007,6 +3260,11 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             refreshHud(audio_.isMuted() ? "Mute" : "Unmute");
             return;
         case Qt::Key_Left:
+            // Stepping out of a reverse run: end it first, without a landing
+            // decode -- the step below lands its own frame, and the playhead is
+            // already the frame that was on screen because every present sets
+            // it from the frame's own index.
+            endReverseRun(/*landExactly=*/false);
             playback_.stepBackward();
             needsReload = true;
             prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
@@ -3022,6 +3280,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             }
             break;
         case Qt::Key_Right:
+            endReverseRun(/*landExactly=*/false);
             playback_.stepForward();
             needsReload = true;
             prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, false);
@@ -3045,10 +3304,22 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
                 // clock (plan section 29.2). Audio is deliberately not started --
                 // reverse is silent, and stopAudio() above is what makes it so.
                 beginPlaybackTimeline();
+                // After the timeline, because the run's first frames are decoded
+                // against the playhead this press starts from. Every press is a
+                // new run: startReverseRun ends the previous one, which is what
+                // makes a speed change newest-target-wins rather than a merge of
+                // two ladders.
+                // The stride IS the commanded speed. It is an input the user
+                // chose, so nothing the decoder measures can move it.
+                startReverseRun(static_cast<int>(
+                    std::lround(std::abs(playback_.state().speed))));
             }
             refreshHud("J");
             return;
         case Qt::Key_K:
+            // Before pause(): the lease has to come back and the exact landing
+            // has to happen while the run still knows which frame was on screen.
+            endReverseRun(/*landExactly=*/true);
             playback_.pause();
             userPlayIntent_ = false;
             if (playTimer_.isActive()) {
@@ -3061,6 +3332,10 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
             return;
         case Qt::Key_L:
             if (frameSource_ && frameSource_->canPlay()) {
+                // A direction change ends the reverse run and lands, so forward
+                // starts from the frame that was on screen rather than from
+                // wherever the reverse pipeline had run ahead to.
+                endReverseRun(/*landExactly=*/true);
                 playback_.jogForward();
                 // L at 1x is ordinary forward play and is worth restoring after
                 // a drag; the shuttle speeds above it are not, for the same
