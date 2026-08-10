@@ -1,9 +1,9 @@
-# The interface pass is the next phase. Priority 2 is LIFTED.
+# The interface pass is open, the prerequisites are done, and phase 2 is next.
 
-Supersedes the previous version. The bounded reverse-shuttle phase closed with owner
-sign-off on 2026-08-10, and the accelerated fast-forward blocker found during that retest
-closed with it. **The owner has chosen the next phase: the deferred interface pass.**
-Paste everything below the line into a fresh session in the repo root.
+Supersedes the previous version. Priority 2 was lifted on 2026-08-10 and the interface pass
+was opened the same day: the spec's §2 was re-derived, both GPU prerequisites were built and
+measured, and the spec's own phase 1 audit is written. **The next thing to do is spec
+phase 2.** Paste everything below the line into a fresh session in the repo root.
 
 ---
 
@@ -63,53 +63,53 @@ wrong — see the deferred list.
 - **EXR / image sequences and OCIO.** `TRACE_WITH_OIIO` is undefined in vcpkg and CI, so EXR
   does not open today. Largest untouched area, and a feature rather than a fix.
 
-## THE OPEN PHASE — interface pass 1
+## THE OPEN PHASE — interface pass 1, now at phase 2
 
 The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
-`docs/interface-pass-1-spec.md` — approved, complete, and written by the owner.
-**Rename it** (drop `-DEFERRED`) and replace its "do not begin any of this" header with the
-lift, as the first commit, so the tree stops saying two different things.
+`docs/interface-pass-1-spec.md`.
 
-### Do this before planning anything: re-derive §2 of that spec
+### Done on 2026-08-10 — do not redo any of it
 
-§2 is a list of ten dependencies and conflicts, and it was written on **2026-08-09** —
-before the reverse shuttle existed, before step 9, before `d3d11` became the default, and
-before the fast-forward shuttle. **A deferred item's premise expires** is the rule this
-project has re-learned five times, and it applies to a document as much as to a note.
+- **The spec is renamed and open, and its §2 was RE-DERIVED** (`994dd7b`). §2 is no longer
+  the 2026-08-09 text; read it as it now stands. Item 2 was stale (reverse is a call site),
+  item 1 is materially larger than written (the `d3d11` default flip means the overlay needs
+  a renderer-neutral home or the `cpu` escape hatch ships with no transport), item 6 gained a
+  trap from step 9, item 7's mechanism was not quite as described, item 8's premise was half
+  wrong, and item 9 is worse than "not extracted".
+- **Both GPU prerequisites are BUILT AND MEASURED** — the renderer-neutral overlay
+  (`5e1f834`) and the `VideoRenderer` view-transform contract (`4b7174f`). Plan §31 has the
+  design, the measurements and the two mistakes worth keeping. Playback and scrub are
+  unchanged on 4K H.264 *and* on ProRes 4444, which is the file with the least headroom.
+- **The spec's phase 1 audit is `docs/interface-pass-1-audit.md`** (`7abb6a5`), twelve
+  sections, read-only, each ending in what it means for the pass.
+- CI run 79 green on `2bb1901`, including the renderer selftest.
 
-At least one item is already known stale: **§2 item 2 says reverse shuttle "will likely
-defer on first pass" because continuous reverse is GOP-walk bound.** It is not. The engine
-shipped at `e9fd236`/`dd21fe9`, was measured, and has owner sign-off — 4K H.264 reverse 1×
-went 87.0 → 99.2% of real time, and the full 2×/5×/10×/30× ladder works in both directions.
-So the spec's capability-detection-and-defer branch is no longer the expected outcome; the
-control is a **call site** onto `startShuttleRun(direction, stride)`.
+### Start at spec phase 2, and read the audit's "what the audit changes about the plan" first
 
-Check the other nine the same way rather than reading them as still true.
+The audit's findings that change the work, in the order they bite:
 
-### Then take the two GPU prerequisites first, because they are the structural blockers
-
-Both were deliberately left unbuilt because only this pass needs them. Neither is UI work.
-
-1. **The composited overlay, built for real.** §2 item 1 is the largest structural item in
-   the whole spec. Qt child widgets over the D3D11 child HWND are neither visible nor
-   hit-testable (§19/§20.1), so the auto-hiding floating transport cannot exist without it.
-   Renderer-composited translucency was *proven* to work with real alpha, full native input,
-   keyboard staying with Qt via `MA_NOACTIVATE`, and **no measured playback cost** — but
-   `TRACE_OVERLAY_COMPOSITED` is explicitly a disposable spike with placeholder art. Promote
-   it to a real path, and **re-measure the playback cost** rather than citing the spike's
-   number; the spike held a static overlay visible through one 9s run, which is not the same
-   as an animated fade during a scrub.
-2. **A view-transform contract on `VideoRenderer`.** §2 item 6. Rotate/flip has nowhere to
-   live today. The D3D11 backend already computes a letterbox viewport, which is the natural
-   home; the CPU backend applies it in its `QPainter`. Add it to the interface so both
-   backends implement one contract — separately hacking the two paths is what the spec's own
-   fallback exists to prevent.
-
-### Then the spec's own phasing, from its phase 1
-
-Its 14 phases are already ordered and each is meant to be an independently reviewable
-commit. Phase 1 is a read-only audit — **report the boundaries before implementing**, which
-is the same discipline that made the reverse-shuttle phase work.
+1. **Fullscreen is the only transport control that is not a shared QAction** — the same four
+   lines appear twice. Promoting it is phase 2's one real job; the other three controls
+   already satisfy the shared-actions requirement.
+2. **Phase 3 should build a shortcut table rather than extend `keyPressEvent`'s flat
+   switch**, because phase 13 has to render a Keyboard Shortcuts window from something.
+3. **Phases 4-5: extract the five-step shuttle sequence before adding a third caller.**
+   `startShuttleRun` has exactly two callers today and each performs
+   `endShuttleRun` → controller ladder → `prepareVideoRequest` → `beginPlaybackTimeline` →
+   `startShuttleRun`. §29.2 is the standing warning: GATE E was validated on the Play action
+   alone and every other path that started the timer compiled silently and decayed
+   quadratically. And **the buttons must enter the ladder at 2×** while J/L enter at 1× —
+   `jogForward`/`jogReverse` express only the keyboard contract today, so the controller
+   needs a second documented way in rather than a call site poking `speed`.
+4. **Phase 6 is the one most likely to cost performance**: removing `transportBar_` from the
+   layout in favour of the floating overlay. Measure it when it lands, not at phase 14. Its
+   open question is plan §31.5 item 2 — whether the overlay's timeline *press* lands exactly
+   the way a groove click does. Test with the playhead deliberately far from the press point.
+5. **Phase 7 has a decision, not just work**: the `Timecode:` readout is already synthesised
+   from the frame index, which is the thing the spec forbids. Relabel it as elapsed, or
+   disable it, when no source timecode exists.
+6. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
+   reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob.
 
 ### Priority 1 is the constraint on all of it
 
