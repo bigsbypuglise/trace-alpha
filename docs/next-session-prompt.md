@@ -1,9 +1,10 @@
-# The interface pass is open, the prerequisites are done, and phase 2 is next.
+# The interface pass is open, phase 2 has shipped, and phase 3 is next.
 
 Supersedes the previous version. Priority 2 was lifted on 2026-08-10 and the interface pass
 was opened the same day: the spec's §2 was re-derived, both GPU prerequisites were built and
-measured, and the spec's own phase 1 audit is written. **The next thing to do is spec
-phase 2.** Paste everything below the line into a fresh session in the repo root.
+measured, the phase 1 audit was written, and **phase 2 shipped at `58bfca6`**. **The next
+thing to do is spec phase 3.** Paste everything below the line into a fresh session in the
+repo root.
 
 ---
 
@@ -82,17 +83,28 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
   unchanged on 4K H.264 *and* on ProRes 4444, which is the file with the least headroom.
 - **The spec's phase 1 audit is `docs/interface-pass-1-audit.md`** (`7abb6a5`), twelve
   sections, read-only, each ending in what it means for the pass.
-- CI run 79 green on `2bb1901`, including the renderer selftest.
+- **Phase 2 shipped at `58bfca6`** and its record is `docs/interface-pass-1-progress.md`.
+  Fullscreen is a shared QAction, the dev HUD toggle is one too on **`H`**, the dead
+  `showInfo`/`showTimecode`/`showSeconds` flags are deleted, `refreshHud` no longer *builds*
+  a hidden HUD, and the icon tree is down to the approved `260807` package. Full regression
+  against a control built from `87a39a6`, on the physical panel, all flat.
+- CI run 79 green on `2bb1901`, run 81 green on `58bfca6`, both including the renderer
+  selftest.
 
-### Start at spec phase 2, and read the audit's "what the audit changes about the plan" first
+### Start at spec phase 3, and read `docs/interface-pass-1-progress.md` first
 
-The audit's findings that change the work, in the order they bite:
+The audit's findings that change the work, in the order they bite. **Item 1 is done.**
 
-1. **Fullscreen is the only transport control that is not a shared QAction** — the same four
-   lines appear twice. Promoting it is phase 2's one real job; the other three controls
-   already satisfy the shared-actions requirement.
+1. ~~**Fullscreen is the only transport control that is not a shared QAction.**~~ **DONE at
+   phase 2.** `fullscreenAction_`, checkable, created in `setupSharedActions()` which runs
+   before `setupMenus()`. **F11 is listed first on purpose** — Qt advertises only the first
+   sequence, so the order decides what the menu and the tooltip say; Ctrl+Return and
+   Alt+Enter sit behind it. Escape-exits and geometry restore are still phase 6.
 2. **Phase 3 should build a shortcut table rather than extend `keyPressEvent`'s flat
    switch**, because phase 13 has to render a Keyboard Shortcuts window from something.
+   Phase 2 *removed* two cases from that switch (`I`, and `Return`/`Enter`) and added none —
+   the two new shortcuts live on their actions. What is left in the switch is
+   Space · M · Left/Right · J/K/L · F/S/T.
 3. **Phases 4-5: extract the five-step shuttle sequence before adding a third caller.**
    `startShuttleRun` has exactly two callers today and each performs
    `endShuttleRun` → controller ladder → `prepareVideoRequest` → `beginPlaybackTimeline` →
@@ -110,6 +122,24 @@ The audit's findings that change the work, in the order they bite:
    disable it, when no source timecode exists.
 6. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
    reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob.
+
+### Owner request, 2026-08-10 — a hotkey to hide the dev HUD — DELIVERED at phase 2
+
+`H` toggles it, `Return`/`Enter` still work, and the dead `showInfo` was **deleted** rather
+than wired up (nothing read it, so pressing `I` repainted and changed nothing; `Ctrl+I` is
+the Movie Inspector at phase 12). Hiding it also stops the HUD line being *built*, which the
+old `Return` binding never did — the owner's reason for wanting the key is to judge feel
+without the instrument, which means without its cost. The telemetry capture still runs, so
+`ra-walk` and the seek counters cannot come to mean something different depending on whether
+the HUD happened to be visible.
+
+**The measurement consequence was real and THIS NOTE NAMED THE WRONG GUARD.** It said the
+existing discipline covers it "because `win WxH` changes with the toggle". It does not
+change. Measured on one 4K H.264 reversal drag, HUD shown against hidden: `win 1280x843`
+**both times** — the window does not resize, the *viewer* takes the HUD's height. What moves
+is the video rect, which the HUD reports as `display`: **640x360 → 1280x720**, and with it
+`stalls 70 of 370 → 127 of 450`. **Quote `display` as well as `win WxH` for any number taken
+with the HUD toggled.** `hitch` read **1 either way**.
 
 ### Priority 1 is the constraint on all of it
 
@@ -189,11 +219,16 @@ figure. And **no subjective smoothness, cadence or picture-quality judgement is 
 Parsec** — it captures, re-encodes and re-times the screen. Every owner sign-off in this
 project has been taken at the machine, including the shuttle one.
 
-## Quote `hitch`, not `stalls`, and quote `win WxH` with either
+## Quote `hitch`, not `stalls`, and quote `win WxH` AND `display` with either
 
 `stalls` counts paint gaps over `2 × refresh` — 8.3ms at 239.999Hz, 33.3ms at 60Hz — so the
 same run reads `stalls 51 of 363 (>8.3ms) | hitch 3 (>33ms)`. **`hitch` is a fixed 33ms bar
 and is the only stall figure comparable across sessions.**
+
+**`display` joined the list at phase 2.** Cache depth follows the *video rect*, not the
+window, and `H` now changes one without the other: `win 1280x843` with the HUD shown and
+hidden, `display 640x360` against `1280x720`, `stalls 70 of 370` against `127 of 450`. A bare
+`win WxH` does not disambiguate a run taken with the HUD off.
 
 ## Working notes
 

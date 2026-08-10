@@ -112,6 +112,34 @@ them from the *post-transform* fit or the box average filters the wrong axis. **
 premise was half wrong** — video is already zero-based including the right endpoint, but the
 image-sequence and still HUD lines print `currentFrame + 1`.
 
+**SPEC PHASE 2 IS DONE (2026-08-10, `58bfca6`); the phase record is
+`docs/interface-pass-1-progress.md`.** Fullscreen is a shared `QAction` (F11 listed *first*,
+because Qt advertises only the first sequence, with Ctrl+Return and Alt+Enter behind it), the
+dev HUD toggle is one too, on **`H`**, and the icon tree is down to the approved `260807`
+package. Playback, scrub, `-SnapRelease`, both lifecycle through-drag gestures and all six
+shuttle exits are unchanged against a control built from `87a39a6`.
+
+Three things from it worth carrying:
+
+- **`viewState_.showInfo` is DELETED, not wired up.** `Key_I` toggled it and nothing read it,
+  so pressing `I` repainted and changed nothing. `showTimecode`/`showSeconds` were dead the
+  same way. `Ctrl+I` is the Movie Inspector at phase 12; there is one HUD and it is `showHud`.
+- **Hiding the HUD moves `stalls`, and `win WxH` DOES NOT CATCH IT.** The handoff predicted the
+  §22.8 effect and named the wrong guard. Measured on one 4K H.264 reversal drag, HUD shown vs
+  hidden: `win 1280x843` **both times** — the window does not resize, the *viewer* takes the
+  HUD's height. What moves is `display` (**640x360 → 1280x720**), and with it `stalls 70 of
+  370 → 127 of 450`. **Quote `display` as well as `win WxH` whenever the HUD was toggled.**
+  `hitch` read **1 either way**, which is the fourth time the threshold-independent figure has
+  been the one that survived a changed denominator.
+- **Artwork follows behaviour, and that is why one asset directory is still here.** The
+  approved package has no frame-step icon by design and its `transport_scan_*` pair is the art
+  for the *redesigned* Rewind/Fast-forward — which still step one frame until phases 4–5. So
+  `assets/Interface/` survives for exactly two glyphs and leaves with them; `transport_scan_*`
+  is embedded but unused so those phases are a code change only. The same rule *fixed* the
+  overlay, whose side regions drew scan chevrons over stepping behaviour: they carry the
+  frame-step glyphs now. Cross-backend agreement is untouched — the cpu-vs-d3d11 diff reads
+  **312 px (0.619%), max delta 24 on the control and the same to the pixel after**.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
@@ -870,7 +898,10 @@ and its accumulator gate — the negative control for any cadence measurement),
 reverse — its own knob rather than sharing `TRACE_ASYNC_SCRUB`, so a reverse A/B
 does not also change how dragging behaves), `TRACE_LONGGOP_SLICE_THREADS=1`
 (slice-only threading for long-GOP codecs — **measured and refuted**, retained as
-the control for that closed question), `TRACE_OVERLAY=1` (the floating transport,
+the control for that closed question), **`H` (not an env knob — the keyboard
+toggle for the dev HUD, added at spec phase 2; `Return`/`Enter` still work, and
+hiding it also stops the HUD line being *built*, so it is the state to judge feel
+in and the wrong state to quote a bare `stalls` from)**, `TRACE_OVERLAY=1` (the floating transport,
 **off by default** while its artwork is still placeholder; `TRACE_OVERLAY_COMPOSITED=1`
 is retained because the harness sets it), and `TRACE_VIEW_TRANSFORM=90|180|270|h|v`
 (rotate/flip, a test knob until spec phase 10 wires the real actions).
