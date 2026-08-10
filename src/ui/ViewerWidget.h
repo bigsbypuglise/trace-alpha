@@ -44,6 +44,8 @@ struct ViewerPerfStats {
     double avgUploadMs = 0.0;
     long long uploadCount = 0;
     long long textureCreates = 0;
+    // Taps per axis in the backend's downscale filter; see RenderStats.
+    int reduceTaps = 1;
 };
 
 // Hosts a VideoRenderer and owns the scheduling around it: when a repaint is

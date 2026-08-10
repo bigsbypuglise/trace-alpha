@@ -36,7 +36,23 @@ cbuffer YuvParams : register(b0) {
     float  lumaScale;
     float  chromaOffset;
     float  chromaScale;
-    float3 padding;
+    // Step 9: a filtered reduction. `footprint` is the size of ONE destination
+    // pixel in normalised source coordinates, and `taps` is how many samples to
+    // take across it per axis.
+    //
+    // A single bilinear Sample takes a 2x2 tap wherever it lands, so at a 6.4x
+    // downscale it reads 4 source texels of every 41 and throws the rest away.
+    // Measured against ffmpeg references, that put Trace 0.74 of the way from a
+    // correct area reduction to naked point sampling -- indistinguishable from
+    // swscale's `fast_bilinear`, and matched by Qt's raster bilinear on the CPU
+    // path, because all three are the same 2x2 tap.
+    //
+    // taps == 1 collapses the loop below to exactly one Sample at input.uv, so it
+    // is bit-identical to the pre-step-9 shader rather than merely close. That is
+    // what makes TRACE_GPU_REDUCE=0 a real control, and it is also why the 1:1
+    // preview path needs no special case: at ratio 1 the renderer sends 1.
+    float2 footprint;
+    float  taps;
 };
 
 struct VSOut {
@@ -45,9 +61,45 @@ struct VSOut {
 };
 
 float4 main(VSOut input) : SV_TARGET {
-    float y = planeY.Sample(srcSampler, input.uv).r * sampleScale;
-    float u = planeU.Sample(srcSampler, input.uv).r * sampleScale;
-    float v = planeV.Sample(srcSampler, input.uv).r * sampleScale;
+    // Box average over the destination pixel's footprint. The offsets are in
+    // NORMALISED source coordinates, which is what lets the same loop serve all
+    // three planes: a chroma plane is smaller, so the identical uv offset spans
+    // proportionally the same area of it, and 4:2:0/4:2:2/4:4:4 continue to differ
+    // in nothing but texture size. Sampling the planes in separate loops with
+    // per-plane texel steps would have reintroduced exactly the subsampling
+    // special-casing GATE C removed.
+    //
+    // Each tap is still a bilinear 2x2, so N taps per axis cover the footprint
+    // with 2N source texels of reach -- N does not have to reach the ratio to
+    // cover it. The renderer clamps N; see the caller for why it is not larger.
+    const int n = max(1, (int)taps);
+    const float inv = 1.0 / (float)n;
+    float3 acc = float3(0.0, 0.0, 0.0);
+    [loop] for (int j = 0; j < n; ++j) {
+        // Tap centres across the footprint: ((k + 0.5)/n - 0.5) puts them at the
+        // midpoints of n equal sub-spans, symmetric about the pixel centre. At
+        // n == 1 that is exactly 0, i.e. input.uv untouched.
+        const float dv = (((float)j + 0.5) * inv - 0.5) * footprint.y;
+        [loop] for (int i = 0; i < n; ++i) {
+            const float du = (((float)i + 0.5) * inv - 0.5) * footprint.x;
+            const float2 uv = input.uv + float2(du, dv);
+            acc += float3(planeY.Sample(srcSampler, uv).r,
+                          planeU.Sample(srcSampler, uv).r,
+                          planeV.Sample(srcSampler, uv).r);
+        }
+    }
+    acc *= sampleScale * inv * inv;
+
+    // Averaging happens in code space, BEFORE range normalisation and the
+    // matrix. That ordering is deliberate and it is the cheap one: both remaining
+    // steps are affine, so averaging first and transforming once is identical to
+    // transforming every tap and averaging after -- for a 4x4 box that is one
+    // matrix multiply instead of sixteen. It would NOT be identical if a
+    // non-linear step (a transfer function, a tonemap) were ever added between
+    // them; if BT.2020 tonemapping arrives, this order has to be revisited.
+    float y = acc.r;
+    float u = acc.g;
+    float v = acc.b;
 
     y = (y - lumaOffset) * lumaScale;
     u = (u - chromaOffset) * chromaScale;

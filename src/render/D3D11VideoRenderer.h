@@ -84,6 +84,12 @@ private:
     // signal to refuse the frame rather than present it through a near-enough
     // one -- the decoder declines the same set, so this should not fire.
     bool updateYuvParams(const trace::core::VideoFrame& frame);
+    // Sets the reduction terms from the frame size and the rect it is being drawn
+    // into, and re-uploads the constant buffer if they moved. Called from paint()
+    // rather than setFrame(), because the destination rect is not known until
+    // then -- a resize changes the ratio with no new frame arriving.
+    void updateReduction(QSize content, QSize fitted);
+    bool uploadYuvParams();
     void releasePlaneTextures();
     // The empty state. Rendered on the CPU into an image and uploaded through
     // the same path as a frame, so the placeholder survives the move to a
@@ -128,6 +134,28 @@ private:
     ComPtr<ID3D11Texture2D> planeTexture_[3];
     ComPtr<ID3D11ShaderResourceView> planeSrv_[3];
     ComPtr<ID3D11Buffer> yuvParams_;
+
+    // Mirrors cbuffer YuvParams in YuvToRgb.ps.hlsl. Held rather than built on
+    // the stack because the colour terms come from the frame (setFrame) and the
+    // reduction terms from the destination rect (paint), and the two are written
+    // at different times into one buffer.
+    struct YuvParamsData {
+        float matR[4] = {};
+        float matG[4] = {};
+        float matB[4] = {};
+        float sampleScale = 1.0f;
+        float lumaOffset = 0.0f;
+        float lumaScale = 1.0f;
+        float chromaOffset = 0.0f;
+        float chromaScale = 1.0f;
+        float footprint[2] = {0.0f, 0.0f};
+        // 1 == one sample at the pixel centre, i.e. exactly the pre-step-9
+        // behaviour. Never 0: the shader clamps, but the default should be the
+        // no-op rather than something the shader has to rescue.
+        float taps = 1.0f;
+    };
+    YuvParamsData yuvParamsData_{};
+
     int planeWidth_[3] = {0, 0, 0};
     int planeHeight_[3] = {0, 0, 0};
     // DXGI_FORMAT of the plane textures; R8_UNORM at 8 bits, R16_UNORM above.

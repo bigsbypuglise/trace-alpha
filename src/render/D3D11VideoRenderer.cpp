@@ -8,6 +8,7 @@
 #include <windowsx.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
 
 // Compiled by fxc at build time, not by D3DCompile at runtime: d3dcompiler_47
@@ -37,6 +38,20 @@ constexpr float kDiagRed[4] = {1.0f, 0.0f, 0.0f, 1.0f};
 
 bool clearDiagnosticEnabled() {
     static const bool on = !qgetenv("TRACE_D3D11_CLEAR_DIAG").isEmpty();
+    return on;
+}
+
+// Step 9's filtered reduction. On by default; TRACE_GPU_REDUCE=0 restores the
+// single bilinear tap.
+//
+// It has to be separately switchable from TRACE_PLANAR_UPLOAD, and that is not a
+// convenience. The reduction lives in the YUV shader only, so with it on, the
+// planar and BGRA paths filter differently -- and TRACE_PLANAR_UPLOAD=0 is the
+// control for every planar measurement. Without this knob that control would
+// differ in two ways at once, which is the failure section 22.4a is a whole
+// section about.
+bool reductionEnabled() {
+    static const bool on = qgetenv("TRACE_GPU_REDUCE") != QByteArray("0");
     return on;
 }
 
@@ -644,17 +659,9 @@ bool D3D11VideoRenderer::updateYuvParams(const trace::core::VideoFrame& frame) {
     const float chromaMid  = static_cast<float>(128 << shift);
     const float chromaSpan = static_cast<float>(224 << shift);
 
-    struct Params {
-        float matR[4];
-        float matG[4];
-        float matB[4];
-        float sampleScale;
-        float lumaOffset;
-        float lumaScale;
-        float chromaOffset;
-        float chromaScale;
-        float padding[3];
-    } p = {};
+    // The reduction terms already in yuvParamsData_ are deliberately preserved:
+    // they belong to the destination rect, which a new frame does not change.
+    YuvParamsData& p = yuvParamsData_;
 
     p.matR[0] = r[0]; p.matR[1] = r[1]; p.matR[2] = r[2];
     p.matG[0] = g[0]; p.matG[1] = g[1]; p.matG[2] = g[2];
@@ -676,13 +683,62 @@ bool D3D11VideoRenderer::updateYuvParams(const trace::core::VideoFrame& frame) {
         p.chromaScale = maxCode / chromaSpan;
     }
 
+    return uploadYuvParams();
+}
+
+bool D3D11VideoRenderer::uploadYuvParams() {
+    if (!context_ || !yuvParams_) return false;
     D3D11_MAPPED_SUBRESOURCE mapped = {};
     if (FAILED(context_->Map(yuvParams_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
         return false;
     }
-    std::memcpy(mapped.pData, &p, sizeof(p));
+    std::memcpy(mapped.pData, &yuvParamsData_, sizeof(yuvParamsData_));
     context_->Unmap(yuvParams_.Get(), 0);
     return true;
+}
+
+void D3D11VideoRenderer::updateReduction(QSize content, QSize fitted) {
+    float taps = 1.0f;
+    float fu = 0.0f;
+    float fv = 0.0f;
+
+    // Only when reducing. Upscaling has no undersampling to fix -- a bilinear tap
+    // is already reading more source detail than the output can hold -- and a box
+    // average there would blur a magnified frame, which is the opposite of what a
+    // review tool wants when someone is inspecting pixels.
+    if (reductionEnabled() && !content.isEmpty() && !fitted.isEmpty()
+        && fitted.width() < content.width() && fitted.height() < content.height()) {
+        // One destination pixel, in normalised source coordinates.
+        fu = 1.0f / static_cast<float>(fitted.width());
+        fv = 1.0f / static_cast<float>(fitted.height());
+
+        const double ratio = std::max(
+            static_cast<double>(content.width()) / static_cast<double>(fitted.width()),
+            static_cast<double>(content.height()) / static_cast<double>(fitted.height()));
+
+        // Each tap is a bilinear 2x2, so N taps reach 2N source texels per axis
+        // and ratio/2 taps already cover the footprint. Rounding up rather than
+        // down: a footprint left partly unsampled is the defect being fixed.
+        //
+        // Capped at 4 (16 samples per plane, 48 fetches per output pixel). The cap
+        // is not a performance guess about this box -- at 640x360 even 4x4 is ~11M
+        // fetches, nothing for any GPU that runs this app. It is there because the
+        // backend also has to work on WARP, which is a software rasteriser, and CI
+        // renames itself `d3d11 (warp)` and still has to pass. Beyond 4 the
+        // remaining error is small and the cost is quadratic.
+        const int want = static_cast<int>(std::ceil(ratio / 2.0));
+        taps = static_cast<float>(std::clamp(want, 1, 4));
+    }
+
+    if (taps == yuvParamsData_.taps
+        && fu == yuvParamsData_.footprint[0]
+        && fv == yuvParamsData_.footprint[1]) {
+        return;
+    }
+    yuvParamsData_.taps = taps;
+    yuvParamsData_.footprint[0] = fu;
+    yuvParamsData_.footprint[1] = fv;
+    uploadYuvParams();
 }
 
 void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
@@ -883,6 +939,9 @@ void D3D11VideoRenderer::paint(QWidget* host) {
         // the viewport. Only the pixel shader and what is bound to it differ,
         // which is exactly the split GATE B's shader comment promised.
         if (drawPlanar) {
+            // Before the draw and after the fit, because the ratio is a property
+            // of the destination rect. A resize changes it with no new frame.
+            updateReduction(contentSize_, fitted);
             context_->PSSetShader(yuvPixelShader_.Get(), nullptr, 0);
             ID3D11ShaderResourceView* srvs[] = {planeSrv_[0].Get(), planeSrv_[1].Get(),
                                                 planeSrv_[2].Get()};
@@ -914,6 +973,11 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     // point-sampled variant to A/B against, and the sampler is set once.
     stats_.lastDrawWasFiltered = resampled;
     stats_.lastDrawSize = fitted;
+    // How many taps per axis the reduction is actually using. Reported for the
+    // reason every other capability on this backend is: a filtered reduction that
+    // silently stays at 1 looks exactly like a working one until someone measures
+    // the pixels. 1 is honest at 1:1 and on the BGRA path.
+    stats_.reduceTaps = drawPlanar ? static_cast<int>(yuvParamsData_.taps) : 1;
 
     // Same scope split as the CPU backend: paintMs is the body, paintTotalMs
     // includes the present. Present is the analogue of ~QPainter's flush, so

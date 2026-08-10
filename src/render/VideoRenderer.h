@@ -58,6 +58,14 @@ struct RenderStats {
     double avgUploadMs = 0.0;
     long long uploadCount = 0;
     long long textureCreates = 0;
+
+    // Taps per axis in the backend's downscale filter. 1 means a single bilinear
+    // 2x2 tap, which undersamples at any meaningful reduction -- measured 0.74 of
+    // the way from a correct area reduction to point sampling at 6.4x. Reported
+    // because a filter that silently never engages looks identical to a working
+    // one from every other number in this struct. 1 is the honest answer at 1:1
+    // and for backends with no such filter.
+    int reduceTaps = 1;
 };
 
 // How a frame becomes pixels on screen.

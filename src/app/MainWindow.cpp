@@ -2464,14 +2464,24 @@ void MainWindow::refreshHud(const QString& action) {
             // A stall count quoted without the window it was taken in is not a
             // number anyone can check.
             const double hudDpr = viewer_->devicePixelRatioF();
+            // `display WxH` is followed by how it was resampled, and `xN` is the
+            // reduction's taps per axis. It belongs next to `display` because the
+            // two together are the whole scaling story: the size it was drawn at
+            // and how many source samples each output pixel came from. `x1` at a
+            // real downscale is the undersampling case -- see RenderStats.
+            const QString resampleState =
+                !drawPerf.lastDrawWasScaled
+                    ? QStringLiteral("1:1")
+                    : (drawPerf.lastDrawWasFiltered
+                           ? QStringLiteral("filtered x%1").arg(drawPerf.reduceTaps)
+                           : QStringLiteral("NEAREST"));
             const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
                 .arg(perf.srcFullRange ? "full" : "limited")
                 .arg(drawPerf.lastDrawSize.width())
                 .arg(drawPerf.lastDrawSize.height())
-                .arg(!drawPerf.lastDrawWasScaled ? "1:1"
-                     : drawPerf.lastDrawWasFiltered ? "filtered" : "NEAREST")
+                .arg(resampleState)
                 // Device pixels, matching `display` above, so the two can be
                 // compared without knowing the scale factor.
                 .arg(static_cast<int>(std::lround(width() * hudDpr)))
