@@ -91,6 +91,11 @@ Two further findings the original could not have:
   Fast-forward to `prevFrameAction_` / `nextFrameAction_` — single-frame stepping. The
   transport redesign changes exactly what those two controls mean, so the wiring has to be
   re-pointed, not merely re-skinned.
+
+  **Half done as of spec phase 4**: the right region is `fastForward` and carries the scan
+  glyph; the left is still `stepBack` and keeps the frame-step glyph until phase 5. Note the
+  harness that was supposed to be exercising these hooks had been aiming 1.2px below the icon
+  rect since phase 2 and registering nothing — see the phase 4 record.
 - **§19.3's cost number does not cover the case that matters.** It is a static overlay held
   visible through one 9s 4K *playback* run. The fade is `QTimer`-driven (`animTimer_`,
   `kFadeMs` 165) and asks the UI thread for repaints; the case to measure is a fade **during

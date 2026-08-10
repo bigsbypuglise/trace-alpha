@@ -207,8 +207,12 @@ void OverlayModel::rebuildAtlas() {
     double x = 4;
     aPlay_ = QRectF(x, row, icon, icon);   paintIcon(p, aPlay_, "play");        x += icon + 4;
     aPause_ = QRectF(x, row, icon, icon);  paintIcon(p, aPause_, "pause");      x += icon + 4;
-    aRewind_ = QRectF(x, row, icon, icon); paintIcon(p, aRewind_, "prev-frame"); x += icon + 4;
-    aFfwd_ = QRectF(x, row, icon, icon);   paintIcon(p, aFfwd_, "next-frame");   x += icon + 4;
+    // Artwork follows behaviour, one control at a time. The right region is
+    // Fast-forward from spec phase 4 and takes the continuous-scan glyph; the
+    // left one still steps a frame until phase 5 and keeps the frame-step glyph
+    // until then.
+    aRewind_ = QRectF(x, row, icon, icon); paintIcon(p, aRewind_, "prev-frame");   x += icon + 4;
+    aFfwd_ = QRectF(x, row, icon, icon);   paintIcon(p, aFfwd_, "fast-forward");   x += icon + 4;
 
     aHandle_ = QRectF(x, row, handle, handle);
     p.setBrush(QColor(255, 255, 255));
@@ -410,7 +414,7 @@ bool OverlayModel::onMouseUp(int x, int y) {
             // here without changing what it calls would put a lie in the
             // contract, which is the specific trap `isVideoScrubActive()` set.
             case Region::Rewind:      if (hooks_.stepBack) hooks_.stepBack(); break;
-            case Region::FastForward: if (hooks_.stepForward) hooks_.stepForward(); break;
+            case Region::FastForward: if (hooks_.fastForward) hooks_.fastForward(); break;
             default: break;
         }
         if (hooks_.requestRepaint) hooks_.requestRepaint();

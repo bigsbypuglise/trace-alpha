@@ -351,3 +351,218 @@ is meaningless without it, which is why both legs are printed.
   guard. The table's key-only matching makes this *more* important to get right
   at phase 7, not less: `Go to Frame` is the first text field, and the check that
   `H` and the digits do not fight belongs with it.
+
+---
+
+## Phase 4 — the forward shuttle interface (2026-08-10)
+
+### What shipped
+
+**The visible forward control is Fast-forward.** `nextFrameBtn_` is
+`fastForwardBtn_`, carrying `transport_scan_forward` and a new
+`fastForwardClicked()` signal, and it triggers a new `fastForwardAction_` that
+calls `startShuttle(1, ShuttleEntry::AtTwoX)`. The composited overlay's right
+region moved with it: same action, same glyph.
+
+**`nextFrameAction_` survives untouched.** The spec removes the *button*, not the
+command — "do not delete the underlying exact-frame-step commands" — and it
+survives without care being taken, because phase 3 had already made the button
+and the arrow key trigger one action instead of two near-copies. The Right arrow
+is now its only surface. A separate action rather than a re-pointed one: both
+exist and they do entirely different things.
+
+**The buttons enter the ladder at 2× and the keyboard still enters at 1×.**
+`ShuttleEntry::AtTwoX` was built at phase 3 for exactly this, so the difference
+is an argument to the one rate machine rather than a call site writing `speed`.
+Measured on the button, from paused: **+2× → +5× → +10× → +30×**, and six rapid
+presses end on `stride 30`, not back at 2. `TRACE_SHUTTLE_ENTRY=2x` still drives
+J until phase 5.
+
+**The artwork left with the behaviour, one glyph at a time.** `next-frame` is
+deleted from `assets/interface/transport/` and from the `.qrc`, because this is
+the commit in which the forward button stopped stepping. `prev-frame` stays, and
+so does the asymmetry in `OverlayHooks` — `stepBack` beside `fastForward` — until
+phase 5. That reads like an oversight and is the rule working: the two glyphs
+arrived together and leave separately because their buttons change separately.
+
+**The spec's temporary rate indicator** is a fixed-width label in the transport
+bar, set on a shuttle press and cleared 1200ms later. Driven from `startShuttle`,
+which is the one place a shuttle rate is ever chosen, so every surface gets it
+from one call; and gated on the same `ordinaryForwardPlay` predicate that decides
+whether there is a run at all, so 1× forward announces nothing. Fixed width held
+whether or not there is text: a label that collapsed when it cleared would move
+the slider under the pointer at the end of every run.
+
+### `landPreviousExactly` is settled, and both halves of its justification failed
+
+Phase 3 preserved it rather than unifying it and left the decision here. **No
+shuttle press lands the previous run.** The parameter is gone from
+`startShuttle`; K, Space and running off the end of the media still pass true.
+
+**"L must pass true or the old run's lease and queue would strand" was never
+about this flag.** `endShuttleRun()` calls `reclaimDecoder()` and clears the queue
+*above* its `landExactly` branch, and `startShuttle` calls it unconditionally. The
+lease comes back for every value of the flag. Reading the function was enough to
+find this, and it went unread for a phase.
+
+**"J passes false because a forward run supersedes the picture immediately"
+described a mechanism `dd21fe9` had already removed.** Before it, an off-speed
+forward run presented one frame per tick synchronously and its picture really was
+already exact. It is a queued, strided run now — the same shape as reverse.
+
+What was left was **anchoring**: the landing is a synchronous Step decode, and a
+forward run decodes forward from wherever the decoder is. That is a question
+about the decoder rather than about the picture, so it was measured —
+`scripts/measure/shuttleland.ps1`, reverse then L, landing on against off:
+
+| | land on | land off |
+|---|---|---|
+| 4K H.264 −1× → +2× | **0.8ms**, 48 frames, `starve 0`, 100.2%, handler max 2.3 | 48 frames, `starve 0`, 100.1%, handler max 2.3 |
+| 4K H.264 −1× → +1× | **0.7ms**, 47 frames, 95.9%, `handler>budget 1` (max 105.1) | 47 frames, 95.9%, `handler>budget 1` (max 105.8) |
+| 1080p 412f −10× → +2× | **0.3ms**, 48 frames, `starve 0`, 100.8%, handler max 0.6 | 48 frames, `starve 0`, 100.0%, handler max 0.6 |
+| ProRes 4444 −1× → +2× | **25.2ms**, 46 frames, `starve 4`, 92.8% | 45 frames, `starve 5`, 90.8% |
+
+**It buys nothing, and the mechanism says why.** On a long-GOP file the frame is
+a **reverse-cache hit by construction** — the reverse run decoded and presented it
+moments earlier — so the landing costs under a millisecond, and because a cache
+hit sets the decoder's `currentFrame_` but never its `lastDecodedFrame`, it does
+not move the decoder either. **There is no anchor to buy.** The −1× → +1× row is
+the proof: ordinary 1× playback is the one path that decodes on the UI thread,
+and its first tick pays a ~105ms walk out of the reverse position *with* the
+landing exactly as it does without. On ProRes 4444 the cache cannot help
+(`rev-hit 0.0%` — every frame is a keyframe, so nothing is ever walked past and
+cached), the landing becomes a real **25.2ms block on the UI thread**, and it
+still buys one frame's difference over a two-second run.
+
+So the landing belongs to a **stop**, where the standing rule applies directly:
+fidelity is owed to the frame the user stops on. A press that starts another run
+re-decodes a frame that is replaced within one frame period.
+
+**The instrument stays and reads 0 by construction.** The HUD's
+`land N (Xms max Yms)` counts landings and their UI-thread cost. It has to be its
+own field because the landing runs *before* `beginPlaybackTimeline()` resets the
+run counters, so every other instrument in the HUD measures it as free — which is
+why it had never been measured. It reads `land 0` through any press and non-zero
+only on a stop, so a regression back to press-landing is visible rather than
+silent. `TRACE_SHUTTLE_LAND` was the A/B knob and is **not retained**: the
+measurement and the script are written down, and keeping the knob would have
+meant keeping the parameter that the answer removes.
+
+### The transition enumeration is re-derived, not extended
+
+`revtransitions.ps1` is replaced by **`transitions.ps1`**. Its axis was six ways
+*out of a reverse run*, and every one of them was a key or the slider — which is
+exactly how the frame-step button went unlisted and held a real bug. At phase 4
+the forward button is a shuttle **entry**, so "exits" is no longer the right axis
+at all: a press that starts a run ends the previous one in the same call.
+
+The axis is a **run boundary** — anything that starts a run, ends one, or changes
+its direction or speed — from each state a run can be in. 21 cases, all PASS on
+`M&M_TopGun_1080.mp4`; the nine `R` cases also all PASS on 4K H.264:
+
+| from | commands |
+|---|---|
+| R (reverse run) | Space, K, Right, prevBtn, **ffBtn**, L, **J**, scrub, quit |
+| F (forward run) | Space, K, Right, prevBtn, **ffBtn**, J, scrub, quit |
+| P (paused), N (playing 1×) | **ffBtn** |
+| delayed | R → prevBtn → K, **F → prevBtn → K** |
+
+`R → J` and `F → J` were never enumerated before: a same-direction rung change is
+a full run boundary. The whole `F` row is new, because there was no forward run
+to leave. `F → prevBtn → K` is the untested mirror of the gesture that found the
+phase 3 bug.
+
+**Two harness faults, both of which produced passes that meant nothing.** The
+picture signature samples a grid across the window, so **a 9:16 clip pillarboxes
+four fifths of the grid onto black**: run on the 412-frame 9×16 clip the moving
+cases read 13–15% and one step read 0.0%, while the same 21 cases on a 16:9 clip
+read **48–49% moving** with every step between 1.5% and 50%. Both runs PASSED.
+And **121 frames is too short**: at +2× the forward run reaches the tail inside
+the observation window and reports `moved 0%`, a FAIL for a transition that
+worked. The clip is part of the measurement.
+
+The control locator earns its own note. Deriving button positions from the groove
+by arithmetic is possible and was **wrong by ten pixels**, because QSlider insets
+its groove by the handle radius; the scan finds icon pixels and asserts it found
+exactly three controls, which is a thing a formula cannot do. It stops 24px short
+of the groove because at frame 0 the slider **handle** is a fourth white cluster
+on that exact row.
+
+### The overlay harness was aiming 16px low, and had been for a phase
+
+Fixing it was not optional: shipping a re-pointed overlay hook that has never
+been executed is §29.2 exactly.
+
+`overlay.ps1` predicted the panel from `0.485 × window height`. That fraction is
+the bottom of the video surface, which moves whenever the HUD gains or loses a
+line. By this phase it was 17px stale, putting every click **1.2px below the icon
+rect**: the captures still looked right, the panel-mean still printed, and **not
+one interaction leg registered**. The panel is located by *difference* now — it is
+what changes between the hidden capture and the revealed one — and its size is
+asserted. Found: `panel 459x75, icons y=330` against the constant's 346.
+
+**That changes what the phase 2 overlay number was.** With nothing registering,
+all twelve captures were the same paused frame, so all twelve read the same
+0.619% — which is the **video band's own backend difference**, not an
+overlay-agreement figure. With the legs live, 05/06/07 differ by 18–49% at max
+delta 249 because each backend is on a different *frame* (`frame 116` against
+`frame 120`), and the states worth comparing are the deterministic ones:
+
+| state | cpu vs d3d11 |
+|---|---|
+| 01–04, paused at frame 40 | 312–317 px (0.619–0.629%), max delta 24 — the phase 2 figure, to the pixel |
+| **08-mid-drag**, panel and dragged handle on screen | **0 px (0%), max delta 1** |
+| 09–12, after the drag lands | 35–37 px (0.069–0.073%), max delta 7–8 |
+
+`08-mid-drag` is the better overlay-agreement measurement, and it is exact.
+`overlay.ps1` takes `-Renderer` now; it hard-coded `d3d11`, so producing the cpu
+half meant editing the script, which is how a check stops being run.
+
+### Regression
+
+Control binary built from `0e9e5da`; both on the **physical panel** (5120×1440 @
+239.999Hz, confirmed with `refresh.ps1`), `d3d11` default. `win 1280x829` /
+`display 640x360` for cadence, `win 1280x843` / `display 640x360` for the drag
+and shuttle runs.
+
+| run | control | phase 4 |
+|---|---|---|
+| 4K H.264 cadence | 99.9%, 120 frames, `handler>budget 0 of 119` (max 3.7), p50 41.8 / p99 43.3 / max 43.4, `hitch 0` | 100.0%, 120 frames, `0 of 119` (max 4.1), p50 41.9 / p99 43.4 / max 43.7, `hitch 0` |
+| 4444 cadence | 99.7%, 199 frames, `0 of 198` (max 35.5), p50 41.7 / p99 43.8 / max 44.2, `hitch 0` | 99.7%, 199 frames, `0 of 198` (max 36.4), p50 41.6 / p99 44.1 / max 45.1, `hitch 0` |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, full-res planar 1:1, `hitch 0`, `stalls 104 of 113` | same, `stalls 103 of 114` |
+| forward 2× (`revplay -Forward`) | 24.01 fps, 55 frames, `0 of 54` (max 3.0), `hitch 0` | 24.00 fps, 55 frames, `0 of 54` (max 2.4), `hitch 0` |
+| reverse 1× ×3 | **100.0 / 72.5 / 88.1%** | **88.1 / 88.1 / 100.0%** |
+| lifecycle | `-PlayThroughDrag` PASS 40.1%, `-PausedThroughDrag` PASS 0% | PASS 40.1%, PASS 0% |
+| transitions | six reverse cases PASS at phase 3 | **21 of 21 PASS** |
+
+Cadence buckets identical on both files. Landing exact on every run.
+
+**Reverse 1× is bimodal on this gesture, on both binaries, and the control
+produced the worst run of the six.** The first pass showed phase 4 at 88.1%
+against a control at 99.9% and that looked like a regression; three runs each put
+both inside the same two populations — `frames 114 / elapsed 4.75s` at 100%, and
+`frames 97 / elapsed 4.59s` at 88.1%. The control's 72.5% run is the interesting
+one: it read **`SNAP gop 2`**, i.e. the keyframe grid was learned as 2 and
+snapping engaged at stride 1. That is a pre-existing loose end and is not phase
+4's; it is recorded here because a single run of this gesture cannot support a
+regression claim in either direction.
+
+### What phase 4 changes about the plan
+
+**Phase 5 is now a narrow mirror.** `prevFrameBtn_` → `rewindBtn_`, the `rewind`
+glyph, a `rewindAction_` on `startShuttle(-1, AtTwoX)`, `OverlayHooks::stepBack`
+→ `rewind`, `prev-frame` leaves the tree, and `TRACE_SHUTTLE_ENTRY` leaves with
+it. `transitions.ps1` needs the reverse entry added to `-Entries`, and its
+`prevBtn` cases re-derived rather than kept: the backward button stops being a
+step and becomes a second shuttle entry, so `R -> prevBtn` and `F -> prevBtn`
+change meaning.
+
+**Fast-forward at the end of the file does not rewind and restart.** Play does
+(`c3335ec`), because Play owns the rewind; a Fast-forward press at the tail
+starts a run with no target and the tick ends it, leaving `playbackAtEnd_` set so
+the next Play restarts. Coherent, and worth stating because the spec does not
+cover it.
+
+**Still no text-entry control anywhere in the app**, so the spec's "must not fire
+while focus is inside a text-entry control" still has nothing to guard. Phase 7
+creates the first one.

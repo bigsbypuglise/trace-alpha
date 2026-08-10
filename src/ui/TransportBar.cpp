@@ -10,6 +10,7 @@
 #include <QFile>
 #include <QFontDatabase>
 #include <QProxyStyle>
+#include <QTimer>
 
 namespace trace::ui {
 namespace {
@@ -42,6 +43,12 @@ constexpr double kBgActive = 0.12;
 constexpr double kStrokeActive = 0.22;
 
 constexpr int kBarHeight = 76;
+
+// How long the shuttle-rate indicator stays up. The spec calls it a "temporary
+// indicator" and does not name a duration; this is long enough to read at a
+// glance and short enough that walking the ladder shows each rung rather than
+// leaving the last one on screen for the rest of the run.
+constexpr int kRateFlashMs = 1200;
 
 // Qt's default slider bindings are wrong for a video timeline: left-clicking
 // the groove page-steps (SH_Slider_PageSetButtons), so a click far down the
@@ -240,9 +247,13 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     playPauseBtn_->setIcon(playIcon_);
     playPauseBtn_->setToolTip(tr("Play / Pause (Space)"));
 
-    nextFrameBtn_ = new TransportButton(this);
-    nextFrameBtn_->setIcon(loadIcon(QStringLiteral("next-frame")));
-    nextFrameBtn_->setToolTip(tr("Next frame (Right arrow)"));
+    // Spec phase 4. This control used to step one frame forward; it is
+    // Fast-forward now, and the artwork moved in the same change because
+    // artwork follows behaviour. Frame stepping is the Right arrow -- the
+    // command is untouched, only the button that used to reach it is gone.
+    fastForwardBtn_ = new TransportButton(this);
+    fastForwardBtn_->setIcon(loadIcon(QStringLiteral("fast-forward")));
+    fastForwardBtn_->setToolTip(tr("Fast-forward — 2x, 5x, 10x, 30x (L)"));
 
     fullscreenBtn_ = new TransportButton(this);
     fullscreenBtn_->setIcon(fullscreenIcon_);
@@ -285,24 +296,56 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     frameLabel_->setMinimumWidth(96);
     frameLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
 
+    // The spec's temporary rate indicator. A FIXED width, held whether or not
+    // there is text in it: a label that collapses when it clears would move the
+    // slider under the pointer every time a shuttle run ended, which is the
+    // same class of fault as the handle being written back mid-drag.
+    rateLabel_ = new QLabel(this);
+    rateLabel_->setFocusPolicy(Qt::NoFocus);
+    rateLabel_->setFont(QFontDatabase::systemFont(QFontDatabase::FixedFont));
+    rateLabel_->setStyleSheet(QStringLiteral("color: rgba(255,255,255,0.92);"));
+    rateLabel_->setFixedWidth(48);
+    rateLabel_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+    rateTimer_ = new QTimer(this);
+    rateTimer_->setSingleShot(true);
+    rateTimer_->setInterval(kRateFlashMs);
+    connect(rateTimer_, &QTimer::timeout, this, [this]() { rateLabel_->clear(); });
+
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(16, 8, 16, 8);
     row->setSpacing(8);
     row->addWidget(prevFrameBtn_);
     row->addWidget(playPauseBtn_);
-    row->addWidget(nextFrameBtn_);
+    row->addWidget(fastForwardBtn_);
     row->addSpacing(8);
     row->addWidget(slider_, 1);
     row->addSpacing(4);
+    row->addWidget(rateLabel_);
     row->addWidget(frameLabel_);
     row->addWidget(fullscreenBtn_);
 
     connect(prevFrameBtn_, &TransportButton::clicked, this, &TransportBar::prevFrameClicked);
     connect(playPauseBtn_, &TransportButton::clicked, this, &TransportBar::playPauseClicked);
-    connect(nextFrameBtn_, &TransportButton::clicked, this, &TransportBar::nextFrameClicked);
+    connect(fastForwardBtn_, &TransportButton::clicked, this, &TransportBar::fastForwardClicked);
     connect(fullscreenBtn_, &TransportButton::clicked, this, &TransportBar::fullscreenClicked);
 
     setControlsEnabled(false);
+}
+
+// Shown on a shuttle press and cleared on a timer. Deliberately NOT driven from
+// syncTransportBar: that runs several times a second, and an indicator whose
+// visibility is recomputed on every HUD refresh would either flicker or need a
+// second piece of state saying when it was last set. One call at the press,
+// one timer.
+void TransportBar::flashRate(const QString& text) {
+    if (text.isEmpty()) {
+        rateTimer_->stop();
+        rateLabel_->clear();
+        return;
+    }
+    rateLabel_->setText(text);
+    rateTimer_->start();
 }
 
 void TransportBar::setPlaying(bool playing) {
@@ -326,7 +369,7 @@ void TransportBar::setFrameText(const QString& text) {
 void TransportBar::setControlsEnabled(bool enabled) {
     prevFrameBtn_->setEnabledControl(enabled);
     playPauseBtn_->setEnabledControl(enabled);
-    nextFrameBtn_->setEnabledControl(enabled);
+    fastForwardBtn_->setEnabledControl(enabled);
     slider_->setEnabled(enabled);
 }
 

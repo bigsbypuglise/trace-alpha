@@ -177,15 +177,66 @@ applied at the first rung only, so the buttons' 2× entry is an argument rather 
 writing `speed`. `TRACE_SHUTTLE_ENTRY=2x` drives it through J/L, which is the only way to
 execute it before those buttons exist.
 
-**`landPreviousExactly` is PRESERVED, not unified, and phases 4–5 must settle it.** L must pass
-true (at L-to-1× out of reverse no new run starts, so nothing else would end the old one and
-its lease would strand); J passes false. What is **not** derivable is why L at 2× also lands —
-a synchronous Step decode on every forward speed change out of reverse — when J at −2× does
-not. Both shipped in the signed-off engine and neither was measured against the other.
+**SPEC PHASE 4 IS DONE (2026-08-10).** The visible forward control is **Fast-forward**, entering
+the ladder at **2×** through `ShuttleEntry::AtTwoX`, with `transport_scan_forward` artwork on
+both the transport bar and the composited overlay's right region. `nextFrameAction_` survives
+untouched with the Right arrow as its only surface — the spec removes the *button*, not the
+command — and it survived without care being taken because phase 3 had already collapsed the
+two step paths into one action. `next-frame` left the asset tree in the same commit;
+`prev-frame` stays until phase 5, so `OverlayHooks` reads `stepBack` beside `fastForward` and
+**that asymmetry is the rule working**, not an oversight. Measured on the button: **+2× → +5×
+→ +10× → +30×**, six rapid presses ending on `stride 30`. The spec's temporary rate indicator
+is a fixed-width label driven from `startShuttle`, gated on the same `ordinaryForwardPlay`
+predicate that decides whether there is a run.
+
+**`landPreviousExactly` IS SETTLED AND GONE: no shuttle press lands the previous run.** K,
+Space and running off the end still land, because fidelity is owed to the frame you *stop* on.
+Both halves of the old justification failed. **"L must pass true or the lease and queue would
+strand" was never about this flag** — `endShuttleRun()` reclaims the lease and clears the queue
+*above* its `landExactly` branch, and `startShuttle` calls it unconditionally. And **"J passes
+false because a forward run supersedes the picture immediately" described a mechanism
+`dd21fe9` removed**: forward is a queued, strided run now, the same shape as reverse. What was
+left was *anchoring*, and it was measured (`scripts/measure/shuttleland.ps1`): **4K H.264
+−1×→+2× `land 0.8ms`, 1080p −10×→+2× `0.3ms`, ProRes 4444 −1×→+2× `25.2ms`** — and in every
+case the forward run that follows is identical (48 vs 48 frames, `starve 0` both, 100.2 vs
+100.1%; 4444 46 vs 45 frames, starve 4 vs 5). **The landing is a reverse-cache hit by
+construction** — the reverse run decoded that frame moments earlier — and **a cache hit sets
+`currentFrame_` but never `lastDecodedFrame`, so it does not move the decoder at all.** There
+is no anchor to buy. Proof: at −1×→+1×, ordinary playback's first UI-thread tick pays the same
+~105ms walk with the landing as without. The HUD's **`land N (Xms max Yms)` is retained and
+reads 0 through any press**, so a regression back to press-landing is visible.
+
+**`revtransitions.ps1` IS REPLACED BY `transitions.ps1` (phase 4), and the axis is
+re-derived rather than extended.** Six ways *out of a reverse run* stopped being the right
+question when the forward button became a shuttle **entry** — a press that starts a run ends
+the previous one in the same call. The axis is now a **run boundary** from each state a run
+can be in: **21 cases, all PASS**, including the whole forward row (there was no forward run to
+leave before), `R → J` and `F → J` (a same-direction rung change is a full boundary), and
+`F → prevBtn → K`, the untested mirror of the gesture that found the phase 3 bug. **Two harness
+faults produced passes that meant nothing**: a 9:16 clip pillarboxes four fifths of the picture
+signature onto black (13–15% "moving" against 48–49% on a 16:9 clip, and one step reading 0.0%,
+both runs PASSING), and a 121-frame clip lets a +2× run reach the tail inside the observation
+window and report `moved 0%`. **The clip is part of the measurement.** Button positions are
+found by scanning for icon pixels and asserting exactly three clusters — arithmetic off the
+groove was wrong by ten pixels, because QSlider insets its groove by the handle radius, and a
+formula cannot notice it has drifted.
+
+**`overlay.ps1` WAS AIMING 16px LOW AND HAD BEEN FOR A PHASE** (found at phase 4). It predicted
+the panel from `0.485 × window height` — the bottom of the video surface, which moves whenever
+the HUD gains or loses a line. Every click landed **1.2px below the icon rect**: the captures
+looked right, the panel-mean printed, and **not one interaction leg registered**. The panel is
+located by *difference* now (what changes between the hidden and revealed captures) and its
+size asserted. **This re-reads the phase 2 overlay number**: with nothing registering, all
+twelve captures were the same paused frame, so the recorded `312 px (0.619%)` is the **video
+band's own backend difference**, not overlay agreement. With the legs live, `08-mid-drag` —
+panel and dragged handle on screen — reads **0 px, max delta 1**, and states 05–07 differ by
+18–49% purely because each backend is on a different *frame*. `overlay.ps1` takes `-Renderer`
+now; hard-coding `d3d11` meant the cpu half needed a script edit, which is how a check stops
+being run.
 
 **The frame-step BUTTON never ended a shuttle run, and that was a real bug.**
-`revtransitions.ps1` enumerates six ways out of a reverse run and every one is a key or the
-slider; the buttons are a **seventh** and nothing exercised them. Clicking Prev Frame during a
+`revtransitions.ps1` enumerated six ways out of a reverse run and every one was a key or the
+slider; the buttons were a **seventh** and nothing exercised them. Clicking Prev Frame during a
 reverse run left `shuttleRunActive_` true with `shuttleLastPresented_` holding the *shuttle's*
 frame, so the next K took `endShuttleRun`'s landing branch and **discarded the frame the user
 stepped to** — measured against a control from `cbf6d98`, the picture moves **17.6% on that K
@@ -956,8 +1007,9 @@ does not also change how dragging behaves), `TRACE_LONGGOP_SLICE_THREADS=1`
 the control for that closed question), `TRACE_SHUTTLE_ENTRY=2x` (J and L enter the
 shuttle ladder at 2x, the **button** convention, instead of the keyboard's 1x —
 an interim knob added at spec phase 3 so the entry point the Rewind/Fast-forward
-buttons will use is executable before those buttons exist; it leaves with phases
-4–5), **`H` (not an env knob — the keyboard
+buttons will use is executable before those buttons exist; the Fast-forward
+button is real as of phase 4, so this now only matters for J and it leaves with
+phase 5), **`H` (not an env knob — the keyboard
 toggle for the dev HUD, added at spec phase 2; `Return`/`Enter` still work, and
 hiding it also stops the HUD line being *built*, so it is the state to judge feel
 in and the wrong state to quote a bare `stalls` from)**, `TRACE_OVERLAY=1` (the floating transport,

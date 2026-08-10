@@ -782,7 +782,7 @@ void MainWindow::installOverlayHooks() {
     trace::render::OverlayHooks hooks;
     hooks.playPause = [this]() { if (playPauseAction_) playPauseAction_->trigger(); };
     hooks.stepBack = [this]() { if (prevFrameAction_) prevFrameAction_->trigger(); };
-    hooks.stepForward = [this]() { if (nextFrameAction_) nextFrameAction_->trigger(); };
+    hooks.fastForward = [this]() { if (fastForwardAction_) fastForwardAction_->trigger(); };
 
     hooks.setScrubbing = [this](bool down) {
         if (timelineSlider_) timelineSlider_->setSliderDown(down);
@@ -899,13 +899,15 @@ void MainWindow::setupShortcuts() {
         refreshHud(audio_.isMuted() ? "Mute" : "Unmute");
     });
 
-    // Frame stepping is keyboard-first from here on (spec: "Frame stepping
-    // becomes keyboard-only"). The two visible side buttons still perform it
-    // until phases 4 and 5 turn them into Rewind and Fast-forward, and they
-    // trigger the SAME action these keys do -- so when those phases re-point the
-    // buttons, the exact-frame-step command survives untouched, which is what
-    // the spec's "do not delete the underlying exact-frame-step commands"
-    // requires.
+    // Frame stepping is keyboard-only in the forward direction from spec phase
+    // 4: the Right arrow is the only surface that reaches nextFrameAction_ now,
+    // because the button that used to is Fast-forward. Left still has the
+    // backward button beside it until phase 5.
+    //
+    // The command itself is untouched by either phase, which is what the spec's
+    // "do not delete the underlying exact-frame-step commands" requires, and it
+    // is untouched precisely because phase 3 made the button and the key trigger
+    // ONE action rather than two near-copies.
     shortcuts_.addKey(ShortcutGroup::Stepping, Qt::Key_Left, tr("Step one frame back"),
                       [this]() { prevFrameAction_->trigger(); });
     shortcuts_.addKey(ShortcutGroup::Stepping, Qt::Key_Right, tr("Step one frame forward"),
@@ -913,9 +915,7 @@ void MainWindow::setupShortcuts() {
 
     shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_J,
                       tr("Rewind — 1x, 2x, 5x, 10x, 30x"), [this]() {
-        // Reverse never lands the previous run: a J press always produces a
-        // shuttle run, and that run supersedes the picture immediately.
-        startShuttle(-1, shuttleEntryConvention(), /*landPreviousExactly=*/false);
+        startShuttle(-1, shuttleEntryConvention());
         refreshHud("J");
     });
     shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_K, tr("Stop"), [this]() {
@@ -934,7 +934,7 @@ void MainWindow::setupShortcuts() {
     });
     shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_L,
                       tr("Fast-forward — 1x, 2x, 5x, 10x, 30x"), [this]() {
-        startShuttle(1, shuttleEntryConvention(), /*landPreviousExactly=*/true);
+        startShuttle(1, shuttleEntryConvention());
         refreshHud("L");
     });
 
@@ -1036,6 +1036,22 @@ void MainWindow::setupTransportControls() {
     connect(nextFrameAction_, &QAction::triggered, this,
             [this]() { stepOneFrame(1, "Next Frame"); });
 
+    // Spec phase 4. The visible forward control is Fast-forward now, and it is
+    // the THIRD caller of startShuttle -- which is why phase 3 extracted that
+    // sequence before this button existed rather than after.
+    //
+    // AtTwoX, not the keyboard's AtOneX. The spec states it directly ("If
+    // paused, the first press begins forward playback at +2x") and the owner
+    // confirmed both readings on 2026-08-10: the keyboard ladder and the button
+    // ladder differ at the first rung and agree everywhere above it. The
+    // difference is an ARGUMENT to the one rate machine, never a call site
+    // reaching past the controller to write `speed`.
+    fastForwardAction_ = new QAction("Fast-forward", this);
+    connect(fastForwardAction_, &QAction::triggered, this, [this]() {
+        startShuttle(1, trace::core::ShuttleEntry::AtTwoX);
+        refreshHud("FF");
+    });
+
     // The transport bar owns the slider widget; MainWindow keeps driving it,
     // so every scrub/seek path below is unchanged.
     transportBar_->setFrameText(QStringLiteral("--"));
@@ -1043,8 +1059,8 @@ void MainWindow::setupTransportControls() {
             prevFrameAction_, &QAction::trigger);
     connect(transportBar_, &trace::ui::TransportBar::playPauseClicked,
             playPauseAction_, &QAction::trigger);
-    connect(transportBar_, &trace::ui::TransportBar::nextFrameClicked,
-            nextFrameAction_, &QAction::trigger);
+    connect(transportBar_, &trace::ui::TransportBar::fastForwardClicked,
+            fastForwardAction_, &QAction::trigger);
     // The same action the File menu and the shortcuts run. trigger() rather than
     // a lambda: a checkable action must flip its own tick, and the button and the
     // menu must not be able to disagree about which state that is.
@@ -1218,6 +1234,8 @@ void MainWindow::syncTransportBar() {
     timelineSlider_->setEnabled(hasAnyMedia);
     prevFrameAction_->setEnabled(hasAnyMedia);
     nextFrameAction_->setEnabled(hasAnyMedia);
+    // Fast-forward needs somewhere to run, which a single still frame is not.
+    if (fastForwardAction_) fastForwardAction_->setEnabled(hasPlayableRange);
     playPauseAction_->setEnabled(hasPlayableRange);
     playPauseAction_->setText(playing ? "Pause" : "Play");
 
@@ -1742,26 +1760,57 @@ void MainWindow::startPlaybackRun() {
 // ordinary playback on the validated audio-mastered path, and the shuttle
 // deliberately never enters it.
 //
-// `landPreviousExactly` IS THE ONE THING THE CALLERS GENUINELY DISAGREE ABOUT,
-// and it is preserved here rather than unified, because both readings shipped in
-// the signed-off engine and neither has been measured against the other. L
-// passes true and MUST: at L-to-1x out of a reverse run no new shuttle run is
-// started, so nothing else would end the old one and its lease and queue would
-// be stranded. J passes false: a J press always produces a run, and that run
-// supersedes the picture immediately. What is NOT derivable is why L at 2x also
-// lands -- a synchronous Step decode on every forward speed change out of
-// reverse -- when J at -2x does not. PHASES 4 AND 5 MUST SETTLE THIS, because
-// the buttons are a third caller and will have to pass something.
-void MainWindow::startShuttle(int direction,
-                              trace::core::ShuttleEntry entry,
-                              bool landPreviousExactly) {
+// NO SHUTTLE PRESS LANDS THE PREVIOUS RUN. Settled at spec phase 4; J and L
+// used to disagree, J passing false and L true, and the buttons are a third and
+// fourth caller that had to pass something.
+//
+// Two halves of the recorded justification turned out not to hold.
+//
+// "L must pass true or the old run's LEASE AND QUEUE would strand" is not about
+// this flag at all: endShuttleRun() reclaims the lease and clears the queue
+// ABOVE its landExactly branch, and startShuttle calls it unconditionally. The
+// lease comes back for every value of the flag. What the flag controls is only
+// the decode that follows.
+//
+// "J passes false because a forward run supersedes the picture immediately"
+// described a mechanism that dd21fe9 removed. Before it, an off-speed forward
+// run presented one frame per tick synchronously, so its picture really was
+// already exact; it is a queued, strided run now, the same shape as reverse.
+//
+// What was left was anchoring -- the landing is a synchronous Step decode, and
+// the forward run that follows decodes forward from wherever the decoder is --
+// and that is a question about the decoder rather than about the picture, so it
+// was measured (scripts/measure/shuttleland.ps1, reverse then L, land on vs off):
+//
+//   4K H.264   -1x -> +2x   land 0.8ms   48 frames both, starve 0 both, 100.2 / 100.1%
+//   4K H.264   -1x -> +1x   land 0.7ms   47 frames both, handler>budget 1 (max 105.1 / 105.8)
+//   1080p 412f -10x -> +2x  land 0.3ms   48 frames both, starve 0 both, 100.8 / 100.0%
+//   ProRes4444 -1x -> +2x   land 25.2ms  46 vs 45 frames, starve 4 vs 5, 92.8 / 90.8%
+//
+// It buys nothing, and the mechanism says why. On a long-GOP file the frame is
+// a REVERSE-CACHE HIT by construction -- the reverse run decoded and presented
+// it moments earlier -- so the landing costs under a millisecond AND, because a
+// cache hit sets the decoder's currentFrame_ but never its lastDecodedFrame, it
+// does not move the decoder either. There is no anchor to buy. The -1x -> +1x
+// row is the proof: ordinary 1x playback is the one path that decodes on the UI
+// thread, and its first tick pays a ~105ms walk out of the reverse position
+// WITH the landing exactly as it does without. On ProRes 4444 the cache cannot
+// help (`rev-hit 0.0%` -- every frame is a keyframe, so nothing is ever walked
+// past and cached), the landing becomes a real 25.2ms block on the UI thread,
+// and it still buys one frame's difference over a two-second run.
+//
+// So the landing belongs to a STOP, where the standing rule applies directly:
+// fidelity is owed to the frame the user stops on. K, Space and running off the
+// end of the media all still pass true. A press that starts another run does
+// not, because the frame it would re-decode is replaced within one frame period.
+void MainWindow::startShuttle(int direction, trace::core::ShuttleEntry entry) {
     if (!frameSource_ || !frameSource_->canPlay()) return;
 
     // 1. End the run in progress. Every press is a new run: a new speed or a new
     //    direction invalidates everything already produced, and the generation
     //    bump inside reclaimDecoder() makes that true by construction rather
     //    than by the order two callbacks happen to run in.
-    endShuttleRun(landPreviousExactly);
+    endShuttleRun(/*landExactly=*/false);
 
     // 2. The controller owns the ladder, and this is the only thing that picks a
     //    speed. `entry` decides the first rung and nothing else.
@@ -1804,6 +1853,16 @@ void MainWindow::startShuttle(int direction,
     //    at per-frame decode cost, which is how ProRes 4444 asked for 2x and
     //    delivered 1.00x while 4x delivered 1.33x.
     if (!ordinaryForwardPlay) startShuttleRun(direction, stride);
+
+    // 8. The spec's temporary rate indicator, for every surface at once because
+    //    this is the one place a shuttle rate is ever chosen. Shown only for a
+    //    run: ordinary 1x forward playback has no rate to announce, and the
+    //    predicate that decides whether there is a run is the same one.
+    if (transportBar_) {
+        transportBar_->flashRate(ordinaryForwardPlay
+            ? QString()
+            : QStringLiteral("%1%2x").arg(direction < 0 ? "-" : "+").arg(stride));
+    }
 }
 
 // The single exact-frame-step command. Left/Right and both transport buttons
@@ -2050,6 +2109,8 @@ void MainWindow::endShuttleRun(bool landExactly) {
     shuttleNextTarget_ = -1;
 
     if (landExactly && shuttleLastPresented_ >= 0) {
+        QElapsedTimer landClock;
+        landClock.start();
         // Land on the frame that was ON SCREEN, never on the one the arithmetic
         // had run ahead to. The queue may hold frames the user never saw, and
         // stopping on one of those would move the picture after the user asked
@@ -2059,6 +2120,9 @@ void MainWindow::endShuttleRun(bool landExactly) {
                             shuttleDir_, true);
         QString error;
         loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step);
+        shuttleLandLastMs_ = static_cast<double>(landClock.nsecsElapsed()) / 1'000'000.0;
+        shuttleLandMaxMs_ = std::max(shuttleLandMaxMs_, shuttleLandLastMs_);
+        ++shuttleLandCount_;
     }
     shuttleLastPresented_ = -1;
 }
@@ -3638,7 +3702,12 @@ void MainWindow::refreshHud(const QString& action) {
             // pipeline that never got ahead, and `starve` counts the slots that
             // had no frame to show. A run with starve 0 presented every slot it
             // was asked for.
-            const QString l7g = QString("shuttle | %1 %9 | stride %2 adv %10 | %11 gop %12 | q %3/%4 (max %5) | starve %6 | next %7 | last %8")
+            // `land` is the UI-THREAD cost of endShuttleRun's landing branch --
+            // a synchronous Step decode, which on a long-GOP file is a seek plus
+            // a GOP walk. It is reported separately because it happens BEFORE
+            // beginPlaybackTimeline() resets the run counters, so every other
+            // instrument in this HUD measures it as free.
+            const QString l7g = QString("shuttle | %1 %9 | stride %2 adv %10 | %11 gop %12 | q %3/%4 (max %5) | starve %6 | next %7 | last %8 | land %13 (%14ms max %15ms)")
                 .arg(!shuttleAsyncEnabled() ? "OFF" : shuttleRunActive_ ? "RUN" : "idle")
                 .arg(shuttleStride_)
                 .arg(static_cast<long long>(shuttleQueue_.size()))
@@ -3650,7 +3719,10 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(shuttleDir_ > 0 ? "FWD" : "REV")
                 .arg(shuttleAdvance_)
                 .arg(shuttleSnapping_ ? "SNAP" : "walk")
-                .arg(shuttleGop_);
+                .arg(shuttleGop_)
+                .arg(shuttleLandCount_)
+                .arg(shuttleLandLastMs_, 0, 'f', 1)
+                .arg(shuttleLandMaxMs_, 0, 'f', 1);
 
             const QString l7f = QString("sample %1 | stride %2 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
                 .arg(!scrubSamplingEnabled() ? "OFF"

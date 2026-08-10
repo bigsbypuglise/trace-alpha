@@ -10,7 +10,7 @@ assets/
 │   └── app-icon/       trace.ico, trace.icns, the png/{windows,macos} sets
 │                       and the two svg masters
 ├── interface/
-│   ├── transport/      play, pause, rewind, fast-forward, prev-frame, next-frame
+│   ├── transport/      play, pause, rewind, fast-forward, prev-frame
 │   ├── window/         fullscreen-enter, fullscreen-exit
 │   └── common/         empty — volume, share, inspector, zoom, rotate and loop
 │                       arrive here when those features are real
@@ -50,16 +50,23 @@ Two consequences worth stating, because both have bitten before:
   scales the 48px master. The two frame-step glyphs are the exception and do
   have a 72px rendition — see below.
 
-## The two frame-step glyphs
+## The one remaining frame-step glyph
 
-`prev-frame` and `next-frame` come from the **superseded first-pass set**, which
-the approved package keeps as `player-icons/` and labels "SUPERSEDED — kept for
-reference". Using them is deliberate. The approved `base-ui-icons/` set has no
-frame-step glyph by design, and its `transport_scan_*` pair is the artwork for
-the *redesigned* Rewind and Fast-forward — but those two buttons still perform
-single-frame stepping until spec phases 4 and 5. Shipping scan artwork over
-stepping behaviour would put a lie on a visible control, so the artwork moves
-when the behaviour does, and these two leave `interface/transport/` then.
+`prev-frame` comes from the **superseded first-pass set**, which the approved
+package keeps as `player-icons/` and labels "SUPERSEDED — kept for reference".
+Using it is deliberate. The approved `base-ui-icons/` set has no frame-step
+glyph by design, and its `transport_scan_*` pair is the artwork for the
+*redesigned* Rewind and Fast-forward — but the backward button still performs
+single-frame stepping until spec phase 5. Shipping scan artwork over stepping
+behaviour would put a lie on a visible control, so the artwork moves when the
+behaviour does.
+
+**`next-frame` has already left, at spec phase 4**, because that is the commit
+in which the forward button stopped stepping and became Fast-forward. That is
+the rule working rather than an exception to it: the two glyphs arrived
+together and leave separately because their buttons change separately.
+`prev-frame` is also the only glyph here with a 72px rendition, which is a
+property of the first-pass set rather than of the control.
 
 ## Adding a glyph
 

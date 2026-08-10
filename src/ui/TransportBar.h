@@ -8,6 +8,7 @@ QT_BEGIN_NAMESPACE
 class QSlider;
 class QLabel;
 class QHBoxLayout;
+class QTimer;
 QT_END_NAMESPACE
 
 namespace trace::ui {
@@ -64,11 +65,18 @@ public:
     void setFullscreen(bool fullscreen);
     void setFrameText(const QString& text);
     void setControlsEnabled(bool enabled);
+    // The spec's temporary shuttle-rate indicator: "+2x", "-30x", and so on,
+    // cleared after a moment. An empty string clears it immediately, which is
+    // what ordinary 1x playback passes.
+    void flashRate(const QString& text);
 
 signals:
     void prevFrameClicked();
     void playPauseClicked();
-    void nextFrameClicked();
+    // Spec phase 4: the visible forward control is Fast-forward, not Next
+    // Frame. The exact-frame-step command it used to emit is unchanged and is
+    // reached by the Right arrow.
+    void fastForwardClicked();
     void fullscreenClicked();
 
 protected:
@@ -79,10 +87,12 @@ private:
 
     TransportButton* prevFrameBtn_ = nullptr;
     TransportButton* playPauseBtn_ = nullptr;
-    TransportButton* nextFrameBtn_ = nullptr;
+    TransportButton* fastForwardBtn_ = nullptr;
     TransportButton* fullscreenBtn_ = nullptr;
     QSlider* slider_ = nullptr;
     QLabel* frameLabel_ = nullptr;
+    QLabel* rateLabel_ = nullptr;
+    QTimer* rateTimer_ = nullptr;
 
     QIcon playIcon_;
     QIcon pauseIcon_;

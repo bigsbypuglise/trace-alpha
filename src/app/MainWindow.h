@@ -197,12 +197,12 @@ private:
     // silently while decaying quadratically. A sequence with five steps and no
     // name is a sequence a new caller gets four steps of.
     //
-    // `entry` is which rung the ladder starts on -- J/L enter at 1x, the buttons
-    // will enter at 2x. `landPreviousExactly` is the one thing the two existing
-    // callers genuinely disagree about; see the definition.
-    void startShuttle(int direction,
-                      trace::core::ShuttleEntry entry,
-                      bool landPreviousExactly);
+    // `entry` is which rung the ladder starts on -- J/L enter at 1x, the Rewind
+    // and Fast-forward buttons at 2x. There is no landing parameter: spec phase
+    // 4 measured it and no shuttle press lands the previous run. See the
+    // definition for the measurement and for the two halves of the old
+    // justification that did not survive it.
+    void startShuttle(int direction, trace::core::ShuttleEntry entry);
 
     // The single exact-frame-step command, reached by Left/Right and by the two
     // transport buttons. `delta` is -1 or +1.
@@ -299,6 +299,17 @@ private:
     long long shuttleStarves_ = 0;
     long long shuttleQueueMaxSeen_ = 0;
 
+    // What endShuttleRun's landing branch costs THE UI THREAD, measured rather
+    // than reasoned about. Added at spec phase 4 to settle `landPreviousExactly`
+    // -- the branch is a synchronous Step decode of the frame already on screen,
+    // and on a long-GOP file that is a seek plus a GOP walk. It sits BEFORE
+    // beginPlaybackTimeline() in startShuttle, so the new run's own cadence
+    // counters are reset after it and cannot see it: without this field the
+    // landing measures free on every instrument the app already had.
+    long long shuttleLandCount_ = 0;
+    double shuttleLandLastMs_ = 0.0;
+    double shuttleLandMaxMs_ = 0.0;
+
     // Decoder telemetry as of the last time it was safe to read. Refreshed
     // from the live decoder when this thread owns it, and from the worker's
     // published snapshot when it does not, so refreshHud has one source and
@@ -312,7 +323,16 @@ private:
     trace::ui::TransportBar* transportBar_ = nullptr;
     QAction* prevFrameAction_ = nullptr;
     QAction* playPauseAction_ = nullptr;
+    // The exact-frame-step command still exists and is still shared -- it is
+    // reached by the Right arrow only from spec phase 4 on. The spec's
+    // "frame stepping becomes keyboard-only" removes the BUTTON, not the
+    // command: "do not delete the underlying exact-frame-step commands".
     QAction* nextFrameAction_ = nullptr;
+    // What the old Next Frame button became at spec phase 4. A separate action
+    // from nextFrameAction_ rather than a re-pointed one, because both survive:
+    // one is a control on screen, the other is a keyboard command, and they now
+    // do entirely different things.
+    QAction* fastForwardAction_ = nullptr;
     // Both created in setupSharedActions(), which runs BEFORE setupMenus():
     // the menu adds the action, it does not define it. Before spec phase 2 the
     // fullscreen toggle was four lines written twice -- once for the menu and
