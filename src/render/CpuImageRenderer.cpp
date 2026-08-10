@@ -5,9 +5,11 @@
 #include <QElapsedTimer>
 #include <QPainter>
 #include <QRectF>
+#include <QRgb>
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
 
 namespace trace::render {
 namespace {
@@ -105,6 +107,11 @@ void CpuImageRenderer::paint(QWidget* host) {
             p.drawText(host->rect(), Qt::AlignCenter, placeholder_);
         }
 
+        // After the video, like the D3D11 backend, and inside the same painter
+        // scope so it is included in the paint total rather than measured
+        // separately into a number nobody compares.
+        if (overlayModel_) paintOverlay(p, host);
+
         // Same scope as the original measurement, for continuity.
         const double paintMs = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
         stats_.lastPaintMs = paintMs;
@@ -120,6 +127,86 @@ void CpuImageRenderer::paint(QWidget* host) {
     const double pn = static_cast<double>(stats_.paintCount);
     stats_.avgPaintTotalMs += (paintTotalMs - stats_.avgPaintTotalMs) / pn;
     stats_.avgDrawImageMs += (drawImageMs - stats_.avgDrawImageMs) / pn;
+}
+
+const QImage& CpuImageRenderer::tintedAtlas(const QImage& atlas, long long revision,
+                                            float brighten) {
+    for (auto& t : tints_) {
+        if (std::abs(t.brighten - brighten) < 1e-4f) {
+            if (t.revision != revision) {
+                t.image = atlas;
+                // Detach before writing: `atlas` is the model's own image and
+                // must not be modified through a shared buffer.
+                t.image.detach();
+                const int h = t.image.height();
+                const int w = t.image.width();
+                for (int y = 0; y < h; ++y) {
+                    auto* line = reinterpret_cast<QRgb*>(t.image.scanLine(y));
+                    for (int x = 0; x < w; ++x) {
+                        const QRgb c = line[x];
+                        const int a = qAlpha(c);
+                        if (a == 0) continue;
+                        // Premultiplied RGB scaled and alpha left alone, which
+                        // is bit-for-bit what the shader's tint does. Values
+                        // above the alpha are deliberately allowed: both
+                        // compositors evaluate src + dst*(1-srcA), so an
+                        // over-bright premultiplied texel is an additive glow
+                        // on each and clamping here would make the CPU path
+                        // the odd one out.
+                        line[x] = qRgba(std::min(255, static_cast<int>(qRed(c) * brighten)),
+                                        std::min(255, static_cast<int>(qGreen(c) * brighten)),
+                                        std::min(255, static_cast<int>(qBlue(c) * brighten)),
+                                        a);
+                    }
+                }
+                t.revision = revision;
+            }
+            return t.image;
+        }
+    }
+    tints_.push_back(TintCache{brighten, -1, QImage()});
+    return tintedAtlas(atlas, revision, brighten);
+}
+
+// The CPU half of the renderer-neutral overlay contract. It consumes exactly
+// the same quads the D3D11 drawer does, in the same order, in the same device-
+// pixel space -- so the two paths differ in how a rectangle reaches the screen
+// and in nothing else.
+//
+// QPainter is given the DEVICE grid explicitly rather than being left on the
+// widget's logical one. The model lays out in device pixels because that is the
+// only space the D3D11 surface has, and re-expressing every rect in logical
+// coordinates here would put the two backends a fraction of a pixel apart at
+// fractional DPI, which is the exact fault ddb38ca was opened to fix for the
+// video rect.
+void CpuImageRenderer::paintOverlay(QPainter& p, QWidget* host) {
+    const QSize pixels = hostDeviceSize(host);
+    overlayModel_->setDevicePixelRatio(host->devicePixelRatioF());
+    const auto& quads = overlayModel_->buildFrame(pixels);
+    if (quads.empty()) return;
+
+    const QImage& atlas = overlayModel_->atlasImage();
+    const QImage& text = overlayModel_->textImage();
+    if (atlas.isNull()) return;
+
+    p.save();
+    // Undo the dpr transform Qt installed, so a quad's device-pixel rect means
+    // device pixels here too.
+    p.resetTransform();
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+
+    for (const auto& q : quads) {
+        const bool isText = q.source == OverlayQuad::Source::Text;
+        if (isText && text.isNull()) continue;
+        const QImage& src = isText
+            ? text
+            : tintedAtlas(atlas, overlayModel_->atlasRevision(), q.brighten);
+        p.setOpacity(q.alpha);
+        p.drawImage(q.dst, src, q.src);
+    }
+    p.setOpacity(1.0);
+    p.restore();
 }
 
 } // namespace trace::render

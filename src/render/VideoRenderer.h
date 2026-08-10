@@ -12,6 +12,8 @@ class QWidget;
 
 namespace trace::render {
 
+class OverlayModel;
+
 // What a render pass cost and what it produced. Kept separate from
 // ViewerPerfStats because these are the renderer's numbers: a D3D11 backend
 // reports the same fields for a completely different set of operations, and the
@@ -116,10 +118,18 @@ public:
     // is asked here rather than inferred from name().
     virtual bool usesNativeSurface() const { return false; }
 
-    // Wires the application's commands into a backend that draws its own
-    // controls. A no-op for backends that do not: the CPU path hosts ordinary
-    // Qt widgets, which need none of this.
-    virtual void setOverlayHooks(const OverlayHooks& hooks) { (void)hooks; }
+    // The floating transport this backend should composite into its own output,
+    // or null for none. Non-owning: the host owns the model, because the model
+    // outlives any one backend and because input has to reach it on the CPU
+    // path through Qt events rather than through the renderer at all.
+    //
+    // BOTH backends implement this. It used to be `setOverlayHooks` and a
+    // D3D11-only compositor, which was defensible while `cpu` was the default
+    // and the GPU path was opt-in. `d3d11` is the default now and `cpu` is the
+    // documented escape hatch, so an overlay only one of them can draw would
+    // mean the advice "try TRACE_RENDERER=cpu" silently costs the user their
+    // transport.
+    virtual void setOverlay(OverlayModel* model) { (void)model; }
 
     // Identifies the backend in the HUD, so a fallback is visible rather than
     // silent -- a GPU path that quietly never engages is the failure mode worth

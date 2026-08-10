@@ -139,14 +139,14 @@ LRESULT D3D11VideoRenderer::handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wp,
                 TrackMouseEvent(&tme);
                 mouseTracking_ = true;
             }
-            overlay_.onMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (overlayModel_) overlayModel_->onMouseMove(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             handled = true;
             return 0;
         }
 
         case WM_MOUSELEAVE:
             mouseTracking_ = false;
-            overlay_.onMouseLeave();
+            if (overlayModel_) overlayModel_->onMouseLeave();
             handled = true;
             return 0;
 
@@ -155,13 +155,13 @@ LRESULT D3D11VideoRenderer::handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wp,
             // the release, which is what makes a timeline drag survive the
             // pointer running off the panel.
             SetCapture(hwnd);
-            overlay_.onMouseDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (overlayModel_) overlayModel_->onMouseDown(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             handled = true;
             return 0;
 
         case WM_LBUTTONUP:
             ReleaseCapture();
-            overlay_.onMouseUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            if (overlayModel_) overlayModel_->onMouseUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             handled = true;
             return 0;
 
@@ -423,29 +423,23 @@ bool D3D11VideoRenderer::initialize(QWidget* host, QString& error) {
     if (!ensureRenderTarget(error)) return false;
 
     host_ = host;
+    // Built whether or not the overlay is switched on: it allocates a pipeline
+    // and no per-frame work, and building it here rather than on first reveal
+    // keeps a shader compile out of the presentation path.
     QString overlayError;
     if (!overlay_.initialize(device_.Get(), context_.Get(), overlayError)) {
         // Not fatal: the video path is what this backend is for, and an overlay
-        // that cannot build must not cost the user their picture.
-        qWarning().noquote() << "Trace: overlay compositor disabled:" << overlayError;
-    } else {
-        const bool overlayOn = !qgetenv("TRACE_OVERLAY_COMPOSITED").isEmpty();
-        overlay_.setEnabled(overlayOn);
-        if (overlayOn) {
-            // Say so on stderr. This is a disposable architecture spike with
-            // placeholder art, and anyone who switches it on should be in no
-            // doubt that it is not a feature.
-            qWarning().noquote()
-                << "Trace: EXPERIMENTAL composited overlay enabled "
-                   "(spike, placeholder art, not the final interface).";
-        }
+        // that cannot build must not cost the user their picture. The host is
+        // told by the absence of a drawn overlay, not by a failed initialize.
+        qWarning().noquote() << "Trace: overlay drawer disabled:" << overlayError;
+        overlayFailed_ = true;
     }
 
     return true;
 }
 
-void D3D11VideoRenderer::setOverlayHooks(const OverlayHooks& hooks) {
-    overlay_.setHooks(hooks);
+void D3D11VideoRenderer::setOverlay(OverlayModel* model) {
+    overlayModel_ = overlayFailed_ ? nullptr : model;
 }
 
 void D3D11VideoRenderer::releaseSizeDependent() {
@@ -965,8 +959,10 @@ void D3D11VideoRenderer::paint(QWidget* host) {
 
     // After the video, before Present. Its own viewport and blend state; it
     // restores neither, because every path into paint() sets both.
-    overlay_.setDevicePixelRatio(dpr);
-    overlay_.draw(pixels);
+    if (overlayModel_) {
+        overlayModel_->setDevicePixelRatio(dpr);
+        overlay_.draw(*overlayModel_, pixels);
+    }
 
     stats_.lastDrawWasScaled = resampled;
     // Always filtered when resampled: unlike the CPU path there is no

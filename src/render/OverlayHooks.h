@@ -21,6 +21,13 @@ namespace trace::render {
 struct OverlayHooks {
     // Run the centralized Play/Pause action. Not "start playback".
     std::function<void()> playPause;
+    // The two side controls, as they behave TODAY: single-frame stepping.
+    //
+    // The approved interface spec re-points them at the reverse and forward
+    // shuttle and replaces the artwork with the continuous-scan icons, but that
+    // is spec phases 4 and 5. These are deliberately still named for what they
+    // do rather than for what they will become -- `isVideoScrubActive()` is the
+    // standing reminder of what a name that describes an intention costs.
     std::function<void()> stepBack;
     std::function<void()> stepForward;
 

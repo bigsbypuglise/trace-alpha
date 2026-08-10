@@ -4,7 +4,7 @@
 #include <QSize>
 #include <QString>
 
-#include "render/OverlayCompositor.h"
+#include "render/D3D11OverlayDrawer.h"
 #include "render/VideoRenderer.h"
 
 #include <d3d11.h>
@@ -49,10 +49,11 @@ public:
     // so this is an additional capability rather than a mode.
     bool acceptsPlanarYuv() const override { return true; }
 
-    // Renderer-composited transport overlay (spike). Enabled by
-    // TRACE_OVERLAY_COMPOSITED=1; the hooks keep every command in the
-    // application layer -- see OverlayHooks.
-    void setOverlayHooks(const OverlayHooks& hooks) override;
+    // Composites the host's overlay model into the same pass as the video, and
+    // routes this surface's native mouse input to it. The model owns all the
+    // state and every command stays in the application layer -- see
+    // OverlayModel and OverlayHooks.
+    void setOverlay(OverlayModel* model) override;
 
     QString name() const override { return name_; }
     const RenderStats& stats() const override { return stats_; }
@@ -103,7 +104,16 @@ private:
     // Needed from the window procedure to ask Qt for a repaint when hover or
     // fade changes the picture without a new video frame.
     QWidget* host_ = nullptr;
-    OverlayCompositor overlay_;
+    D3D11OverlayDrawer overlay_;
+    // Non-owning; the host owns it. Null until setOverlay(), and null forever
+    // when the overlay is switched off, which is what makes "no overlay" cost
+    // one null test per present rather than a disabled draw path.
+    OverlayModel* overlayModel_ = nullptr;
+    // The drawer's pipeline failed to build. Kept so setOverlay() can refuse
+    // the model rather than accepting it and drawing nothing -- the difference
+    // matters because paint() would otherwise call buildFrame() every present,
+    // rasterising an atlas nobody can display.
+    bool overlayFailed_ = false;
     bool mouseTracking_ = false;
 
 public:

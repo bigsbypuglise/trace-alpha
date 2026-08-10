@@ -2843,7 +2843,7 @@ void MainWindow::refreshHud(const QString& action) {
                     : (drawPerf.lastDrawWasFiltered
                            ? QStringLiteral("filtered x%1").arg(drawPerf.reduceTaps)
                            : QStringLiteral("NEAREST"));
-            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9")
+            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9%10")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
                 .arg(perf.srcFullRange ? "full" : "limited")
@@ -2856,7 +2856,12 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(static_cast<int>(std::lround(height() * hudDpr)))
                 // Which backend is actually presenting. A GPU path that quietly
                 // fell back to cpu would otherwise be invisible.
-                .arg(viewer_->rendererName());
+                .arg(viewer_->rendererName())
+                // And whether the floating transport is switched on, for the
+                // same reason: the overlay is drawn by the renderer on both
+                // backends now, so "is it on" is not answerable from anything
+                // else on screen once it has faded out.
+                .arg(viewer_->overlayEnabled() ? QStringLiteral(" +overlay") : QString());
 
             // `upload` is the CPU -> GPU transfer for one frame and `tex` is how
             // many GPU textures have been created since launch. Both read 0 on

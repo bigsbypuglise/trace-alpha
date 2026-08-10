@@ -1,13 +1,36 @@
 #include "ui/ViewerWidget.h"
 
 #include <QDebug>
+#include <QMouseEvent>
 #include <QResizeEvent>
+
+#include <cmath>
 
 namespace trace::ui {
 
 ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
     setMinimumSize(640, 360);
     clock_.start();
+
+    // Read once, here, so both backends get the same answer. It used to be read
+    // inside the D3D11 backend, which was defensible while that backend was
+    // opt-in and is not now that it is the default: an overlay that appears on
+    // the shipping renderer and not on its own control would make every A/B
+    // between them a comparison of two different applications.
+    overlayModel_.setEnabled(trace::render::OverlayModel::enabledByEnvironment());
+    if (overlayModel_.enabled()) {
+        // Say so on stderr. The mechanism is real now, but the artwork is still
+        // the spike's placeholder geometry until the interface pass draws it,
+        // and anyone switching this on should know which half they are looking
+        // at.
+        qWarning().noquote()
+            << "Trace: floating transport overlay enabled "
+               "(mechanism is real; artwork is still placeholder).";
+        // Pointer motion has to reveal it, and a move with no button held only
+        // arrives with tracking on. Harmless under the D3D11 backend, which
+        // never receives these events at all.
+        setMouseTracking(true);
+    }
 
     renderer_ = trace::render::createRenderer();
     QString error;
@@ -61,7 +84,20 @@ bool ViewerWidget::adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> r
     }
 
     renderer_ = std::move(renderer);
+    // After initialize(), because a backend that failed has already been
+    // discarded and must not be left holding a pointer to the model. Handed to
+    // both backends unconditionally: whether anything is drawn is the model's
+    // enabled() to decide, not the renderer's.
+    renderer_->setOverlay(&overlayModel_);
     return true;
+}
+
+// Logical -> device. The model lays out in device pixels because the D3D11
+// surface has no other space, so this is where the CPU path joins it.
+QPoint ViewerWidget::toDevice(const QPointF& logical) const {
+    const double dpr = devicePixelRatioF();
+    return QPoint(static_cast<int>(std::lround(logical.x() * dpr)),
+                  static_cast<int>(std::lround(logical.y() * dpr)));
 }
 
 QString ViewerWidget::rendererName() const {
@@ -81,7 +117,39 @@ QPaintEngine* ViewerWidget::paintEngine() const {
 }
 
 void ViewerWidget::setOverlayHooks(const trace::render::OverlayHooks& hooks) {
-    if (renderer_) renderer_->setOverlayHooks(hooks);
+    // The hooks belong to the model, not to a backend. That is the whole point
+    // of the split: the commands are the application's, the geometry is the
+    // model's, and a renderer only puts rectangles on a screen.
+    overlayModel_.setHooks(hooks);
+}
+
+void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
+    if (!overlayModel_.enabled()) { QWidget::mouseMoveEvent(event); return; }
+    const QPoint p = toDevice(event->position());
+    if (!overlayModel_.onMouseMove(p.x(), p.y())) QWidget::mouseMoveEvent(event);
+}
+
+void ViewerWidget::mousePressEvent(QMouseEvent* event) {
+    if (!overlayModel_.enabled() || event->button() != Qt::LeftButton) {
+        QWidget::mousePressEvent(event);
+        return;
+    }
+    const QPoint p = toDevice(event->position());
+    if (!overlayModel_.onMouseDown(p.x(), p.y())) QWidget::mousePressEvent(event);
+}
+
+void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
+    if (!overlayModel_.enabled() || event->button() != Qt::LeftButton) {
+        QWidget::mouseReleaseEvent(event);
+        return;
+    }
+    const QPoint p = toDevice(event->position());
+    if (!overlayModel_.onMouseUp(p.x(), p.y())) QWidget::mouseReleaseEvent(event);
+}
+
+void ViewerWidget::leaveEvent(QEvent* event) {
+    if (overlayModel_.enabled()) overlayModel_.onMouseLeave();
+    QWidget::leaveEvent(event);
 }
 
 void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {

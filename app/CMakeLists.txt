@@ -94,8 +94,8 @@ if(TRACE_FXC)
   set(TRACE_D3D11_SOURCES
     ../src/render/D3D11VideoRenderer.h
     ../src/render/D3D11VideoRenderer.cpp
-    ../src/render/OverlayCompositor.h
-    ../src/render/OverlayCompositor.cpp
+    ../src/render/D3D11OverlayDrawer.h
+    ../src/render/D3D11OverlayDrawer.cpp
     ../src/render/shaders/FullscreenQuad.vs.hlsl
     ../src/render/shaders/TexturedQuad.ps.hlsl
     ../src/render/shaders/OverlayQuad.vs.hlsl
@@ -127,6 +127,10 @@ add_executable(Trace
   ../src/ui/OverlaySpike.h
   ../src/ui/OverlaySpike.cpp
   ../src/render/OverlayHooks.h
+  # Backend-neutral, so it is listed here rather than in TRACE_D3D11_SOURCES:
+  # the CPU renderer draws the same overlay and must build without D3D11.
+  ../src/render/OverlayModel.h
+  ../src/render/OverlayModel.cpp
   ../src/render/VideoRenderer.h
   ../src/render/VideoRenderer.cpp
   ../src/render/CpuImageRenderer.h

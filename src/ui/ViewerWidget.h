@@ -7,6 +7,7 @@
 #include <memory>
 
 #include "core/VideoFrame.h"
+#include "render/OverlayModel.h"
 #include "render/VideoRenderer.h"
 
 namespace trace::ui {
@@ -72,17 +73,39 @@ public:
     // successful WARP init as a fallback and a genuine fallback as a rename.
     bool rendererFellBack() const { return rendererFellBack_; }
     void setOverlayHooks(const trace::render::OverlayHooks& hooks);
+    // Whether the floating transport is switched on at all. The HUD reports it,
+    // because an overlay that silently never engages looks exactly like one
+    // that is working from every other number -- the same reason rendererName()
+    // is reported.
+    bool overlayEnabled() const { return overlayModel_.enabled(); }
 
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     QPaintEngine* paintEngine() const override;
+    // The CPU backend's input path. Under the D3D11 backend these never fire:
+    // the surface is a child HWND above this widget and takes the hit-test
+    // itself, which is the same fact that closed the Qt-widget overlay route.
+    // So the two paths do not race -- exactly one of them is reachable at a
+    // time, decided by which backend was adopted.
+    void mouseMoveEvent(QMouseEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
+    void leaveEvent(QEvent* event) override;
 
 private:
     // Applies the widget-level contract a backend asks for, then initializes
     // it. False leaves the widget in its non-native state, ready for a fallback.
     bool adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> renderer, QString& error);
+    // Logical widget coordinates -> the surface device pixels the model lays
+    // itself out in. One conversion, in one place, because the D3D11 path has
+    // no conversion at all and a second expression is how the two would drift.
+    QPoint toDevice(const QPointF& logical) const;
 
+    // Declared BEFORE renderer_: the constructor adopts a renderer, and
+    // adoptRenderer hands it &overlayModel_. A member constructed afterwards
+    // would be handed to the backend before it existed.
+    trace::render::OverlayModel overlayModel_;
     std::unique_ptr<trace::render::VideoRenderer> renderer_;
     // Mirrors the active renderer's usesNativeSurface(), so the widget-level
     // attributes can be undone if a backend fails to initialize and the CPU
