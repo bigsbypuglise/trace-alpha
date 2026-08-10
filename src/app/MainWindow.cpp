@@ -209,6 +209,25 @@ int scrubRearmMs() {
     return ms;
 }
 
+// Which rung J and L enter the shuttle ladder on.
+//
+// The two conventions are both approved and they differ: the keyboard enters at
+// 1x, and the Rewind / Fast-forward BUTTONS enter at 2x when spec phases 4 and 5
+// add them. TRACE_SHUTTLE_ENTRY=2x drives the button convention through the
+// keyboard, which is the only way to exercise it before those buttons exist --
+// and shipping an entry point that has never been executed is the failure plan
+// section 29.2 records at length. It is an interim knob, like
+// TRACE_VIEW_TRANSFORM is for phase 10, and it leaves with the phase that makes
+// it redundant.
+trace::core::ShuttleEntry shuttleEntryConvention() {
+    static const trace::core::ShuttleEntry entry = [] {
+        return qgetenv("TRACE_SHUTTLE_ENTRY").toLower() == "2x"
+                   ? trace::core::ShuttleEntry::AtTwoX
+                   : trace::core::ShuttleEntry::AtOneX;
+    }();
+    return entry;
+}
+
 } // namespace
 
 MainWindow::~MainWindow() {
@@ -232,6 +251,8 @@ MainWindow::MainWindow() {
     setupSharedActions();
     setupMenus();
     setupTransportControls();
+    // Last: every action it lists has to exist before it can point at one.
+    setupShortcuts();
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
         // GATE E: the timer is re-armed per wake against an absolute deadline,
@@ -845,6 +866,92 @@ void MainWindow::setupSharedActions() {
     addAction(toggleHudAction_);
 }
 
+// Trace's complete keyboard contract, in one place.
+//
+// Spec phase 3 asked for the shuttle and stepping CONTRACTS, and this is the
+// half of it that is about who owns a key. What was here before was a flat
+// switch in keyPressEvent, which works fine as a dispatcher and is useless as a
+// source: spec phase 13 has to render a Keyboard Shortcuts window, and a switch
+// cannot be enumerated, printed, grouped or grepped for a conflict. Extending it
+// would have meant a second, hand-written list of the same keys at phase 13 --
+// two things to keep in agreement, which is exactly what phase 2 spent its
+// effort removing from the fullscreen command.
+//
+// THE TABLE IS COMPLETE AND THE DISPATCHER IS NOT, and that separation is the
+// design. Rows carrying a QAction are documentation only, because Qt dispatched
+// them before keyPressEvent was ever reached; they point at the action instead
+// of copying its keys, so they cannot go stale when a binding changes. Rows
+// carrying a handler are the ones this window still dispatches itself.
+//
+// Behaviour is unchanged by construction: the dispatcher matches on the key and
+// ignores modifiers, which is what a `switch (event->key())` did.
+void MainWindow::setupShortcuts() {
+    using trace::app::ShortcutGroup;
+
+    shortcuts_.addAction(ShortcutGroup::File, openAction_);
+    shortcuts_.addAction(ShortcutGroup::View, fullscreenAction_);
+    shortcuts_.addAction(ShortcutGroup::View, toggleHudAction_);
+
+    shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_Space, tr("Play / Pause"),
+                      [this]() { togglePlayPause(); refreshHud("Space"); });
+    shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_M, tr("Mute"), [this]() {
+        audio_.setMuted(!audio_.isMuted());
+        refreshHud(audio_.isMuted() ? "Mute" : "Unmute");
+    });
+
+    // Frame stepping is keyboard-first from here on (spec: "Frame stepping
+    // becomes keyboard-only"). The two visible side buttons still perform it
+    // until phases 4 and 5 turn them into Rewind and Fast-forward, and they
+    // trigger the SAME action these keys do -- so when those phases re-point the
+    // buttons, the exact-frame-step command survives untouched, which is what
+    // the spec's "do not delete the underlying exact-frame-step commands"
+    // requires.
+    shortcuts_.addKey(ShortcutGroup::Stepping, Qt::Key_Left, tr("Step one frame back"),
+                      [this]() { prevFrameAction_->trigger(); });
+    shortcuts_.addKey(ShortcutGroup::Stepping, Qt::Key_Right, tr("Step one frame forward"),
+                      [this]() { nextFrameAction_->trigger(); });
+
+    shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_J,
+                      tr("Rewind — 1x, 2x, 5x, 10x, 30x"), [this]() {
+        // Reverse never lands the previous run: a J press always produces a
+        // shuttle run, and that run supersedes the picture immediately.
+        startShuttle(-1, shuttleEntryConvention(), /*landPreviousExactly=*/false);
+        refreshHud("J");
+    });
+    shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_K, tr("Stop"), [this]() {
+        // Before pause(): the lease has to come back and the exact landing has
+        // to happen while the run still knows which frame was on screen.
+        endShuttleRun(/*landExactly=*/true);
+        playback_.pause();
+        userPlayIntent_ = false;
+        if (playTimer_.isActive()) {
+            playTimer_.stop();
+            stopAudio();
+            playbackClock_.invalidate();
+            playbackAccumulatorMs_ = 0.0;
+        }
+        refreshHud("K");
+    });
+    shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_L,
+                      tr("Fast-forward — 1x, 2x, 5x, 10x, 30x"), [this]() {
+        startShuttle(1, shuttleEntryConvention(), /*landPreviousExactly=*/true);
+        refreshHud("L");
+    });
+
+    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_F, tr("Readout: frames"), [this]() {
+        viewState_.readoutMode = PrimaryReadoutMode::Frame;
+        refreshHud("Readout: Frame");
+    });
+    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_S, tr("Readout: seconds"), [this]() {
+        viewState_.readoutMode = PrimaryReadoutMode::Seconds;
+        refreshHud("Readout: Seconds");
+    });
+    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_T, tr("Readout: timecode"), [this]() {
+        viewState_.readoutMode = PrimaryReadoutMode::Timecode;
+        refreshHud("Readout: Timecode");
+    });
+}
+
 // Single-key shortcuts and text entry: there is NO text-entry control anywhere
 // in Trace today (phase 1 audit section 4), so the spec's "must not fire while
 // focus is inside a text-entry control" has nothing to guard yet. Qt's own
@@ -889,10 +996,14 @@ void MainWindow::setHudVisible(bool visible) {
 void MainWindow::setupMenus() {
     auto* fileMenu = menuBar()->addMenu("&File");
 
-    auto* openAction = new QAction("&Open...", this);
-    openAction->setShortcut(QKeySequence::Open);
-    connect(openAction, &QAction::triggered, this, &MainWindow::openFileDialog);
-    fileMenu->addAction(openAction);
+    // A member rather than a local, so setupShortcuts() can list it: the
+    // Keyboard Shortcuts window at spec phase 13 has to print Ctrl+O too, and a
+    // table that can only see the actions someone remembered to hoist is the
+    // second hand-written list it exists to avoid.
+    openAction_ = new QAction("&Open...", this);
+    openAction_->setShortcut(QKeySequence::Open);
+    connect(openAction_, &QAction::triggered, this, &MainWindow::openFileDialog);
+    fileMenu->addAction(openAction_);
 
     fileMenu->addAction(fullscreenAction_);
     fileMenu->addAction(toggleHudAction_);
@@ -908,29 +1019,12 @@ void MainWindow::setupTransportControls() {
     // The QActions carry the transport behavior and are shared by the
     // transport bar, menus, and keyboard. The bar only emits intent; nothing
     // about playback logic lives in the UI widget.
+    // ONE exact-frame-step command per direction, reached by the button and by
+    // the arrow key alike. Before spec phase 3 there were two near-copies of it
+    // and they had drifted -- see stepOneFrame for the measured consequence.
     prevFrameAction_ = new QAction("Previous Frame", this);
-    connect(prevFrameAction_, &QAction::triggered, this, [this]() {
-        playback_.stepBackward();
-        playback_.pause();
-        playTimer_.stop();
-        stopAudio();
-        // Explicit stepping: the user has asked to inspect a frame, not to keep
-        // playing. Scrubbing after this must not restart playback.
-        userPlayIntent_ = false;
-        playbackClock_.invalidate();
-        playbackAccumulatorMs_ = 0.0;
-
-        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
-        QString error;
-        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
-            playback_.stepForward();
-            loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step);
-        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
-            prefetchNeighbors();
-        }
-        refreshHud("Prev Frame");
-    });
+    connect(prevFrameAction_, &QAction::triggered, this,
+            [this]() { stepOneFrame(-1, "Prev Frame"); });
 
     playPauseAction_ = new QAction("Play", this);
     connect(playPauseAction_, &QAction::triggered, this, [this]() {
@@ -939,26 +1033,8 @@ void MainWindow::setupTransportControls() {
     });
 
     nextFrameAction_ = new QAction("Next Frame", this);
-    connect(nextFrameAction_, &QAction::triggered, this, [this]() {
-        playback_.stepForward();
-        playback_.pause();
-        playTimer_.stop();
-        stopAudio();
-        userPlayIntent_ = false;
-        playbackClock_.invalidate();
-        playbackAccumulatorMs_ = 0.0;
-
-        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
-        QString error;
-        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
-            playback_.stepBackward();
-            loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step);
-        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
-            prefetchNeighbors();
-        }
-        refreshHud("Next Frame");
-    });
+    connect(nextFrameAction_, &QAction::triggered, this,
+            [this]() { stepOneFrame(1, "Next Frame"); });
 
     // The transport bar owns the slider widget; MainWindow keeps driving it,
     // so every scrub/seek path below is unchanged.
@@ -1645,6 +1721,157 @@ void MainWindow::startPlaybackRun() {
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
     startAudioForPlayback();
     beginPlaybackTimeline();
+}
+
+// Everything a shuttle press does, in the one order that works.
+//
+// Extracted at spec phase 3, deliberately BEFORE phases 4 and 5 add the Rewind
+// and Fast-forward buttons as further callers. It was five steps written out
+// twice, in J and in L, and the two copies had already diverged in four places.
+// Plan section 29.2 is why that matters more here than tidiness usually does:
+// GATE E turned playback from a free-running timer into a timeline that must be
+// ESTABLISHED, and a path that starts the timer without establishing it still
+// compiles, still runs, and decays quadratically -- 20 presents in 8 seconds
+// against a control's 111. A five-step sequence with no name is a sequence the
+// next caller gets four steps of.
+//
+// ONE PREDICATE DECIDES THREE THINGS. `ordinaryForwardPlay` -- forward at
+// exactly 1x -- is simultaneously the case that keeps the play intent a scrub
+// release restores, the case that gets sound, and the case that does NOT become
+// a shuttle run. That is not a coincidence to be tidied away: 1x forward is
+// ordinary playback on the validated audio-mastered path, and the shuttle
+// deliberately never enters it.
+//
+// `landPreviousExactly` IS THE ONE THING THE CALLERS GENUINELY DISAGREE ABOUT,
+// and it is preserved here rather than unified, because both readings shipped in
+// the signed-off engine and neither has been measured against the other. L
+// passes true and MUST: at L-to-1x out of a reverse run no new shuttle run is
+// started, so nothing else would end the old one and its lease and queue would
+// be stranded. J passes false: a J press always produces a run, and that run
+// supersedes the picture immediately. What is NOT derivable is why L at 2x also
+// lands -- a synchronous Step decode on every forward speed change out of
+// reverse -- when J at -2x does not. PHASES 4 AND 5 MUST SETTLE THIS, because
+// the buttons are a third caller and will have to pass something.
+void MainWindow::startShuttle(int direction,
+                              trace::core::ShuttleEntry entry,
+                              bool landPreviousExactly) {
+    if (!frameSource_ || !frameSource_->canPlay()) return;
+
+    // 1. End the run in progress. Every press is a new run: a new speed or a new
+    //    direction invalidates everything already produced, and the generation
+    //    bump inside reclaimDecoder() makes that true by construction rather
+    //    than by the order two callbacks happen to run in.
+    endShuttleRun(landPreviousExactly);
+
+    // 2. The controller owns the ladder, and this is the only thing that picks a
+    //    speed. `entry` decides the first rung and nothing else.
+    if (direction < 0) playback_.jogReverse(entry);
+    else               playback_.jogForward(entry);
+
+    // The stride IS the commanded speed. It is an input the user chose, so
+    // nothing the decoder measures can move it -- which is what stops it running
+    // away the way three of the four scrub-gate inferences did.
+    const int stride = static_cast<int>(std::lround(std::abs(playback_.state().speed)));
+    const bool ordinaryForwardPlay = direction > 0 && stride <= 1;
+
+    // 3. Intent, not state. A 1x forward run is worth restoring after a drag;
+    //    an off-speed or reverse run is a different gesture and resuming it at
+    //    1x would be the wrong answer.
+    userPlayIntent_ = ordinaryForwardPlay;
+
+    // 4. The decoder request. clearQueue is true for both directions now; J
+    //    passed true and L passed false, and the difference was inert --
+    //    clearForwardQueue() only zeroes perfStats_.forwardQueueDepth, a counter
+    //    for the synchronous forward-fill queue that was removed in July 2026
+    //    and is never written any other value.
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, true);
+
+    // 5. Audio. ONE call covers all four cases, because startAudioForPlayback()
+    //    asks audioShouldDrive() first and that already means "forward, at 1x,
+    //    on a video file with a track" -- so it stops the device for reverse and
+    //    for every rung above 1x rather than starting it. J's separate
+    //    stopAudio() was the same thing said twice.
+    startAudioForPlayback();
+
+    // 6. The timeline, NOT a bare playTimer_.start(). See section 29.2 above;
+    //    this is the step whose omission is invisible until playback has been
+    //    running for several seconds.
+    beginPlaybackTimeline();
+
+    // 7. Above 1x, and in reverse at any speed, the run is a shuttle: the speed
+    //    is a sampling stride and presentation stays at one frame per source
+    //    period. Carrying the speed in the tick rate instead caps achieved speed
+    //    at per-frame decode cost, which is how ProRes 4444 asked for 2x and
+    //    delivered 1.00x while 4x delivered 1.33x.
+    if (!ordinaryForwardPlay) startShuttleRun(direction, stride);
+}
+
+// The single exact-frame-step command. Left/Right and both transport buttons
+// reach it through prevFrameAction_ / nextFrameAction_, so there is one
+// definition of what stepping a frame means rather than the two near-copies that
+// were here before spec phase 3.
+//
+// The copies had diverged, and one difference was a real bug: the BUTTON path
+// never called endShuttleRun(), so clicking a frame-step button during a reverse
+// run left shuttleRunActive_ true and shuttleLastPresented_ holding the
+// SHUTTLE's frame. The step itself looked fine -- the run cannot present
+// anything once stepBackward() has paused the controller and the timer is
+// stopped -- so the fault is invisible until the NEXT thing that ends a run
+// takes its landing branch. Press K after that click and
+// setCurrentFrame(shuttleLastPresented_) puts the playhead back where the
+// shuttle was, discarding the frame the user stepped to.
+//
+// MEASURED, on a control built from cbf6d98 against this change, 4K H.264:
+// reverse, click Prev Frame, settle, then K. Control moves the picture by
+// **17.6%** on the K press; after this change it moves **0%**. The gesture
+// preceding it -- click, then step with the arrow key -- passes identically on
+// both, which is why the hole survived: it does not hang and it does not freeze.
+//
+// revtransitions.ps1 enumerates six ways out of a reverse run and every one is a
+// key or the slider. The buttons are a seventh, and nothing exercised them.
+//
+// The other difference between the two copies was inert: Left passed
+// clearQueue=true and Right false, and clearForwardQueue() only zeroes
+// perfStats_.forwardQueueDepth, a counter for the synchronous forward-fill queue
+// removed in July 2026 that is never written any other value.
+void MainWindow::stepOneFrame(int delta, const char* hudLabel) {
+    // End a shuttle run WITHOUT a landing decode: the step below lands its own
+    // frame, and the playhead is already the frame that was on screen, because
+    // every present sets it from the frame's own index.
+    endShuttleRun(/*landExactly=*/false);
+
+    if (delta < 0) playback_.stepBackward();
+    else           playback_.stepForward();
+
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step,
+                        delta < 0 ? -1 : 1, true);
+
+    // Outside any isActive() guard: stepping is a request to inspect a frame
+    // whether or not playback happened to be running, and the intent must not
+    // survive it into a later scrub release.
+    userPlayIntent_ = false;
+    if (playTimer_.isActive()) {
+        playTimer_.stop();
+        stopAudio();
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+    }
+
+    QString error;
+    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
+        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        // Put the playhead back where it was AND re-land the frame it names: a
+        // step that could not be decoded must not leave the counter claiming a
+        // frame the viewer is not showing. The button path did this and the
+        // keyboard path only reverted the counter; the button's is the correct
+        // half and both take it now.
+        if (delta < 0) playback_.stepForward();
+        else           playback_.stepBackward();
+        loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step);
+    } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+        prefetchNeighbors();
+    }
+    refreshHud(hudLabel);
 }
 
 // Everything a run needs that is not the decoder request and not the audio.
@@ -3492,149 +3719,15 @@ void MainWindow::refreshHud(const QString& action) {
     syncTransportBar();
 }
 
+// Dispatch only. Every key Trace answers to is declared in setupShortcuts(),
+// and this walks that one table rather than a switch that only it could read.
+//
+// The rows carrying a QAction never reach here at all -- Qt runs an action's
+// shortcut before the key event is delivered to the window -- so they are in the
+// table as documentation for spec phase 13 and are skipped by the dispatcher.
 void MainWindow::keyPressEvent(QKeyEvent* event) {
-    bool needsReload = false;
-
-    switch (event->key()) {
-        case Qt::Key_Space:
-            togglePlayPause();
-            refreshHud("Space");
-            return;
-        case Qt::Key_M:
-            audio_.setMuted(!audio_.isMuted());
-            refreshHud(audio_.isMuted() ? "Mute" : "Unmute");
-            return;
-        case Qt::Key_Left:
-            // Stepping out of a reverse run: end it first, without a landing
-            // decode -- the step below lands its own frame, and the playhead is
-            // already the frame that was on screen because every present sets
-            // it from the frame's own index.
-            endShuttleRun(/*landExactly=*/false);
-            playback_.stepBackward();
-            needsReload = true;
-            prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, -1, true);
-            // Outside the isActive() guard: stepping is a request to inspect a
-            // frame whether or not playback happened to be running, and the
-            // intent must not survive it into a later scrub release.
-            userPlayIntent_ = false;
-            if (playTimer_.isActive()) {
-                playTimer_.stop();
-                stopAudio();
-                playbackClock_.invalidate();
-                playbackAccumulatorMs_ = 0.0;
-            }
-            break;
-        case Qt::Key_Right:
-            endShuttleRun(/*landExactly=*/false);
-            playback_.stepForward();
-            needsReload = true;
-            prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, false);
-            userPlayIntent_ = false;
-            if (playTimer_.isActive()) {
-                playTimer_.stop();
-                stopAudio();
-                playbackClock_.invalidate();
-                playbackAccumulatorMs_ = 0.0;
-            }
-            break;
-        case Qt::Key_J:
-            if (frameSource_ && frameSource_->canPlay()) {
-                playback_.jogReverse();
-                stopAudio();  // reverse is silent; don't wait a tick for it
-                // Reverse is not the 1x forward run a scrub release restores.
-                userPlayIntent_ = false;
-                prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, -1, true);
-                // Not a bare playTimer_.start(): the GATE E timeline has to be
-                // established for this run or the schedule runs away from the
-                // clock (plan section 29.2). Audio is deliberately not started --
-                // reverse is silent, and stopAudio() above is what makes it so.
-                beginPlaybackTimeline();
-                // After the timeline, because the run's first frames are decoded
-                // against the playhead this press starts from. Every press is a
-                // new run: startShuttleRun ends the previous one, which is what
-                // makes a speed change newest-target-wins rather than a merge of
-                // two ladders.
-                // The stride IS the commanded speed. It is an input the user
-                // chose, so nothing the decoder measures can move it.
-                startShuttleRun(-1, static_cast<int>(
-                    std::lround(std::abs(playback_.state().speed))));
-            }
-            refreshHud("J");
-            return;
-        case Qt::Key_K:
-            // Before pause(): the lease has to come back and the exact landing
-            // has to happen while the run still knows which frame was on screen.
-            endShuttleRun(/*landExactly=*/true);
-            playback_.pause();
-            userPlayIntent_ = false;
-            if (playTimer_.isActive()) {
-                playTimer_.stop();
-                stopAudio();
-                playbackClock_.invalidate();
-                playbackAccumulatorMs_ = 0.0;
-            }
-            refreshHud("K");
-            return;
-        case Qt::Key_L:
-            if (frameSource_ && frameSource_->canPlay()) {
-                // A direction change ends the reverse run and lands, so forward
-                // starts from the frame that was on screen rather than from
-                // wherever the reverse pipeline had run ahead to.
-                endShuttleRun(/*landExactly=*/true);
-                playback_.jogForward();
-                // L at 1x is ordinary forward play and is worth restoring after
-                // a drag; the shuttle speeds above it are not, for the same
-                // reason they are silent -- an off-speed run is a different
-                // gesture, and resuming it at 1x would be the wrong answer.
-                userPlayIntent_ = std::abs(playback_.state().speed) <= 1.0001;
-                prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, 1, false);
-                // L at 1x is normal forward play and gets sound; the shuttle
-                // speeds above it do not, and this silences them on the way up.
-                startAudioForPlayback();
-                // As in Key_J: the timeline must be established, not just the
-                // timer started. Without it the audio clock kept real time while
-                // video presented at 1.26 fps, so video skipped 35 frames chasing
-                // it -- a "never skip a frame" violation (plan section 29.2).
-                beginPlaybackTimeline();
-                // Above 1x, forward becomes a shuttle run for exactly the same
-                // reason reverse is one: carrying the speed in the tick rate
-                // caps the achieved speed at the per-frame decode cost, so
-                // ProRes 4444 asked for 2x and delivered 1.00x while 4x
-                // delivered 1.33x -- two rungs that looked identical and neither
-                // of which was the number on the label.
-                //
-                // AT EXACTLY 1x NOTHING CHANGES. That is ordinary playback on
-                // the validated audio-mastered path, and the shuttle deliberately
-                // does not touch it.
-                const int fwdStride = static_cast<int>(
-                    std::lround(std::abs(playback_.state().speed)));
-                if (fwdStride > 1) startShuttleRun(1, fwdStride);
-            }
-            refreshHud("L");
-            return;
-        case Qt::Key_F: viewState_.readoutMode = PrimaryReadoutMode::Frame; refreshHud("Readout: Frame"); return;
-        case Qt::Key_S: viewState_.readoutMode = PrimaryReadoutMode::Seconds; refreshHud("Readout: Seconds"); return;
-        case Qt::Key_T: viewState_.readoutMode = PrimaryReadoutMode::Timecode; refreshHud("Readout: Timecode"); return;
-        // H / Return / Enter (HUD) and Ctrl+Return / F11 / Alt+Enter (fullscreen)
-        // are QAction shortcuts now and never reach here -- see
-        // setupSharedActions(). `I` is gone with the flag it toggled; Ctrl+I is
-        // the Movie Inspector at spec phase 12.
-        default:
-            QMainWindow::keyPressEvent(event);
-            return;
-    }
-
-    if (needsReload) {
-        QString error;
-        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
-            if (event->key() == Qt::Key_Left) playback_.stepForward();
-            else playback_.stepBackward();
-        } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
-            prefetchNeighbors();
-        }
-    }
-    refreshHud(event->key() == Qt::Key_Left ? "Left" : "Right");
+    if (shortcuts_.dispatch(event)) return;
+    QMainWindow::keyPressEvent(event);
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {

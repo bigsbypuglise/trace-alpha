@@ -38,15 +38,22 @@ void PlaybackController::pause() {
 // asked for 4x and delivered 1.33x -- so two rungs of the ladder were visually
 // identical and neither was the speed on the label.
 //
-// The first press from a stop stays exactly 1x, which is ordinary playback on
-// the validated audio-mastered path. Only the rungs above it shuttle.
-void PlaybackController::jogForward() {
+// The first press from a stop stays exactly 1x on the KEYBOARD convention,
+// which is ordinary playback on the validated audio-mastered path; only the
+// rungs above it shuttle. The BUTTON convention enters at 2x instead -- see
+// ShuttleEntry, and note the two are deliberately different rather than one of
+// them being a bug.
+void PlaybackController::jogForward(ShuttleEntry entry) {
     state_.mode = PlaybackMode::PlayingForward;
     static constexpr double kShuttleLadder[] = {1.0, 2.0, 5.0, 10.0, 30.0};
     if (state_.speed <= 0.0) {
         // Coming from a stop or from reverse: reset to the bottom of the ladder
         // rather than mirroring whatever the other direction had reached.
-        state_.speed = kShuttleLadder[0];
+        //
+        // The entry convention is applied HERE and only here -- it decides the
+        // first rung, never any later one, so a button run and a keyboard run
+        // that have both reached 5x behave identically from then on.
+        state_.speed = entry == ShuttleEntry::AtTwoX ? kShuttleLadder[1] : kShuttleLadder[0];
         return;
     }
     for (double step : kShuttleLadder) {
@@ -68,11 +75,11 @@ void PlaybackController::jogForward() {
 // can be the commanded speed rather than something inferred from how the decoder
 // is coping: nothing measured feeds back into it, so it cannot run away the way
 // three of the four scrub-gate inferences did.
-void PlaybackController::jogReverse() {
+void PlaybackController::jogReverse(ShuttleEntry entry) {
     state_.mode = PlaybackMode::PlayingReverse;
     static constexpr double kRewindLadder[] = {-1.0, -2.0, -5.0, -10.0, -30.0};
     if (state_.speed >= 0.0) {
-        state_.speed = kRewindLadder[0];
+        state_.speed = entry == ShuttleEntry::AtTwoX ? kRewindLadder[1] : kRewindLadder[0];
         return;
     }
     for (double step : kRewindLadder) {

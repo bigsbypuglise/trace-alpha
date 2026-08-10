@@ -166,3 +166,188 @@ survives a changed denominator.
   shortcut and delivers the keystroke. **That is untested because it is untestable
   today** — Go to Frame and Go to Timecode create the first text field at phase 7,
   and verifying that `H` does not eat a digit belongs with them.
+
+---
+
+## Phase 3 — keyboard stepping and shuttle control contracts (2026-08-10)
+
+### What shipped
+
+**The flat switch in `keyPressEvent` is a `ShortcutTable`** (`src/app/ShortcutTable.*`).
+`keyPressEvent` is now two lines: walk the table, fall through to the base class.
+The reason is phase 13, which has to render a Keyboard Shortcuts window: a switch
+works as a dispatcher and is useless as a *source*, because it cannot be
+enumerated, printed, grouped, or checked for a conflict. Extending it would have
+meant a second hand-written list of the same keys at phase 13 — two things to
+keep in agreement, which is exactly what phase 2 spent its effort removing from
+the fullscreen command.
+
+**The table is complete and the dispatcher is not, and that separation is the
+design.** Rows carrying a `QAction` (Ctrl+O, fullscreen, the HUD toggle) are
+documentation only — Qt dispatched them before `keyPressEvent` was reached — and
+they point *at* the action rather than copying its keys and its text, so a
+changed binding cannot leave the table stale. Rows carrying a handler are the
+ones this window still dispatches. `rows()` is what phase 13 renders.
+
+**The dispatcher matches on the key and ignores modifiers**, which is precisely
+what `switch (event->key())` did — Shift+Right stepped a frame and still does.
+That is deliberate rather than inherited: every shortcut in Trace that carries a
+modifier is *already* on a `QAction`, because `QAction` is what resolves modifier
+ambiguity properly. The rule to keep is that a new modifier'd shortcut goes on an
+action and this half of the table stays plain keys.
+
+**`startShuttle()` is the five-step sequence, extracted before phases 4–5 add a
+third caller.** J and L each performed `endShuttleRun` → controller ladder →
+`prepareVideoRequest` → `beginPlaybackTimeline` → `startShuttleRun`, written out
+twice, and the two copies had diverged in four places. §29.2 is the standing
+reason this matters more than tidiness: GATE E turned playback from a
+free-running timer into a timeline that must be *established*, and a path that
+starts the timer without establishing it still compiles, still runs, and decays
+quadratically.
+
+**One predicate decides three things.** `ordinaryForwardPlay` — forward at exactly
+1× — is simultaneously the case that keeps the play intent a scrub release
+restores, the case that gets sound, and the case that does *not* become a shuttle
+run. That is not a coincidence to be tidied away; 1× forward is ordinary playback
+on the validated audio-mastered path and the shuttle never enters it. The HUD
+shows it directly: a default L press reads `shuttle idle`, and the same press
+under the 2× convention reads `shuttle RUN FWD stride 2`.
+
+**Two of the four divergences collapsed and one did not.** J's separate
+`stopAudio()` was the same thing said twice — `startAudioForPlayback()` asks
+`audioShouldDrive()` first, and that already means "forward, at 1×, on a video
+file with a track", so it stops the device for reverse and for every rung above
+1× rather than starting it. The `clearQueue` disagreement (J true, L false) was
+inert: `clearForwardQueue()` only zeroes `perfStats_.forwardQueueDepth`, a
+counter for the synchronous forward-fill queue removed in July 2026 and never
+written any other value.
+
+**`landPreviousExactly` is the one the callers genuinely disagree about, and it
+is preserved rather than unified.** L passes true and *must*: at L-to-1× out of a
+reverse run no new shuttle run is started, so nothing else would end the old one
+and its lease and queue would be stranded. J passes false: a J press always
+produces a run, and that run supersedes the picture immediately. What is **not**
+derivable is why L at 2× also lands — a synchronous Step decode on every forward
+speed change out of reverse — when J at −2× does not. Both readings shipped in
+the signed-off engine and neither has been measured against the other.
+**Phases 4–5 must settle it, because the buttons are a third caller and will have
+to pass something.**
+
+**`PlaybackController` has a second documented way in** (`ShuttleEntry::AtOneX` /
+`AtTwoX`). The keyboard enters the ladder at 1×; the Rewind and Fast-forward
+buttons enter at 2×, which the spec states directly and the owner confirmed on
+2026-08-10. The entry convention is applied at the *first rung only*, so a button
+run and a keyboard run that have both reached 5× behave identically from then on.
+This exists so the difference is an argument rather than a call site reaching past
+the controller to write `speed`.
+
+**`TRACE_SHUTTLE_ENTRY=2x` drives the button convention through J and L**, which
+is the only way to execute it before those buttons exist. Shipping an entry point
+nothing has ever run is the failure §29.2 records at length. Interim knob, like
+`TRACE_VIEW_TRANSFORM` for phase 10; it leaves with the phase that makes it
+redundant. Measured, first press, 4K H.264:
+
+| first press | default | `TRACE_SHUTTLE_ENTRY=2x` |
+|---|---|---|
+| J | `speed -1.00x`, `shuttle RUN REV stride 1 adv 1` | `speed -2.00x`, `shuttle RUN REV stride 2 adv 2` |
+| L | `speed 1.00x`, `shuttle idle` | `speed 2.00x`, `shuttle RUN FWD stride 2 adv 2` |
+
+`starve 0` in all four. The `shuttle idle` cell is the `ordinaryForwardPlay`
+predicate visible from outside: default L is ordinary playback and never becomes
+a run at all.
+
+### A real bug, found by enumerating the entry points
+
+**The frame-step BUTTON never ended a shuttle run.** `revtransitions.ps1`
+enumerates six ways out of a reverse run and every one of them is a key or the
+slider. The buttons are a seventh and nothing exercised them — and the two
+frame-step paths, keyboard and button, were near-copies that had drifted.
+
+Clicking Prev Frame during a reverse run left `shuttleRunActive_` true and
+`shuttleLastPresented_` holding the *shuttle's* frame. The step itself looks
+fine, because the run cannot present anything once `stepBackward()` has paused the
+controller and the timer is stopped — so the fault is invisible until the next
+thing that ends a run takes its landing branch. Press **K** after that click and
+`setCurrentFrame(shuttleLastPresented_)` puts the playhead back where the shuttle
+was, **discarding the frame the user stepped to**.
+
+Measured on a control built from `cbf6d98`, 4K H.264 — reverse, click Prev Frame,
+settle, then K:
+
+| | picture moved on K |
+|---|---|
+| control (`cbf6d98`) | **17.6%** — the step was discarded |
+| phase 3 | **0%** |
+
+**The obvious gesture does not find it.** Reverse → click Prev Frame → arrow-key
+passes *identically* on both builds (`0%` still, then `21.3–21.6%` on the step):
+it does not hang and it does not freeze, so every check written for a stranded
+lease reports healthy. The gesture that exposes it is the one that ends a run
+*afterwards*.
+
+Both frame-step paths are one command now (`stepOneFrame`), reached by the arrow
+keys and by the buttons through the same two `QAction`s — so when phases 4–5
+re-point those buttons to Rewind and Fast-forward, the exact-frame-step command
+survives untouched, which is what the spec's "do not delete the underlying
+exact-frame-step commands" requires.
+
+One more difference between the copies was resolved in the button's favour: on a
+failed decode the button path reverted the playhead **and re-landed the frame it
+names**, while the keyboard path only reverted the counter. Both do the former now.
+
+### Regression
+
+Control binary built from `cbf6d98`; both measured on the **physical panel**
+(5120×1440 @ 239.999Hz, confirmed with `refresh.ps1`), `d3d11` default,
+`win 1280x843`, `display 640x360`.
+
+| run | control | phase 3 |
+|---|---|---|
+| 4K H.264 cadence | 99.9%, 120 frames, `handler>budget 0 of 119` (max 3.9), p50 41.9 / p99 43.5 / max 43.6, `long-gap --` | 100.0%, 120 frames, `0 of 119` (max 3.8), p50 41.8 / p99 43.5 / max 44.3, `long-gap --` |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, full-res planar, `hitch 0`, `stalls 102 of 113` | `target 120 shown 120 delta 0`, full-res planar, `hitch 0`, `stalls 103 of 114` |
+| reverse 1× (`revplay`) | 20.30/24.000 fps, 99 frames, `0 of 98` (max 5.5), `hitch 0`, `starve 0` | 20.30/24.000 fps, 99 frames, `0 of 98` (max 6.4), `hitch 0`, `starve 0` |
+| forward 2× (`revplay -Forward`) | 24.02/24.000 fps, 55 frames, `0 of 54` (max 2.3), `hitch 0`, `stride 2 adv 2` | 24.02/24.000 fps, 55 frames, `0 of 54` (max 2.2), `hitch 0`, `stride 2 adv 2` |
+| `revtransitions -All` | six of six PASS | six of six PASS |
+| lifecycle | `-PlayThroughDrag` PASS 40.3%, `-PausedThroughDrag` PASS 0%, `-PlayAfter` PASS | PASS 40.1%, PASS 0%, PASS |
+| `revplay -StepCheck` | — | `+1 moved 5.6%`, `-1 returned to 0.1%` — **both legs read** |
+| the seventh exit | **FAIL, 17.6% moved on K** | **PASS, 0%** |
+
+Cadence buckets are identical (`~1x 119`, every other bucket 0). Presented frame
+counts and elapsed times match to the digit on both shuttle runs.
+
+**Every key in the table was exercised one at a time**, which is the point of
+having a table: Space play/pause, Right/Left stepping (`Right then Left returns`
+reads **0%** — exact), Right during playback stopping it, J/K/L, F/S/T, M, and H.
+All PASS.
+
+### What phase 3 changes about the plan
+
+**`revtransitions.ps1` covers six exits and there are at least seven.** The
+missing one was the frame-step button, and it held a real bug for as long as it
+went unlisted. When phases 4–5 turn those buttons into Rewind and Fast-forward
+they become shuttle *entries* as well as exits, so the enumeration needs
+re-deriving then rather than extending.
+
+**Two harness faults cost more time than the code did, and both are already
+written down in this repo.** A helper named `Diff` is never called — `diff` is a
+built-in alias for `Compare-Object` and aliases outrank functions — and every
+check in the first smoke run reported FAIL for that reason alone. And a
+picture-difference check placed at frame 0 of `Splash_1.mp4` reads 0% because the
+first frames are static; stepping has to be measured mid-clip. Neither was an app
+fault and both looked exactly like one.
+
+**`revplay -StepCheck` must be given a hold short enough to stop mid-clip.** At
+the default 8s, reverse traverses the 121-frame clip to frame 0, the `+1` control
+leg reads 0.2% and the script says so — `stepcheck INCONCLUSIVE`. The `-1` result
+is meaningless without it, which is why both legs are printed.
+
+### Still true after phase 3
+
+- Phases 4–5 must settle `landPreviousExactly`, and must decide what the buttons
+  pass. `startShuttle(direction, entry, landPreviousExactly)` and
+  `ShuttleEntry::AtTwoX` are in place, so both are call sites.
+- **There is still no text-entry control anywhere in the app**, so the spec's
+  "must not fire while focus is inside a text-entry control" still has nothing to
+  guard. The table's key-only matching makes this *more* important to get right
+  at phase 7, not less: `Go to Frame` is the first text field, and the check that
+  `H` and the digits do not fight belongs with it.

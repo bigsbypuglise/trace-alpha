@@ -18,6 +18,7 @@
 #include "core/VideoFrameSource.h"
 #include "core/ScrubDecodeWorker.h"
 #include "core/AudioOutput.h"
+#include "app/ShortcutTable.h"
 
 QT_BEGIN_NAMESPACE
 class QKeyEvent;
@@ -65,6 +66,8 @@ private:
     void setupSharedActions();
     void setupMenus();
     void setupTransportControls();
+    // Fills shortcuts_. Runs LAST, after every action it lists exists.
+    void setupShortcuts();
     // The one place the window's fullscreen state is changed. Re-reads
     // isFullScreen() afterwards rather than assuming the toggle took, so the
     // action's checked state, viewState_ and the button icon all come from what
@@ -185,6 +188,26 @@ private:
     // and the reverse shuttle so both are measured by one instrument.
     void notePresentedPlaybackFrame(double frameDurationMs);
 
+    // The whole of what a shuttle press does, in the one order that works.
+    //
+    // Extracted at spec phase 3, BEFORE phases 4 and 5 add the Rewind and
+    // Fast-forward buttons as a third and fourth caller. Plan section 29.2 is
+    // the standing reason: GATE E was validated on the Play action alone, and
+    // for weeks every other path that started the playback timer kept compiling
+    // silently while decaying quadratically. A sequence with five steps and no
+    // name is a sequence a new caller gets four steps of.
+    //
+    // `entry` is which rung the ladder starts on -- J/L enter at 1x, the buttons
+    // will enter at 2x. `landPreviousExactly` is the one thing the two existing
+    // callers genuinely disagree about; see the definition.
+    void startShuttle(int direction,
+                      trace::core::ShuttleEntry entry,
+                      bool landPreviousExactly);
+
+    // The single exact-frame-step command, reached by Left/Right and by the two
+    // transport buttons. `delta` is -1 or +1.
+    void stepOneFrame(int delta, const char* hudLabel);
+
     void startShuttleRun(int direction, int stride);
     // True while `frame` is still inside the media. The head and the tail are
     // different expressions, which is why this is a function and not a `< 0`
@@ -298,6 +321,12 @@ private:
     // stay synchronized" requirement was not already met.
     QAction* fullscreenAction_ = nullptr;
     QAction* toggleHudAction_ = nullptr;
+    QAction* openAction_ = nullptr;
+
+    // Trace's complete keyboard contract, and the dispatcher for the half of it
+    // keyPressEvent still owns. Spec phase 13 renders the Keyboard Shortcuts
+    // window from rows() rather than from a second list written by hand.
+    trace::app::ShortcutTable shortcuts_;
     QSlider* timelineSlider_ = nullptr;
 
     trace::core::PlaybackController playback_;

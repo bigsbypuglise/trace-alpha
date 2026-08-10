@@ -122,6 +122,8 @@ add_executable(Trace
   ../src/main.cpp
   ../src/app/MainWindow.h
   ../src/app/MainWindow.cpp
+  ../src/app/ShortcutTable.h
+  ../src/app/ShortcutTable.cpp
   ../src/ui/ViewerWidget.h
   ../src/ui/ViewerWidget.cpp
   ../src/ui/OverlaySpike.h
