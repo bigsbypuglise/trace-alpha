@@ -792,6 +792,21 @@ void MainWindow::syncScrubPreviewSize() {
     videoDecoder_.setScrubPreviewSize(px);
 }
 
+void MainWindow::syncPlanarOutput() {
+    if (!viewer_) return;
+    // The renderer is asked, rather than TRACE_RENDERER being consulted: a GPU
+    // backend that failed to initialize has already been replaced by the CPU
+    // one, and only the widget knows which is actually installed.
+    //
+    // TRACE_PLANAR_UPLOAD=0 forces the GATE B path back on for an A/B without a
+    // rebuild -- the same shape as every other knob in this codebase, and the
+    // control that says whether a difference is the planar path or the day.
+    static const bool allowed = qgetenv("TRACE_PLANAR_UPLOAD") != "0";
+    // Clears the decoder's frame cache, so it needs the decoder back.
+    reclaimDecoder();
+    videoDecoder_.setPlanarOutputEnabled(allowed && viewer_->rendererAcceptsPlanarYuv());
+}
+
 void MainWindow::syncTransportBar() {
     if (!timelineSlider_ || !playPauseAction_) return;
 
@@ -1027,6 +1042,7 @@ void MainWindow::openPath(const QString& path) {
     // file opened into an already-sized window never gets a resize event to
     // tell it.
     syncScrubPreviewSize();
+    syncPlanarOutput();
 
     QString error;
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {

@@ -67,6 +67,14 @@ QString ViewerWidget::rendererName() const {
     return renderer_ ? renderer_->name() : QStringLiteral("none");
 }
 
+bool ViewerWidget::rendererAcceptsPlanarYuv() const {
+    // Asked of whatever was ACTUALLY adopted, which after a failed GPU
+    // initialize is the CPU backend. A cached answer taken from the requested
+    // backend would tell the decoder to skip swscale for a renderer that needs
+    // BGRA, and every frame would come out blank.
+    return renderer_ && renderer_->acceptsPlanarYuv();
+}
+
 QPaintEngine* ViewerWidget::paintEngine() const {
     return hostHwndSpike_ ? nullptr : QWidget::paintEngine();
 }

@@ -69,6 +69,47 @@ AVPixelFormat alphaStrippedFormat(AVPixelFormat fmt) {
     return fmt;
 }
 
+// Can this decoded format be handed to the GPU as three planes, and if so as
+// what? Answered from the format DESCRIPTOR rather than a list of AVPixelFormat
+// enumerators, so every yuv*p*le spelling FFmpeg has -- and any it gains -- is
+// covered by the same four questions.
+//
+// Alpha is allowed here and then ignored: the caller passes the alpha-stripped
+// format, and even if it did not, the shader samples three planes. That is the
+// same trade alphaStrippedFormat() makes, for the same reason.
+bool planarLayoutFor(AVPixelFormat fmt, PixelLayout* layout, int* bitDepth) {
+    const AVPixFmtDescriptor* d = av_pix_fmt_desc_get(fmt);
+    if (!d) return false;
+    if (!(d->flags & AV_PIX_FMT_FLAG_PLANAR)) return false;
+    if (d->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL | AV_PIX_FMT_FLAG_BITSTREAM)) return false;
+    // Big-endian would need a byte swap on the way in, which is a repacking
+    // pass and therefore exactly what this path exists to avoid. No format
+    // Trace opens on Windows is BE.
+    if (d->flags & AV_PIX_FMT_FLAG_BE) return false;
+    if (d->nb_components < 3) return false;
+
+    const int depth = d->comp[0].depth;
+    if (depth != 8 && depth != 10 && depth != 12 && depth != 16) return false;
+    // Every component must share the depth and sit at the bottom of its word;
+    // anything else is a packed-in-planes layout that a straight memcpy would
+    // misread.
+    for (int i = 0; i < 3; ++i) {
+        if (d->comp[i].depth != depth) return false;
+        if (d->comp[i].shift != 0) return false;
+        if (d->comp[i].offset != 0) return false;
+        if (d->comp[i].plane != i) return false;
+        if (d->comp[i].step != (depth > 8 ? 2 : 1)) return false;
+    }
+
+    if (d->log2_chroma_w == 1 && d->log2_chroma_h == 1)      *layout = PixelLayout::YUV420P;
+    else if (d->log2_chroma_w == 1 && d->log2_chroma_h == 0) *layout = PixelLayout::YUV422P;
+    else if (d->log2_chroma_w == 0 && d->log2_chroma_h == 0) *layout = PixelLayout::YUV444P;
+    else return false;
+
+    *bitDepth = depth;
+    return true;
+}
+
 // swscale defaults to BT.601 coefficients for every YUV source unless it is
 // told otherwise. HD and UHD video is BT.709, so the default silently applies
 // the wrong matrix to nearly everything Trace opens: skin tones flatten and
@@ -401,25 +442,54 @@ struct VideoDecoderFFmpeg::Impl {
     std::deque<std::shared_ptr<FrameBuffer>> convertPool;
     int convertPoolLimit = 16;
 
-    std::shared_ptr<FrameBuffer> acquireConvertTarget(int w, int h, PixelLayout layout) {
+    // One pool for both kinds of buffer, because one session holds both: with
+    // planar output on, full-resolution frames are planar while scrub previews
+    // stay BGRA, and they alternate frame by frame through a drag.
+    //
+    // EVICTION ONLY WHEN THE POOL IS FULL, and that is the whole reason this is
+    // one function. Evicting every non-matching unreferenced entry on each
+    // acquire -- which is what the single-kind version did, harmlessly, when
+    // BGRA was the only kind -- makes an alternating workload throw away the
+    // other kind's buffers on every frame and reallocate them on the next. On
+    // 4K ProRes 4444 that is a ~56MB planar allocation per landing, and it
+    // measured as the drag shuttle going 7.8 -> 18.2ms/frame while every
+    // per-frame cost stayed the same. Waiting until the pool is actually full
+    // still stops a resolution change pinning it at stale sizes; it just takes
+    // one pool's worth of frames to notice instead of one.
+    template <typename Match, typename Make>
+    std::shared_ptr<FrameBuffer> acquirePooled(Match matches, Make make) {
         for (auto& buf : convertPool) {
-            if (buf.use_count() == 1 && buf->width() == w && buf->height() == h
-                && buf->layout() == layout) {
-                return buf;
+            if (buf.use_count() == 1 && matches(*buf)) return buf;
+        }
+        if (static_cast<int>(convertPool.size()) >= convertPoolLimit) {
+            for (auto it = convertPool.begin(); it != convertPool.end();) {
+                const bool stale = it->use_count() == 1 && !matches(**it);
+                it = stale ? convertPool.erase(it) : it + 1;
             }
+            if (static_cast<int>(convertPool.size()) >= convertPoolLimit) return nullptr;
         }
-        // Release unreferenced buffers of the wrong geometry so a resolution
-        // or format change doesn't pin the pool at stale sizes.
-        for (auto it = convertPool.begin(); it != convertPool.end();) {
-            const bool stale = it->use_count() == 1
-                && ((*it)->width() != w || (*it)->height() != h || (*it)->layout() != layout);
-            it = stale ? convertPool.erase(it) : it + 1;
-        }
-        if (static_cast<int>(convertPool.size()) >= convertPoolLimit) return nullptr;
-        auto buffer = FrameBuffer::allocate(w, h, layout);
+        auto buffer = make();
         if (!buffer) return nullptr;
         convertPool.push_back(buffer);
         return buffer;
+    }
+
+    std::shared_ptr<FrameBuffer> acquireConvertTarget(int w, int h, PixelLayout layout) {
+        return acquirePooled(
+            [&](const FrameBuffer& b) {
+                return b.width() == w && b.height() == h && b.layout() == layout;
+            },
+            [&] { return FrameBuffer::allocate(w, h, layout); });
+    }
+
+    std::shared_ptr<FrameBuffer> acquirePlanarTarget(int w, int h, PixelLayout layout,
+                                                     int bitDepth) {
+        return acquirePooled(
+            [&](const FrameBuffer& b) {
+                return b.width() == w && b.height() == h && b.layout() == layout
+                       && b.bitDepth() == bitDepth;
+            },
+            [&] { return FrameBuffer::allocatePlanar(w, h, layout, bitDepth); });
     }
     // The cache is budgeted in BYTES, not in entries, because its entries are
     // not all the same size: above 1920px a scrub preview is half resolution
@@ -517,6 +587,23 @@ void VideoDecoderFFmpeg::setScrubPreviewSize(QSize size) {
     impl_->reverseCacheBytes = 0;
 #else
     Q_UNUSED(size);
+#endif
+}
+
+void VideoDecoderFFmpeg::setPlanarOutputEnabled(bool enabled) {
+#ifdef TRACE_WITH_FFMPEG
+    if (enabled == planarOutput_) return;
+    planarOutput_ = enabled;
+    // Cached frames carry the layout that was in force when they were made, and
+    // a renderer that has just changed cannot present the other kind. Same
+    // reasoning as setScrubPreviewSize: an entry describes a decision, so the
+    // entries do not survive the decision changing.
+    if (impl_) {
+        impl_->reverseCache.clear();
+        impl_->reverseCacheBytes = 0;
+    }
+#else
+    Q_UNUSED(enabled);
 #endif
 }
 
@@ -1178,6 +1265,100 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
             }
             dstW = std::max(2, dstW);
             dstH = std::max(2, dstH);
+        }
+
+        // Read the matrix/range off the frame rather than the codec context:
+        // the frame is what was actually decoded, and container-level metadata
+        // is not always propagated before the first frame arrives.
+        //
+        // Hoisted above the planar branch because the planar path needs exactly
+        // the same answer -- it is the shader rather than swscale that applies
+        // it, but it is the same decision and must not become two.
+        {
+            AVColorSpace spc0 = impl_->frame->colorspace;
+            if (spc0 == AVCOL_SPC_UNSPECIFIED) spc0 = impl_->codec->colorspace;
+            AVColorRange range0 = impl_->frame->color_range;
+            if (range0 == AVCOL_RANGE_UNSPECIFIED) range0 = impl_->codec->color_range;
+            bool inferred0 = false;
+            const int coeff0 = swsCoefficientsFor(spc0, w, h, &inferred0);
+            const bool full0 = (range0 == AVCOL_RANGE_JPEG);
+
+            // Planar handoff: no scale, no matrix, no swscale. Only for frames
+            // wanted at full resolution -- a scrub preview is converted to the
+            // displayed size and is far cheaper as BGRA (plan section 20.7).
+            PixelLayout planarLayout = PixelLayout::Unknown;
+            int planarDepth = 0;
+            const ColorInfo planarColor = colorInfoFor(coeff0, full0, inferred0);
+            // Only the three matrices the shader has exact coefficients for.
+            // Fcc and Smpte240m would have to be approximated, and an
+            // approximation here is a colour difference between the two
+            // backends that no A/B could attribute to anything -- swscale
+            // applies them properly, so those files keep taking that path.
+            const bool matrixSupported = planarColor.matrix == ColorInfo::Matrix::BT601
+                                      || planarColor.matrix == ColorInfo::Matrix::BT709
+                                      || planarColor.matrix == ColorInfo::Matrix::BT2020;
+            if (planarOutput_ && matrixSupported && !previewResolution && dstW == w && dstH == h
+                && planarLayoutFor(srcPixFmt, &planarLayout, &planarDepth)) {
+                QElapsedTimer palloc;
+                palloc.start();
+                std::shared_ptr<FrameBuffer> target =
+                    impl_->acquirePlanarTarget(w, h, planarLayout, planarDepth);
+                if (!target) {
+                    target = FrameBuffer::allocatePlanar(w, h, planarLayout, planarDepth);
+                }
+                convertAllocNs += palloc.nsecsElapsed();
+                if (target) {
+                    QElapsedTimer copyTimer;
+                    copyTimer.start();
+                    const int sampleBytes = target->bytesPerSample();
+                    for (int p = 0; p < 3; ++p) {
+                        const uint8_t* src = impl_->frame->data[p];
+                        if (!src) { target = nullptr; break; }
+                        const int srcStride = impl_->frame->linesize[p];
+                        uint8_t* dst = target->data(p);
+                        const int dstStride = target->bytesPerLine(p);
+                        const int rowBytes = target->planeWidth(p) * sampleBytes;
+                        const int rows = target->planeHeight(p);
+                        // Row by row: FFmpeg's linesize is padded for SIMD and
+                        // rarely equals ours, so a single memcpy of the plane
+                        // would shear the picture.
+                        for (int y = 0; y < rows; ++y) {
+                            std::memcpy(dst + static_cast<ptrdiff_t>(y) * dstStride,
+                                        src + static_cast<ptrdiff_t>(y) * srcStride,
+                                        static_cast<size_t>(rowBytes));
+                        }
+                    }
+                    if (target) {
+                        const qint64 copyNs = copyTimer.nsecsElapsed();
+                        swsScaleNs += copyNs;
+                        if (isCacheFill) cacheConvertNs += copyNs;
+                        else convertNs += copyNs;
+
+                        perfStats_.colorMatrix = QString::fromLatin1(swsCoefficientsName(coeff0));
+                        perfStats_.colorMatrixInferred = inferred0;
+                        perfStats_.srcFullRange = full0;
+                        perfStats_.lastImageWasShared = false;
+                        perfStats_.fullFrameCopiesPerFrame = 1;
+                        perfStats_.swsContextReused = true;
+                        perfStats_.experimentalFastPathEnabled = useFast;
+                        perfStats_.swsSlotRebuilds = impl_->swsRebuilds;
+                        perfStats_.swsSlotsInUse = impl_->swsSlotsInUse();
+                        perfStats_.dstPixelFormat =
+                            QStringLiteral("%1P%2 planar")
+                                .arg(planarLayout == PixelLayout::YUV420P ? "YUV420"
+                                     : planarLayout == PixelLayout::YUV422P ? "YUV422"
+                                                                            : "YUV444")
+                                .arg(planarDepth);
+
+                        frame.buffer = std::move(target);
+                        frame.color = planarColor;
+                        frame.previewRes = false;
+                        return true;
+                    }
+                    // A plane was missing. Fall through to swscale rather than
+                    // publishing a frame with two of three planes filled.
+                }
+            }
         }
 
         QElapsedTimer wrapTimer;

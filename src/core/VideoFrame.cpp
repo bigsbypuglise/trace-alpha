@@ -35,15 +35,28 @@ void alignedFree(void* p) {
 int bytesPerPixel(PixelLayout layout) {
     switch (layout) {
         case PixelLayout::BGRA8: return 4;
-        case PixelLayout::Unknown: break;
+        default: break;
     }
     return 0;
+}
+
+// Horizontal and vertical chroma divisors for the planar layouts.
+void chromaShift(PixelLayout layout, int& shiftX, int& shiftY) {
+    switch (layout) {
+        case PixelLayout::YUV420P: shiftX = 1; shiftY = 1; break;
+        case PixelLayout::YUV422P: shiftX = 1; shiftY = 0; break;
+        default:                   shiftX = 0; shiftY = 0; break;   // 4:4:4
+    }
 }
 
 QImage::Format qtFormatFor(PixelLayout layout) {
     switch (layout) {
         case PixelLayout::BGRA8: return QImage::Format_RGB32;
-        case PixelLayout::Unknown: break;
+        // Planar YUV has no QImage equivalent, and returning one that happened
+        // to have the right byte count would show the luma plane as garbage
+        // rather than failing. The CPU renderer never receives one; the check
+        // is here so that stays true by construction.
+        default: break;
     }
     return QImage::Format_Invalid;
 }
@@ -76,12 +89,69 @@ std::shared_ptr<FrameBuffer> FrameBuffer::allocate(int width, int height, PixelL
 
     // Private ctor, so make_shared is not available.
     std::shared_ptr<FrameBuffer> buffer(new FrameBuffer());
-    buffer->data_ = raw;
+    buffer->allocation_ = raw;
+    buffer->planes_[0] = raw;
+    buffer->planeCount_ = 1;
     buffer->width_ = width;
     buffer->height_ = height;
-    buffer->bytesPerLine_ = bytesPerLine;
+    buffer->planeWidth_[0] = width;
+    buffer->planeHeight_[0] = height;
+    buffer->bytesPerLine_[0] = bytesPerLine;
+    buffer->bitDepth_ = 8;
+    buffer->totalBytes_ = static_cast<long long>(bytesPerLine) * height;
     buffer->layout_ = layout;
-    buffer->ownsAllocation_ = true;
+    return buffer;
+}
+
+std::shared_ptr<FrameBuffer> FrameBuffer::allocatePlanar(int width, int height,
+                                                         PixelLayout layout, int bitDepth) {
+    if (width <= 0 || height <= 0 || !isPlanarYuv(layout)) return nullptr;
+    if (bitDepth != 8 && bitDepth != 10 && bitDepth != 12 && bitDepth != 16) return nullptr;
+
+    int shiftX = 0, shiftY = 0;
+    chromaShift(layout, shiftX, shiftY);
+    const int sampleBytes = bitDepth > 8 ? 2 : 1;
+
+    // Round up, so an odd width still gets the chroma column that covers its
+    // last luma column. FFmpeg allocates the same way, and a plane short by one
+    // column reads past the end of the last row on upload.
+    const int cw = (width + (1 << shiftX) - 1) >> shiftX;
+    const int ch = (height + (1 << shiftY) - 1) >> shiftY;
+
+    const int w[kMaxPlanes] = {width, cw, cw};
+    const int h[kMaxPlanes] = {height, ch, ch};
+
+    // 64-byte rows per plane: the upload copies row by row, and a plane start
+    // that is not itself aligned would give away the alignment the allocation
+    // was made for.
+    int stride[kMaxPlanes];
+    long long total = 0;
+    for (int i = 0; i < kMaxPlanes; ++i) {
+        const int rowBytes = w[i] * sampleBytes;
+        stride[i] = static_cast<int>(((rowBytes + kAlignment - 1) / kAlignment) * kAlignment);
+        total += static_cast<long long>(stride[i]) * h[i];
+    }
+
+    auto* raw = static_cast<uint8_t*>(alignedAlloc(static_cast<std::size_t>(total)));
+    if (!raw) return nullptr;
+
+    std::shared_ptr<FrameBuffer> buffer(new FrameBuffer());
+    buffer->allocation_ = raw;
+    buffer->planeCount_ = kMaxPlanes;
+    buffer->width_ = width;
+    buffer->height_ = height;
+    buffer->bitDepth_ = bitDepth;
+    buffer->layout_ = layout;
+    buffer->totalBytes_ = total;
+
+    long long offset = 0;
+    for (int i = 0; i < kMaxPlanes; ++i) {
+        buffer->planes_[i] = raw + offset;
+        buffer->bytesPerLine_[i] = stride[i];
+        buffer->planeWidth_[i] = w[i];
+        buffer->planeHeight_[i] = h[i];
+        offset += static_cast<long long>(stride[i]) * h[i];
+    }
     return buffer;
 }
 
@@ -102,17 +172,23 @@ std::shared_ptr<FrameBuffer> FrameBuffer::adopt(QImage image) {
     // caller's image was still shared, this is the one copy that has to happen,
     // and it happens here rather than unpredictably at first write.
     buffer->adopted_.detach();
-    buffer->data_ = buffer->adopted_.bits();
+    buffer->planes_[0] = buffer->adopted_.bits();
+    buffer->planeCount_ = 1;
     buffer->width_ = buffer->adopted_.width();
     buffer->height_ = buffer->adopted_.height();
-    buffer->bytesPerLine_ = static_cast<int>(buffer->adopted_.bytesPerLine());
+    buffer->planeWidth_[0] = buffer->width_;
+    buffer->planeHeight_[0] = buffer->height_;
+    buffer->bytesPerLine_[0] = static_cast<int>(buffer->adopted_.bytesPerLine());
+    buffer->bitDepth_ = 8;
+    buffer->totalBytes_ =
+        static_cast<long long>(buffer->bytesPerLine_[0]) * buffer->height_;
     buffer->layout_ = layoutForQtFormat(buffer->adopted_.format());
-    buffer->ownsAllocation_ = false;
+    // allocation_ stays null: the storage belongs to the QImage.
     return buffer;
 }
 
 FrameBuffer::~FrameBuffer() {
-    if (ownsAllocation_) alignedFree(data_);
+    alignedFree(allocation_);
 }
 
 QImage VideoFrame::toQImage() const {

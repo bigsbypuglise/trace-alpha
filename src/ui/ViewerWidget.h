@@ -52,6 +52,9 @@ public:
     const ViewerPerfStats& perfStats() const { return perfStats_; }
     const trace::core::VideoFrame& frame() const { return frame_; }
     QString rendererName() const;
+    // Whether the adopted backend can take Y/U/V planes and convert them
+    // itself, so the decoder may skip swscale for full-resolution frames.
+    bool rendererAcceptsPlanarYuv() const;
     void setOverlayHooks(const trace::render::OverlayHooks& hooks);
 
 protected:

@@ -86,6 +86,9 @@ private:
     void refreshHud(const QString& action = {});
     // Tell the decoder how big a scrub preview needs to be, in device pixels.
     void syncScrubPreviewSize();
+    // Tells the decoder whether the installed renderer can take Y/U/V planes
+    // (GATE C). Asked of the adopted renderer, not of TRACE_RENDERER.
+    void syncPlanarOutput();
     bool isVideoScrubActive() const;
     void queueVideoScrubFrame(long long frameIndex);
     void flushVideoScrub(bool forceExact);

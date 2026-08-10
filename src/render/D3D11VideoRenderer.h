@@ -43,6 +43,12 @@ public:
     // of the widget.
     bool usesNativeSurface() const override { return true; }
 
+    // Three planes and the matrix in the pixel shader (GATE C). A frame that
+    // arrives as BGRA8 anyway -- a scrub preview, a still, or a source whose
+    // format or matrix the planar path declines -- still takes the GATE B path,
+    // so this is an additional capability rather than a mode.
+    bool acceptsPlanarYuv() const override { return true; }
+
     // Renderer-composited transport overlay (spike). Enabled by
     // TRACE_OVERLAY_COMPOSITED=1; the hooks keep every command in the
     // application layer -- see OverlayHooks.
@@ -66,6 +72,19 @@ private:
     bool ensureRenderTarget(QString& error);
     bool ensureTexture(int width, int height);
     void uploadPixels(const uint8_t* src, int srcStride, int width, int height);
+
+    // The planar path. Three single-channel textures whose sizes carry the
+    // chroma subsampling, so 4:2:0, 4:2:2 and 4:4:4 differ only in how big two
+    // of them are and the shader never asks.
+    bool ensurePlaneTextures(const trace::core::FrameBuffer& buffer);
+    bool uploadPlanes(const trace::core::FrameBuffer& buffer);
+    // Range normalisation, bit-depth scale and the 3x3, computed on the CPU for
+    // the frame's actual depth and matrix and written to the constant buffer.
+    // Returns false for a matrix it has no exact coefficients for, which is the
+    // signal to refuse the frame rather than present it through a near-enough
+    // one -- the decoder declines the same set, so this should not fire.
+    bool updateYuvParams(const trace::core::VideoFrame& frame);
+    void releasePlaneTextures();
     // The empty state. Rendered on the CPU into an image and uploaded through
     // the same path as a frame, so the placeholder survives the move to a
     // native surface instead of quietly becoming a black rectangle.
@@ -100,6 +119,21 @@ private:
     ComPtr<ID3D11RasterizerState> rasterizer_;
     ComPtr<ID3D11Texture2D> texture_;
     ComPtr<ID3D11ShaderResourceView> textureSrv_;
+
+    // GATE C. Kept alongside the BGRA texture rather than replacing it: a
+    // session mixes the two frame by frame, because scrub previews stay on
+    // swscale, and tearing one set down to build the other on every drag would
+    // reallocate three textures per gesture.
+    ComPtr<ID3D11PixelShader> yuvPixelShader_;
+    ComPtr<ID3D11Texture2D> planeTexture_[3];
+    ComPtr<ID3D11ShaderResourceView> planeSrv_[3];
+    ComPtr<ID3D11Buffer> yuvParams_;
+    int planeWidth_[3] = {0, 0, 0};
+    int planeHeight_[3] = {0, 0, 0};
+    // DXGI_FORMAT of the plane textures; R8_UNORM at 8 bits, R16_UNORM above.
+    unsigned int planeFormat_ = 0;   // DXGI_FORMAT_UNKNOWN
+    // Which shader and which resources the next draw should bind.
+    bool contentIsPlanar_ = false;
 
     int textureWidth_ = 0;
     int textureHeight_ = 0;

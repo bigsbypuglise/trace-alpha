@@ -72,6 +72,16 @@ public:
     virtual void resize(QSize size) = 0;
     virtual void paint(QWidget* host) = 0;
 
+    // True when the backend can present separate Y/U/V planes and apply the
+    // colour matrix itself, so the decoder may skip swscale for full-resolution
+    // frames (GATE C). False means every frame must arrive as BGRA8.
+    //
+    // Asked of the renderer rather than inferred from name() for the same
+    // reason as usesNativeSurface(): it is a capability the application has to
+    // know before it configures the decoder, and a second backend with the same
+    // answer should not have to be recognised by name.
+    virtual bool acceptsPlanarYuv() const { return false; }
+
     // True when the backend presents through a native surface rather than
     // Qt's backing store. The host must then realise a native window for it to
     // attach to and stop erasing the widget -- neither of which the renderer

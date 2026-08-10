@@ -16,6 +16,7 @@
 // the "green must mean launchable" rule exists to prevent.
 #include "FullscreenQuad.vs.h"
 #include "TexturedQuad.ps.h"
+#include "YuvToRgb.ps.h"
 
 namespace trace::render {
 namespace {
@@ -329,6 +330,32 @@ bool D3D11VideoRenderer::createPipeline(QString& error) {
                                     nullptr, &pixelShader_);
     if (FAILED(hr)) { error = hrText("CreatePixelShader", hr); return false; }
 
+    // GATE C. A failure here is NOT fatal: without the YUV shader the backend
+    // still presents every BGRA frame exactly as it did at GATE B, and the
+    // decoder is told not to send planes because acceptsPlanarYuv() is answered
+    // from whether this exists. Refusing to initialize at all would turn a
+    // missing capability into a fallback to the CPU renderer.
+    hr = device_->CreatePixelShader(g_TraceYuvToRgbPS, sizeof(g_TraceYuvToRgbPS),
+                                    nullptr, &yuvPixelShader_);
+    if (FAILED(hr)) {
+        yuvPixelShader_.Reset();
+        qWarning().noquote() << "Trace: YUV pixel shader unavailable"
+                             << hrText("CreatePixelShader(YuvToRgb)", hr)
+                             << "- planar upload disabled, BGRA path unchanged.";
+    } else {
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = 80;   // three float4 rows plus five floats and padding
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (FAILED(device_->CreateBuffer(&bd, nullptr, &yuvParams_))) {
+            yuvParams_.Reset();
+            yuvPixelShader_.Reset();
+            qWarning().noquote() << "Trace: YUV constant buffer failed"
+                                 << "- planar upload disabled, BGRA path unchanged.";
+        }
+    }
+
     // Bilinear, matching what the CPU backend does when it resamples. GATE B is
     // judged against that backend's picture, so the filter has to be the same
     // kind of filter -- a sharper one here would look like a GPU win that was
@@ -489,15 +516,199 @@ void D3D11VideoRenderer::uploadPixels(const uint8_t* src, int srcStride, int wid
     context_->Unmap(texture_.Get(), 0);
 }
 
+void D3D11VideoRenderer::releasePlaneTextures() {
+    for (int i = 0; i < 3; ++i) {
+        planeTexture_[i].Reset();
+        planeSrv_[i].Reset();
+        planeWidth_[i] = 0;
+        planeHeight_[i] = 0;
+    }
+    planeFormat_ = DXGI_FORMAT_UNKNOWN;
+}
+
+bool D3D11VideoRenderer::ensurePlaneTextures(const trace::core::FrameBuffer& buffer) {
+    // R8 at 8 bits, R16 above. R16_UNORM normalises by 65535 while the samples
+    // occupy only the low 10 or 12 bits, which is what the shader's sampleScale
+    // corrects; storing them this way is what makes the CPU-side copy a memcpy.
+    const DXGI_FORMAT want =
+        buffer.bytesPerSample() == 2 ? DXGI_FORMAT_R16_UNORM : DXGI_FORMAT_R8_UNORM;
+
+    bool ok = planeFormat_ == static_cast<unsigned int>(want);
+    if (ok) {
+        for (int i = 0; i < 3 && ok; ++i) {
+            ok = planeTexture_[i] && planeWidth_[i] == buffer.planeWidth(i)
+                 && planeHeight_[i] == buffer.planeHeight(i);
+        }
+    }
+    if (ok) return true;
+
+    releasePlaneTextures();
+
+    for (int i = 0; i < 3; ++i) {
+        D3D11_TEXTURE2D_DESC td = {};
+        td.Width = static_cast<UINT>(buffer.planeWidth(i));
+        td.Height = static_cast<UINT>(buffer.planeHeight(i));
+        td.MipLevels = 1;
+        td.ArraySize = 1;
+        td.Format = want;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_DYNAMIC;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        if (td.Width == 0 || td.Height == 0) { releasePlaneTextures(); return false; }
+        if (FAILED(device_->CreateTexture2D(&td, nullptr, &planeTexture_[i]))) {
+            releasePlaneTextures();
+            return false;
+        }
+        if (FAILED(device_->CreateShaderResourceView(planeTexture_[i].Get(), nullptr,
+                                                     &planeSrv_[i]))) {
+            releasePlaneTextures();
+            return false;
+        }
+        planeWidth_[i] = buffer.planeWidth(i);
+        planeHeight_[i] = buffer.planeHeight(i);
+    }
+    planeFormat_ = static_cast<unsigned int>(want);
+    return true;
+}
+
+bool D3D11VideoRenderer::uploadPlanes(const trace::core::FrameBuffer& buffer) {
+    if (!context_) return false;
+    const int sampleBytes = buffer.bytesPerSample();
+    for (int i = 0; i < 3; ++i) {
+        const uint8_t* src = buffer.data(i);
+        if (!src || !planeTexture_[i]) return false;
+
+        D3D11_MAPPED_SUBRESOURCE mapped = {};
+        if (FAILED(context_->Map(planeTexture_[i].Get(), 0, D3D11_MAP_WRITE_DISCARD, 0,
+                                 &mapped))) {
+            return false;
+        }
+        // Row by row for the same reason as the BGRA path: the source stride is
+        // ours and the destination stride is the driver's, and they are not the
+        // same number.
+        const int rowBytes = buffer.planeWidth(i) * sampleBytes;
+        const int srcStride = buffer.bytesPerLine(i);
+        auto* dst = static_cast<uint8_t*>(mapped.pData);
+        for (int y = 0; y < buffer.planeHeight(i); ++y) {
+            std::memcpy(dst + static_cast<size_t>(y) * mapped.RowPitch,
+                        src + static_cast<size_t>(y) * srcStride,
+                        static_cast<size_t>(rowBytes));
+        }
+        context_->Unmap(planeTexture_[i].Get(), 0);
+    }
+    return true;
+}
+
+bool D3D11VideoRenderer::updateYuvParams(const trace::core::VideoFrame& frame) {
+    if (!context_ || !yuvParams_ || !frame.buffer) return false;
+
+    // Rows of the YUV->RGB matrix, from plan section 11. The vector is
+    // (y, Cb, Cr) with the chroma already centred at zero by the offsets below.
+    float r[3], g[3], b[3];
+    using M = trace::core::ColorInfo::Matrix;
+    switch (frame.color.matrix) {
+        case M::BT709:
+            r[0] = 1.0f; r[1] =  0.0f;      r[2] =  1.5748f;
+            g[0] = 1.0f; g[1] = -0.1873f;   g[2] = -0.4681f;
+            b[0] = 1.0f; b[1] =  1.8556f;   b[2] =  0.0f;
+            break;
+        case M::BT601:
+            r[0] = 1.0f; r[1] =  0.0f;      r[2] =  1.4020f;
+            g[0] = 1.0f; g[1] = -0.344136f; g[2] = -0.714136f;
+            b[0] = 1.0f; b[1] =  1.7720f;   b[2] =  0.0f;
+            break;
+        case M::BT2020:
+            r[0] = 1.0f; r[1] =  0.0f;      r[2] =  1.4746f;
+            g[0] = 1.0f; g[1] = -0.16455f;  g[2] = -0.57135f;
+            b[0] = 1.0f; b[1] =  1.8814f;   b[2] =  0.0f;
+            break;
+        default:
+            // Fcc, Smpte240m and Unspecified have no entry here on purpose.
+            // Presenting them through a near-enough matrix would put a colour
+            // difference between the two backends that no A/B could attribute.
+            // The decoder declines the same set, so this is a backstop.
+            return false;
+    }
+
+    const int depth = frame.buffer->bitDepth();
+    const float maxCode = static_cast<float>((1 << depth) - 1);
+    const int shift = depth - 8;
+
+    // Computed at the ACTUAL depth rather than reusing the 8-bit fractions:
+    // 10-bit black is code 64 of 1023, which is not 16/255. See the shader.
+    const float blackCode  = static_cast<float>(16 << shift);
+    const float whiteCode  = static_cast<float>(235 << shift);
+    const float chromaMid  = static_cast<float>(128 << shift);
+    const float chromaSpan = static_cast<float>(224 << shift);
+
+    struct Params {
+        float matR[4];
+        float matG[4];
+        float matB[4];
+        float sampleScale;
+        float lumaOffset;
+        float lumaScale;
+        float chromaOffset;
+        float chromaScale;
+        float padding[3];
+    } p = {};
+
+    p.matR[0] = r[0]; p.matR[1] = r[1]; p.matR[2] = r[2];
+    p.matG[0] = g[0]; p.matG[1] = g[1]; p.matG[2] = g[2];
+    p.matB[0] = b[0]; p.matB[1] = b[1]; p.matB[2] = b[2];
+
+    // R8_UNORM already yields value/255; R16_UNORM yields value/65535 for data
+    // that only fills the low `depth` bits.
+    p.sampleScale = (frame.buffer->bytesPerSample() == 2) ? (65535.0f / maxCode) : 1.0f;
+
+    if (frame.color.fullRange) {
+        p.lumaOffset = 0.0f;
+        p.lumaScale = 1.0f;
+        p.chromaOffset = chromaMid / maxCode;
+        p.chromaScale = 1.0f;
+    } else {
+        p.lumaOffset = blackCode / maxCode;
+        p.lumaScale = maxCode / (whiteCode - blackCode);
+        p.chromaOffset = chromaMid / maxCode;
+        p.chromaScale = maxCode / chromaSpan;
+    }
+
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(context_->Map(yuvParams_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        return false;
+    }
+    std::memcpy(mapped.pData, &p, sizeof(p));
+    context_->Unmap(yuvParams_.Get(), 0);
+    return true;
+}
+
 void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
     if (frame.isNull() || !device_) { clearFrame(); return; }
 
     const auto& buffer = *frame.buffer;
+
+    if (trace::core::isPlanarYuv(buffer.layout())) {
+        // Any failure here falls back to nothing rather than to the BGRA path,
+        // because there is no BGRA copy of this frame to fall back TO -- the
+        // decoder skipped the conversion precisely because this backend said it
+        // could take the planes. clearFrame() shows the placeholder, which is
+        // diagnosable; a stale previous frame under a new index would not be.
+        if (!yuvPixelShader_ || !ensurePlaneTextures(buffer) || !uploadPlanes(buffer)
+            || !updateYuvParams(frame)) {
+            clearFrame();
+            return;
+        }
+        contentSize_ = QSize(buffer.width(), buffer.height());
+        hasContent_ = true;
+        contentIsPlanar_ = true;
+        contentIsPlaceholder_ = false;
+        return;
+    }
+
     if (buffer.layout() != trace::core::PixelLayout::BGRA8) {
-        // Nothing else can reach here today -- swscale's destination is BGRA
-        // and the still path adopts an RGB32 QImage -- but the check is the
-        // difference between an unsupported layout being a black screen and
-        // being a diagnosable one.
+        // The check is the difference between an unsupported layout being a
+        // black screen and being a diagnosable one.
         clearFrame();
         return;
     }
@@ -507,12 +718,18 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
 
     contentSize_ = QSize(buffer.width(), buffer.height());
     hasContent_ = true;
+    contentIsPlanar_ = false;
     contentIsPlaceholder_ = false;
 }
 
 void D3D11VideoRenderer::clearFrame() {
     hasContent_ = false;
     contentIsPlaceholder_ = false;
+    // The placeholder is BGRA, so the next draw must not bind the YUV shader.
+    // The plane textures themselves are kept: clearFrame runs on every media
+    // change and between drag and landing, and rebuilding three textures each
+    // time would be the allocation this path exists to avoid.
+    contentIsPlanar_ = false;
     contentSize_ = QSize();
     // The placeholder is what gets shown instead, and it has to be rebuilt
     // because the texture now holds a frame.
@@ -543,6 +760,9 @@ void D3D11VideoRenderer::uploadPlaceholder(QSize pixelSize) {
     placeholderSize_ = pixelSize;
     placeholderDirty_ = false;
     contentIsPlaceholder_ = true;
+    // The placeholder went into the BGRA texture, so the draw must bind the
+    // BGRA shader whatever the last frame was.
+    contentIsPlanar_ = false;
     contentSize_ = pixelSize;
 }
 
@@ -623,7 +843,9 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     context_->ClearRenderTargetView(backBufferRtv_.Get(),
                                     clearDiagnosticEnabled() ? kDiagRed : kBlack);
 
-    if (textureSrv_) {
+    const bool drawPlanar = contentIsPlanar_ && planeSrv_[0] && planeSrv_[1] && planeSrv_[2]
+                            && yuvPixelShader_;
+    if (drawPlanar || textureSrv_) {
         QElapsedTimer drawTimer;
         drawTimer.start();
 
@@ -634,9 +856,25 @@ void D3D11VideoRenderer::paint(QWidget* host) {
         // triangle from SV_VertexID.
         context_->IASetInputLayout(nullptr);
         context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
-        context_->PSSetShader(pixelShader_.Get(), nullptr, 0);
-        ID3D11ShaderResourceView* srvs[] = {textureSrv_.Get()};
-        context_->PSSetShaderResources(0, 1, srvs);
+
+        // Both paths share the vertex shader, the sampler, the rasteriser and
+        // the viewport. Only the pixel shader and what is bound to it differ,
+        // which is exactly the split GATE B's shader comment promised.
+        if (drawPlanar) {
+            context_->PSSetShader(yuvPixelShader_.Get(), nullptr, 0);
+            ID3D11ShaderResourceView* srvs[] = {planeSrv_[0].Get(), planeSrv_[1].Get(),
+                                                planeSrv_[2].Get()};
+            context_->PSSetShaderResources(0, 3, srvs);
+            ID3D11Buffer* cbs[] = {yuvParams_.Get()};
+            context_->PSSetConstantBuffers(0, 1, cbs);
+        } else {
+            context_->PSSetShader(pixelShader_.Get(), nullptr, 0);
+            // Unbind slots 1 and 2: leaving the chroma planes bound while the
+            // BGRA shader runs is harmless today but makes the next frame's
+            // state depend on the previous frame's kind.
+            ID3D11ShaderResourceView* srvs[] = {textureSrv_.Get(), nullptr, nullptr};
+            context_->PSSetShaderResources(0, 3, srvs);
+        }
         ID3D11SamplerState* samplers[] = {sampler_.Get()};
         context_->PSSetSamplers(0, 1, samplers);
         context_->Draw(3, 0);

@@ -191,6 +191,20 @@ public:
     // whatever size was in force when they were made.
     void setScrubPreviewSize(QSize size);
 
+    // Hand full-resolution frames to the renderer as separate Y/U/V planes
+    // instead of running swscale to BGRA, when the source is a planar YUV
+    // format this can describe. Off by default: only a backend that says it can
+    // sample three planes and apply the matrix itself may turn it on, and the
+    // CPU backend cannot, so its path is unchanged whatever this is set to.
+    //
+    // SCRUB PREVIEWS ARE DELIBERATELY EXCLUDED and stay on swscale. A preview is
+    // converted straight to the size it will be drawn at (`b5a56af`), which is a
+    // fiftieth of the pixels of a full-resolution frame; uploading full-res
+    // planes for one would move that cost onto the bus rather than remove it,
+    // and playback throughput would never show it. See plan section 20.7.
+    void setPlanarOutputEnabled(bool enabled);
+    bool planarOutputEnabled() const { return planarOutput_; }
+
     long long currentFrame() const { return currentFrame_; }
     const VideoMetadata& metadata() const { return metadata_; }
     const VideoPerfStats& perfStats() const { return perfStats_; }
@@ -235,6 +249,7 @@ private:
     VideoPerfStats perfStats_;
     long long currentFrame_ = -1;
     bool lastRequestAbandoned_ = false;
+    bool planarOutput_ = false;
 };
 
 } // namespace trace::core

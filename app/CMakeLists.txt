@@ -87,6 +87,8 @@ if(TRACE_FXC)
                        g_TraceOverlayQuadVS OverlayQuad.vs.h)
   trace_compile_shader(../src/render/shaders/OverlayQuad.ps.hlsl ps_4_0
                        g_TraceOverlayQuadPS OverlayQuad.ps.h)
+  trace_compile_shader(../src/render/shaders/YuvToRgb.ps.hlsl ps_4_0
+                       g_TraceYuvToRgbPS YuvToRgb.ps.h)
 
   set(TRACE_D3D11_FOUND TRUE)
   set(TRACE_D3D11_SOURCES
@@ -98,10 +100,12 @@ if(TRACE_FXC)
     ../src/render/shaders/TexturedQuad.ps.hlsl
     ../src/render/shaders/OverlayQuad.vs.hlsl
     ../src/render/shaders/OverlayQuad.ps.hlsl
+    ../src/render/shaders/YuvToRgb.ps.hlsl
     "${TRACE_SHADER_DIR}/FullscreenQuad.vs.h"
     "${TRACE_SHADER_DIR}/TexturedQuad.ps.h"
     "${TRACE_SHADER_DIR}/OverlayQuad.vs.h"
     "${TRACE_SHADER_DIR}/OverlayQuad.ps.h"
+    "${TRACE_SHADER_DIR}/YuvToRgb.ps.h"
   )
   # .hlsl files are inputs to our own fxc rules; stop MSBuild running its
   # built-in HLSL task over them as well, which picks its own profile and fails.
@@ -110,6 +114,7 @@ if(TRACE_FXC)
     ../src/render/shaders/TexturedQuad.ps.hlsl
     ../src/render/shaders/OverlayQuad.vs.hlsl
     ../src/render/shaders/OverlayQuad.ps.hlsl
+    ../src/render/shaders/YuvToRgb.ps.hlsl
     PROPERTIES HEADER_FILE_ONLY TRUE VS_TOOL_OVERRIDE "None")
 endif()
 

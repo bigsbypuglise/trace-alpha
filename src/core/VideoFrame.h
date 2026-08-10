@@ -11,14 +11,34 @@ namespace trace::core {
 //
 // Deliberately Trace's own enum rather than AVPixelFormat: this header sits on
 // the image-sequence path too, which must compile with TRACE_WITH_FFMPEG
-// undefined. The planar YUV layouts the GPU renderer will want are not listed
-// yet -- add them when something can actually produce one.
+// undefined.
 enum class PixelLayout {
     Unknown,
     // 32bpp, byte order B,G,R,A. On little-endian that is exactly
     // QImage::Format_RGB32's 0xffRRGGBB, and AV_PIX_FMT_BGRA's byte order.
     BGRA8,
+
+    // Three separate Y, U, V planes, no alpha -- the GPU upload path (GATE C).
+    // The suffix is chroma subsampling; the bit depth is carried separately by
+    // FrameBuffer::bitDepth(), because 10- and 12-bit share one layout and one
+    // texture format and differ only in a shader constant.
+    //
+    // There is no alpha variant on purpose. The shader never samples a fourth
+    // plane, so ProRes 4444 arrives here as YUV444 with its alpha dropped at the
+    // copy -- the same decision alphaStrippedFormat() makes on the CPU path, for
+    // the same reason: the destination cannot show it.
+    YUV420P,
+    YUV422P,
+    YUV444P,
 };
+
+// True for the three planar YUV layouts above. Written as a function rather
+// than a range check so adding a layout cannot silently join or leave the set.
+constexpr bool isPlanarYuv(PixelLayout layout) {
+    return layout == PixelLayout::YUV420P
+        || layout == PixelLayout::YUV422P
+        || layout == PixelLayout::YUV444P;
+}
 
 // Source colorimetry, carried with the frame rather than looked up again.
 //
@@ -54,15 +74,26 @@ struct ColorInfo {
 // entry reporting isDetached(); owning the memory outright makes the hazard
 // structurally impossible instead of avoided by policy.
 //
-// Exactly one plane today. Planar YUV upload (GPU phase 7) adds more; the
-// accessors are deliberately shaped so that is an addition rather than a
-// change of meaning.
+// One plane for BGRA8, three for the planar YUV layouts. A single allocation
+// holds all of them, so the recycling pool, the byte budget and the refcount
+// all keep working exactly as they did for one plane.
 class FrameBuffer {
 public:
+    static constexpr int kMaxPlanes = 3;
+
     // Allocates writable storage. `bytesPerLine` matches QImage's stride rule
     // for the equivalent format, so swscale sees the same destination geometry
     // it did before this type existed.
     static std::shared_ptr<FrameBuffer> allocate(int width, int height, PixelLayout layout);
+
+    // Planar YUV storage for a source of the given bit depth (8, 10 or 12).
+    // `width`/`height` are the LUMA dimensions; the chroma planes are derived
+    // from the layout's subsampling. Samples above 8 bits are stored as
+    // little-endian 16-bit, LSB-aligned, exactly as FFmpeg's p10le/p12le give
+    // them -- so the copy in is a memcpy and the bit depth becomes a shader
+    // constant rather than a repacking pass.
+    static std::shared_ptr<FrameBuffer> allocatePlanar(int width, int height,
+                                                       PixelLayout layout, int bitDepth);
 
     // Takes over an already-decoded image (the still/sequence path, where the
     // pixels come from OIIO or QImage rather than swscale). The image is
@@ -77,29 +108,59 @@ public:
 
     // Writable pixels. Only meaningful for allocate()d buffers -- a producer
     // owns its buffer until it publishes a VideoFrame over it.
-    uint8_t* data() { return data_; }
-    const uint8_t* data() const { return data_; }
+    //
+    // The no-argument forms are plane 0, which is the whole picture for BGRA8
+    // and the luma plane for planar YUV. Every existing caller is a BGRA one and
+    // keeps working unchanged.
+    uint8_t* data() { return planes_[0]; }
+    const uint8_t* data() const { return planes_[0]; }
+    uint8_t* data(int plane) { return plane >= 0 && plane < planeCount_ ? planes_[plane] : nullptr; }
+    const uint8_t* data(int plane) const { return plane >= 0 && plane < planeCount_ ? planes_[plane] : nullptr; }
 
     int width() const { return width_; }
     int height() const { return height_; }
-    int bytesPerLine() const { return bytesPerLine_; }
+    int bytesPerLine() const { return bytesPerLine_[0]; }
+    int bytesPerLine(int plane) const { return plane >= 0 && plane < planeCount_ ? bytesPerLine_[plane] : 0; }
+    // Per-plane dimensions in samples. Equal to the frame size for plane 0 and
+    // for every plane of a 4:4:4 layout.
+    int planeWidth(int plane) const { return plane >= 0 && plane < planeCount_ ? planeWidth_[plane] : 0; }
+    int planeHeight(int plane) const { return plane >= 0 && plane < planeCount_ ? planeHeight_[plane] : 0; }
+    int planeCount() const { return planeCount_; }
     PixelLayout layout() const { return layout_; }
+    // 8 for BGRA8 and for 8-bit planar; 10 or 12 for high-bit-depth planar. This
+    // is the SOURCE depth, not the storage depth: above 8 the samples occupy the
+    // low bits of a 16-bit word, which is what makes the shader's scale factor
+    // 65535/(2^bitDepth - 1) rather than 1.
+    int bitDepth() const { return bitDepth_; }
+    // Bytes per sample in storage: 1 at 8 bits, 2 above.
+    int bytesPerSample() const { return bitDepth_ > 8 ? 2 : 1; }
+
     // Footprint for the frame cache's byte budget. Counts the allocation, not
-    // width*height*4, so a padded stride is priced honestly.
-    long long sizeInBytes() const { return static_cast<long long>(bytesPerLine_) * height_; }
+    // width*height*4, so a padded stride is priced honestly -- and so a planar
+    // frame, which is a third to a half the size of the BGRA one, is priced as
+    // what it is rather than as what it would have converted to.
+    long long sizeInBytes() const { return totalBytes_; }
 
 private:
     FrameBuffer() = default;
 
-    uint8_t* data_ = nullptr;
+    uint8_t* planes_[kMaxPlanes] = {nullptr, nullptr, nullptr};
+    int bytesPerLine_[kMaxPlanes] = {0, 0, 0};
+    int planeWidth_[kMaxPlanes] = {0, 0, 0};
+    int planeHeight_[kMaxPlanes] = {0, 0, 0};
+    int planeCount_ = 1;
     int width_ = 0;
     int height_ = 0;
-    int bytesPerLine_ = 0;
+    int bitDepth_ = 8;
+    long long totalBytes_ = 0;
     PixelLayout layout_ = PixelLayout::Unknown;
     // Set when the storage came from adopt(); its lifetime is the QImage's, not
     // an aligned allocation of ours.
     QImage adopted_;
-    bool ownsAllocation_ = false;
+    // The one allocation every plane points into, and what the destructor
+    // frees. Kept separately from planes_[0] because a planar buffer's plane
+    // pointers are offsets into it and only this one is the allocation base.
+    uint8_t* allocation_ = nullptr;
 };
 
 // A decoded frame: pixels plus the identity and colorimetry that make them
