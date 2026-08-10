@@ -1,28 +1,38 @@
 <RCC>
   <!--
-    ONE icon source: assets/260807 Trace Media Player Icon/export/.
+    Paths here point at WORKING COPIES under assets/interface/ and
+    assets/branding/, named for the control they drive. The untouched design
+    package is assets/source/original-design-package/ and nothing embeds from
+    it directly; assets/README.md states the rule and why.
 
-    Before spec phase 2 there were three packages in the tree: assets/icons/
-    (app icon), assets/Interface/ (first-pass player icons) and this one, which
-    supersedes both and says so in its own CONTENTS.txt. assets/icons/ is
-    deleted; assets/Interface/ survives for exactly two glyphs, see below.
+    ONE icon source. Before spec phase 2 there were three packages in the tree:
+    assets/icons/ (app icon), assets/Interface/ (first-pass player icons) and
+    the 260807 package, which supersedes both and says so in its own
+    CONTENTS.txt. Both of the others are gone. Note the first-pass set was
+    never actually needed as a separate directory, because the approved package
+    carries a byte-identical copy of it as player-icons/, labelled SUPERSEDED
+    and kept for reference. That is where the two frame-step glyphs below come
+    from now.
   -->
   <qresource prefix="/icons">
-    <file alias="trace-16.png">../assets/260807 Trace Media Player Icon/export/png/windows/trace-16.png</file>
-    <file alias="trace-32.png">../assets/260807 Trace Media Player Icon/export/png/windows/trace-32.png</file>
-    <file alias="trace-48.png">../assets/260807 Trace Media Player Icon/export/png/windows/trace-48.png</file>
-    <file alias="trace-256.png">../assets/260807 Trace Media Player Icon/export/png/windows/trace-256.png</file>
+    <file alias="trace-16.png">../assets/branding/app-icon/png/windows/trace-16.png</file>
+    <file alias="trace-32.png">../assets/branding/app-icon/png/windows/trace-32.png</file>
+    <file alias="trace-48.png">../assets/branding/app-icon/png/windows/trace-48.png</file>
+    <file alias="trace-256.png">../assets/branding/app-icon/png/windows/trace-256.png</file>
   </qresource>
 
   <!--
     Transport icons. Only controls that exist in the app are embedded; the rest
     of the base UI set (volume, share, inspector, zoom, rotate, loop, ...) is
-    deliberately left out until those features are real.
+    deliberately left out until those features are real, which is why
+    assets/interface/common/ is an empty directory rather than a populated one.
 
     The approved set ships 24px @1x and 48px @2x. It has no @3x, so a 3x display
     scales the 48px master rather than picking a dedicated file; the previous
-    first-pass set did have one. SVG masters exist in the package if that ever
-    matters, but using them needs Qt6::Svg, which Trace does not link.
+    first-pass set did have one, which is why the two frame-step glyphs below
+    are the only ones with a -72. SVG masters sit beside each PNG in
+    assets/interface/ if that ever matters, but using them needs Qt6::Svg, which
+    Trace does not link.
 
     THE TWO FRAME-STEP GLYPHS ARE STILL FROM THE OLD SET, ON PURPOSE. The
     approved package contains no frame-step icon by design ("Left/Right Arrow
@@ -31,36 +41,38 @@
     single-frame stepping until spec phases 4 and 5. Shipping the scan artwork
     over stepping behaviour would put a lie on a visible control in a player
     whose third pillar is that it can be trusted, so the artwork moves when the
-    behaviour does. That is also when assets/Interface/ leaves the tree.
+    behaviour does. That is also when the two files leave assets/interface/.
 
-    transport_scan_* is embedded now so phases 4 and 5 are a code change only.
+    rewind/fast-forward ARE transport_scan_reverse/transport_scan_forward,
+    renamed to what they do. They are embedded now, and unused, so phases 4 and
+    5 are a code change only.
   -->
   <qresource prefix="/ui">
-    <file alias="play-24.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/1x/transport_play.png</file>
-    <file alias="play-48.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/2x/transport_play.png</file>
+    <file alias="play-24.png">../assets/interface/transport/play-24.png</file>
+    <file alias="play-48.png">../assets/interface/transport/play-48.png</file>
 
-    <file alias="pause-24.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/1x/transport_pause.png</file>
-    <file alias="pause-48.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/2x/transport_pause.png</file>
+    <file alias="pause-24.png">../assets/interface/transport/pause-24.png</file>
+    <file alias="pause-48.png">../assets/interface/transport/pause-48.png</file>
 
-    <file alias="fullscreen-24.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/1x/view_fullscreen_enter.png</file>
-    <file alias="fullscreen-48.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/2x/view_fullscreen_enter.png</file>
+    <file alias="fullscreen-24.png">../assets/interface/window/fullscreen-enter-24.png</file>
+    <file alias="fullscreen-48.png">../assets/interface/window/fullscreen-enter-48.png</file>
 
-    <file alias="exit-fullscreen-24.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/1x/view_fullscreen_exit.png</file>
-    <file alias="exit-fullscreen-48.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/2x/view_fullscreen_exit.png</file>
+    <file alias="exit-fullscreen-24.png">../assets/interface/window/fullscreen-exit-24.png</file>
+    <file alias="exit-fullscreen-48.png">../assets/interface/window/fullscreen-exit-48.png</file>
 
     <!-- Unused until spec phases 4 and 5 re-point the two side controls. -->
-    <file alias="scan-forward-24.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/1x/transport_scan_forward.png</file>
-    <file alias="scan-forward-48.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/2x/transport_scan_forward.png</file>
+    <file alias="fast-forward-24.png">../assets/interface/transport/fast-forward-24.png</file>
+    <file alias="fast-forward-48.png">../assets/interface/transport/fast-forward-48.png</file>
 
-    <file alias="scan-reverse-24.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/1x/transport_scan_reverse.png</file>
-    <file alias="scan-reverse-48.png">../assets/260807 Trace Media Player Icon/export/base-ui-icons/png/2x/transport_scan_reverse.png</file>
+    <file alias="rewind-24.png">../assets/interface/transport/rewind-24.png</file>
+    <file alias="rewind-48.png">../assets/interface/transport/rewind-48.png</file>
 
-    <file alias="prev-frame-24.png">../assets/Interface/export/player-icons/png/1x/prev-frame.png</file>
-    <file alias="prev-frame-48.png">../assets/Interface/export/player-icons/png/2x/prev-frame.png</file>
-    <file alias="prev-frame-72.png">../assets/Interface/export/player-icons/png/3x/prev-frame.png</file>
+    <file alias="prev-frame-24.png">../assets/interface/transport/prev-frame-24.png</file>
+    <file alias="prev-frame-48.png">../assets/interface/transport/prev-frame-48.png</file>
+    <file alias="prev-frame-72.png">../assets/interface/transport/prev-frame-72.png</file>
 
-    <file alias="next-frame-24.png">../assets/Interface/export/player-icons/png/1x/next-frame.png</file>
-    <file alias="next-frame-48.png">../assets/Interface/export/player-icons/png/2x/next-frame.png</file>
-    <file alias="next-frame-72.png">../assets/Interface/export/player-icons/png/3x/next-frame.png</file>
+    <file alias="next-frame-24.png">../assets/interface/transport/next-frame-24.png</file>
+    <file alias="next-frame-48.png">../assets/interface/transport/next-frame-48.png</file>
+    <file alias="next-frame-72.png">../assets/interface/transport/next-frame-72.png</file>
   </qresource>
 </RCC>

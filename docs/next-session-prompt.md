@@ -8,6 +8,65 @@ repo root.
 
 ---
 
+## DO THIS FIRST — the asset tree was reorganised by hand and THE BUILD IS BROKEN
+
+The owner cleaned up `assets/` on 2026-08-10, outside a session. Two directories were
+deleted and the approved package's `export/` contents were moved up one level, so `assets/`
+now holds `base-ui-icons/`, `player-icons/`, `png/`, `svg/`, `trace.ico`, `trace.icns` and
+three `.txt` files at its root.
+
+**`app/resources.qrc` still points at both deleted paths** — `assets/260807 Trace Media
+Player Icon/export/…` (16 entries) and `assets/Interface/export/…` (6 entries). All 22 are
+dangling, so `rcc` fails and the tree does not build. Verify that before anything else, then
+fix it as **one commit** — the move and the `.qrc` rewrite have to land together, with a
+local build and CI green, because there is no intermediate state that works.
+
+### The target layout, as the owner specified it
+
+```
+assets/
+├── branding/
+│   └── app-icon/          trace.ico, trace.icns, + the png/{windows,macos} sets
+│                          and svg masters the qrc embeds
+├── interface/
+│   ├── transport/         play, pause, rewind, fast-forward, prev-frame, next-frame
+│   ├── window/            fullscreen-enter, fullscreen-exit
+│   └── common/            empty — where volume/share/inspector/zoom/rotate/loop go
+│                          when those features are real
+├── source/
+│   └── original-design-package/    the complete untouched export
+└── README.md
+```
+
+`rewind` and `fast-forward` are the package's `transport_scan_reverse` /
+`transport_scan_forward`. Renaming them to what they *do* is right and matches phase 2's
+own rule that artwork follows behaviour.
+
+### Three things the sketch omits, and each one is load-bearing
+
+1. **`prev-frame` and `next-frame` must survive.** They came from the now-deleted
+   `assets/Interface/`, and they are the artwork on the two *visible* side buttons, which
+   still perform single-frame stepping until phases 4–5. The approved package has no
+   frame-step glyph by design. Dropping them ships the scan artwork over stepping behaviour,
+   which is the exact thing phase 2 refused to do. They are available at
+   `assets/player-icons/{svg,png/*}/`. They leave the tree at phases 4–5, with the
+   behaviour.
+2. **The app embeds PNG, not SVG, and does not link `Qt6::Svg`.** An SVG-only layout would
+   have nothing for the `.qrc` to reference. Carry the 1x/2x PNG renditions alongside each
+   SVG master. Linking `Qt6::Svg` and moving to vector icons is a reasonable future change,
+   but it is a real decision with a deployment consequence — do not let it happen as a side
+   effect of a folder move.
+3. **`app/resources.qrc`'s comments are project knowledge, not decoration.** They record why
+   there is one icon source, why the scan glyphs are embedded-but-unused, and why the two
+   step glyphs are still from the old set. Re-point the paths and keep the reasoning.
+
+Write `assets/README.md` to say what each directory is for and state the rule that
+`source/original-design-package/` is the untouched master and everything under `interface/`
+is a working copy named for its behaviour.
+
+**Regression:** icons are resources, so a build plus a visual check that the transport bar
+and window icon still render is enough. Do not re-run the playback suite for this.
+
 ## Standing priorities (owner) — these outrank anything below
 
 1. **Performance is priority #1.** No interface feature may ever compromise lightweight,

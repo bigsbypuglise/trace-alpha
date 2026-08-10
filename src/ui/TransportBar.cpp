@@ -15,7 +15,7 @@ namespace trace::ui {
 namespace {
 
 // Design tokens. STATE VALUES are the approved set's
-// (assets/260807 Trace Media Player Icon/export/base-ui-icons/README.txt);
+// (assets/source/original-design-package/base-ui-icons/README.txt);
 // CONTROL GEOMETRY is still the first-pass set's, and that is deliberate.
 //
 // The approved package specifies 34x34 utility targets and a 44x44 play/pause
