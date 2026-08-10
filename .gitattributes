@@ -1,0 +1,60 @@
+# Line endings are pinned here rather than left to core.autocrlf.
+#
+# WHAT WAS WRONG. With no .gitattributes and core.autocrlf=true, the working
+# tree drifted into a mixed state: `git ls-files --eol` reported 67 tracked text
+# files at LF and **24 at CRLF**, which is exactly the "24 modified files,
+# 11304 insertions and 11304 deletions" that showed up across three sessions.
+# Nothing was actually edited. Whether a file ended up LF or CRLF depended only
+# on whether git or an editor wrote it last -- git converts LF to CRLF on
+# checkout under autocrlf, while a tool writing the file directly leaves LF.
+#
+# The index was never the problem: zero tracked files hold CRLF there. So this
+# is not a history repair, it is pinning the working tree so it stops drifting.
+#
+# WHY eol=lf RATHER THAN NATIVE. `text=auto` alone normalises the index but
+# leaves the working tree to core.autocrlf, which is per-machine config and is
+# therefore the thing that drifted. Pinning the checkout to LF makes the index
+# and the working tree byte-identical, so core.autocrlf cannot reintroduce this
+# on either platform -- and this repo is developed on macOS as well as Windows.
+#
+# Nothing in the build needs CRLF: MSVC, CMake and PowerShell 5.1 all read LF
+# perfectly well, and there are no .bat or .cmd files, which are the only things
+# that genuinely require it. The rule for those is below anyway, so adding one
+# later cannot silently get LF.
+* text=auto eol=lf
+
+# Named explicitly as well as covered by the rule above. This is the list to
+# check when someone asks whether a file type is handled.
+*.cpp          text eol=lf
+*.h            text eol=lf
+*.hlsl         text eol=lf
+*.md           text eol=lf
+*.ps1          text eol=lf
+*.txt          text eol=lf
+*.yml          text eol=lf
+*.yaml         text eol=lf
+*.cmake        text eol=lf
+*.qrc          text eol=lf
+*.rc           text eol=lf
+*.svg          text eol=lf
+*.json         text eol=lf
+CMakeLists.txt text eol=lf
+
+# The exception, kept ahead of ever needing it: cmd.exe genuinely requires CRLF
+# and a batch file checked out with LF fails in ways that look like a bad script.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary. Never converted, never diffed as text -- line-ending translation
+# applied to an image corrupts it silently, which is the one failure here that
+# would not announce itself.
+*.png  binary
+*.jpg  binary
+*.jpeg binary
+*.ico  binary
+*.icns binary
+*.pdf  binary
+*.zip  binary
+*.mov  binary
+*.mp4  binary
+*.exr  binary
