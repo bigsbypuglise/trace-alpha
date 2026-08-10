@@ -31,8 +31,8 @@ struct ViewerPerfStats {
     long long paintsWithoutNewImage = 0;
 
     // Whether the last frame was resampled to fit, and the size it was drawn
-    // at: the scale factor is what decides whether filtering is good enough or
-    // the downscale needs to move into the conversion.
+    // at, in DEVICE pixels -- mirrored from RenderStats, which is where the
+    // unit is stated and why.
     bool lastDrawWasScaled = false;
     bool lastDrawWasFiltered = false;
     QSize lastDrawSize;

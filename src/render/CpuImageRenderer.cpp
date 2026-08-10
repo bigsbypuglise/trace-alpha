@@ -70,17 +70,29 @@ void CpuImageRenderer::paint(QWidget* host) {
             QRect target((host->width() - fitted.width()) / 2,
                          (host->height() - fitted.height()) / 2,
                          fitted.width(), fitted.height());
+            // Drawn in logical coordinates, but QPainter carries the widget's
+            // device-pixel-ratio transform, so the rectangle actually sampled
+            // into is `fitted * dpr`. That is the size the resample is really
+            // against, and it is what D3D11 reports for the same rectangle --
+            // the two disagreed by exactly the dpr until this was made explicit.
+            const double dpr = host->devicePixelRatioF();
+            const QSize drawn(qRound(fitted.width() * dpr), qRound(fitted.height() * dpr));
             // Nearest-neighbour point sampling is what jagged every diagonal
             // edge in the frame: any window that is not exactly the source
             // resolution drops whole pixel rows and columns. Filter whenever
             // the frame is being resampled -- but never when it maps 1:1, where
             // filtering could only soften pixels the user is inspecting.
-            const bool resampled = fitted != image_.size();
+            //
+            // The test is against the device size for the same reason: at
+            // dpr 1.5 a frame fitted to a logical rect of its own size is being
+            // upscaled by half again, and comparing logical sizes called that
+            // 1:1 and switched filtering off for it.
+            const bool resampled = drawn != image_.size();
             const bool filtered = resampled && !nearestScaleForced();
             p.setRenderHint(QPainter::SmoothPixmapTransform, filtered);
             stats_.lastDrawWasScaled = resampled;
             stats_.lastDrawWasFiltered = filtered;
-            stats_.lastDrawSize = fitted;
+            stats_.lastDrawSize = drawn;
             QElapsedTimer drawTimer;
             drawTimer.start();
             p.drawImage(target, image_);

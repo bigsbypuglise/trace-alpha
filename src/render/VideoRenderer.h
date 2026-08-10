@@ -33,6 +33,12 @@ struct RenderStats {
     // Whether the last frame was resampled to fit, and the size it was drawn
     // at: the scale factor is what decides whether filtering is good enough or
     // the downscale needs to move into the conversion.
+    //
+    // lastDrawSize is in DEVICE pixels, and `lastDrawWasScaled` is decided
+    // against it. Backends must agree on this: a logical-pixel answer differs
+    // from a device-pixel one by the dpr for the same on-screen rectangle, and
+    // the two backends reported different numbers for the same picture until
+    // the unit was named here.
     bool lastDrawWasScaled = false;
     bool lastDrawWasFiltered = false;
     QSize lastDrawSize;
