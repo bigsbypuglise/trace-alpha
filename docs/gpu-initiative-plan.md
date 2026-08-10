@@ -392,7 +392,8 @@ Each is independently reviewable and revertable. Gates in **bold**.
    **every** full-resolution frame rather than only the landing §9 named. Fixed
    with a box reduction in the shader: 4444 0.74 → 0.02, 422 HQ 0.89 → 0.00, no
    measurable playback or scrub cost. The telemetry half landed early with §27.
-   **Owner visual sign-off outstanding.**
+   **Owner visual sign-off PASSED 2026-08-10**, and the drag preview's remaining
+   softness is accepted as-is.
 10. `feat(gpu): add high-bit-depth ProRes presentation` — **deferred**
 11. **GATE E** — pulled ahead of 8-10 (2026-08-09, owner decision) and **split in
     two**, which §24.11 Q1 asked and the result justified:
@@ -3222,7 +3223,7 @@ being measured honestly, which was worth confirming.
 
 ---
 
-## 28. Step 9 — GPU scaling. A REAL defect, measured and fixed (2026-08-10)
+## 28. Step 9 — GPU scaling. A REAL defect, measured, fixed, SIGNED OFF (2026-08-10)
 
 Unlike step 8 (§27), this one had something behind it. Same discipline applied:
 state what it should buy, measure before building, measure after.
@@ -3367,20 +3368,32 @@ The HUD reports `display WxH filtered xN`. 4444 reads `x4` (ratio 6.4), 4K H.264
 
 ### 28.6 Open after step 9
 
-1. **Owner visual sign-off. Fifth time.** Every figure says the picture now
-   matches a correct reduction. None says it looks better to the person reviewing
-   with it. Take it **at the machine** — §25.2: Parsec re-encodes the screen, so a
-   sharpness judgement over it is worthless.
-2. **The drag preview is still 0.76 and is now the odd one out.** Preview and
-   landing used to match (§9's 0.7%) and no longer do: the picture *sharpens* on
-   release. That is an improvement in the direction of travel, not a regression,
-   and previews being cruder than landings is normal for a review tool — but it is
-   a behaviour change and it is the owner's to accept. **The fix is one flag**:
-   `swsFlagsFor(fast)` returns `SWS_FAST_BILINEAR`, and plain `SWS_BILINEAR`
-   measures −0.20 on the same frame. **Its cost is unmeasured and it is the
-   dangerous kind** — previews are the drag path, where §15.1 measured supply at
-   19% on 4444, and drag throughput is what priority #1 protects. Do not flip it
-   without measuring the shuttle rate; that is why it was not flipped here.
+1. ~~**Owner visual sign-off. Fifth time.**~~ **PASSED — owner sign-off
+   2026-08-10**, on the 4x-zoom before/after/reference comparison of 4444 frame
+   120 at the shipping 6.4x downscale. Fifth time the project has needed the split
+   between "every figure improved" and "the picture is right", and the fifth time
+   only the owner could supply the second half. **Caveat, as with §26.6: the
+   session did not establish whether it was viewed at the machine or over Parsec**,
+   and §25.2 holds that a sharpness judgement over a re-encoded stream is not
+   valid. The concern was raised before the sign-off was given and the sign-off
+   was given anyway, so it stands as the owner's decision — but if it was remote,
+   re-take it at the panel before leaning on it against a future regression.
+2. ~~**The drag preview is still 0.76 and is now the odd one out.**~~ **ACCEPTED
+   AS-IS — owner sign-off 2026-08-10.** Preview and landing used to match (§9's
+   0.7%) and no longer do: the picture *sharpens* on release. The owner has
+   accepted that behaviour, which is the direction of travel and is normal for a
+   review tool — previews are previews.
+
+   **What was signed off is the behaviour, NOT a mandate to change the flag.**
+   Read that carefully, because the two are easy to conflate and the conflation is
+   expensive. The fix, if it is ever wanted, is one flag: `swsFlagsFor(fast)`
+   returns `SWS_FAST_BILINEAR`, and plain `SWS_BILINEAR` measures −0.20 on the same
+   frame. **Its cost is unmeasured and it is the dangerous kind** — previews are
+   the drag path, where §15.1 measured supply at 19% on 4444, and drag throughput
+   is what priority #1 protects. It was not flipped here and it should not be
+   flipped without measuring the shuttle rate first and putting the trade to the
+   owner explicitly. The experiment stays available; nothing obliges anyone to run
+   it.
 3. **The CPU backend is unchanged at 0.73.** `TRACE_RENDERER=cpu` is the escape
    hatch, so falling back to it now costs picture quality as well as GPU
    presentation. Worth stating in any instruction to try it.

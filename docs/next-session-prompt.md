@@ -1,8 +1,9 @@
-# After the scrub-stall pass
+# After the scaling pass — the GPU initiative is done except 10-bit output
 
-Supersedes the previous version of this file. GATE E is passed with owner sign-off, the
-playback stutter is gone, `d3d11` is the default renderer, and the scrub-stall item is
-largely closed. Paste everything below the line into a fresh session in the repo root.
+Supersedes the previous version of this file. The scrub-stall pass is closed with owner
+sign-off, GPU step 8 is closed as answered-no, GPU step 9 is built and signed off, and
+**step 10 (10-bit output) is the only deferred GPU item left.** No GPU item has an open
+owner question. Paste everything below the line into a fresh session in the repo root.
 
 ---
 
@@ -16,179 +17,201 @@ largely closed. Paste everything below the line into a fresh session in the repo
    locked real-time playback, responsive polished scrubbing at slow and fast speeds in both
    directions, and strong GPU integration.
 
+**There is no owner-facing playback or scrub complaint outstanding.** Playback, the scrub
+feel, and the picture have all been signed off. That is a real change in the situation: for
+several sessions there was always a named complaint to chase, and now there is not. Do not
+invent one — pick with the owner.
+
 ---
 
-Read `CLAUDE.md` and `docs/gpu-initiative-plan.md` first — §9, §22 (GATE C), §23 (the
-cadence characterisation), §24 (GATE E) and §25 (the default-renderer flip) are the
-load-bearing sections.
+Read `CLAUDE.md` and `docs/gpu-initiative-plan.md` first. Load-bearing sections: §9 (open
+items, and note §28.1 corrects its scope), §22 (GATE C), §23 (the cadence
+characterisation), §24 (GATE E), §25 (the default-renderer flip), §26 (scrub stalls), §27
+(step 8, answered-no) and §28 (step 9, the scaling fix).
 
-## What just happened, and the one thing not to undo
+## The rule this project keeps re-learning — read it before picking up any deferred item
 
-**GATE E passed at step 1** (`e2b8655`). The playback tick was a fixed integer-millisecond
-`QTimer` at `floor(1000/fps)` — 41ms against a 41.667ms frame — so presents landed on a
-41ms grid and every interval was 41 or 82ms, never 41.667. It is now re-armed per frame
-against an absolute deadline built from the source's exact rational. Doubled frames went
-from 5 per 11s to 0, and all three audio-mastered files improved.
+**A deferred item's premise expires. Re-derive it before building it.** Twice in two
+sessions a note that was correct when written was stale when it came up:
 
-**The owner signed off running the CPU default**, having just double-clicked the app. That
-is the fact to carry: E1 alone cleared the complaint on the renderer that still has a
-cause-B component. Do not re-litigate §23.6 (why 4444 specifically) — the fault is gone
-and the evidence with it.
+- **§26.2** — "convert Step and cache-fill conversions to display size" was written against
+  8.29MB BGRA cache entries. GATE C had already made them 3.11MB planar plane sets, so the
+  remaining gain was 18% and it would have been bought by replacing a 0.25ms plane copy with
+  a swscale resample. Answered no.
+- **§27** — "textures are recreated on any geometry change" was true as written and was not a
+  cost. GATE B's own lazy creation already reused everything: measured `tex 3` across 261
+  frames of playback and `tex 4` across a 406-paint reversal drag. Answered no.
 
-**GATE E step 2 — vsync snapping and the present/decode swap — is deliberately NOT built.**
-The design is retained unbuilt at plan §24.4–24.6. Its case largely evaporated under
-measurement: on the planar path the residual is about one refresh with nothing in the
-doubling bucket, and E2 costs a frame of latency plus a reshaped tick handler. Two premises
-also changed: `DwmGetCompositionTimingInfo` **fails on this machine**, so there is no
-renderer-independent phase source and any future E2 is d3d11-only via
-`IDXGISwapChain::GetFrameStatistics`; and the panel is **239.999 Hz**, exactly 10 refreshes
-per 24.000fps frame. **Do not start E2 without a specific new cadence complaint.**
+And the counter-example that makes the rule worth applying rather than a reason for
+pessimism: **§28** was a deferred item whose premise had *understated* the problem, and it
+turned out to be a real defect on every path in the app.
 
-`TRACE_DEADLINE_SCHED=0` restores the old scheduler in the same binary. It is the negative
-control for any cadence measurement and it still shows the fault.
+**The companion rule, now on its fourth instance: check what a number is measured against
+before believing it.** GATE E's `jitter` read 34ms on a schedule within 1.8ms of its
+deadline (§24.13). `stalls` read 51 on a run with 3 real hitches (§26.1). `total` silently
+under-reported the shipping renderer by up to 3.47ms/frame because it never included the
+upload (§27.4). And §9's "local contrast within 0.7%" concluded there was no scaling defect
+when there was a large one (§28.1).
 
-## `d3d11` is now the default renderer (2026-08-10)
+## What just happened
 
-The owner tested both side by side and chose it. Plan §25 has the measured case and
-the verification; the short version is that on 4K ProRes 4444 it takes doubled frames
-1 -> 0, handlers over budget 1 -> 0, worst present gap 62.5 -> 45.9ms and conversion
-16.6 -> 5.6ms. **`TRACE_RENDERER=cpu` is now the control and the escape hatch, and it
-is the first thing to try if anything about the picture looks wrong.**
+**The scrub-stall pass is CLOSED with owner sign-off** (§26, §26.6). The reverse-cache
+budget is 384MB (was 192): 1080p `hitch 8 → 2`, 4K H.264 `hitch 3 → 1`, worst gap
+169.6 → 80ms. Footprint approved, boundedness and file-change discard verified, playback
+neutrality verified, and the owner confirmed the drag feels good on the shipping build.
+`TRACE_REVERSE_CACHE_MB` is the control and the fallback. **Adaptive caching and convert-pool
+changes were explicitly declined — do not add them off the back of this.**
 
-**Two obligations follow and they are easy to forget.**
+**GPU step 8 is CLOSED as answered-no** (§27). See the rule above. The telemetry built to
+answer it stayed, and it is worth knowing about: the HUD now reads `upload last/avg tex N`.
+`tex` is cumulative `CreateTexture2D` calls since launch and is a **churn tripwire** — if a
+future change to the frame path makes textures churn, that number starts climbing and says
+so. The residual upload cost is memcpy bandwidth (4444's 56.6MB of planes in 3.47ms =
+16.3 GB/s) and no API change reaches it; a staging buffer is strictly more work and its
+justification needs the draw to be the constraint, which at `draw 0.01ms` it is not.
 
-**Every scrub and playback baseline in the plan was taken on `cpu`**, and most are not
-tagged with a renderer because there was only one default. They remain valid as records;
-they are *not* valid as comparisons against a run taken today. Re-tag as you re-measure,
-and quote `win WxH` with any stall or scrub number (§22.8 — stall counts are a function
-of window size and dominate).
+**GPU step 9 is DONE and SIGNED OFF** (§28, `f2d6d57`). The D3D11 sampler took one bilinear
+2x2 tap, so at the shipping 6.4x downscale it read 4 source texels of every 41. Measured
+against external ffmpeg references on a calibrated axis where `area` is 0 and `neighbor` is
+1: **d3d11 0.74, cpu 0.73, swscale drag preview 0.76, 422 HQ 0.89.** Three unrelated
+mechanisms, one number, because a 2x2 tap is a 2x2 tap. A box reduction in the pixel shader
+takes 4444 to **0.02** (max channel delta vs area 46 → **2**) and 422 HQ to **0.00**, with
+**no measurable playback or scrub cost** — 4444 99.8%/99.8%, 261/261, zero doubled frames,
+max gap 45.3 → 44.3ms; reversal `hitch` 5,9 on against 9,7 off.
 
-**The untested-DPI gaps are now the shipping path.** Real mixed-monitor DPI has never
-run (§20.4), the box has one display, and its mode was observed changing mid-session on
-2026-08-10 — 5120x1440 @ 239.999Hz in the morning, 1920x1200 @ 60Hz in the afternoon.
-**That cause is now known: it is Anj logging in over Parsec.** Remote sessions present a
-virtual display at 1920x1200 @ 60Hz; the physical panel is 5120x1440 @ 239.999Hz. So ask
-which one a session is on before comparing to a record — resolution moves with the refresh
-rate, so a Parsec run also has a different window geometry, and window size dominates cache
-depth and stall counts (§22.8); the two effects arrive together and neither shows in a bare
-stall figure. **And no subjective smoothness, cadence or picture-quality judgement is valid
-over Parsec** — it captures, re-encodes and re-times the screen, imposing its own pacing and
-its own lossy compression. Owner sign-offs on feel must be taken at the machine.
-Never assume a recorded refresh rate or geometry still holds; `scripts/measure/refresh.ps1`
-reports the current one, and it matters because 24fps is exactly 10 refreshes at 240Hz
-and a 2:3 cadence at 60Hz.
+It was bigger than §9 described: **not only the Step landing, because every
+full-resolution frame goes through the same sampler**, so playback undersampled too. And it
+re-reads §20.3/§21.2 — CPU and D3D11 agreeing was never evidence that either was right, and
+the GATE B visual sign-off was taken on that comparison. Nothing was hidden; the question
+was not asked.
 
-## The scrub-stall pass, 2026-08-10 — read this before touching scrub
+## Things not to undo
 
-Plan §26 has it in full. Three things carry.
+- **GATE E step 2 — vsync snapping and the present/decode swap — is deliberately NOT built**
+  and is stopped by owner decision. Design retained unbuilt at §24.4–24.6.
+  `DwmGetCompositionTimingInfo` **fails on this machine**, so there is no renderer-independent
+  phase source and any future E2 is d3d11-only via `IDXGISwapChain::GetFrameStatistics`. The
+  panel is **239.999Hz**, exactly 10 refreshes per 24.000fps frame. **Do not start E2 without
+  a specific new cadence complaint.**
+- **The drag preview's remaining softness is ACCEPTED AS-IS** (§28.6 item 2). The picture
+  sharpens on release, and that is fine — previews are previews. **What the owner accepted is
+  the behaviour, not a mandate to change the flag.** If it is ever wanted, the fix is
+  `swsFlagsFor(fast)` returning `SWS_BILINEAR` instead of `SWS_FAST_BILINEAR` (measured
+  −0.20 on the same frame), but **its cost is unmeasured and it is the dangerous kind** —
+  previews are the drag path, §15.1 measured supply at 19% on 4444, and drag throughput is
+  what priority #1 protects. Measure the shuttle rate and put the trade to the owner first.
+- **Directional scrub prefetch stays declined** (§15.3, §26.4 item 3). Supply is 55–67% on
+  the files that hitch, so the worker is saturated and has no idle time to speculate with.
+- **The convert pool is still sized in pre-GATE-C currency** (§26.4 item 2) and **the owner
+  declined changing it** as part of the cache work. `alloc` is 0.61–0.65ms of a 32ms frame at
+  4K — visible, not binding. Needs raising with him rather than picking up.
+- **Upscaling is deliberately unfiltered** (§28.6 item 5). A box average of a magnified frame
+  would blur pixels someone is inspecting. The guard is `fitted < content` on both axes.
 
-**`stalls` was measured against the display and this box changes mode.** It counts paint
-gaps over `2 × refresh` — 8.3ms at 239.999Hz, 33.3ms at 60Hz. The same 4K H.264 run reads
-`stalls 51 of 363 (>8.3ms) | hitch 3 (>33ms)`. **Quote `hitch`; it is the only stall figure
-comparable across sessions.** This is also most of §21.4's unexplained "2 of 394 vs 44 of
-375" — §22.8 was right that window size matters and wrong that the rest was machine state.
+## `d3d11` is the default renderer, and two obligations follow
 
-**§15.5 item 1 is closed as answered-no.** Converting Step and cache-fill conversions to
-display size would now *cost* — GATE C already made full-res 1080p entries 3.11MB planar
-plane sets rather than 8.29MB BGRA, and the remaining 18% would be bought by replacing a
-0.25ms plane copy with a swscale resample. **A deferred item's premise expires. Re-derive
-before building.**
+The owner chose it after testing both side by side (§25). `TRACE_RENDERER=cpu` is the
+control and the escape hatch — **the first thing to try if anything about the picture looks
+wrong** — but note it is now the *softer* picture as well as the slower one, since step 9
+only fixed the GPU path. Say so when telling anyone to try it.
 
-**What the misses needed was bytes.** The reverse-cache budget is 384MB now (was 192):
-1080p `hitch 8 → 2`, 4K H.264 `hitch 3 → 1` with worst gap 169.6 → 80ms. `TRACE_REVERSE_CACHE_MB`
-is the control and the fallback.
+**Every scrub and playback baseline in the plan taken before 2026-08-10 was on `cpu`** and
+most are not tagged with a renderer. They remain valid as records; they are **not** valid as
+comparisons against a run taken today. Re-tag as you re-measure.
 
-**The footprint is APPROVED** (owner, 2026-08-10): working set 396 → 598MB at 1080p and
-677 → 902MB at 4K is acceptable for a professional 4K review application, and performance
-stays the priority. §26.5 is the owner-requested verification that followed — the cache is
-bounded (six consecutive scrub runs plateau; 382.2 of 384MB after 1357 inserts and 1245
-evictions), discarded on a file change (working set 920 → 254MB), and playback-neutral
-(identical rate, frames, doubling bucket and `handler>budget` across three files at both
-budgets). **Do not add adaptive caching or pool changes off the back of this** — that was
-explicitly declined.
+**The untested-DPI gaps are the shipping path.** Real mixed-monitor DPI has never run
+(§20.4) and the box has one display.
+
+## Parsec — ask which display a session is on before comparing any number
+
+The mid-session display mode changes are **Anj logging in over Parsec**. Remote sessions
+present a virtual display at **1920x1200 @ 60Hz**; the physical panel is **5120x1440 @
+239.999Hz**. `scripts/measure/refresh.ps1` reports the current one, and this session's runs
+were all on the physical panel.
+
+Three consequences. Resolution moves with the refresh rate, so a Parsec run also has a
+different window geometry, and **window size dominates cache depth and stall counts**
+(§22.8) — the two effects arrive together and neither shows in a bare stall figure. 24fps is
+exactly 10 refreshes at 240Hz and a 2:3 cadence at 60Hz. And **no subjective smoothness,
+cadence or picture-quality judgement is valid over Parsec** — it captures, re-encodes and
+re-times the screen. Owner sign-offs on feel must be taken at the machine. Note honestly
+that the last two sign-offs (§26.6, §28.6) did not record which display they were taken on;
+the concern was raised beforehand both times and the sign-offs were given anyway, so they
+stand — but re-take at the panel before leaning on either against a future regression.
+
+## Quote `hitch`, not `stalls`, and quote `win WxH` with either
+
+`stalls` counts paint gaps over `2 × refresh` — 8.3ms at 239.999Hz, 33.3ms at 60Hz — so the
+same 4K H.264 run reads `stalls 51 of 363 (>8.3ms) | hitch 3 (>33ms)`. **`hitch` is a fixed
+33ms bar and is the only stall figure comparable across sessions.** `stalls` prints its own
+threshold now.
 
 ## Candidate next work, in rough order
 
-Nothing here is started. Pick with the owner rather than assuming.
+Nothing here is started. Pick with the owner rather than assuming — and note there is no
+outstanding complaint driving any of it.
 
-1. ~~**The owner's subjective scrub test on the finished build**~~ — **DONE, PASSED
-   2026-08-10** (plan §26.6). The picture feels good on the 384MB cache with `d3d11`
-   default. §26 is closed and nothing about scrub stalls carries forward as open.
-2. **4K ProRes 4444 fast drag** — still decode-bound at ~15.4ms/frame, ~2.3x playback
-   against the owner's stated ~4x. Not a bug; an explicit product decision about whether to
-   skip frames on the heaviest media or run the worker ahead of the request chain. Note
-   4444 gains least from cache work and that is structural (§26.3), so this is untouched.
-3. **The convert pool is sized in pre-GATE-C currency** (§26.4 item 2). It prices the
-   smallest entry as BGRA, so at 1080p it provisions ~50 buffers for a cache holding 129.
-   `alloc` is 0.61–0.65ms of a 32ms frame at 4K — visible, not binding. Left alone on
-   purpose so it would not confound the budget measurement. **The owner declined it as
-   part of the cache work**, so it needs raising with him rather than picking up.
-4. ~~**Deferred GPU items 8, 9, 10**~~ — **8 is CLOSED answered-no and 9 is DONE**
-   (2026-08-10, plan §27/§28). Only **step 10, 10-bit output**, is still deferred, and it
-   needs an `R10G10B10A2` swapchain and a display in 10-bit mode — a different thing from
-   the high-bit-depth *processing* that shipped at GATE C. Read the §28.6 open items before
-   picking anything up here; two of them are owner decisions.
-5. **LucidLink read-ahead** — two designs measured worse; try full-request buffered serving
+1. **4K ProRes 4444 fast drag** — still decode-bound at ~15.4ms/frame, ~2.3x playback against
+   the owner's stated ~4x. Not a bug; an explicit product decision about whether to skip
+   frames on the heaviest media or run the worker ahead of the request chain. 4444 gains
+   least from cache work and that is structural (§26.3), so the 384MB pass did not touch it.
+2. **GPU step 10 — 10-bit output.** The only deferred GPU item. Needs an `R10G10B10A2`
+   swapchain and a display in 10-bit mode, and §9 warns not to conflate it with the
+   high-bit-depth *processing* that shipped at GATE C. Ask whether the owner's panel and
+   workflow actually want it before building it.
+3. **BT.2020 has no tonemap** (§22.7 item 5). HDR/PQ content still looks wrong on both
+   backends. Known gap, never a complaint. **If this is picked up, note §28.4: the shader
+   averages before the matrix because both remaining steps are affine, and a tonemap between
+   them breaks that — the ordering has to be revisited.**
+4. **LucidLink read-ahead** — two designs measured worse; try full-request buffered serving
    before partial reads, then benchmark. Not in progress.
-
-## The scaling pass, 2026-08-10 — read before touching the picture
-
-Plan §27 and §28 in full. Three things carry.
-
-**Step 8's premise had expired and step 8 is closed.** GATE B's own lazy creation already
-reused everything — `tex 3` across 261 frames of 4444 playback, `tex 4` across a 406-paint
-reversal drag — and the residual upload is memcpy bandwidth (56.6MB in 3.47ms = 16.3 GB/s).
-A staging buffer is strictly more work and its justification needs the draw to be the
-constraint, which at `draw 0.01ms` it is not. **Second deferred item in two sessions whose
-premise expired; §26.2 was the first. Re-derive before building.**
-
-**Every path in Trace was undersampling the downscale, and now the default one is not.**
-Measured against ffmpeg references at the exact drawn size: d3d11 **0.74**, cpu **0.73**,
-swscale drag preview **0.76** on an axis where `area` is 0 and `neighbor` is 1. A box
-reduction in the shader takes 4444 to **0.02** and 422 HQ from 0.89 to **0.00**, with no
-measurable playback or scrub cost. `TRACE_GPU_REDUCE=0` is the control and is exact.
-**This is why §9's "local contrast within 0.7%" saw nothing, and it re-reads §20.3/§21.2 —
-CPU and D3D11 agreeing was never evidence either was right.**
-
-**Two owner decisions came out of it.** The drag preview is still 0.76, so the picture now
-*sharpens* on release where it used to match; the fix is one swscale flag but previews are
-the drag path where supply is 19% on 4444, so **do not flip it without measuring the shuttle
-rate**. And `TRACE_RENDERER=cpu` is now the softer picture as well as the slower one, which
-matters when telling anyone to try it. **Owner visual sign-off on the new picture is
-outstanding and must be taken at the machine, not over Parsec.**
+5. **EXR / image sequences and OCIO** (roadmap item 7). **EXR does not open today**: OIIO is
+   not installed in vcpkg and not built in CI, so `TRACE_WITH_OIIO` is undefined in both.
+   This is the largest untouched area of the product and the first one that is a feature
+   rather than a fix — so it needs the owner's word on whether the playback phase is over.
+6. **J-K-L off-speed audio, then scrub audio** (roadmap item 5). Deliberately silent today.
 
 ## Working notes
 
 - github.com is reachable from the Windows box and you can push directly. Verify with
   `git remote -v` and `git rev-list --count @{u}..HEAD` rather than assuming. `gh` is NOT
-  installed, but the git credential helper holds a usable token, so CI runs and logs can
-  be read straight off the API — that is how the renderer self-test below was verified.
-- **CI asserts the renderer initializes now** (`b5ad4d2`, `a36f10d`): the workflow runs
-  `Trace.exe --renderer-selftest=d3d11` against the deployed folder and fails on a
-  fallback (exit 3), on the backend not being built (exit 4), or on `planar=0`. First run
-  read `renderer=d3d11 fellback=0 planar=1`. If you add a renderer capability that can
-  degrade silently, add it to that line.
+  installed, but the git credential helper holds a usable token, so CI runs and logs can be
+  read off the API — `printf 'protocol=https\nhost=github.com\n\n' | git credential fill`
+  then curl with `Authorization: Bearer`. Note `git credential fill` needs the `host` field
+  or it refuses.
+- **CI asserts the renderer initializes** (`b5ad4d2`, `a36f10d`): the workflow runs
+  `Trace.exe --renderer-selftest=d3d11` and fails on a fallback (exit 3), on the backend not
+  being built (exit 4), or on `planar=0`. If you add a renderer capability that can degrade
+  silently, add it to that line. **It does not `show()` and does not draw a video frame**, so
+  it proves shaders *compile* and the device initializes — it has never executed the step-9
+  reduction loop on WARP (§28.6 item 7).
 - Build locally with the VS2022 / Qt 6.10.2 / vcpkg commands in `CLAUDE.md` before pushing.
-  Check the configure lines for `audio output enabled` and `D3D11 renderer enabled`.
-- `V:\` is live client production storage and is strictly read-only.
-- **Quote the window size with any scrub or stall number** (§22.8 — the HUD carries
-  `win WxH`), and **check the diff, not the commit subjects**, before concluding a range
-  changed nothing.
-- **A derived metric whose inputs changed meaning reads as a catastrophic result, not as a
-  broken metric.** GATE E's `jitter` field read 34ms on a schedule that was within 1.8ms of
-  its deadline, because the timer is re-armed after the handler and the reference had
-  quietly become decode cost. Check what a metric is measured *against* before believing a
-  number that moved by an order of magnitude.
-- Harness: `scripts/measure/sidebyside.ps1` (both backends on screen at once, with a
-  readback that proves which one each window actually adopted), `cadence.ps1` (cadence distribution — the only thing that can
-  see a beat; presented rate cannot), `playhud.ps1` (taller crop, for `rep`/`skip` and the
-  audio line), `refresh.ps1` (the display's true rational rate), `lifecycle.ps1`,
-  `scrub.ps1`, `stalls_vs_window.ps1`, and for scaling quality `abfilter.ps1` (calibrated
-  area-to-point axis, with `-Sensitivity` that refuses material too smooth to resolve
-  anything), `croprect.ps1` (video rect out of a window capture, size asserted against the
-  HUD) and `previewshot.ps1` (captures with the button held, so it is a preview and not a
-  landing). **Never use Trace as its own reference for a filtering question.**
-  **Cadence controls need `TRACE_NO_AUDIO=1`** — 4444
-  has no audio track while 422 HQ and the 1080p clips do, so as shipped they run on
-  different schedulers.
+  Check the configure lines for `audio output enabled` and `D3D11 renderer enabled`. **Stop
+  a running `Trace.exe` first** or the link fails with LNK1104.
+- `V:\` is live client production storage and is strictly **read-only**.
+- PowerShell 5.1 `Get-Content` reads as ANSI, so appending a UTF-8 doc through it mangles
+  every `§` into mojibake. Use `cat` from the Bash tool for that.
+- Harness: `sidebyside.ps1` (both backends at once, with a readback proving which each
+  window adopted), `cadence.ps1` (cadence distribution — the only thing that can see a beat;
+  presented rate cannot), `playhud.ps1` (taller crop, for `rep`/`skip` and the audio line),
+  `refresh.ps1` (the display's true rational rate), `lifecycle.ps1`, `scrub.ps1`
+  (`-SnapRelease` for anything about the landing, `-Reversals` does not guarantee one),
+  `stalls_vs_window.ps1`. **Cadence controls need `TRACE_NO_AUDIO=1`** — 4444 has no audio
+  track while 422 HQ and the 1080p clips do, so as shipped they run on different schedulers.
+- **Scaling quality**, new this session: `abfilter.ps1` places a capture on a calibrated axis
+  between ffmpeg `area` (0) and `neighbor` (1) references at the exact drawn size, scored by
+  mean |Laplacian| — high-frequency energy is what separates aliasing from mere difference.
+  `-Sensitivity` **refuses material whose two references agree**; it rejected the 4K milk
+  splash and the 60fps drone plate, either of which would have passed silently. Use 4444 or
+  422 HQ. `croprect.ps1` cuts the video rect from a window capture and asserts its size
+  against the HUD's `display`, because a one-pixel crop error on a 6x reduction reads as a
+  filtering difference. `previewshot.ps1` captures with the button still **down**, since the
+  release lands a full-resolution frame. **Never use Trace as its own reference for a
+  filtering question** — §20.3 spent a session on a CPU-vs-GPU difference where both sides
+  were the same 2x2 tap.
+- The HUD is unreadable in a downsampled screenshot on the 5120x1440 panel. Capture the
+  window at native resolution (`capture.ps1`). Synthetic drags that teleport the pointer
+  overstate how well the shuttle keeps up; use continuous sweeps, and keep both the smooth
+  sweep and the hard-reversal gesture sets — the decode error in `2523d77` only appeared
+  under reversals into both ends of the clip.
 - Update `CLAUDE.md` and the plan at the end of the session.
