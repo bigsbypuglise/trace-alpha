@@ -2896,3 +2896,120 @@ not less: real mixed-monitor DPI has never been tested and the box has one
 display, and the display's mode was observed to change mid-session on
 2026-08-10 (5120x1440 @ 239.999Hz in the morning, 1920x1200 @ 60Hz in the
 afternoon). A default GPU path makes both of those the shipping path.
+
+## 26. Scrub stalls — the metric was half the problem (2026-08-10)
+
+Picked up as the oldest live owner-facing scrub complaint (§15.5 item 1, and
+item 1 of CLAUDE.md's "Known open items"). Two findings, and the first one
+changes how every earlier number in this document reads.
+
+### 26.1 `stalls` is measured against the display, and the display moved
+
+`scrubPaintStalls_` counts paint gaps over `2 × refresh interval`. Nothing in
+the HUD said so, and the refresh is not a constant on this box: 5120x1440 @
+239.999Hz on the morning of 2026-08-10 and 1920x1200 @ 60Hz that afternoon. The
+threshold is therefore **8.3ms in one session and 33.3ms in another** — a factor
+of four, from the monitor, applied to the metric that defines the problem.
+
+Measured on **one run**, so there is no confound at all: 4K H.264 reversals,
+`win 1284x1067`, d3d11 —
+
+    stalls 51 of 363 (>8.3ms) | hitch 3 (>33ms)
+
+Same paints, same build, same gesture. 51 or 3 depending only on the threshold.
+
+**This is most of the §21.4 mystery.** That entry carried "~44 stalls of ~375
+against §17.4's `2 of 394`, unexplained" as a pre-GATE-E blocker. §22.8 resolved
+it as window size plus machine state — window size is real and its sweep stands
+— but it *recorded* the display changing from `2560x1440` (§18.3) to "5120x1440
+@ 239Hz" and filed that under machine state, when it was the metric's own
+denominator. `2 of 394` is what this distribution looks like at a 33.3ms bar.
+
+`hitch` is **added**, not a redefinition, because the two answer different
+questions and both are worth having: `stalls` is "slower than the panel could
+have shown it" and is the right companion to `wasted`; `hitch` is "the picture
+visibly stopped". `stalls` now prints its own threshold, so a figure copied out
+of a screenshot carries the unit it was taken in.
+
+**The general rule this is the third instance of:** a derived metric whose
+input changed meaning does not announce itself. GATE E's `jitter` read 34ms on
+a schedule within 1.8ms of its deadline (§24.13). Here a metric read 51 on a
+run with 3 real hitches. Check what a number is measured *against* before
+believing it, and never compare one across sessions without its denominator.
+
+### 26.2 §15.5 item 1 is answered, and the answer is no
+
+The nominated untried lever was "convert Step and cache-fill conversions to
+display size, as scrub previews already are", to multiply cache depth against
+the byte budget. Its premise was that nothing is halved at 1080p, so 24 full-res
+entries exhaust the budget and bytes bind.
+
+**GATE C had already collected most of it.** A full-resolution 1080p entry is a
+`yuv420p` plane set at **3.11MB**, not an 8.29MB BGRA frame, because full-res
+frames stop going through swscale on the planar path. Depth was already **64**
+entries and the hit rate **96.8%**, not the weak case §15.5 describes. What
+display-size conversion adds on top is 3.11 → 2.54MB — **eighteen percent** —
+and it buys that by replacing a 0.25ms plane copy with a multi-millisecond
+swscale resample, on the one path whose entire per-frame cost is the round trip.
+It was a winning trade when it was written and is a losing one now.
+
+This is the §25.4 obligation biting exactly as predicted: the note was correct
+against the `cpu` default it was written under, and stale against the shipping
+one. **A deferred item's premise expires; re-derive it before building it.**
+
+### 26.3 What the misses actually needed: bytes
+
+The question was settled by measurement rather than by the arithmetic above,
+which is the right way round — quadrupling the budget is a strictly stronger
+version of anything a cheaper entry representation could buy, so hitches falling
+when it was raised is what proved they were misses at all. `TRACE_REVERSE_CACHE_MB`
+exists for that experiment and stays as the control.
+
+Reversal drags, `win 1284x1067`, d3d11, two reps where shown:
+
+| file | budget | cache | rev-hit | seeks | **hitch** | max gap | WS |
+|---|---|---|---|---|---|---|---|
+| 1080p H.264 | 192MB | 64/64 | 96.8% | 11, 11 | **8, 8** | 60, 68ms | 396MB |
+| 1080p H.264 | **384MB** | 129/129 | 98.7, 99.0% | 4, 3 | **3, 2** | 66, 67ms | 598MB |
+| 1080p H.264 | 768MB | 258/258 | 99.2% | 2 | **1** | 51ms | — |
+| 4K H.264 | 192MB | 67/67 | 97.7% | 5 | **3** | 170ms | 677MB |
+| 4K H.264 | **384MB** | 146/146 | 98.3, 98.2% | 3, 3 | **1, 1** | 80, 91ms | 902MB |
+| 4K H.264 | 768MB | 194/268 | 98.6% | 2 | **1** | 73ms | 1110MB |
+| ProRes 4444 | 192MB | 75/75 | 9.9% | 98 | **7** | 169ms | 572MB |
+| ProRes 4444 | **384MB** | 103/108 | 19.5% | 97 | **5** | 48ms | 710MB |
+
+384MB is the knee and is now the default. 768MB buys 1080p another hitch and
+another ~400MB.
+
+**4444 moves least and that is structural, not a shortfall.** Every frame is a
+keyframe, a seek lands on the target, no intermediate frames are ever produced,
+so there is nothing to cache — §15.1 measured `rev-hit 0.0%` and `walk max 0f`
+there. Its improvement is the worst gap, not the hit rate. **Do not try to fix
+4444's hit rate with more bytes.**
+
+**Cost is memory and only memory.** Playback is untouched: 4444 with
+`TRACE_NO_AUDIO=1` reads 99.8% of real time, **0 doubled frames**, `handler>budget
+0 of 260`, max gap 45.2–45.3ms over two runs — the §25.1 record exactly. Step ±5
+after a release returns to the landed frame with `delta 0`, `stale-blocked 0`,
+`recov 0`, and the drag exercised cancellation cleanly (`abandoned 0 stale 1`,
+`cancel 0.34ms`).
+
+**The memory figures are a product decision the owner has not taken.** ~900MB of
+working set on a 4K file is normal for a review tool on a workstation and is not
+playback cost, but "lightweight" is one of the three pillars. `TRACE_REVERSE_CACHE_MB`
+makes it one number to change either way.
+
+### 26.4 Open after this
+
+1. **Owner validation.** Every figure here says misses are rarer and the worst
+   gap is shorter. None says whether a drag *feels* better. This is the fourth
+   time the project has needed that split.
+2. **The convert pool is sized in pre-GATE-C currency.** It prices the smallest
+   entry as `w*h*4` at ≤1920 and `w*h` above, both BGRA assumptions, so at 1080p
+   it provisions ~50 buffers for a cache that now holds 129. `alloc` is
+   0.61–0.65ms/frame at 4K/384MB against a 32ms total — 2%, visible but not
+   binding. **Left alone deliberately**: changing it in the same commit as the
+   budget would have confounded the measurement above.
+3. **§15.3 still holds.** Directional prefetch remains declined — supply is
+   55–67% on the files that hitch, so the worker is saturated and has no idle
+   time to spend speculating. Nothing here changes that.

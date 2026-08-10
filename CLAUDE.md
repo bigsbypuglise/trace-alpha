@@ -45,6 +45,7 @@ FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt ru
 - Tags matching `v*` also publish a GitHub prerelease with a `trace-alpha-windows-x64.zip` asset
 - **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
 - **Green must mean launchable** (Aug 2026): the workflow checks native tool exit codes (`windeployqt` failures used to pass silently), asserts FFmpeg was found at configure time, and verifies `Trace.exe` + Qt DLLs + `platforms/qwindows.dll` + av* DLLs exist before publishing. If a build goes green, the download starts.
+- **CI asserts the renderer initializes** (Aug 2026, `b5ad4d2`): `Trace.exe --renderer-selftest=d3d11` builds the viewer, lets it adopt whatever `TRACE_RENDERER` selects, prints `renderer=`/`fellback=`/`planar=` and exits. It runs the real path — `ViewerWidget`'s constructor applies the native-surface contract and calls `initialize()`, which creates the device, the child surface window, the flip-model swapchain, every shader and the render target. **No `show()`**: `initialize()` reaches the HWND through `winId()`, so the check does not need an interactive desktop. Runners have no GPU, so the device lands on **WARP** and the match is a prefix — `d3d11 (warp)` passes. **Exit 3 is the selected backend failing to initialize, exit 4 is that backend never having been built** (no `fxc`); the two are separate codes because they are separate faults, and that is also why the expected name is an argument to the exe rather than a grep in the YAML. `planar=` is printed but not yet asserted — a failed YUV shader is deliberately non-fatal (GATE C) and whether WARP supplies it has never been observed. **Promote it to a hard assertion once a run shows `planar=1`.**
 - vcpkg/FFmpeg and Qt are cached; the ~20+ min build only recurs on cache miss (7-day idle expiry). Bump `VCPKG_CACHE_VERSION` in the workflow to force a clean FFmpeg rebuild.
 - **Whether Claude can push depends on which machine the session is on — check, don't assume.** On the **Windows box** (repo at `C:\Users\andre\Documents\Claude_Cowork\Trace_Windows`) github.com **is reachable and Claude can push directly**; verified Aug 2026 by a read-only `git ls-remote` followed by a real push. On the **macOS sandbox** the proxy blocks github.com, so commits are made locally and Anj pushes from `~/Claude/Trace`.
 
@@ -108,6 +109,16 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   **The gate is `AV_CODEC_PROP_INTRA_ONLY`, asked of the codec, and three inferred versions were measured wrong first.** Without a gate, sampling on long-GOP is catastrophic — adjacent backward steps are cache hits inside an already-walked GOP (~0.5ms) while a strided step leaves that run and pays a seek plus a fresh walk (~46ms), so skipping raises cost per frame more than it lowers frame count: 4K H.264 backward measured hits 85.4% → 13.3%, decode 90.0 → 13.9 f/s, 76 paints → 14. And it runs away, since a higher stride lowers the measured rate which raises the stride (1080p reached stride 14). The failed inferences, all of which look reasonable: a **latch** on the first observed walk (ProRes seeks land short occasionally; one walk killed sampling for the session, 22ms → 1784ms); a **decaying mean** (collapses during a run of cache hits and declares long-GOP free); a **mean per request** (diluted by forward steps that never seek, so any mixed gesture opened the gate on its backward stretches, stalls 2 of 437 → 13 of 199); a **mean per seek with an evidence threshold** (a forward ProRes sweep performs two seeks total and never reaches it). `ra-walk` is kept in the HUD as the empirical *check* on the codec's answer, not as the answer: 0.00 frames/seek on ProRes, 10–16 on H.264.
 
   **Two estimator choices are load-bearing.** Capacity is frames *presented* per second over the gesture, not an EMA of per-request cost — the EMA is dominated by whichever of hits and misses came last, reading 0.17ms on a file whose true mixed cost is ~5ms, which collapses the stride exactly when a heavy stretch begins. Presented-per-second is near-invariant under striding, because one presented frame costs one decode whatever the stride. Demand is short-window, because a drag that starts slow and then whips must raise the stride now.
+- **`stalls` is measured against the DISPLAY; `hitch` is the number to quote** (Aug 2026, `177759f`, plan §26.1). `stalls` counts paint gaps over `2 × refresh interval` — **8.3ms on this box's 239.999Hz mode and 33.3ms on the 60Hz mode it was also observed in on the same day**. Nothing in the HUD said so, and no stall figure recorded anywhere in this repo is tagged with a refresh rate. Measured on **one run**, 4K H.264 reversals at `win 1284x1067`: `stalls 51 of 363 (>8.3ms) | hitch 3 (>33ms)`. Same paints, same build — 51 or 3 depending only on the threshold.
+
+  **That is most of the "2 of 394 → 44 of 375" mystery** §21.4 carried and §22.8 closed as window size plus machine state. Window size is real and its sweep stands; but §22.8 *recorded* the display changing to 5120x1440 @ 239Hz and filed it under machine state when it was the metric's own denominator. `2 of 394` is what this distribution looks like at a 33.3ms bar.
+
+  `hitch` was **added**, not substituted: `stalls` is "slower than the panel could have shown it" and pairs with `wasted`; `hitch` is "the picture visibly stopped". `stalls` prints its own threshold now. **Third instance of the same failure** — GATE E's `jitter` read 34ms on a schedule within 1.8ms of its deadline. Check what a number is measured *against* before believing it.
+- **The reverse-cache budget is 384MB, and drag hitches were cache misses** (Aug 2026, `ac3ae21`, plan §26.3). Reversal drags at `win 1284x1067` on d3d11, 192 → 384MB: 1080p H.264 `hitch 8,8 → 3,2` with `seeks 11 → 4,3` and hit 96.8 → 98.9%; 4K H.264 `hitch 3 → 1,1`, worst gap **169.6 → 80/91ms**; 4444 `hitch 7 → 5`, worst gap 169.4 → 47.9ms. 768MB was measured and is past the knee. **Cost is memory and only memory** — working set 396 → 598MB at 1080p, 677 → 902MB at 4K H.264. Playback is untouched (4444 `TRACE_NO_AUDIO=1`: 99.8%, 0 doubled, 0 over budget — the §25.1 record exactly). `TRACE_REVERSE_CACHE_MB` is the control.
+
+  **4444 moves least and that is structural**: every frame is a keyframe, a seek lands on the target, no intermediate frames exist, so there is nothing to cache. Don't try to fix its hit rate with more bytes.
+
+  **§15.5 item 1 — "convert Step and cache-fill conversions to display size" — is ANSWERED, and the answer is no.** GATE C already collected it: a full-res 1080p entry is a `yuv420p` plane set at **3.11MB**, not an 8.29MB BGRA frame, so depth was already 64 entries and the hit rate 96.8%, not the weak case that note describes. Display-size conversion adds 3.11 → 2.54MB — eighteen percent — and pays for it by replacing a 0.25ms plane copy with a multi-millisecond swscale resample on the one path whose whole cost is the round trip. **A deferred item's premise expires; re-derive it before building it.**
 - **The seek-walk cache fill budget is 240ms, not 60** (Aug 2026, `f08f015`): the old value was set when the walk ran synchronously and a 240ms fill was a 240ms frozen window. On the worker it costs the UI thread nothing (`ui gap` unchanged), so the trade that set it no longer applies — **step 5 is what unlocked this, it is not a tuning tweak**. 4K H.264 backward: hit 86.4 → 91.9%, decode 91.5 → 121.3 f/s, seeks 10 → 7, stalls 7 of 73 → 5 of 97. Flat past 240. Memory unaffected (eviction is by bytes against the same budget). 1080p gains little because nothing is halved there, so 24 full-res entries fill the budget and bytes bind rather than time.
 
   **This is the honest answer to "directional prefetch".** The worker has no idle time on H.264 backward to prefetch *with* — supply is 59–74%, it is saturated whenever there is lag — so speculative lookahead has nothing to spend. What it can do is spend the time it is already using more productively.
@@ -446,16 +457,22 @@ perfectly on lag while stalling for 100ms.
 
 **Known open items, in the order they are likely worth attacking:**
 
-1. **Stalls are the stutter, and Gate D did not remove them.** Measured on a
-   fast scrub: 4K H.264 carries 7-8 gaps of 30-116ms in a multi-gesture run,
-   1080p carries 21. Those are cache misses forcing a seek plus a GOP walk
-   (~30ms against ~0.5ms for a hit). **Paint scheduling cannot reach them** --
-   see the pacing entry in Decisions, measured and rejected -- and neither can
-   the async worker, which moved the block off the UI thread without making a
-   miss any cheaper. The fix is to make misses rarer: **prefetch ahead of the
-   drag direction while the worker is idle**, which is now cheap to build
-   because the worker exists and the lease already answers who owns the decoder.
-   ProRes 422 HQ measures `stalls 0 of 438`, so the bar is reachable.
+1. ~~**Stalls are the stutter, and Gate D did not remove them.**~~ **Largely
+   resolved 2026-08-10** (plan §26). Two things were wrong with this entry. The
+   *count* was mostly an artifact -- `stalls` is measured against the display
+   refresh and this box's mode changed between sessions, so the same run reads
+   51 or 3 (see the `stalls`/`hitch` entry in Decisions). And the *fix* named
+   here was declined: directional prefetch has no idle worker time to spend
+   (§15.3), and supply is still 55-67% on the files that hitch, so that holds.
+
+   What the misses actually needed was cache bytes. 192 → 384MB took 1080p
+   `hitch 8 → 2` and 4K H.264 `hitch 3 → 1`, with worst gap 169.6 → 80ms. The
+   diagnosis in the original entry -- "cache misses forcing a seek plus a GOP
+   walk" -- was right; the mechanism proposed to fix it was not.
+
+   **What is left is owner validation**: every figure says misses are rarer and
+   the worst gap shorter, none says whether a drag *feels* better. Fourth time
+   the project has needed that split.
 2. ~~**The slider handle itself trails the pointer**~~ **Fixed 2026-08-08**
    (`f77d472`) -- and the diagnosis in this entry was wrong, which is the part
    worth keeping. It was recorded as event-loop starvation: "the walk loop
@@ -500,6 +517,9 @@ perfectly on lag while stalling for 100ms.
 (the synchronous walk's budget and re-arm, for the control A/B),
 `TRACE_SCRUB_FILL_MS` (seek-walk cache fill budget during a drag, default 60ms),
 `TRACE_PREVIEW_DISPLAY_SIZE=0` (back to plain half-res previews),
+`TRACE_REVERSE_CACHE_MB` (reverse-cache byte budget, **default 384**; the
+control for any hitch measurement and the one number to change if the memory
+footprint is too high),
 `TRACE_SCRUB_PACE`, `TRACE_SEEK_CACHE_WINDOW`, `TRACE_AUDIO_BUFFER_MS`,
 `TRACE_AUDIO_SLEW`, `TRACE_AUDIO_FIXED_LATENCY`, `TRACE_NO_AUDIO`,
 `TRACE_RENDERER=cpu` (**`d3d11` is the default as of 2026-08-10** — this is the
@@ -537,6 +557,12 @@ as a bad number, and no throughput harness reaches them.
 `scrub.ps1 -SnapRelease` releases with no settling pause -- the only gesture
 that reliably catches a decode in flight, and therefore the only one that
 exercises cancellation at all.
+
+**Quote `hitch`, not `stalls`, and quote `win WxH` with either.** `stalls` is
+`gap > 2 x refresh` and this box has been observed at both 239.999Hz and 60Hz,
+so the same run reads 51 or 3 (plan §26.1). `hitch` is a fixed 33ms bar and is
+the only one comparable across sessions. Cache depth is also a function of
+window size and dominates (§22.8).
 
 **Measurement note:** the HUD is unreadable in a normal screenshot on the
 5120x1440 panel -- it downsamples too far. Capture the Trace window at native
