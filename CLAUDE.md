@@ -15,6 +15,15 @@ for the current phase is the core playback experience alone: smooth playback, lo
 playback, responsive polished scrubbing at slow and fast speeds in both directions, and strong
 GPU integration. Everything else comes after that foundation is working extremely well.
 
+**Corollary for the drag path (owner, 2026-08-10): smooth, responsive scrubbing takes
+priority over matching final-frame scaling quality during motion.** Fidelity is owed to the
+frame the user stops on, not to the frames flying past on the way there. This resolves a
+whole class of trades in advance — preview resolution, preview filtering, sampling stride,
+paint pacing — so do not re-open any of them on quality grounds alone. It is what settled
+the drag preview staying unfiltered after step 9 sharpened the landing (plan §28.6 item 2),
+and it is the principle §15's "sampling may skip frames during an active drag and nowhere
+else" was already an instance of.
+
 The approved interface pass is written up and **deferred** in
 `docs/interface-pass-1-spec-DEFERRED.md`, with the icon assets in
 `assets/260807 Trace Media Player Icon/`. Do not start any of it. Read its §2 during the GPU
@@ -143,7 +152,7 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   `TRACE_GPU_REDUCE=0` is the control and is **exact, not approximate**: `taps == 1` collapses the loop to one sample at `input.uv`, and the control re-measures 0.74 / mean 1.32 / max 46, the pre-change figures to the digit. It is a **separate knob from `TRACE_PLANAR_UPLOAD`** on purpose — the reduction is in the YUV shader only, so without its own control the planar-vs-BGRA A/B would differ in two ways at once. HUD reads `display WxH filtered xN`; a preview still reads `1:1`.
 
-  **Both owner decisions are now taken (2026-08-10).** The picture is **signed off**, and the drag preview staying at 0.76 is **accepted as-is** — the picture *sharpens* on release where it used to match, and that is fine because previews are previews. **What was accepted is the behaviour, not a mandate to change the swscale flag**: `swsFlagsFor(fast)` returns `SWS_FAST_BILINEAR` and plain `SWS_BILINEAR` measures −0.20, but previews are the drag path where supply is 19% on 4444, so **do not flip it without measuring the shuttle rate and putting the trade to the owner.** Separately, `TRACE_RENDERER=cpu` is now the softer picture as well as the slower one, which matters when telling anyone to try it.
+  **Both owner decisions are now taken (2026-08-10).** The picture is **signed off**, and the drag preview staying at 0.76 is **accepted as-is** — the picture *sharpens* on release where it used to match, and that is fine because previews are previews. What was accepted is the behaviour, **not** a mandate to change the swscale flag; the owner confirmed that reading and gave the reason, which generalises past this one flag: **smooth, responsive scrubbing takes priority over matching final-frame scaling quality during motion.** Treat that as a standing rule for the whole drag path — preview resolution, preview filtering, sampling stride, paint pacing — rather than a ruling on one flag. Fidelity is owed to the frame the user stops on. **The reopen condition is named and is an observation, not a measurement**: the change on release becoming visibly objectionable in normal use. Until then no further work here is wanted. (If it ever is: `swsFlagsFor(fast)` returns `SWS_FAST_BILINEAR`, plain `SWS_BILINEAR` measures −0.20, and previews are the drag path where supply is 19% on 4444 — measure the shuttle rate first.) Separately, `TRACE_RENDERER=cpu` is now the softer picture as well as the slower one, which matters when telling anyone to try it.
 - **Full-resolution frames go to the GPU as three planes; scrub previews do NOT** (Aug 2026, `e8566a4`, GATE C, plan §22). The D3D11 backend takes Y/U/V and applies the matrix in the pixel shader. **One shader covers everything**: subsampling is carried by the size of two textures and resolved by the sampler, so 4:2:0/4:2:2/4:4:4 differ in nothing else, and bit depth, range and the 3x3 are constants rather than compiled variants.
 
   **The range terms are computed at the actual bit depth.** Reusing the 8-bit 16/255 and 128/255 at 10-bit is wrong — black is code 64 of 1023, 0.062561 against 0.062745 — and the error is a lift of the black point across the whole picture, which is exactly the "global gamma/level shift" the colorimetry notes warn a wrong factor produces. Matrices with no exact coefficients (Fcc, Smpte240m) are **declined** by decoder and renderer alike and keep taking swscale, because an approximation there is a colour difference between backends that no A/B could attribute.

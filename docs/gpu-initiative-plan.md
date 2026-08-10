@@ -3384,16 +3384,33 @@ The HUD reports `display WxH filtered xN`. 4444 reads `x4` (ratio 6.4), 4K H.264
    accepted that behaviour, which is the direction of travel and is normal for a
    review tool — previews are previews.
 
-   **What was signed off is the behaviour, NOT a mandate to change the flag.**
-   Read that carefully, because the two are easy to conflate and the conflation is
-   expensive. The fix, if it is ever wanted, is one flag: `swsFlagsFor(fast)`
-   returns `SWS_FAST_BILINEAR`, and plain `SWS_BILINEAR` measures −0.20 on the same
-   frame. **Its cost is unmeasured and it is the dangerous kind** — previews are
-   the drag path, where §15.1 measured supply at 19% on 4444, and drag throughput
-   is what priority #1 protects. It was not flipped here and it should not be
-   flipped without measuring the shuttle rate first and putting the trade to the
-   owner explicitly. The experiment stays available; nothing obliges anyone to run
-   it.
+   **What was signed off is the behaviour, NOT a mandate to change the flag.** The
+   owner confirmed that reading explicitly when asked, and gave the reason, which
+   is worth more than the decision because it generalises:
+
+   > **Smooth, responsive scrubbing takes priority over matching final-frame
+   > scaling quality during motion.**
+
+   Treat that as a standing rule for the drag path, not a one-off ruling on one
+   swscale flag. It resolves the whole class in advance: preview resolution,
+   preview filtering, sampling stride, paint pacing — anything that would buy
+   fidelity *during* a gesture with responsiveness. Fidelity is owed to the frame
+   the user stops on. This is the same order of preference §15 already established
+   when sampling was allowed to skip frames on all-intra media during an active
+   drag and nowhere else; now it is stated as a principle rather than inferred from
+   one exception.
+
+   **The condition that reopens it is named**: the quality change on release
+   becoming *visibly objectionable in normal use*. Not a measurement, not a
+   threshold on the numbers below — an observation, by someone reviewing with it.
+   Until then **no further measurement or implementation is wanted**, and this is
+   not a deferred item awaiting work.
+
+   For the record if it ever is: `swsFlagsFor(fast)` returns `SWS_FAST_BILINEAR`,
+   and plain `SWS_BILINEAR` measures −0.20 on the same frame. Its cost is
+   unmeasured and it is the dangerous kind — previews are the drag path, where
+   §15.1 measured supply at 19% on 4444. Measure the shuttle rate first and put
+   the trade to the owner; do not treat the entry above as pre-authorisation.
 3. **The CPU backend is unchanged at 0.73.** `TRACE_RENDERER=cpu` is the escape
    hatch, so falling back to it now costs picture quality as well as GPU
    presentation. Worth stating in any instruction to try it.

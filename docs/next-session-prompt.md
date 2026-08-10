@@ -16,6 +16,13 @@ owner question. Paste everything below the line into a fresh session in the repo
 3. The goal for this whole phase is the core playback experience alone: smooth playback,
    locked real-time playback, responsive polished scrubbing at slow and fast speeds in both
    directions, and strong GPU integration.
+4. **Smooth, responsive scrubbing takes priority over matching final-frame scaling quality
+   during motion** (2026-08-10). Fidelity is owed to the frame the user stops on, not to the
+   frames flying past on the way there. This settles a whole class of trades in advance —
+   preview resolution, preview filtering, sampling stride, paint pacing — so **do not re-open
+   any of them on picture-quality grounds alone.** §15's "sampling may skip frames during an
+   active drag and nowhere else" was already an instance of it; §28.6 item 2 is the most
+   recent.
 
 **There is no owner-facing playback or scrub complaint outstanding.** Playback, the scrub
 feel, and the picture have all been signed off. That is a real change in the situation: for
@@ -93,13 +100,15 @@ was not asked.
   phase source and any future E2 is d3d11-only via `IDXGISwapChain::GetFrameStatistics`. The
   panel is **239.999Hz**, exactly 10 refreshes per 24.000fps frame. **Do not start E2 without
   a specific new cadence complaint.**
-- **The drag preview's remaining softness is ACCEPTED AS-IS** (§28.6 item 2). The picture
-  sharpens on release, and that is fine — previews are previews. **What the owner accepted is
-  the behaviour, not a mandate to change the flag.** If it is ever wanted, the fix is
-  `swsFlagsFor(fast)` returning `SWS_BILINEAR` instead of `SWS_FAST_BILINEAR` (measured
-  −0.20 on the same frame), but **its cost is unmeasured and it is the dangerous kind** —
-  previews are the drag path, §15.1 measured supply at 19% on 4444, and drag throughput is
-  what priority #1 protects. Measure the shuttle rate and put the trade to the owner first.
+- **The drag preview's remaining softness is ACCEPTED AS-IS and is CLOSED, not deferred**
+  (§28.6 item 2). The picture sharpens on release, and the owner has ruled that this is
+  correct — see standing priority 4, which he stated as the reason. **No further measurement
+  or implementation is wanted.** The only thing that reopens it is an *observation* — the
+  change on release becoming visibly objectionable in normal use — not a number. If that ever
+  happens, the fix is `swsFlagsFor(fast)` returning `SWS_BILINEAR` instead of
+  `SWS_FAST_BILINEAR` (measured −0.20 on the same frame), its cost is unmeasured, previews
+  are the drag path where §15.1 measured supply at 19% on 4444, and the shuttle rate must be
+  measured before the trade goes back to the owner.
 - **Directional scrub prefetch stays declined** (§15.3, §26.4 item 3). Supply is 55–67% on
   the files that hitch, so the worker is saturated and has no idle time to speculate with.
 - **The convert pool is still sized in pre-GATE-C currency** (§26.4 item 2) and **the owner
