@@ -43,6 +43,20 @@ they are where every previous reverse or scrub attempt in this project actually 
 validated async scrub/cache infrastructure where appropriate, but **do not weaken exact
 scrub release or increase normal playback cost.** Full brief in `docs/next-session-prompt.md`.
 
+**THE MEASUREMENT PASS AND THE PROPOSAL ARE DONE (2026-08-10, `docs/reverse-shuttle-plan.md`);
+no reverse-shuttle code was written, by instruction.** Read that document before proposing
+anything here. Three results decide the shape of the work and each is measured:
+**(a) at reverse 1x the decoder is IDLE 80–93% of the time** on long-GOP and still misses
+real time — the deficit is burstiness, not throughput, which is the opposite of the drag
+path and is why §15.3's decline of directional prefetch **does not carry over**;
+**(b) ProRes reverse at 1x is already perfect** (4444 reads 99.7% of real time, zero
+handlers over budget) because a seek lands on the target — the intuition that 4444 is the
+hard file is inverted here; **(c) a keyframe-aligned reverse sample costs ~30ms and a
+walked frame costs 1.7–2.6ms**, which is what makes a *snapped* coarse scan on long-GOP
+cheap where §15's arbitrary stride was catastrophic. The proposal's stride is the
+**commanded speed**, not an estimate — that is the whole answer to how it avoids the
+feedback loop that killed three of §15's four failed gate inferences.
+
 **Corollary for the drag path (owner, 2026-08-10): smooth, responsive scrubbing takes
 priority over matching final-frame scaling quality during motion.** Fidelity is owed to the
 frame the user stops on, not to the frames flying past on the way there. This resolves a
@@ -161,7 +175,7 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   **4444 moves least and that is structural**: every frame is a keyframe, a seek lands on the target, no intermediate frames exist, so there is nothing to cache. Don't try to fix its hit rate with more bytes.
 
   **§15.5 item 1 — "convert Step and cache-fill conversions to display size" — is ANSWERED, and the answer is no.** GATE C already collected it: a full-res 1080p entry is a `yuv420p` plane set at **3.11MB**, not an 8.29MB BGRA frame, so depth was already 64 entries and the hit rate 96.8%, not the weak case that note describes. Display-size conversion adds 3.11 → 2.54MB — eighteen percent — and pays for it by replacing a 0.25ms plane copy with a multi-millisecond swscale resample on the one path whose whole cost is the round trip. **A deferred item's premise expires; re-derive it before building it.**
-- **The seek-walk cache fill budget is 240ms, not 60** (Aug 2026, `f08f015`): the old value was set when the walk ran synchronously and a 240ms fill was a 240ms frozen window. On the worker it costs the UI thread nothing (`ui gap` unchanged), so the trade that set it no longer applies — **step 5 is what unlocked this, it is not a tuning tweak**. 4K H.264 backward: hit 86.4 → 91.9%, decode 91.5 → 121.3 f/s, seeks 10 → 7, stalls 7 of 73 → 5 of 97. Flat past 240. Memory unaffected (eviction is by bytes against the same budget). 1080p gains little because nothing is halved there, so 24 full-res entries fill the budget and bytes bind rather than time.
+- **The seek-walk cache fill budget is 240ms, not 60** (Aug 2026, `f08f015`) — **but the SHIPPING default is 60, and this entry is wrong about what runs** (found 2026-08-10 while measuring reverse). The member initialiser is `240.0`, and `open()` then overwrites it unconditionally with `envInt("TRACE_SCRUB_FILL_MS", 60)`, on every media open. So the change below is not in force. **Measured before reporting, and it does not matter on this gesture**: 4K H.264 backward drag, default vs `TRACE_SCRUB_FILL_MS=240` — `rev-hit 94.0 vs 94.2%`, `seeks 6 vs 6`, `ins 124 vs 124`, `hitch 4 vs 4`, `stalls 59 vs 58 of 115`. Treat it as a documentation-versus-code discrepancy rather than a regression to chase: the figures below were not reproducible today, so **correct the note rather than the default**, and re-measure before doing either. The reasoning that follows still stands and is what the reverse fill window is argued from: On the worker it costs the UI thread nothing (`ui gap` unchanged), so the trade that set it no longer applies — **step 5 is what unlocked this, it is not a tuning tweak**. 4K H.264 backward: hit 86.4 → 91.9%, decode 91.5 → 121.3 f/s, seeks 10 → 7, stalls 7 of 73 → 5 of 97. Flat past 240. Memory unaffected (eviction is by bytes against the same budget). 1080p gains little because nothing is halved there, so 24 full-res entries fill the budget and bytes bind rather than time.
 
   **This is the honest answer to "directional prefetch".** The worker has no idle time on H.264 backward to prefetch *with* — supply is 59–74%, it is saturated whenever there is lag — so speculative lookahead has nothing to spend. What it can do is spend the time it is already using more productively.
 - **Scrubbing interrupts playback; it does not end it — and the flag is intent, not state** (Aug 2026, `473b90e`, step 5.6): `sliderPressed` and `valueChanged` both paused unconditionally and nothing in `sliderReleased` restored, so a drag during playback stopped it for good. `userPlayIntent_` means *the user has asked for playback and has not asked for it to stop*, as distinct from `playTimer_.isActive()`, which is whether the mechanism is running. The scrub path suspends the mechanism and **never writes the intent**; the release restores iff it is set.
@@ -224,6 +238,68 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   **It was masking the real reverse-playback weakness.** Reverse on 4K H.264 now measures **86.7% of real time**, `handler>budget 11 of 110 (max 111.1ms)`, `p95 123.6ms` — the GOP-walk cost the roadmap describes. Any reverse-playback figure taken between GATE E and 2026-08-10 measured the scheduler fault instead.
 
+- **Reverse playback is BURSTY, not slow — measured 2026-08-10, `docs/reverse-shuttle-plan.md`.**
+  The first cross-format reverse measurement in the project, taken with the new
+  `scripts/measure/revplay.ps1` (physical panel, d3d11, 384MB cache, `win 1280x829`).
+  4K H.264 reverse 1x reproduces §29.3 to the digit (87.0% vs 86.7%), which is the check
+  that the harness measures the same thing.
+
+  **Duty cycle is the number to carry**: handler average against the slot it had to fit in
+  reads **7% at 1080p 1x and 20% at 4K H.264 1x**, and both files still miss real time
+  (95.4% and 87.0%). The work is not large, it is lumpy — eleven ~104ms GOP walks inside
+  5.5 seconds that are 80% empty, `p95 118.9ms` against `p50 41.8ms`. **§15.3 declined
+  directional prefetch on the explicit condition "do not revisit without first showing
+  measured idle worker time coinciding with stalls", and on the reverse path that condition
+  is now met by a wide margin.** The reason the answers differ is that a drag's target is
+  the pointer and a reverse run's target is arithmetic (`anchor − round(k × S)`), so
+  lookahead there is speculation and here it is not.
+
+  **ProRes reverse at 1x is already perfect and that inverts the usual intuition**: 4444
+  reads **99.7% of real time, `handler>budget 0 of 216`, cadence 41.7/43.7/44.3ms** —
+  every frame is a keyframe, the seek lands on the target, the walk is empty and each frame
+  costs one decode of known price. Uniform work gives perfect cadence; the deadline
+  scheduler already converts overload into a *stable slower* cadence rather than jitter
+  (4444 at 4x reads `p50 31.3 / max 34.2`, a rock-steady 32 f/s at the wrong speed). Do not
+  tune one mechanism against both codec families. `rev-hit 0.0%` on ProRes is still not a
+  cache failure.
+
+  **The cost model, from a two-point solve with the fill switched off**
+  (`TRACE_SEEK_CACHE_WINDOW=0` makes every step a seek plus a walk of uniform length, so
+  the mean and max handler are two points on one line): a walked frame costs **2.59ms at 4K
+  H.264 / 1.74ms at 1080p**, and the **fixed cost of a keyframe-aligned sample is ~30ms on
+  both**. That it does not scale with resolution means it is not pixel work — the seek
+  itself measures 5.8–7.7ms, so **20–24ms per seek is unaccounted for, and the candidate is
+  the frame-threaded decoder refilling its pipeline after every flush.** That is exactly
+  the mechanism the July 2026 note gives for moving intra-only codecs to `FF_THREAD_SLICE`;
+  long-GOP kept `FRAME|SLICE` for forward throughput, and reverse is seek-dominated. **It is
+  a hypothesis derived from an intercept, not a measurement** — measuring it needs a code
+  change and it is the first experiment of the next session, because it moves the handover
+  point and it is what decides whether 10x on long-GOP is reachable.
+
+  **Reverse pays 2.3 seeks per GOP where one would do.** `long-gap med 13` on a file whose
+  GOP is 30, confirmed frame-by-frame in the seek log. The cause is that the seek-walk cache
+  fill for `RequestMode::Playback` is an **18ms conversion budget written for a Step
+  landing**, where one frame is wanted and every speculative conversion is delay in front of
+  it — while during reverse the frames walked past are precisely the next 29 requests. That
+  is the same argument §15.2 made for Scrub and it was never applied to reverse. Measured
+  with the window forced open: **87.0 → 93.4% of real time, seeks 11 → 3, handler avg 8.30 →
+  4.18ms, long-gap spacing 13 → 30 = exactly the GOP**, at the cost of max handler 103.8 →
+  126.1ms. **That trade is only worth taking once the lump is off the UI thread.** More
+  cache bytes are *not* the proposal — §26.5 declined that and the fill window is the
+  binding term.
+
+  **`reverseCacheCapacity` is stale pre-GATE-C currency and it silently blocked the first
+  attempt at that experiment**: it is `384MB / (w × h × 4)`, the BGRA footprint, so it reads
+  11 at 4K where planar entries really give 32, and it clamps `TRACE_SEEK_CACHE_WINDOW`.
+  Forcing a 30-frame fill at the 384MB default therefore did nothing at all and looked like
+  a refuted hypothesis. Fifth instance of "a premise expires", and the first where the
+  expired premise is live code rather than a note.
+
+  **`outside` — per-cycle time that is not the handler — is 3.7–15ms and is unattributed.**
+  Renderer-independent (a `cpu` control reads 10.08 against d3d11's 9.92 on the same
+  gesture) and not the renderer's own paint, which measures 0.01–0.19ms. It caps presented
+  frames near ~110/s whatever the decoder does, i.e. ~4.5x at 24fps if every source frame is
+  presented. Attribute it before promising any speed.
 - **4444 fast drag is NOT short of the owner's ~4x — candidate item 1 is closed by §15** (Aug 2026, plan §29.1). The item read "~2.3x playback against the owner's stated ~4x", which converts a *decoder throughput* figure into a *drag speed* claim. That conversion was only valid while the shuttle presented every frame; velocity-adaptive sampling (`77738f0`/`f08f015`) broke it **two days after the item was written**, and the item was never re-read against it. Both branches of the "product decision" it proposes are already taken — skipping frames on the heaviest media *is* §15, shipped and signed off; running the worker ahead is directional prefetch, measured and declined at §15.3.
 
   Re-measured on the shipping build: **at ~4x the picture ends exactly on the pointer and never trails more than 6 frames, in both directions** (`behind 0/6f`, `p2p 26ms`), on 52–54% supply — the figure §15.1 predicted. The fast sweep reproduces §15.2's `p2p 22ms` to the digit with max lag better than §15.4's `cpu` record (`0/21f` vs `0/48f`). The throughput fact (~23ms/frame, untouched) is still true; **supply below 100% stopped meaning "behind" when sampling shipped.** Fourth premise-expiry in three sessions, after §26.2, §27 and §28.
@@ -587,11 +663,19 @@ perfectly on lag while stalling for 100ms.
    proposal before implementation. See the phase statement at the top of this
    file and the brief in `docs/next-session-prompt.md`.
 
-   **The only valid reverse baseline is `29.3`'s**: 4K H.264 reverse 1x at
-   **86.7% of real time**, `handler>budget 11 of 110 (max 111.1ms)`, `seeks 13`,
-   `rev-hit 88.5%`, `p50 41.8 / p95 123.6 / p99 150.1ms`, `win 1280x829`, d3d11,
-   physical panel. **Every reverse figure recorded between GATE E and 2026-08-10
-   is void** — it was measuring the J-K-L scheduler fault, not the GOP walk.
+   **The measurement pass and the architecture proposal are DONE (2026-08-10) and
+   live in `docs/reverse-shuttle-plan.md`.** No implementation was begun, by
+   instruction. The baseline is now a full cross-format table taken with
+   `scripts/measure/revplay.ps1` rather than §29.3's single row, and §29.3
+   reproduces inside it (87.0% against 86.7%). **Every reverse figure recorded
+   between GATE E and 2026-08-10 is still void** — it was measuring the J-K-L
+   scheduler fault, not the GOP walk.
+
+   Reverse at 1x, % of real time: **4K H.264 87.0 · 1080p 95.4 · 4K 60fps 69.1 ·
+   ProRes 422 HQ 99.9 · ProRes 4444 99.7.** At 4x, % of the demanded speed:
+   **59.0 · 81.1 · 33.2 · 59.6 · 33.3.** The ladder that exists is 1x/2x/4x;
+   5x/10x/30x are not measurable in the app as it stands and are modelled in the
+   plan from measured per-frame costs, with the falsification conditions stated.
 5. ~~**1080p backward is still "a lil glitchy"**~~ **Very likely closed by the
    384MB cache, 2026-08-10** — but read the qualification. Item 1 was named as
    the likely cause and item 1 is now fixed and signed off: 1080p was the file
@@ -672,6 +756,16 @@ as a bad number, and no throughput harness reaches them.
 `scrub.ps1 -SnapRelease` releases with no settling pause -- the only gesture
 that reliably catches a decode in flight, and therefore the only one that
 exercises cancellation at all.
+
+**Reverse playback has a harness now**: `scripts/measure/revplay.ps1` (2026-08-10).
+It clicks to position the playhead (a click jumps and lands exactly; a drag would
+shuttle every frame there and pre-fill the cache the run is about to read),
+presses J `-Presses` times for -1x/-2x/-4x, holds, and **captures before K** --
+the cumulative counters survive the stop but `speed` does not. `-StepCheck` is the
+landing-exactness gesture and **both its legs must be read**: the `-1` leg is the
+result, the `+1` leg is the control proving the comparison can see a moved picture
+(4K H.264 reads `+1 moved 7.5%, -1 returned 0%`). Reverse is silent, so no
+`TRACE_NO_AUDIO` control is needed -- every file is already on the same scheduler.
 
 **Quote `hitch`, not `stalls`, and quote `win WxH` with either.** `stalls` is
 `gap > 2 x refresh` and this box has been observed at both 239.999Hz and 60Hz,

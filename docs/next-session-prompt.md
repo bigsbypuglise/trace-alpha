@@ -66,6 +66,29 @@ out. Do not let a later summary widen any of them.
 
 # THE CURRENT PHASE — reverse shuttle
 
+> **UPDATE 2026-08-10: the measurement pass and the architecture proposal are DONE and live
+> in `docs/reverse-shuttle-plan.md`. No implementation was begun, by instruction.** Read
+> that document first; everything below it remains the standing brief and is unchanged.
+>
+> The three results that decide the shape of the work: **the decoder is idle 80–93% of the
+> time at reverse 1x on long-GOP and still misses real time** (the deficit is burstiness,
+> so §15.3's decline of directional prefetch does not carry over — the condition it set for
+> revisiting is now met); **ProRes reverse at 1x is already perfect** (4444 at 99.7% of real
+> time, zero handlers over budget), which inverts the usual intuition about which file is
+> hard; and **a keyframe-aligned reverse sample costs ~30ms against 1.7–2.6ms for a walked
+> frame**, which is what makes a *snapped* coarse scan cheap on long-GOP where §15's
+> arbitrary stride was catastrophic.
+>
+> The proposal's stride is the **commanded speed**, not an estimate — that is the answer to
+> the oscillation question, since nothing the decoder does can feed back into it.
+>
+> **The next session starts with two experiments, not with code**: attribute the
+> unexplained 3.7–15ms of per-present `outside` time, and test whether long-GOP
+> `FF_THREAD_SLICE` collapses the ~30ms seek intercept. Both change the numbers the
+> architecture is sized against. See §11 of the plan.
+>
+> A reverse harness exists now: `scripts/measure/revplay.ps1`.
+
 ## Why now, in the owner's reasoning
 
 The planned interface includes **2x, 5x, 10x and 30x rewind**. Reverse at 1x currently
