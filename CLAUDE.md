@@ -139,6 +139,61 @@ Three things from it worth carrying:
   overlay, whose side regions drew scan chevrons over stepping behaviour: they carry the
   frame-step glyphs now. Cross-backend agreement is untouched — the cpu-vs-d3d11 diff reads
   **312 px (0.619%), max delta 24 on the control and the same to the pixel after**.
+  (**Superseded on the directory point by the asset reorganisation below** — the approved
+  package carries a byte-identical copy of the first-pass set as `player-icons/`, so
+  `assets/Interface/` never needed to exist. The behaviour rule itself stands unchanged.)
+
+**THE ASSET TREE IS REORGANISED AND EVERY REFERENCE RE-POINTED (2026-08-10, `cbf6d98`).** The
+owner moved `assets/` by hand outside a session and nothing that referenced it was updated, so
+`rcc` failed on its first entry and the tree did not build. The layout now separates a master
+you never edit from working copies named for what they do: `assets/source/original-design-package/`
+is the untouched export, `assets/branding/app-icon/` and `assets/interface/{transport,window,common}/`
+are working copies, and `assets/README.md` states the rule. `rewind`/`fast-forward` **are**
+`transport_scan_reverse`/`transport_scan_forward`, renamed to what they do.
+
+Two things to carry. **The handoff listed 22 dangling references and there were 23** —
+`app/trace.rc` pointed at the old `trace.ico` path, so the Windows resource compiler dangled
+too and no count of `.qrc` entries would have found it; grep the tree for the old path rather
+than trusting an enumeration. And **`interface/` carries the SVG master plus exactly the PNG
+renditions the `.qrc` embeds and nothing else**, so the directory listing and the `.qrc` agree
+by construction — the absence of that property is what caused this.
+
+**SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
+**`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
+phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The
+table is complete and the dispatcher is not, and that separation is the design**: rows carrying
+a `QAction` are documentation only — Qt dispatched them before `keyPressEvent` was reached —
+and they point *at* the action rather than copying its keys, so a changed binding cannot leave
+the table stale. The dispatcher **matches on the key and ignores modifiers**, exactly as the
+switch did; every modifier'd shortcut in Trace is already on an action, and that is the rule.
+
+**`startShuttle()` is the five-step sequence J and L each wrote out**, extracted *before*
+phases 4–5 add the buttons as a third caller. **One predicate decides three things**:
+`ordinaryForwardPlay` (forward at exactly 1×) is the case that keeps the play intent, the case
+that gets sound, and the case that does *not* become a shuttle run — visible from outside, a
+default `L` reads `shuttle idle` while the same press under the 2× convention reads
+`shuttle RUN FWD stride 2`. `PlaybackController` gains **`ShuttleEntry::AtOneX`/`AtTwoX`**,
+applied at the first rung only, so the buttons' 2× entry is an argument rather than a call site
+writing `speed`. `TRACE_SHUTTLE_ENTRY=2x` drives it through J/L, which is the only way to
+execute it before those buttons exist.
+
+**`landPreviousExactly` is PRESERVED, not unified, and phases 4–5 must settle it.** L must pass
+true (at L-to-1× out of reverse no new run starts, so nothing else would end the old one and
+its lease would strand); J passes false. What is **not** derivable is why L at 2× also lands —
+a synchronous Step decode on every forward speed change out of reverse — when J at −2× does
+not. Both shipped in the signed-off engine and neither was measured against the other.
+
+**The frame-step BUTTON never ended a shuttle run, and that was a real bug.**
+`revtransitions.ps1` enumerates six ways out of a reverse run and every one is a key or the
+slider; the buttons are a **seventh** and nothing exercised them. Clicking Prev Frame during a
+reverse run left `shuttleRunActive_` true with `shuttleLastPresented_` holding the *shuttle's*
+frame, so the next K took `endShuttleRun`'s landing branch and **discarded the frame the user
+stepped to** — measured against a control from `cbf6d98`, the picture moves **17.6% on that K
+press before and 0% after**. **The obvious gesture does not find it**: reverse → click →
+arrow-key passes identically on both builds, because it neither hangs nor freezes. Both step
+paths are one command now (`stepOneFrame`). Regression flat: cadence 99.9 → 100.0% with
+identical buckets, `-SnapRelease` `delta 0` and `hitch 0` both, reverse 1× and forward 2×
+identical to the digit, all six transitions and both lifecycle legs passing.
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
@@ -898,7 +953,11 @@ and its accumulator gate — the negative control for any cadence measurement),
 reverse — its own knob rather than sharing `TRACE_ASYNC_SCRUB`, so a reverse A/B
 does not also change how dragging behaves), `TRACE_LONGGOP_SLICE_THREADS=1`
 (slice-only threading for long-GOP codecs — **measured and refuted**, retained as
-the control for that closed question), **`H` (not an env knob — the keyboard
+the control for that closed question), `TRACE_SHUTTLE_ENTRY=2x` (J and L enter the
+shuttle ladder at 2x, the **button** convention, instead of the keyboard's 1x —
+an interim knob added at spec phase 3 so the entry point the Rewind/Fast-forward
+buttons will use is executable before those buttons exist; it leaves with phases
+4–5), **`H` (not an env knob — the keyboard
 toggle for the dev HUD, added at spec phase 2; `Return`/`Enter` still work, and
 hiding it also stops the HUD line being *built*, so it is the state to judge feel
 in and the wrong state to quote a bare `stalls` from)**, `TRACE_OVERLAY=1` (the floating transport,

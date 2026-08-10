@@ -1,71 +1,11 @@
-# The interface pass is open, phase 2 has shipped, and phase 3 is next.
+# The interface pass is open, phase 3 has shipped, and phase 4 is next.
 
-Supersedes the previous version. Priority 2 was lifted on 2026-08-10 and the interface pass
-was opened the same day: the spec's §2 was re-derived, both GPU prerequisites were built and
-measured, the phase 1 audit was written, and **phase 2 shipped at `58bfca6`**. **The next
-thing to do is spec phase 3.** Paste everything below the line into a fresh session in the
+Supersedes the previous version. The asset tree was reorganised and every reference re-pointed
+(`cbf6d98`), and **spec phase 3 shipped at `4de678e`**. **The next thing to do is spec phase 4,
+the forward shuttle interface.** Paste everything below the line into a fresh session in the
 repo root.
 
 ---
-
-## DO THIS FIRST — the asset tree was reorganised by hand and THE BUILD IS BROKEN
-
-The owner cleaned up `assets/` on 2026-08-10, outside a session. Two directories were
-deleted and the approved package's `export/` contents were moved up one level, so `assets/`
-now holds `base-ui-icons/`, `player-icons/`, `png/`, `svg/`, `trace.ico`, `trace.icns` and
-three `.txt` files at its root.
-
-**`app/resources.qrc` still points at both deleted paths** — `assets/260807 Trace Media
-Player Icon/export/…` (16 entries) and `assets/Interface/export/…` (6 entries). All 22 are
-dangling, so `rcc` fails and the tree does not build. Verify that before anything else, then
-fix it as **one commit** — the move and the `.qrc` rewrite have to land together, with a
-local build and CI green, because there is no intermediate state that works.
-
-### The target layout, as the owner specified it
-
-```
-assets/
-├── branding/
-│   └── app-icon/          trace.ico, trace.icns, + the png/{windows,macos} sets
-│                          and svg masters the qrc embeds
-├── interface/
-│   ├── transport/         play, pause, rewind, fast-forward, prev-frame, next-frame
-│   ├── window/            fullscreen-enter, fullscreen-exit
-│   └── common/            empty — where volume/share/inspector/zoom/rotate/loop go
-│                          when those features are real
-├── source/
-│   └── original-design-package/    the complete untouched export
-└── README.md
-```
-
-`rewind` and `fast-forward` are the package's `transport_scan_reverse` /
-`transport_scan_forward`. Renaming them to what they *do* is right and matches phase 2's
-own rule that artwork follows behaviour.
-
-### Three things the sketch omits, and each one is load-bearing
-
-1. **`prev-frame` and `next-frame` must survive.** They came from the now-deleted
-   `assets/Interface/`, and they are the artwork on the two *visible* side buttons, which
-   still perform single-frame stepping until phases 4–5. The approved package has no
-   frame-step glyph by design. Dropping them ships the scan artwork over stepping behaviour,
-   which is the exact thing phase 2 refused to do. They are available at
-   `assets/player-icons/{svg,png/*}/`. They leave the tree at phases 4–5, with the
-   behaviour.
-2. **The app embeds PNG, not SVG, and does not link `Qt6::Svg`.** An SVG-only layout would
-   have nothing for the `.qrc` to reference. Carry the 1x/2x PNG renditions alongside each
-   SVG master. Linking `Qt6::Svg` and moving to vector icons is a reasonable future change,
-   but it is a real decision with a deployment consequence — do not let it happen as a side
-   effect of a folder move.
-3. **`app/resources.qrc`'s comments are project knowledge, not decoration.** They record why
-   there is one icon source, why the scan glyphs are embedded-but-unused, and why the two
-   step glyphs are still from the old set. Re-point the paths and keep the reasoning.
-
-Write `assets/README.md` to say what each directory is for and state the rule that
-`source/original-design-package/` is the untouched master and everything under `interface/`
-is a working copy named for its behaviour.
-
-**Regression:** icons are resources, so a build plus a visual check that the transport bar
-and window icon still render is enough. Do not re-run the playback suite for this.
 
 ## Standing priorities (owner) — these outrank anything below
 
@@ -123,7 +63,7 @@ wrong — see the deferred list.
 - **EXR / image sequences and OCIO.** `TRACE_WITH_OIIO` is undefined in vcpkg and CI, so EXR
   does not open today. Largest untouched area, and a feature rather than a fix.
 
-## THE OPEN PHASE — interface pass 1, now at phase 2
+## THE OPEN PHASE — interface pass 1, now at phase 4
 
 The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 `docs/interface-pass-1-spec.md`.
@@ -147,40 +87,89 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
   `showInfo`/`showTimecode`/`showSeconds` flags are deleted, `refreshHud` no longer *builds*
   a hidden HUD, and the icon tree is down to the approved `260807` package. Full regression
   against a control built from `87a39a6`, on the physical panel, all flat.
-- CI run 79 green on `2bb1901`, run 81 green on `58bfca6`, both including the renderer
-  selftest.
+- **The asset tree is reorganised and every reference re-pointed** (`cbf6d98`). The owner
+  moved `assets/` by hand outside a session and nothing that referenced it was updated, so
+  `rcc` failed on its first entry. `assets/source/original-design-package/` is the untouched
+  master, `assets/branding/app-icon/` and `assets/interface/{transport,window,common}/` are
+  working copies named for behaviour, and `assets/README.md` states the rule. **The previous
+  handoff listed 22 dangling references and there were 23** — `app/trace.rc` dangled too, so
+  grep for an old path rather than trusting an enumeration.
+- **Phase 3 shipped at `4de678e`** — the shortcut table, the extracted shuttle sequence, the
+  controller's second ladder entry, and a real bug in the frame-step button. Record in
+  `docs/interface-pass-1-progress.md`; full regression against a control built from
+  `cbf6d98`, on the physical panel, all flat.
+- CI run 79 green on `2bb1901`, run 81 green on `58bfca6`, run 84 green on `cbf6d98`, all
+  including the renderer selftest.
 
-### Start at spec phase 3, and read `docs/interface-pass-1-progress.md` first
+### Start at spec phase 4, and read `docs/interface-pass-1-progress.md` first
 
-The audit's findings that change the work, in the order they bite. **Item 1 is done.**
+The audit's findings that change the work. **Items 1, 2 and half of 3 are done.**
 
 1. ~~**Fullscreen is the only transport control that is not a shared QAction.**~~ **DONE at
-   phase 2.** `fullscreenAction_`, checkable, created in `setupSharedActions()` which runs
-   before `setupMenus()`. **F11 is listed first on purpose** — Qt advertises only the first
-   sequence, so the order decides what the menu and the tooltip say; Ctrl+Return and
-   Alt+Enter sit behind it. Escape-exits and geometry restore are still phase 6.
-2. **Phase 3 should build a shortcut table rather than extend `keyPressEvent`'s flat
-   switch**, because phase 13 has to render a Keyboard Shortcuts window from something.
-   Phase 2 *removed* two cases from that switch (`I`, and `Return`/`Enter`) and added none —
-   the two new shortcuts live on their actions. What is left in the switch is
-   Space · M · Left/Right · J/K/L · F/S/T.
-3. **Phases 4-5: extract the five-step shuttle sequence before adding a third caller.**
-   `startShuttleRun` has exactly two callers today and each performs
-   `endShuttleRun` → controller ladder → `prepareVideoRequest` → `beginPlaybackTimeline` →
-   `startShuttleRun`. §29.2 is the standing warning: GATE E was validated on the Play action
-   alone and every other path that started the timer compiled silently and decayed
-   quadratically. And **the buttons must enter the ladder at 2×** while J/L enter at 1× —
-   `jogForward`/`jogReverse` express only the keyboard contract today, so the controller
-   needs a second documented way in rather than a call site poking `speed`.
-4. **Phase 6 is the one most likely to cost performance**: removing `transportBar_` from the
+   phase 2.** F11 is listed first on purpose — Qt advertises only the first sequence, so the
+   order decides what the menu and the tooltip say. Escape-exits and geometry restore are
+   still phase 6.
+2. ~~**Phase 3 should build a shortcut table.**~~ **DONE at phase 3.** `ShortcutTable` in
+   `src/app/ShortcutTable.*`; `keyPressEvent` is two lines. Phase 13 renders the Keyboard
+   Shortcuts window from `rows()`. **The table is complete and the dispatcher is not** —
+   action-owned rows are documentation and point at their `QAction`, so a changed binding
+   cannot leave the table stale. **The dispatcher matches on the key and ignores modifiers**,
+   exactly as the switch did; a new modifier'd shortcut goes on an action, not in the
+   dispatched half.
+3. **Phases 4–5: the five-step shuttle sequence IS extracted, and it left one decision
+   open.** `startShuttle(direction, entry, landPreviousExactly)` is the whole sequence, and
+   `PlaybackController` has `ShuttleEntry::AtOneX`/`AtTwoX` so the **buttons' 2× entry is an
+   argument** rather than a call site writing `speed`. Two things remain, and both are on you:
+
+   - **What do the buttons pass for `landPreviousExactly`?** It is preserved rather than
+     unified because the two existing callers genuinely disagree and neither reading was
+     measured against the other. L **must** pass true: at L-to-1× out of a reverse run no new
+     shuttle run starts, so nothing else would end the old one and its lease and queue would
+     strand. J passes false because a J press always produces a run that supersedes the
+     picture immediately. What is **not** derivable is why L at **2×** also lands — a
+     synchronous Step decode on every forward speed change out of reverse — when J at −2× does
+     not. Measure it before choosing; it is a decode in the middle of a direction change.
+   - **`TRACE_SHUTTLE_ENTRY=2x` is the interim knob and it leaves with these phases.** It
+     drives the button convention through J and L so the entry point is executable before the
+     buttons exist. Verified: a first J reads `speed -2.00x` / `shuttle RUN REV stride 2`, a
+     first L reads `speed 2.00x` / `RUN FWD stride 2`, against `-1.00x` / `stride 1` and
+     `1.00x` / `shuttle idle` on the default.
+
+   Phase 4 is also where the **artwork moves with the behaviour**: `rewind`/`fast-forward` are
+   embedded and unused in `assets/interface/transport/`, and the two frame-step glyphs leave
+   the tree when the buttons stop stepping. The composited overlay's side regions carry the
+   frame-step glyphs and have to move at the same time.
+
+4. **`revtransitions.ps1` covers six exits and there are at least seven.** The seventh is the
+   frame-step **button**, and it held a real bug for as long as it went unlisted — see the
+   phase 3 record. **At phases 4–5 those buttons become shuttle *entries* as well as exits**,
+   so re-derive the enumeration rather than extending it, and note that the gesture which
+   exposed the bug was not the obvious one: reverse → click → arrow-key passed identically on
+   both builds, because the fault neither hangs nor freezes. It took reverse → click → **K**.
+5. **Phase 6 is the one most likely to cost performance**: removing `transportBar_` from the
    layout in favour of the floating overlay. Measure it when it lands, not at phase 14. Its
    open question is plan §31.5 item 2 — whether the overlay's timeline *press* lands exactly
    the way a groove click does. Test with the playhead deliberately far from the press point.
-5. **Phase 7 has a decision, not just work**: the `Timecode:` readout is already synthesised
+6. **Phase 7 has a decision, not just work**: the `Timecode:` readout is already synthesised
    from the frame index, which is the thing the spec forbids. Relabel it as elapsed, or
-   disable it, when no source timecode exists.
-6. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
+   disable it, when no source timecode exists. Phase 7 also creates **the first text-entry
+   control in the app**, which is when the spec's "must not fire while focus is inside a
+   text-entry control" finally has something to guard — and the shortcut table's key-only
+   matching makes that check more important, not less.
+7. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
    reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob.
+
+### Two harness traps that cost real time this session, both already written down here
+
+- **Never name a PowerShell helper `Diff`.** `diff` is a built-in alias for `Compare-Object`
+  and aliases outrank functions, so the helper is never called. Every check in the first
+  keyboard smoke run reported FAIL for that reason alone, and each one looked like an app
+  fault.
+- **A picture-difference check at frame 0 of `Splash_1.mp4` reads 0%** because the opening
+  frames are static. Stepping has to be measured mid-clip. Same shape of trap:
+  **`revplay -StepCheck` needs a hold short enough to stop mid-clip** — at the default 8s
+  reverse traverses the 121-frame clip to the head, and the `+1` control leg reads 0.2% and
+  prints `stepcheck INCONCLUSIVE`. The `-1` result means nothing without it.
 
 ### Owner request, 2026-08-10 — a hotkey to hide the dev HUD — DELIVERED at phase 2
 
@@ -245,7 +234,12 @@ improved. The keyframe *positions* were exact and available all along.
 **A validated path is not a validated feature.** §29.2 is the sharpest instance: GATE E was
 validated on the Play action alone and every other path that started the timer kept compiling
 silently. Enumerate the entry points rather than testing the one the harness drives —
-`scripts/measure/revtransitions.ps1` exists for exactly this and covers all six shuttle exits.
+`scripts/measure/revtransitions.ps1` exists for exactly this and covers six shuttle exits.
+**And the enumeration itself goes stale.** Phase 3 found a seventh exit, the frame-step
+button, which had never been exercised and had been discarding a stepped frame for as long
+as it went unlisted. **The obvious gesture did not find it**: reverse → click → arrow-key
+passed identically on a control, because the fault neither hung nor froze. It took
+reverse → click → **K**, the gesture that ends a run *afterwards*.
 
 **Reproduce on the reported case AND on a healthy one before theorising.** The fast-forward
 fault was reported as affecting every format. It did — but 4K H.264 still reached 3.97× of 4×
