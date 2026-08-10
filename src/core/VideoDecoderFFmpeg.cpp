@@ -843,7 +843,45 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     // before any frame has been converted.
     {
         const long long frameBytes = static_cast<long long>(w) * h * 4;
-        impl_->reverseCacheBudgetBytes = 192LL * 1024 * 1024;
+        // 384MB, raised from 192 in Aug 2026 because the old figure was the
+        // binding constraint on drag hitches and nothing else was.
+        //
+        // The route here matters, because the obvious lever was the wrong one.
+        // Plan section 15.5 item 1 nominated "convert Step and cache-fill
+        // conversions to display size" as the way to multiply cache depth. GATE
+        // C had already collected most of that without anyone noticing: a
+        // full-res 1080p entry is a yuv420p PLANE SET at 3.11MB, not an 8.29MB
+        // BGRA frame, so depth was already 64 entries rather than the 24 that
+        // note assumed. What display-size conversion would add on top is 3.11MB
+        // -> 2.54MB, eighteen percent, and it would pay for that by replacing a
+        // 0.25ms plane copy with a multi-millisecond swscale resample on the
+        // one path whose whole cost is the round trip. It is a losing trade now
+        // even though it was a winning one when it was written.
+        //
+        // Raising the budget is what the measurement actually pointed at.
+        // Reversal drags at win 1284x1067 on d3d11, 192 -> 384MB:
+        //
+        //   1080p H.264    hitch 8,8 -> 3,2   seeks 11 -> 4,3   hit 96.8 -> 98.9%
+        //   4K H.264       hitch 3   -> 1,1   seeks  5 -> 3,3   hit 97.7 -> 98.3%
+        //   ProRes 4444    hitch 7   -> 5     seeks 98 -> 97    hit  9.9 -> 19.5%
+        //
+        // 4444 moves least and that is structural, not a shortfall: every frame
+        // is a keyframe, a seek lands on the target, no intermediate frames are
+        // ever produced and there is nothing to cache (section 15.1). Do not
+        // try to fix its hit rate with more bytes.
+        //
+        // Cost is memory and only memory: working set 396 -> 598MB on 1080p,
+        // 677 -> 902MB on 4K H.264, 572 -> 710MB on 4444. 768MB was measured
+        // too and is past the knee -- 1080p goes to hitch 1 and seeks 2 for
+        // another ~400MB.
+        //
+        // The knob stays, as the control for any of the above and as the way to
+        // buy more depth on a machine that can afford it. It is also how the
+        // question was settled at all: quadrupling the budget is a strictly
+        // stronger version of anything a cheaper entry representation could buy,
+        // so hitches falling when it was raised is what proved they were misses.
+        const int budgetMb = std::clamp(envInt("TRACE_REVERSE_CACHE_MB", 384), 16, 4096);
+        impl_->reverseCacheBudgetBytes = static_cast<long long>(budgetMb) * 1024 * 1024;
         impl_->reverseCacheBytes = 0;
         // Worst case: every entry full resolution. Half-res scrub entries cost
         // a quarter of this, so the byte budget will hold about four times as
