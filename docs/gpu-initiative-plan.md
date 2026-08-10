@@ -382,8 +382,12 @@ Each is independently reviewable and revertable. Gates in **bold**.
    aspect, resize, fallback). *(done — see §17)*
 7. `feat(gpu): add planar YUV upload and shader colour conversion` — **GATE C.**
    *(done, `e8566a4` — see §22)*
-8. `perf(gpu): reuse textures and upload resources` — **deferred**, see below
-9. `perf(gpu): add GPU scaling and telemetry` — **deferred**
+8. ~~`perf(gpu): reuse textures and upload resources`~~ — **CLOSED, answered-no
+   2026-08-10, see §27.** The reuse is already in the GATE B code (`tex 3` across
+   261 frames, `tex 4` across a 406-paint drag) and the residual upload is memcpy
+   bandwidth. The telemetry that answered it shipped (`e88d002`).
+9. `perf(gpu): add GPU scaling and telemetry` — **deferred**; the telemetry half
+   landed early with §27
 10. `feat(gpu): add high-bit-depth ProRes presentation` — **deferred**
 11. **GATE E** — pulled ahead of 8-10 (2026-08-09, owner decision) and **split in
     two**, which §24.11 Q1 asked and the result justified:
@@ -2219,9 +2223,11 @@ another run. Do not assume content or resolution explains it without evidence.
 ### 22.7 Open after GATE C
 
 1. **The 4444 release latency above.** Needs the owner, not another harness run.
-2. **Textures are recreated on any geometry change** — step 8 (`perf(gpu): reuse
-   textures and upload resources`) is where that and a staging-buffer upload
-   belong. Today every plane is `Map/WRITE_DISCARD` per frame.
+2. ~~**Textures are recreated on any geometry change**~~ — **step 8 is CLOSED as
+   answered-no, §27.** Both halves of this note are true as written and neither is
+   a cost: "any geometry change" means the *frame's* geometry, and per-frame
+   `Map/WRITE_DISCARD` is the upload rather than an allocation. Measured `tex 3`
+   across 261 frames and `tex 4` across a 406-paint drag.
 3. **GPU scaling is still not done** (step 9). Both backends downscale to the
    window; the landing frame still converts full-res and lets the sampler scale.
    §9's honest target — the Step landing — is unchanged by GATE C.
@@ -3099,3 +3105,111 @@ hold that subjective feel judgements are not valid over Parsec, because it
 re-times and re-encodes the screen. The sign-off is recorded as given; if it was
 a remote session it should be re-taken at the panel before being leaned on
 against any future regression.
+
+---
+
+## 27. Step 8 — texture and upload-resource reuse. ANSWERED: NO (2026-08-10)
+
+Taken up under an explicit owner condition: state what step 8 is expected to buy
+and how it will be known, before implementing it; if it measures as noise, say
+so and move to step 9 rather than shipping an optimisation with no number behind
+it. That condition is the entire reason this section exists rather than a commit.
+
+**Session conditions**, since §26.1 is the reason to state them: physical panel,
+`5120x1440 @ 239999/1000 = 239.999Hz`, confirmed with `refresh.ps1`. Not a Parsec
+session. `d3d11` default, `win 1280x829`/`1280x815`.
+
+### 27.1 What the section it came from actually claimed
+
+§22.7 item 2: *"Textures are recreated on any geometry change — step 8 is where
+that and a staging-buffer upload belong. Today every plane is `Map/WRITE_DISCARD`
+per frame."*
+
+Both halves are true as written and neither is a cost. "Any geometry change"
+means the **frame's** geometry, not the window's: `releaseSizeDependent()` drops
+the render target view only, and the textures are untouched by a resize. And
+`Map/WRITE_DISCARD` per frame is not an allocation — it is the upload.
+
+The code already does what step 8 proposes. `ensureTexture` early-returns when
+size matches; `ensurePlaneTextures` early-returns when the format and all three
+plane sizes match; and `clearFrame()` deliberately **keeps** the plane textures,
+with a comment saying why — it runs on every media change and between drag and
+landing, and rebuilding three textures each time is the allocation that path
+exists to avoid. The header has claimed this since GATE B ("built lazily and only
+when the size changes, so a steady stream of frames at one resolution reuses
+everything"). Nothing had ever checked it.
+
+### 27.2 The measurement
+
+`tex` is cumulative `CreateTexture2D` calls since launch; `upload` is the CPU→GPU
+transfer for one frame. Both new in `e88d002`.
+
+| run | frames / paints | `tex` | `upload` last/avg | budget |
+|---|---|---|---|---|
+| 4K H.264 playback, `win 1280x829` | 120 | **3** | 0.59 / **0.76ms** | 41.67ms |
+| ProRes 4444 playback, `win 1280x815`, no audio | 261 | **3** | 3.44 / **3.47ms** | 41.67ms |
+| 4K H.264 reversal drag, `win 1280x829` | 406 paints | **4** | 0.73 / 0.13ms | — |
+| ProRes 4444 playback, **`cpu` control** | 261 | **0** | 0.00 / 0.00 | 41.67ms |
+
+**Three is the three planes. Four is the three planes plus the one BGRA texture
+the previews share.** Nothing is ever recreated: not across 261 frames of
+playback, and not across a multi-gesture reversal drag that alternates BGRA
+previews and full-resolution planar frames 406 times. **There is no texture churn
+to remove, so the "reuse textures" half of step 8 has nothing to reuse.**
+
+The drag row is the one that could have gone the other way, and it is the reason
+it was run: previews are BGRA at display size and landings are planar at full
+resolution, so a naive implementation would tear one set down to build the other
+on every transition. `clearFrame()`'s decision not to is what makes it 4.
+
+### 27.3 The residual is memory bandwidth, and no API change reaches it
+
+4444 is the worst case and the only file where the upload is visible at all:
+**3.47ms of a 41.67ms budget, 8.3%.** Its planes are 3 × 4096 × 2304 × 2 bytes =
+**56.6MB**, so 56.6MB in 3.47ms is **16.3 GB/s** — a single-threaded CPU write
+into the driver's mapped region, at bandwidth. It is not allocation, not API
+overhead, and not a texture lifetime.
+
+The two mechanisms step 8 names both fail against that:
+
+- **Texture reuse** is already complete (§27.2). It could not have helped anyway:
+  the copy happens whether the texture is new or reused.
+- **A staging-buffer upload** is strictly more work — the same 56.6MB CPU memcpy
+  into a staging resource, *plus* a GPU-side `CopySubresourceRegion` of another
+  56.6MB. Its usual justification is that a `DYNAMIC` texture lives in system
+  memory so the shader samples it across PCIe, while a `DEFAULT` texture is in
+  VRAM. That justification requires the draw to be the constraint, and the draw
+  reads **`draw 0.01ms`, `paint tot 0.13ms`**. There is nothing there to win.
+
+The only remaining micro-optimisation is real and is quantified rather than
+dismissed: `uploadPlanes` loops row by row unconditionally, while `uploadPixels`
+has a whole-buffer fast path for the case where source stride, destination
+`RowPitch` and row bytes all agree. Adding the same fast path to the planar side
+would remove ~2300 `memcpy` call overheads per 4444 frame — on the order of
+**35µs**, which is **1% of the upload and 0.08% of the frame.** That is noise by
+any definition, and shipping it would be exactly the optimisation-with-no-number
+the owner's condition rules out.
+
+### 27.4 The conclusion, and the one thing worth keeping
+
+**Step 8 is closed as answered-no.** It is the second deferred item in two
+sessions whose premise had expired by the time it came up — §26.2 was the first,
+and the rule it produced applies verbatim: *a deferred item's premise expires;
+re-derive it before building it.* Here the premise expired because GATE B's own
+lazy-creation code already satisfied it and nobody had counted.
+
+The telemetry stays, and it is the part with lasting value. It is also step 9's
+"and telemetry" half, delivered early:
+
+- `tex` is a **regression tripwire**. If a future change to the frame path makes
+  textures churn — a preview size that moves per frame, a format that alternates,
+  a `clearFrame()` that stops keeping the planes — this number starts climbing
+  and says so. Before this commit that failure would have shown up only as an
+  unexplained few milliseconds inside the tick handler.
+- `upload` closed a real hole in `total`. `total` had never included it, so on
+  the shipping default it under-reported every frame by up to 3.47ms. **A d3d11
+  `total` from before `e88d002` is a smaller number for the same work.**
+
+Charged for the upload it always had, d3d11 on 4444 still reads `total 24.63`
+against `cpu`'s `total 32.89` in the same session — so GATE C's win survives
+being measured honestly, which was worth confirming.
