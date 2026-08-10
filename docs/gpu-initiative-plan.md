@@ -7,19 +7,20 @@
 8, 9 and 10 are deferred, not cancelled. §23.5 recorded the argument and declined
 to act on it unilaterally; the owner has now taken it.
 
-**GATE E step 1 (E1) is IMPLEMENTED AND MEASURED — see §24.13.** The
-integer-tick beat is gone on every file and every renderer: the 1.5-2.5x bucket
-goes 5 -> 0 on 4444 with the planar path, long-gap spacing 58/61/62 -> none, and
-all three audio-mastered files improved with `rep` falling 4-5 -> 1. A negative
-control in the same binary (`TRACE_DEADLINE_SCHED=0`) still shows the fault.
+**GATE E is PASSED at step 1, with owner sign-off (2026-08-09) — §24.13, §24.14.**
+The integer-tick beat is gone on every file and every renderer: the 1.5-2.5x
+bucket goes 5 -> 0 on 4444 with the planar path, long-gap spacing 58/61/62 ->
+none, and all three audio-mastered files improved with `rep` falling 4-5 -> 1. A
+negative control in the same binary (`TRACE_DEADLINE_SCHED=0`) still shows the
+fault. **The owner signed off running the CPU default with no GPU path
+involved**, so E1 alone cleared the complaint.
 
-**E2 (the DXGI phase source and the present/decode swap) is NOT built, and
-§24.14 asks whether it should be** — E1 met every measurable criterion on its
-own, so E2's remaining value is a one-refresh wobble whose visibility only the
-owner can judge. Two design premises also changed under measurement:
-`DwmGetCompositionTimingInfo` **fails on this machine** (§24.4), so a
-renderer-independent phase source does not exist; and the panel is
-**239.999 Hz**, i.e. exactly 10 refreshes per 24.000fps frame (§24.2).
+**E2 (the DXGI phase source and the present/decode swap) is NOT built and is
+stopped by owner decision** — the design is retained unbuilt at §24.4-24.6. Two
+of its premises changed under measurement: `DwmGetCompositionTimingInfo` **fails
+on this machine** (§24.4), so a renderer-independent phase source does not exist
+and any future E2 is d3d11-only; and the panel is **239.999 Hz**, i.e. exactly
+10 refreshes per 24.000fps frame (§24.2).
 
 **GATE B is signed off by the owner (§20.2, §17.5 item 2).** CPU and D3D11 are
 visually equivalent in fit-to-window and fullscreen; the 150% case is accepted
@@ -378,10 +379,14 @@ Each is independently reviewable and revertable. Gates in **bold**.
 8. `perf(gpu): reuse textures and upload resources` — **deferred**, see below
 9. `perf(gpu): add GPU scaling and telemetry` — **deferred**
 10. `feat(gpu): add high-bit-depth ProRes presentation` — **deferred**
-11. `perf(gpu): add DXGI presentation timing` — **GATE E** before any default change.
-    **Pulled ahead of 8-10 (2026-08-09, owner decision).** Design at §24, awaiting
-    review. §24.11 asks whether to split it into E1 (renderer-independent
-    deadline scheduling) and E2 (the DXGI phase source proper).
+11. **GATE E** — pulled ahead of 8-10 (2026-08-09, owner decision) and **split in
+    two**, which §24.11 Q1 asked and the result justified:
+    - 11a. `perf(playback): schedule presents against the exact source rate`
+      — E1, renderer-independent. *(done, `e2b8655` — **GATE E PASSED**, owner
+      sign-off on the CPU default; see §24.13, §24.14)*
+    - 11b. `perf(gpu): add DXGI presentation timing` — E2, the vblank phase
+      source and the present/decode swap. **NOT BUILT, stopped by owner
+      decision.** Design retained unbuilt at §24.4-24.6.
 
 **On the reorder.** Locked real-time playback is priority #1; §23 measured the
 residual stutter as the integer-tick beat, which is universal and which only
@@ -2739,27 +2744,52 @@ the fix: **0.65 avg / 2.49 max**. A derived metric whose inputs changed meaning
 reads as a catastrophic result, not as a broken metric, and there is nothing in
 the number itself that says which.
 
-### 24.14 Open after E1 — is E2 still justified?
+### 24.14 GATE E — PASSED at step 1. E2 is NOT being built.
 
-**Every measurable criterion in §24.9 is met by E1 alone**, on `cpu` and on
-`d3d11`, with a working negative control. What is left is criterion 5 (the
-refresh sweep) and criterion 6 (the owner's eye).
+**Owner sign-off, 2026-08-09: "wow, Playback is great!"** — and the important
+detail is *what they ran*. Asked which build, the answer was **"just
+double-clicked the app", i.e. `TRACE_RENDERER` unset, i.e. the CPU default.**
 
-That was not the expectation. §24.1 argued E2 was structurally necessary because
-present time carries `handler_k − handler_{k−1}`, and 4444's handler spread of
-~12ms is ±3 refreshes. The measurement says the premise was overstated **for the
-planar path**: on d3d11 the 4444 handler is ~21.6ms total and the present-to-
-present spread is `p50 41.7 → max 45.9`, i.e. **about one refresh**, with
-nothing at all in the doubling bucket.
+So the sign-off is on **E1 alone, on the default renderer, with no GPU path
+involved.** That is a stronger result than the design anticipated and it settles
+several things at once:
 
-So E2 now buys the removal of an occasional one-refresh wobble, at the cost of
-one frame of display latency and a reshaped tick handler. **Whether that is
-visible is an owner question, not a harness one** — which is the same split this
-project has recorded six times, and the honest place to stop and ask.
+- The stutter the owner reported was **cause A, the tick beat, essentially in
+  full.** §23.4 measured a cause-B component on `cpu` (one handler over budget,
+  jitter 11–14ms) and §23.5 predicted the owner was seeing beat *plus* that.
+  They were not seeing enough of it to matter: removing the beat alone cleared
+  the complaint on the very configuration that still has the cause-B component.
+- **§23.6 stays open and is now unlikely to be resolvable.** Why 4444 stood out
+  when the beat was identical on 1080p and 422 HQ was never established, and the
+  fault is now gone, so the evidence for it is gone with it. Do not re-open it
+  speculatively.
+- The GPU path's remaining advantage on 4444 (0 vs 1 doubled frame, 0 vs 1
+  over-budget handler, 99.8% vs 99.3%) is **real but below the owner's
+  threshold**. It is an argument for flipping the default, not a requirement.
 
-The `cpu` path is the weaker case (max gap 62.5ms, one over-budget handler) and
-the fix for it is GATE C, not E2 — which folds back into the default-renderer
-decision at §24.12.
+**E2 is stopped by owner decision.** Every measurable criterion in §24.9 was met
+by E1, so E2's remaining value was the removal of an occasional one-refresh
+wobble at the cost of one frame of display latency and a reshaped tick handler.
+That was not the expectation: §24.1 argued E2 was structurally necessary because
+present time carries `handler_k − handler_{k−1}` and 4444's spread is ~12ms,
+three refreshes. **The premise was overstated for the planar path** — on d3d11
+the 4444 handler is ~21.6ms total and the present-to-present spread is
+`p50 41.7 → max 45.9`, about one refresh, with nothing in the doubling bucket.
+
+The design at §24.4–24.6 is **retained, unbuilt**. If a cadence complaint returns
+on a specific file, it is ready to pick up — and note that its phase source is
+settled by measurement: `GetFrameStatistics` on the swapchain, d3d11 only,
+because §24.4's renderer-independent route does not exist on this machine.
+
+**Criterion 5, the refresh sweep, is MOOT for E1 and was deliberately not run.**
+The criterion was written for a display-synchronised path — "must not be worse at
+any refresh rate". E1 is not display-synchronised: it schedules against the
+source rational and knows nothing about refresh, so changing the monitor's rate
+**cannot move its counters**, which is exactly the finding CLAUDE.md already
+records from the 59/119.98/240Hz sweep ("expected, since nothing in the current
+path is display-synchronised, so the counters *cannot* move"). Running it would
+have cost three display-mode changes to reproduce a known null result. **It
+becomes required the moment E2 is built and not before.**
 
 ### 24.12 Before any code — the zero-cost A/B, put to the owner
 
