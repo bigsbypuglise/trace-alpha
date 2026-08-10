@@ -480,6 +480,7 @@ bool D3D11VideoRenderer::ensureTexture(int width, int height) {
     td.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
 
     if (FAILED(device_->CreateTexture2D(&td, nullptr, &texture_))) return false;
+    ++stats_.textureCreates;
     if (FAILED(device_->CreateShaderResourceView(texture_.Get(), nullptr, &textureSrv_))) {
         texture_.Reset();
         return false;
@@ -560,6 +561,7 @@ bool D3D11VideoRenderer::ensurePlaneTextures(const trace::core::FrameBuffer& buf
             releasePlaneTextures();
             return false;
         }
+        ++stats_.textureCreates;
         if (FAILED(device_->CreateShaderResourceView(planeTexture_[i].Get(), nullptr,
                                                      &planeSrv_[i]))) {
             releasePlaneTextures();
@@ -688,6 +690,24 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
 
     const auto& buffer = *frame.buffer;
 
+    // Timed from here rather than from inside uploadPlanes/uploadPixels so the
+    // number is "what this frame cost to get onto the GPU" including a texture
+    // creation on the frames where one happens -- which is the whole question
+    // step 8 asks. `textureCreates` says which samples those were, so an
+    // inflated one is attributable rather than mysterious.
+    //
+    // Deliberately only in setFrame: uploadPlaceholder goes through the same two
+    // functions but is not a frame, and counting it would put a startup cost in
+    // a per-frame average.
+    QElapsedTimer uploadTimer;
+    uploadTimer.start();
+    const auto recordUpload = [this, &uploadTimer]() {
+        stats_.lastUploadMs = static_cast<double>(uploadTimer.nsecsElapsed()) / 1e6;
+        ++stats_.uploadCount;
+        stats_.avgUploadMs += (stats_.lastUploadMs - stats_.avgUploadMs)
+                              / static_cast<double>(stats_.uploadCount);
+    };
+
     if (trace::core::isPlanarYuv(buffer.layout())) {
         // Any failure here falls back to nothing rather than to the BGRA path,
         // because there is no BGRA copy of this frame to fall back TO -- the
@@ -699,6 +719,7 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
             clearFrame();
             return;
         }
+        recordUpload();
         contentSize_ = QSize(buffer.width(), buffer.height());
         hasContent_ = true;
         contentIsPlanar_ = true;
@@ -715,6 +736,7 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
 
     if (!ensureTexture(buffer.width(), buffer.height())) { clearFrame(); return; }
     uploadPixels(buffer.data(), buffer.bytesPerLine(), buffer.width(), buffer.height());
+    recordUpload();
 
     contentSize_ = QSize(buffer.width(), buffer.height());
     hasContent_ = true;

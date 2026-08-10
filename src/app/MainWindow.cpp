@@ -2414,8 +2414,18 @@ void MainWindow::refreshHud(const QString& action) {
             // and clipped exactly the fields needed to diagnose playback
             // (rev-hit, late, walk).
             const double budgetMs = vm.fps > 0.0 ? 1000.0 / vm.fps : 41.67;
+            // `upload` is included as of the step-8 measurement, and it was
+            // MISSING before: on the CPU backend setFrame is a refcount bump and
+            // a QImage view, so total genuinely was decode + convert + paint,
+            // but on the d3d11 planar path there is a second copy between the
+            // conversion and the draw that no term covered. `total` therefore
+            // under-reported the shipping default. It reads 0 on cpu, so the
+            // change is confined to the backend it was wrong for -- but a d3d11
+            // `total` recorded before this commit is a smaller number for the
+            // same work, and comparing across it would invent a regression.
             const double lastTotalMs = perf.lastDecodeMs + perf.lastConvertMs
                                      + perf.lastConvertWrapMs + perf.lastConvertAllocMs
+                                     + drawPerf.lastUploadMs
                                      + drawPerf.lastPaintMs;
 
             const QString l1 = QString("%1 | %2x%3 | fps %4 | codec %5 | src %6 %7b -> dst %8 | F:%9 | open %10ms | first %11ms")
@@ -2470,7 +2480,17 @@ void MainWindow::refreshHud(const QString& action) {
                 // fell back to cpu would otherwise be invisible.
                 .arg(viewer_->rendererName());
 
-            const QString l2 = QString("dec %1/%2 | sws %3/%4 | ctx %5/%6 | detach %7/%8 | alloc %9 | memcpy %10 | handoff %11 | draw %12 | total %13 | budget %14ms")
+            // `upload` is the CPU -> GPU transfer for one frame and `tex` is how
+            // many GPU textures have been created since launch. Both read 0 on
+            // the CPU backend, which is the honest answer rather than a gap.
+            //
+            // `tex` is cumulative on purpose: it is the measurement that decides
+            // whether plan step 8 ("reuse textures and upload resources") has
+            // anything left to do. A count that climbs through a run is churn; a
+            // count that stops after the first frame of a source means the reuse
+            // is already there and the remaining per-frame cost is the transfer
+            // itself, which is a copy that has to happen somewhere.
+            const QString l2 = QString("dec %1/%2 | sws %3/%4 | ctx %5/%6 | detach %7/%8 | alloc %9 | memcpy %10 | handoff %11 | upload %15/%16 tex %17 | draw %12 | total %13 | budget %14ms")
                 .arg(QString::number(perf.lastDecodeMs, 'f', 2))
                 .arg(QString::number(perf.avgDecodeMs, 'f', 2))
                 .arg(QString::number(perf.lastSwsScaleMs, 'f', 2))
@@ -2486,7 +2506,10 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.lastHandoffMs, 'f', 2))
                 .arg(QString::number(drawPerf.lastPaintMs, 'f', 2))
                 .arg(QString::number(lastTotalMs, 'f', 2))
-                .arg(QString::number(budgetMs, 'f', 2));
+                .arg(QString::number(budgetMs, 'f', 2))
+                .arg(QString::number(drawPerf.lastUploadMs, 'f', 2))
+                .arg(QString::number(drawPerf.avgUploadMs, 'f', 2))
+                .arg(drawPerf.textureCreates);
 
             const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6%% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19")
                 .arg(perf.lastConvertCalls)

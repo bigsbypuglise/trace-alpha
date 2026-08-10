@@ -42,6 +42,22 @@ struct RenderStats {
     bool lastDrawWasScaled = false;
     bool lastDrawWasFiltered = false;
     QSize lastDrawSize;
+
+    // What it cost to get one frame from system memory onto the GPU, and how
+    // many GPU textures have ever been created. Zero on the CPU backend, which
+    // has no upload and no textures -- and reading 0.00 there is the point: the
+    // field says "this backend does not do this" rather than going missing.
+    //
+    // `textureCreates` is cumulative for the life of the renderer, deliberately.
+    // Step 8 of the plan is "reuse textures and upload resources", and the only
+    // way to know whether there is anything left to reuse is a count that does
+    // not reset: a number that climbs during a run is churn, and a number that
+    // stops climbing after the first frame of a source means the reuse is
+    // already there. An average would hide both.
+    double lastUploadMs = 0.0;
+    double avgUploadMs = 0.0;
+    long long uploadCount = 0;
+    long long textureCreates = 0;
 };
 
 // How a frame becomes pixels on screen.

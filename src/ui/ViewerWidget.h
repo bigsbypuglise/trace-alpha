@@ -36,6 +36,14 @@ struct ViewerPerfStats {
     bool lastDrawWasScaled = false;
     bool lastDrawWasFiltered = false;
     QSize lastDrawSize;
+
+    // CPU -> GPU frame upload cost and cumulative texture creations, mirrored
+    // from RenderStats where the units and the reason for a cumulative count are
+    // stated. Both read 0 on the CPU backend, which has neither.
+    double lastUploadMs = 0.0;
+    double avgUploadMs = 0.0;
+    long long uploadCount = 0;
+    long long textureCreates = 0;
 };
 
 // Hosts a VideoRenderer and owns the scheduling around it: when a repaint is

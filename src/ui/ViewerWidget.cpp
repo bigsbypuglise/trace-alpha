@@ -141,6 +141,10 @@ void ViewerWidget::paintEvent(QPaintEvent* event) {
     perfStats_.lastDrawWasScaled = rs.lastDrawWasScaled;
     perfStats_.lastDrawWasFiltered = rs.lastDrawWasFiltered;
     perfStats_.lastDrawSize = rs.lastDrawSize;
+    perfStats_.lastUploadMs = rs.lastUploadMs;
+    perfStats_.avgUploadMs = rs.avgUploadMs;
+    perfStats_.uploadCount = rs.uploadCount;
+    perfStats_.textureCreates = rs.textureCreates;
 
     const double pn = static_cast<double>(perfStats_.paintCount);
     if (pn > 0.0) {
