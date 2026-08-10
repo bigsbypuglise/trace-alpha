@@ -235,13 +235,19 @@ jobs:
             throw "Renderer self-test failed (exit $code). See the line above."
           }
 
-          # Reported, not asserted, for now. A failed YUV shader is deliberately
-          # non-fatal (GATE C): the backend keeps presenting BGRA. Whether WARP
-          # supplies it has never been observed, so this prints the answer rather
-          # than turning the first run red -- promote it to a hard assertion once
-          # a run has shown planar=1.
-          if ($out -match 'planar=0') {
-            Write-Host "::warning::Renderer self-test reports planar=0 - the GATE C YUV shader path is not active on this runner."
+          # A failed YUV shader is deliberately non-fatal at runtime (GATE C):
+          # the backend keeps presenting BGRA and nothing else would say the
+          # shader path was lost. That makes it exactly the kind of silent
+          # degradation this step exists to catch, so CI asserts it even though
+          # the app tolerates it.
+          #
+          # Asserted only after a run showed it: b5ad4d2 read
+          # `renderer=d3d11 fellback=0 planar=1` on a GitHub runner. Before that
+          # it was printed rather than checked, because whether the runner's
+          # device supplies ps_4_0 had never been observed and guessing would
+          # have turned the first run red on a guess.
+          if ($out -notmatch 'planar=1') {
+            throw "Renderer self-test reports planar=0 - the GATE C YUV shader path did not build, so every frame would take the BGRA fallback."
           }
 
       # Uploaded as a FOLDER, not a .zip. upload-artifact always zips what it
