@@ -66,6 +66,39 @@ And when a gesture is written for a specific bug, run it against a build that
 still has the bug before trusting a pass — `-PlayThroughDrag` reads 0% on
 `044b2ea` and 13.3% after the fix, which is what makes the pass mean something.
 
+## Reverse playback
+
+`revplay.ps1` drives continuous reverse (J) and is the only harness that does.
+Every reverse figure taken before 2026-08-10 was measuring the J-K-L scheduler
+fault instead of reverse playback (plan section 29.2), so treat older reverse
+numbers as void rather than as history.
+
+```powershell
+.\scripts\measure\restart.ps1 -Clip $clip
+.\scripts\measure\revplay.ps1 -Presses 1 -HoldSeconds 9 -Out rev1x.png
+```
+
+`-Presses` is how many times J is pressed: 1/2/3 give -1x/-2x/-4x, which is the
+whole ladder the engine has today. `-StepCheck` presses Right then Left after
+stopping and reports how far the picture moved -- **read both legs**: the `-1`
+leg is the landing-exactness result and the `+1` leg is the control that proves
+the comparison can see a moved picture at all.
+
+The capture is taken **before** K. The cadence and handler counters survive the
+stop but `speed` does not, and a run whose speed cannot be confirmed from its own
+capture cannot be quoted.
+
+It clicks to position the playhead rather than dragging: a click is a jump and
+lands exactly, while a drag would shuttle every frame on the way and leave the
+cache full of the frames the run is about to ask for.
+
+Reverse is silent by design, so unlike the cadence runs this needs no
+`TRACE_NO_AUDIO` control -- every file is on the same scheduler already.
+
+`-Traverse` waits for the picture to stop changing instead of holding a fixed
+time. Its sampling resolution is ~200ms, which is too coarse for a fast traverse;
+the HUD's own `frames` and `elapsed` are exact and answer the same question.
+
 ## Things that will waste an hour if you rediscover them
 
 - **The 1080p validation clip opens on a black frame.** `Universe_rc07_I_9x16_Online.mp4`
