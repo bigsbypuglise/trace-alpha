@@ -1485,6 +1485,25 @@ void MainWindow::startPlaybackRun() {
     const int direction = playback_.state().mode == PlaybackMode::PlayingReverse ? -1 : 1;
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
     startAudioForPlayback();
+    beginPlaybackTimeline();
+}
+
+// Everything a run needs that is not the decoder request and not the audio.
+//
+// J and L used to start playTimer_ themselves and set only playbackClock_, so
+// none of the rest of this ran on their path. sessionClock_ is the one that
+// turned a cosmetic omission into a playback fault: syncPresentTimeline and
+// armNextPresent both guard on isValid() and fall through to `: 0`, which makes
+// `target = 0 + slot * period` permanently greater than `now == 0`. The rephase
+// branch that exists to catch a schedule running ahead can then never fire, and
+// the armed delay grows by one frame period per tick -- 792ms by the 19th, which
+// is 8 seconds in. Measured before the fix: 20 presents in 8s on J, against 111
+// on the same file with TRACE_DEADLINE_SCHED=0. See plan section 29.2.
+//
+// Called on every J and L press, not only the first. That is deliberate: each
+// press is a new speed or direction, so it is a new run, and its cadence figures
+// should be measured from the press rather than averaged across the one before.
+void MainWindow::beginPlaybackTimeline() {
     playbackClock_.start();
     playbackAccumulatorMs_ = 0.0;
     // Presented-rate window starts with the play action, so pausing and
@@ -3021,9 +3040,11 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
                 // Reverse is not the 1x forward run a scrub release restores.
                 userPlayIntent_ = false;
                 prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, -1, true);
-                playbackClock_.start();
-                playbackAccumulatorMs_ = 0.0;
-                if (!playTimer_.isActive()) playTimer_.start();
+                // Not a bare playTimer_.start(): the GATE E timeline has to be
+                // established for this run or the schedule runs away from the
+                // clock (plan section 29.2). Audio is deliberately not started --
+                // reverse is silent, and stopAudio() above is what makes it so.
+                beginPlaybackTimeline();
             }
             refreshHud("J");
             return;
@@ -3047,12 +3068,14 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
                 // gesture, and resuming it at 1x would be the wrong answer.
                 userPlayIntent_ = std::abs(playback_.state().speed) <= 1.0001;
                 prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, 1, false);
-                playbackClock_.start();
-                playbackAccumulatorMs_ = 0.0;
                 // L at 1x is normal forward play and gets sound; the shuttle
                 // speeds above it do not, and this silences them on the way up.
                 startAudioForPlayback();
-                if (!playTimer_.isActive()) playTimer_.start();
+                // As in Key_J: the timeline must be established, not just the
+                // timer started. Without it the audio clock kept real time while
+                // video presented at 1.26 fps, so video skipped 35 frames chasing
+                // it -- a "never skip a frame" violation (plan section 29.2).
+                beginPlaybackTimeline();
             }
             refreshHud("L");
             return;

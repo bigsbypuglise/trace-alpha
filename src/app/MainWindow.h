@@ -80,6 +80,14 @@ private:
     // misreport the resumed run, and step 6's cadence work would start from
     // poisoned counters.
     void startPlaybackRun();
+    // The timeline-and-telemetry half of starting a run, without the decoder
+    // request or the audio. Extracted because J and L must NOT take the audio
+    // half -- reverse is silent, and so is L above 1x -- but they need every
+    // clock in here, and the one that matters is sessionClock_: the GATE E
+    // deadline timeline is built on it, and a run that starts without it reads
+    // now == 0 forever, so the armed delay grows by a frame period every tick
+    // and playback decays quadratically (plan section 29.2).
+    void beginPlaybackTimeline();
     // Restores playback after a scrub gesture, iff the user never asked for it
     // to stop. Called once the release has landed its exact frame.
     void resumePlaybackAfterScrub();
