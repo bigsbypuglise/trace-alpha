@@ -651,7 +651,26 @@ Not regressed: forward 1x 4K H.264 99.1% and ProRes 4444 99.7%, both with
 hitch 4, `delta 0`; both lifecycle gestures PASS; **all six shuttle exit paths
 PASS** (K, step, Space, L, scrub, quit).
 
-### 11b.5 Open
+### 11b.5 OWNER SIGN-OFF — THE SHUTTLE PHASE IS COMPLETE (2026-08-10)
+
+Retest passed on the shipping build, at the machine:
+
+- **fast-forward advances clearly through the complete ladder** on every format;
+- **reverse 30× reads as intentional** at the approved ~15fps presentation cadence;
+- **direction changes respond correctly**;
+- **stopping lands on the last visibly displayed frame**;
+- normal playback, audio return, scrubbing, exact release and stepping all remain good.
+
+That closes the bounded reverse-shuttle phase and the fast-forward blocker with it.
+Every goal in the phase brief is now met and verified: immediate response, stable
+cadence, newest-target-wins, no UI-thread saturation, rapid direction changes,
+appropriate sampling at 2×/5×/10×/30×, exact frame landing on stop, and no
+regression to forward playback, scrubbing, stepping or audio state.
+
+**The subjective half was taken at the machine, not over Parsec**, which is the
+condition §1 attaches to any cadence judgement.
+
+### 11b.6 Open
 
 1. **30x is only measurable on the 412-frame clip.** Every other test file
    traverses in under 0.2s at that speed. A longer clip would make the 30x row

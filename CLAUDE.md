@@ -29,7 +29,23 @@ confirmed and (b) the intended Windows Advanced Color / HDR / colour-management 
 defined. Both gates are outside the code. §9's warning still applies — do not conflate it
 with the high-bit-depth *processing* that shipped at GATE C.
 
-**THE CURRENT PHASE IS REVERSE SHUTTLE, and it is bounded** (owner, 2026-08-10). The planned
+**THE SHUTTLE PHASE IS ACCEPTED AS COMPLETE (owner retest, 2026-08-10).** Fast-forward
+advances clearly through the whole ladder on every format; reverse 30x reads as intentional
+at the approved ~15fps presentation cadence; direction changes respond correctly; stopping
+lands on the last visibly displayed frame; and normal playback, audio return, scrubbing,
+exact release and stepping all remain good. Every goal in the phase brief below is met and
+verified — the brief is retained as the record of what was asked for, not as open work.
+**The subjective half was taken at the machine, not over Parsec.**
+
+Read the scope at its stated width, as with the playback phase before it: what is accepted
+is the **engine**. The 2x/5x/10x/30x **interface** remains deferred and unstarted, and
+carries one requirement that is easy to lose — **the buttons must begin at 2x on their
+first click**, while the J/L keyboard convention keeps 1x as its first rung. The owner
+confirmed both readings; a button that inherits the keyboard ladder wholesale is wrong.
+`startShuttleRun(direction, stride)` takes any stride, so that is a call site rather than
+engine work.
+
+**The phase brief, retained as the record of what was asked for:** (owner, 2026-08-10). The planned
 interface includes 2x, 5x, 10x and 30x rewind, and reverse at 1x measures 86.7% of real time
 on 4K H.264 (plan §29.3), so exposing rewind controls now would surface a known weakness.
 Note this is an interface spec driving an *engine* requirement — starting it is not a breach
@@ -743,13 +759,17 @@ perfectly on lag while stalling for 100ms.
    worker ahead is directional prefetch, declined at §15.3. Measured at the
    owner's ~4x: `behind 0/6f`, `p2p 26ms`, `delta 0`, **both directions**.
    **Supply below 100% stopped meaning "behind".**
-4. **Backward *playback* (not dragging)** beyond the cache is still GOP-walk
-   bound on long-GOP H.264. The drag path is fast because it walks sequentially
-   and the cache absorbs misses; reverse playback does not share that.
-   **This is now THE CURRENT PHASE** (owner, 2026-08-10) — reverse shuttle at
-   2x/5x/10x/30x, bounded, starting with measurement and an architecture
-   proposal before implementation. See the phase statement at the top of this
-   file and the brief in `docs/next-session-prompt.md`.
+4. ~~**Backward *playback* (not dragging)** beyond the cache is still GOP-walk
+   bound on long-GOP H.264.~~ **CLOSED 2026-08-10 with owner sign-off** — the
+   bidirectional shuttle (`e9fd236`, `dd21fe9`, `docs/reverse-shuttle-plan.md`).
+   The diagnosis in this item was right and the remedy was not what it implied:
+   reverse was not short of throughput, it was **bursty**, and the decoder was
+   idle 80–93% of the time while missing real time. Queueing the frames off the
+   UI thread fixed the cadence; making the speed a **stride** fixed the speed.
+   4K H.264 reverse 1x 87.0 → **99.2%** of real time, and accelerated forward —
+   which turned out to have the identical fault — went from 4444 delivering
+   **1.00x when asked for 2x** to within a few percent of demanded on every rung
+   of 2x/5x/10x/30x across all four formats.
 
    **The measurement pass and the architecture proposal are DONE (2026-08-10) and
    live in `docs/reverse-shuttle-plan.md`.** No implementation was begun, by

@@ -196,6 +196,20 @@ existing internal convention and perform presentation-layer conversion only if n
 
 ### Fast-forward behavior
 
+> **ENGINE STATUS 2026-08-10: the shuttle behind this is BUILT, MEASURED AND SIGNED OFF**
+> (`dd21fe9`, plan §11a–§11b). Both directions run the 2×/5×/10×/30× ladder as sampling
+> strides at a constant presentation cadence, achieved speed measured within a few percent
+> of demanded on all four formats, and reverse 30× snaps to the keyframe grid at a stable
+> ~15fps presentation. **The interface itself remains deferred and is not to be started.**
+>
+> **One thing this section must not lose when it is picked up.** The keyboard convention
+> keeps 1× as its first rung — J and L step 1× → 2× → 5× → 10× → 30× — but **the BUTTONS
+> must begin at 2× on their first click**, as this section already specifies. The owner
+> confirmed both readings on 2026-08-10: the keyboard convention is not the button contract,
+> and a button that inherits J/L's ladder wholesale would start at 1× and be wrong.
+> `startShuttleRun(direction, stride)` takes any stride, so this is a call site rather than
+> engine work.
+
 Each normal activation advances one stage: **+2× → +5× → +10× → +30×**, and further presses
 at +30× remain at +30× because that is the maximum.
 
