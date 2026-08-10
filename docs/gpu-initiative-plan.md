@@ -1,13 +1,24 @@
 # Trace GPU / smooth-presentation initiative — active plan
 
-**Status: GATE B IMPLEMENTED, PENDING SIGN-OFF (2026-08-09).** Steps 1-6 of §8
-are committed and validated on the local Windows toolchain. The native D3D11
-surface exists (§17) and is visually equivalent to the CPU path at the shipping
-DPI (§18.2); playback, scrub, resize, fullscreen and shutdown all measure at the
-CPU baseline (§17.4, §18.3).
+**Status: GATE C IMPLEMENTED; GATE B PENDING OWNER VISUAL SIGN-OFF ONLY
+(2026-08-09, second session).** Steps 1-7 of §8 are committed and validated on
+the local Windows toolchain.
 
-**GATE B is pending on exactly two things (§20.2): human visual review, and the
-HUD logical/device-pixel unit correction.** 4K ProRes 422 HQ is the bar.
+**GATE B's two blocking items are done (§21).** The HUD unit bug is fixed
+(`58ec879`), and the 150% divergence of §20.3 is explained and mostly fixed
+(`ddb38ca`) -- the downscale ratio was a confound and the real variable is
+fractional DPI. **The one thing still outstanding is human visual review**, and
+it is the owner's to give: 4K ProRes 422 HQ against the CPU path. The material
+is built and waiting in `Desktop\Trace_GateB_Visual` (§21.3); three of its four
+viewing conditions are pixel-identical.
+
+**GATE C is implemented and measured (§22).** Planar YUV upload with the matrix
+in the pixel shader, confirmed against the CPU path at 8, 10 and 12 bits (max
+channel delta 2-3). Conversion cost falls 2.5-4.1x; presented rate is unchanged,
+so the win is headroom rather than throughput. Scrub is unchanged, which is what
+§20.7 asked to be verified.
+
+**`cpu` remains the default renderer.** GATE C changes nothing for it.
 
 The overlay question is **settled and the work is stopped** (§20.1): the child
 HWND stays, `WA_PaintOnScreen` is not promoted, and renderer-composited
@@ -17,9 +28,10 @@ interface is built after GPU integration completes, not before.
 **`cpu` remains the default renderer and every experimental path is off unless
 its environment variable is set** — confirmed at runtime (§20.6).
 
-**Do not start GATE C** until GATE B is signed off. When it is, measure scrubbing
-separately (§20.7): full-resolution planar upload could silently make interactive
-previews worse, and playback throughput would not reveal it.
+~~**Do not start GATE C** until GATE B is signed off.~~ GATE C is done (§22) and
+scrubbing was measured separately as §20.7 required: previews stay on swscale and
+decoder throughput is identical across three runs each. GATE B's remaining item
+is the owner's eye, which no amount of further implementation supplies.
 
 This document holds the **decisions**. The requirements it answers are in
 `docs/gpu-initiative-brief.md`; where the two differ, this file wins.
@@ -1844,3 +1856,130 @@ repeats read 44 and 46 against CPU's 44.
    GATE E**, because stalls are the metric the scrub complaints live in.
 2. Run any renderer comparison **twice**. The first run of a session on d3d11
    carries a warm-up cost large enough to look like a regression.
+
+---
+
+## 22. GATE C — planar YUV upload and shader conversion (`e8566a4`)
+
+Step 7 of §8. Full-resolution frames reach the D3D11 backend as three planes and
+are converted in the pixel shader. **`cpu` is still the default**;
+`TRACE_PLANAR_UPLOAD=0` restores the BGRA path on d3d11 for an A/B.
+
+### 22.1 One shader, not a family
+
+Subsampling is carried by the **size of two textures** and resolved by the
+sampler, so 4:2:0, 4:2:2 and 4:4:4 differ in nothing else and the shader never
+asks. Bit depth, range and the 3x3 arrive as constants, so 8/10/12-bit and
+BT.601/709/2020 are not compiled variants (§11 asked for exactly this).
+
+`R8_UNORM` at 8 bits, `R16_UNORM` above, LSB-aligned as FFmpeg gives them — so
+the CPU side is a memcpy and the depth becomes a shader constant rather than a
+repacking pass.
+
+**The range terms are computed at the actual depth**, not by reusing 16/255 and
+128/255. At 10-bit black is code 64 of 1023 — 0.062561 against 0.062745 — and
+the difference is a lift of the black point across the whole picture, which is
+precisely the global level shift §11 warns about.
+
+**Matrices Trace has no exact coefficients for are declined**, and the decoder
+declines the same set it does. Fcc and Smpte240m keep taking swscale, which
+applies them properly. An approximation here would be a colour difference
+between the two backends that no A/B could attribute to anything.
+
+### 22.2 The scale factors are confirmed, at three depths
+
+§11 said to confirm empirically rather than inherit. Against the CPU path, same
+frame, same window:
+
+| clip | source | differing | max Δ |
+|---|---|---|---|
+| 4K H.264 | yuv420p **8-bit** | 0.006% | 3 |
+| ProRes 422 HQ | yuv422p **10-bit** | 0.002% | 3 |
+| ProRes 4444 | yuv444p **12-bit** | 0% | 2 |
+| 1080p H.264 | yuv420p 8-bit | 0% | 2 |
+
+Three depths confirmed **independently**, which is more than a single test
+pattern would have given: a wrong 65535/1023 would leave 10-bit shifted while
+8-bit stayed correct, and that is visible here as three separate passes.
+
+### 22.3 Playback — measured against the BGRA control, not against cpu
+
+Comparing with `cpu` would re-book the presentation win §17.4 already recorded
+and explicitly says not to count twice.
+
+| clip | sws → copy | handler | first frame |
+|---|---|---|---|
+| ProRes 422 HQ | 14.58 → **3.52ms** | 20.89 → **10.50ms** | 38 → 14ms |
+| ProRes 4444 | 16.97 → **5.60ms** | 35.20 → **25.22ms** | 60 → 35ms |
+| 4K H.264 | 3.07 → **1.25ms** | 5.29 → **2.30ms** | 94 → 58ms |
+
+**Presented rate is unchanged everywhere (98.3–99.6%), and that is the honest
+summary**: none of these files was conversion-bound at 24fps. What the change
+buys is *headroom* — 4444 now sits at 25ms of a 41.67ms budget instead of 35 —
+and first-frame latency. Headroom is what GATE E spends.
+
+Note for §11's benefit: **planar is not always fewer bytes.** 4:4:4 12-bit is
+56.6MB of planes against 37.7MB of BGRA. It is still much cheaper, because a
+memcpy is not a colour conversion, but "planar means less data" is only true for
+4:2:0 and 4:2:2.
+
+### 22.4 Scrub — unchanged, which is the requirement (§20.7)
+
+Previews stay on swscale by design. Over **three runs each** on 4444, decoder
+throughput is identical: bgra 42.0 / 44.8 / 46.8 f/s against planar 45.8 / 46.0
+/ 42.7. That is the "no change" §20.7 asked to verify.
+
+Two reproducible differences on 4444, consistent across all three runs:
+
+- **worst UI-thread block 53.5/53.4/53.6 → 30.7/30.0/30.5ms** — better, because
+  the landing is now a plane copy rather than a full-res 4444 swscale;
+- **release latency 6.1/7.9/5.1 → 33.9/31.3/34.5ms** — worse.
+
+The second is **recorded, not explained**. Per-frame costs all moved the right
+way (`dec` 15.8 → 15.1, `sws` 2.5 → 1.9), so the release figure disagrees with
+the parts it is made of, and one plausible reading — that the BGRA release was
+being served without a fresh full-res decode — was not confirmed. **Owner feel
+on a 4444 release is the next evidence**, and if it reads as a lag on letting go
+of the handle, this is the number.
+
+### 22.5 The pool bug, worth keeping
+
+Sharing one recycling pool between BGRA and planar buffers is right — one drag
+holds both kinds, since previews stay BGRA — but the original eviction pass
+dropped every unreferenced non-matching entry on **each acquire**. Harmless
+while BGRA was the only kind; with two alternating it threw away and
+reallocated ~56MB per landing on 4444, and measured as the shuttle going
+7.8 → 18.2ms/frame while every per-frame cost stayed flat. Eviction now runs
+only when the pool is actually full.
+
+The general shape: **a policy that is a no-op under one workload becomes a
+thrash under two**, and nothing about the first workload predicts it.
+
+### 22.6 Correctness
+
+`delta 0`, `detach 0.00`, `stale-blocked 0`, `recov 0` throughout.
+
+| check | result |
+|---|---|
+| step ±5 × 3, 4K H.264 | landed **61** → ends **61** |
+| step ±5 × 3, ProRes 4444 | landed **133** → ends **133** (the §15.4 frame) |
+| PlayThroughDrag | 41.5% (H.264) / 20% (4444) moved |
+| PausedThroughDrag (control) | **0.0%** both |
+| KillMidDrag | 167ms / 162ms |
+| SwitchMedia | clean |
+| PNG sequence, still image | present correctly — `adopt()` gives BGRA, GATE B path |
+
+### 22.7 Open after GATE C
+
+1. **The 4444 release latency above.** Needs the owner, not another harness run.
+2. **Textures are recreated on any geometry change** — step 8 (`perf(gpu): reuse
+   textures and upload resources`) is where that and a staging-buffer upload
+   belong. Today every plane is `Map/WRITE_DISCARD` per frame.
+3. **GPU scaling is still not done** (step 9). Both backends downscale to the
+   window; the landing frame still converts full-res and lets the sampler scale.
+   §9's honest target — the Step landing — is unchanged by GATE C.
+4. **No 10-bit output path.** The swapchain is `B8G8R8A8_UNORM`, so 10- and
+   12-bit sources are converted to 8-bit for display. §9 warns not to conflate
+   high-bit-depth *processing* (done now) with 10-bit *output* (step 10).
+5. **BT.2020 still has no tonemap**, exactly as on the CPU path. Known gap,
+   carried forward unchanged.

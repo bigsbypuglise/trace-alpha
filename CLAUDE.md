@@ -8,6 +8,20 @@ A fast, minimal Windows desktop media player for professional review workflows (
 
 Current alpha focus: 4K H.264 MP4 + ProRes MOV playback, reliable reverse playback, frame-accurate stepping, trustworthy scrubbing. Formats and UI features come after the playback foundation is dependable. Longer-term: image sequences, EXR, OCIO color management, timecode/frame HUD (partially present).
 
+**Owner priority order (2026-08-09), which outranks any roadmap item:** performance is #1 —
+no interface feature may ever compromise lightweight, fast, smooth playback; if a feature and
+playback smoothness conflict, the feature loses. Interface work is explicitly paused. The goal
+for the current phase is the core playback experience alone: smooth playback, locked real-time
+playback, responsive polished scrubbing at slow and fast speeds in both directions, and strong
+GPU integration. Everything else comes after that foundation is working extremely well.
+
+The approved interface pass is written up and **deferred** in
+`docs/interface-pass-1-spec-DEFERRED.md`, with the icon assets in
+`assets/260807 Trace Media Player Icon/`. Do not start any of it. Read its §2 during the GPU
+work though — the auto-hiding floating transport depends on the composited-overlay path
+(plan §19/§20.1), and rotate/flip needs a view-transform contract on `VideoRenderer` that is
+much cheaper to add while both backends are being touched than afterwards.
+
 Owner context: Anj is a VFX/motion-design lead, not a programmer. Explain things plainly; he tests builds on a Windows RTX 4090 box; development happens on macOS. Don't ask him to debug code — give exact copy-paste terminal commands when he needs to run anything.
 
 ## Build and test
@@ -106,6 +120,25 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   Resume runs **after** `flushVideoScrub(true)`, and the ordering is load-bearing: the landing goes through `loadCurrentFrame` → `reclaimDecoder()`, which already bumps the generation *and* tells the worker, so no older preview frame can be painted afterwards — the release needs no second supersede call, and a bare `supersedeInFlightRequests()` would not have worked anyway since it deliberately does not tell the worker. Resuming earlier would also start audio at the *preview* position, because `startAudioForPlayback()` takes its offset from the current frame. Declined on `playbackAtEnd_` (Play owns the rewind, `c3335ec`) and on a storage-stalled landing. `startPlaybackRun()` is extracted so Play and resume share one setup — resume needs every cadence counter reset that Play does, and a resumed run measured from poisoned counters would corrupt step 6's cadence work.
 
   Validated with a negative control (plan §16.6): the new `lifecycle.ps1 -PlayThroughDrag` reads 0% moved on the pre-fix build and 13–95% after, with `-PausedThroughDrag` at 0.0% on every file. **Run both** — a check that can only report "moving" proves nothing.
+- **Full-resolution frames go to the GPU as three planes; scrub previews do NOT** (Aug 2026, `e8566a4`, GATE C, plan §22). The D3D11 backend takes Y/U/V and applies the matrix in the pixel shader. **One shader covers everything**: subsampling is carried by the size of two textures and resolved by the sampler, so 4:2:0/4:2:2/4:4:4 differ in nothing else, and bit depth, range and the 3x3 are constants rather than compiled variants.
+
+  **The range terms are computed at the actual bit depth.** Reusing the 8-bit 16/255 and 128/255 at 10-bit is wrong — black is code 64 of 1023, 0.062561 against 0.062745 — and the error is a lift of the black point across the whole picture, which is exactly the "global gamma/level shift" the colorimetry notes warn a wrong factor produces. Matrices with no exact coefficients (Fcc, Smpte240m) are **declined** by decoder and renderer alike and keep taking swscale, because an approximation there is a colour difference between backends that no A/B could attribute.
+
+  Confirmed against the CPU path at **three depths independently** — 4K H.264 8-bit 0.006% of pixels differing (max Δ3), ProRes 422 HQ 10-bit 0.002% (max Δ3), ProRes 4444 12-bit 0% (max Δ2). A wrong 65535/1023 would have left 10-bit shifted while 8-bit stayed correct, so this is stronger evidence than one test pattern.
+
+  **The win is headroom, not throughput.** Conversion falls 2.5–4.1x (422 HQ `sws 14.58 → 3.52ms`, 4444 `16.97 → 5.60`, 4K H.264 `3.07 → 1.25`) and 4444's per-frame handler goes 35.20 → 25.22ms of a 41.67ms budget — but **presented rate is unchanged at 98.3–99.6% everywhere**, because none of these files was conversion-bound at 24fps. Don't book it as a playback-rate win.
+
+  **Previews staying on swscale is deliberate and was the thing to verify** (plan §20.7): a preview converts straight to the size it will be drawn at, a fiftieth of a full-res frame, so uploading full-res planes for one moves the cost rather than removing it. Measured over three runs each on 4444, decoder throughput is identical (42.0/44.8/46.8 f/s against 45.8/46.0/42.7). Two reproducible side-effects there: worst UI-thread block **53 → 30ms** (better — the landing is a plane copy now), and **release latency 6 → 33ms** (worse, recorded but not yet explained; owner feel on a 4444 release is the next evidence).
+
+  **Planar is not always fewer bytes**: 4:4:4 12-bit is 56.6MB of planes against 37.7MB of BGRA. It is still much cheaper because a memcpy is not a colour conversion.
+
+  `TRACE_PLANAR_UPLOAD=0` restores the BGRA path for an A/B. The capability is asked of the **adopted** renderer, never of `TRACE_RENDERER`: a GPU backend that failed to initialize has already been replaced by the CPU one, and telling the decoder to skip swscale for a backend that needs BGRA blanks every frame.
+- **A recycling pool shared by two buffer kinds must only evict when full** (Aug 2026, `e8566a4`): the convert pool holds BGRA previews and planar full-res frames at the same time, because one drag produces both. Its eviction pass dropped every unreferenced non-matching entry on *each acquire* — a no-op while BGRA was the only kind, and a thrash the moment there were two, reallocating ~56MB per landing on 4444 and taking the shuttle 7.8 → 18.2ms/frame while every per-frame cost stayed flat. **A policy that is a no-op under one workload can become a thrash under two, and nothing about the first workload predicts it.**
+- **`RenderStats::lastDrawSize` is DEVICE pixels, and both backends fit the video rect with one shared expression** (Aug 2026, `58ec879` + `ddb38ca`). Two bugs with one root: the arithmetic existed twice. The CPU path measured and fitted in *logical* pixels while D3D11 used *device* pixels, so at 1.5x DPI they reported `640x360` and `960x540` for the same rectangle and drew to rectangles a fraction of a pixel apart.
+
+  **The recorded explanation for that divergence was wrong and the measurement that produced it was confounded.** It was filed as a filter-quality difference under a 4x downscale, with the puzzle that the difference was *larger* at 4x than at 6x. The window opens at a fixed logical size, so raising the scale factor also enlarges the video band — DPI and downscale ratio moved together. At dpr 1, sweeping ratios 5.6x → 2.28x (4.33x included), the backends are **identical**. Holding the window and varying only the scale factor: **1.00 → 0%, 1.25 → 8.9%, 1.50 → 5.8%, 2.00 → 0%.** Integer ratios agree exactly; fractional ones do not. Sharing the expression took dpr 1.25 to 2.6% and left dpr 1 and 2 untouched, which is where this box runs.
+
+  Three instruments were needed and none existed: `abshift.ps1` (whole-pixel shift search, to tell geometry from filtering), `abscale.ps1` (scale-factor sweep, to break the confound) and `abcontrol.ps1` (**same renderer twice** — the noise floor, which reads exactly 0 and without which no A/B number means anything). The shift search alone would have closed the investigation wrongly: it reported the pictures aligned, because the offset is *sub*-pixel — a parabola fit to its own numbers put it at (−0.25, +0.5).
 - **Presentation is NOT frame-rate locked, and `Present(0,0)` is not display-synchronized** (Aug 2026, audited at GATE B — plan §20.5). Four facts, kept together because each is separately easy to misremember: (a) the **exact rational is stored** (`VideoMetadata::fpsNum`/`fpsDen`); (b) **nothing reads it** — every consumer goes through `FrameSource::fps()`, a double, and the tick is `floor(1000.0/fps)`, an integer-millisecond QTimer (41ms at 23.976); (c) `Present(0, 0)` uses **sync interval 0** — not vsync-throttled, not phase-aligned; DWM composites at refresh so at most one present is seen per refresh, but nothing in Trace knows the refresh phase; (d) **cadence and refresh synchronization are GATE E**, not GATE B or C. The accumulator does not drift — `frameDurationMs` is a double fed by `nsecsElapsed()` and carries its residue forward, so the tick *bounds* the rate rather than setting it. **Do not describe the rational as frame-rate lock**: its value is as an unrounded reference for measuring cadence, not as a rate correction.
 - **The source frame rate is kept as a rational** (Aug 2026, `7b924be`): `metadata_.fps = av_q2d(fr)` discarded the `AVRational` on the spot, so 24000/1001 became the nearest double and the tick interval, timecode and seek arithmetic all worked from an approximation. `VideoMetadata` carries `fpsNum`/`fpsDen` alongside it. Nothing reads the pair yet — this is a prerequisite for GATE E, where a rate that is already rounded cannot be the reference for late-present or jitter. `int`/`int`, not `AVRational`: the header is reached from `MainWindow.h` and must compile with `TRACE_WITH_FFMPEG` undefined, the same rule that keeps `AVPixelFormat` out of `VideoFrame.h`.
 - **The slider handle belongs to the user while the user is holding it** (Aug 2026, `f77d472`): `syncTransportBar` wrote the *decoded* frame back into the slider on every HUD refresh — several times a second during a drag — so the handle was yanked out from under the pointer and the next mouse move dragged it back. **That is the "slider not keeping up with the pull" report, and it was never event-loop starvation**: the handle was being moved somewhere else on purpose. It also corrupted the landing, because `sliderReleased` lands on `timelineSlider_->value()`: a fast 1080p reversal set landed on frame 30 instead of the 3 the user pointed at. Guarded on `isSliderDown()`.
@@ -262,7 +295,11 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
 
    **Two open items to carry, both recorded in plan §20.3–20.4.** At **150% scaling** CPU and D3D11 differ on 3.9% of the video band, max channel delta 75 — Qt's raster bilinear against the D3D11 sampler. Not geometry, identity or colour; it needs an eye. And note it is *larger* at 1.5x (4x downscale) than at dpr 1 (6x downscale), which is the wrong direction for a filter-quality explanation — don't accept a hand-wave. **Real mixed-monitor DPI is untested**: the box has one display, so `QT_SCALE_FACTOR` is all that ran; monitor-to-monitor moves, per-monitor DPI changes and fullscreen on a secondary display have never executed.
 
-   **Next is the GATE B visual A/B, then GATE C** (planar YUV upload + GPU colour conversion). **Measure scrubbing separately in GATE C**: the scrub path converts to *display size* in swscale (`b5a56af`), and a full-resolution planar upload would move that cost rather than remove it — playback throughput would not show it, the scrub harness would.
+   **GATE B's two blocking items are now done and GATE C is implemented** (2026-08-09, second session; plan §21–§22). The HUD unit bug is fixed (`58ec879`); §20.3's 150% divergence is explained and mostly fixed (`ddb38ca`) — the downscale ratio was a confound, the variable is *fractional* DPI. The deferred scrub tripwires were re-run on both renderers and neither got worse. **The only outstanding GATE B item is the owner's visual review**, 4K ProRes 422 HQ against the CPU path; the material is in `Desktop\Trace_GateB_Visual` (`scripts/measure/gateb_visual.ps1`), and three of its four viewing conditions are pixel-identical.
+
+   **GATE C is done** (`e8566a4`): planar YUV upload with the matrix in the shader, confirmed against swscale at 8/10/12 bits, conversion cost down 2.5–4.1x, scrub unchanged. Next is step 8 (texture and upload-resource reuse), then step 9 (GPU scaling and telemetry).
+
+   **One thing to look at before GATE E**: 4K H.264 reversals now measure ~44 stalls of ~375 on *both* renderers, against the "2 of 394" recorded at §17.4 on the same file and gesture. A control build of the preceding commit reads the same, so it predates this session's changes — but stalls are the metric the scrub complaints live in, and a 20x move deserves an hour.
 
    **The overlay question is settled and that work is stopped** (plan §19, §20.1). Ordinary Qt child widgets over the child HWND are neither visible nor hit-testable; every native-window variant loses translucency. **Renderer-composited translucency works** — real alpha over the video, full native input, keyboard staying with Qt via `MA_NOACTIVATE`, and **no measured playback cost** (98.3%, 120/120 with the overlay held visible through a 9s 4K run). The child HWND stays; **`WA_PaintOnScreen` is not promoted** — it works on this build but Qt documents it X11-only. `TRACE_OVERLAY_COMPOSITED=1` is a **disposable spike with placeholder art**, off by default, and it announces itself on stderr. No further overlay/interface work until GPU integration is complete.
 
@@ -432,9 +469,10 @@ perfectly on lag while stalling for 100ms.
 `TRACE_SCRUB_FILL_MS` (seek-walk cache fill budget during a drag, default 60ms),
 `TRACE_PREVIEW_DISPLAY_SIZE=0` (back to plain half-res previews),
 `TRACE_SCRUB_PACE`, `TRACE_SEEK_CACHE_WINDOW`, `TRACE_AUDIO_BUFFER_MS`,
-`TRACE_AUDIO_SLEW`, `TRACE_AUDIO_FIXED_LATENCY`, `TRACE_NO_AUDIO`, and
+`TRACE_AUDIO_SLEW`, `TRACE_AUDIO_FIXED_LATENCY`, `TRACE_NO_AUDIO`,
 `TRACE_RENDERER=d3d11` (the native surface from GATE B; `cpu` is the default and
-an unknown value warns and falls back).
+an unknown value warns and falls back), and `TRACE_PLANAR_UPLOAD=0` (GATE C off,
+back to swscale BGRA on the d3d11 path — the control for any planar measurement).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
 a default launch reports `renderer cpu`, draws no overlay and writes no Trace
