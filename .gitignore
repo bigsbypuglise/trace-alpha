@@ -19,6 +19,12 @@ compile_commands.json
 .idea/
 *.swp
 
+# Claude Code local settings. settings.local.json holds a per-machine tool
+# allowlist with absolute paths into this checkout and a scratchpad -- it is
+# useful to whoever is sitting at this box and meaningless anywhere else.
+# A shared .claude/settings.json would be committable; nothing here is.
+.claude/
+
 # Icon working files (superseded revisions, source zips)
 assets/icons/_old/
 assets/icons/*.zip

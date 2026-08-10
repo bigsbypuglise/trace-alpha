@@ -1,0 +1,27 @@
+TRACE — DESIGN ASSET PACKAGE
+============================
+
+TRACE_IMPLEMENTATION_SPEC.txt   Full spec: tokens, geometry, behavior, keyboard,
+                                aspect-ratio rules, state semantics.
+
+base-ui-icons/                  Player UI icon family (33 glyphs)
+  svg/                          24x24 masters, currentColor
+  png/1x/  png/2x/              24px / 48px white on transparent
+  README.txt                    state opacities + geometry per control
+
+App icon (Spectral Core):
+  trace.icns                    macOS icon bundle
+  trace.ico                     Windows icon, 16/24/32/48/256
+  svg/trace-windows.svg         vector master, Windows radius (112/1024)
+  svg/trace-macos.svg           vector master, macOS radius (232/1024)
+  png/windows/                  16, 24, 32, 48, 64, 256 px
+  png/macos/                    16, 32, 64, 128, 256, 512, 1024 px
+
+player-icons/                   SUPERSEDED — first-pass set, kept for reference.
+                                Use base-ui-icons/ for implementation.
+
+Living design boards (open in the project, not in this package):
+  Trace Base UI.dc.html         13 boards: player mockups, icon sheet, states,
+                                menus, inspector, aspect ratios, tokens
+  Trace Transport.dc.html       transport panel component
+  Trace Icon Final.dc.html      app icon

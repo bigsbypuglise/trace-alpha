@@ -1,0 +1,199 @@
+TRACE — WINDOWS 11 PLAYER · IMPLEMENTATION SPEC
+===============================================
+Base/free interface pass. Accompanies base-ui-icons/ and app-icon assets.
+
+
+1. SURFACES
+-----------
+surface.window            #16181C
+surface.chrome            #1D2025      titlebar + menu bar
+surface.inspector         #191B1F
+viewport.background       #24272C      media-shaped window, no bars
+viewport.bars             #000000      constrained areas only (fullscreen/maximize/snap)
+viewport.imageEdge        1px rgba(255,255,255,0.06) inset at image boundary
+
+panel.fill                rgba(22,23,26,0.86)
+panel.fill.opaqueFallback #14161A @ 100%   (Windows transparency effects off)
+panel.stroke              rgba(255,255,255,0.10) · 1px
+panel.shadow              0 12 34 rgba(0,0,0,0.48)
+panel.radius              14px  (narrow variant 12px)
+
+menu.surface              #202227 · radius 8 · 1px rgba(255,255,255,0.10)
+menu.highlight            rgba(91,141,239,0.22)
+menu.shadow               0 14 36 rgba(0,0,0,0.55)
+
+
+2. CONTROLS
+-----------
+control.hover             rgba(255,255,255,0.09)      90ms ease-out
+control.pressed           rgba(255,255,255,0.17)      no transition, scale 0.96
+control.checked           rgba(91,141,239,0.22) fill + 1px rgba(91,141,239,0.55) inset
+control.radius            8px
+control.target            34 x 34   (glyph 20px)
+transport.target          44 x 44   (glyph 26px)  play/pause
+shuttle.glyph             24px inside a 34 x 34 target
+
+icon.rest                 rgba(255,255,255,0.82)
+icon.transport            rgba(255,255,255,0.92) – #FFFFFF
+icon.disabled             rgba(255,255,255,0.28)
+icon.unavailable          rgba(255,255,255,0.24) + tooltip stating why
+
+accent                    #5B8DEF
+accent.wash               rgba(91,141,239,0.22)
+focus.ring                #5B8DEF 2px + 2px dark offset ring
+
+
+3. TIMELINE
+-----------
+track                     rgba(255,255,255,0.20) · 4px · radius 2
+track.hover               6px
+progress                  rgba(255,255,255,0.90)
+progress.scrubbing        #5B8DEF
+playhead                  #FFFFFF · 13px  (hover 15px, dragging 17px)
+playhead.shadow           0 1 4 rgba(0,0,0,0.55)
+playhead.dragRing         0 0 0 6px rgba(91,141,239,0.22)
+label column              62px  (narrow 54px)
+
+Frames are ZERO-BASED. First frame is 0. A 100-frame file reads 0 F .. 99 F.
+Labels use tabular figures so the panel never reflows during playback.
+
+
+4. TYPOGRAPHY
+-------------
+text.primary              Segoe UI Variable Text · 13px / 500 · #E8ECF1
+text.secondary            Segoe UI Variable Text · 12px · #848C95
+text.numeric              Cascadia Mono (or Segoe UI + tabular-nums) · 12.5px · #D7DDE4
+menu.item                 13px · row height ~30px · 12px horizontal padding
+inspector.label           12px · right-aligned · #848C95
+inspector.value           mono 12px · #D7DDE4 ("Unknown"/"Untagged" at #7E858E)
+section.header            11.5px / 600 · 0.06em tracking · uppercase · #C3CAD2
+
+
+5. TRANSPORT PANEL
+------------------
+Wide     860 x 100 · padding 12/18/14 · row gap 10 · center gap 12
+Narrow   560 x 92  · padding 10/14/12 · row gap 8  · center gap 8
+         Switch to narrow below ~700px viewport width.
+         Narrow collapses the volume slider into the mute button (popover on click).
+
+Top row     mute/volume · volume slider | rewind · play/pause · forward | fullscreen · share
+Bottom row  current frame | timeline | last frame index
+
+Position: bottom center, 26px from the viewport bottom (fullscreen 34px).
+
+
+6. SHUTTLE TRANSPORT
+--------------------
+Rewind and fast-forward are SHUTTLE controls, not frame step.
+Click ladder:  2x -> 5x -> 10x -> 30x -> 1x (fifth click)
+The opposite button resets to 1x before reversing.
+Single-frame movement is keyboard only: Left Arrow / Right Arrow. No on-screen button.
+
+Rate indicator: centered above the transport, visible 900ms, fades over 200ms.
+  Chip: padding 9/18, radius 8, panel.fill, 1px rgba(255,255,255,0.12)
+  Label: mono 21px / 500, #FFFFFF, with the matching shuttle glyph at 19px
+  Values: 2x 5x 10x 30x  and  -2x -5x -10x -30x   (1x uses the play glyph)
+
+
+7. OVERLAY VISIBILITY
+---------------------
+Fade in    160ms ease-out on pointer move or key input
+Fade out   240ms ease-out after 2.4s idle
+Never auto-hides while the pointer is over the panel or a menu is open.
+Fullscreen hides panel, filename chip and cursor together.
+Honor the system reduced-motion setting: fades drop to 0ms.
+
+
+8. MEDIA-SHAPED WINDOW
+----------------------
+The video viewport adopts the source DISPLAY aspect ratio exactly.
+- Use DAR, not encoded dimensions. Anamorphic 2048x858 @ 2:1 PAR opens at its DAR.
+- Apply rotation metadata first: 1920x1080 tagged 90 deg opens as a 9:16 window.
+- Titlebar (38px) and menu bar are added OUTSIDE the viewport height.
+- Transport floats over the image, excluded from layout.
+- No permanent chrome inside the viewport. No internal bars. No crop. No stretch.
+
+Opening size:
+  100% of display size when it fits the work area with a 64px margin.
+  Otherwise step down: 75% -> 50% -> 33% -> 25%. Never scale up past 100% on open.
+  Minimum viewport short edge: 320px.
+  9:16 caps at 90% work-area height; cinemascope caps at 90% work-area width.
+
+Resize: with the lock on, any edge/corner drag constrains to the media ratio.
+
+Constrained areas (fullscreen / maximize / Windows Snap):
+  Preserve the whole image and its ratio. Fill the remainder with #000000.
+  Bars must read as black against the #24272C viewport so the two states differ.
+  Snap and maximize override the lock for their duration, then restore.
+
+Menu item: Window > "Lock Window to Media Aspect Ratio" — checked by default.
+  Unchecked, the window resizes freely and the image letterboxes inside it.
+
+
+9. STATE SEMANTICS
+------------------
+Disabled       action exists but cannot run now (Zoom Out at min scale).
+               icon 0.28, no hover.
+Unavailable    this media can never support it (SMPTE Timecode with no embedded
+               timecode; LucidLink link on a local file). Same rendering plus a
+               tooltip stating why. NEVER hide the row.
+Checked        accent wash + 1px accent inset AND a ui_check or ui_radio_selected
+               glyph. State never depends on color alone.
+
+
+10. KEYBOARD
+------------
+Space            play / pause
+Left / Right     previous / next frame
+Shift+Left/Right jump 10 frames
+Home / End       first / last frame
+F                toggle fullscreen        Esc  exit fullscreen
+Ctrl+G           Go to Frame...
+Ctrl+I           Show Movie Inspector
+Ctrl+1 / Ctrl+9  Actual Size / Fit to Window
+Ctrl++ / Ctrl+-  Zoom In / Zoom Out
+Ctrl+0           Reset View Transform
+Ctrl+L / Ctrl+R  Rotate Left / Rotate Right
+Ctrl+Alt+L       Loop
+
+Tab order: mute -> volume -> rewind -> play/pause -> forward -> fullscreen
+           -> share -> timeline
+
+
+11. SHARE MENU
+--------------
+Items: Copy File Path · Copy LucidLink Link · Show in File Explorer
+States:
+  Local file                  path + explorer enabled, LucidLink unavailable
+  LucidLink file, integration all three enabled
+  Non-file source             all three unavailable, tip "This media has no file on disk."
+  Integration missing         LucidLink disabled, tip "LucidLink is not running.
+                              Start the LucidLink client and reopen this menu."
+
+share_copy_lucidlink is a NEUTRAL CHAIN GLYPH, not a LucidLink brand mark.
+Replace only with a licensed official asset.
+
+
+12. MOVIE INSPECTOR
+-------------------
+Two forms, same content: docked side panel (340px, attached right) and modeless
+utility window (380px). Sections: General / Video Details / Audio Details,
+each independently collapsible via ui_disclosure_*.
+
+Values are selectable text with a right-click Copy affordance.
+Long Windows and LucidLink paths WRAP, never truncate.
+Missing metadata reads "Unknown". Present-but-unlabeled reads "Untagged".
+
+
+13. ICON DELIVERY
+-----------------
+33 glyphs, 24 x 24 master grid, strokes 1.75-2.0px, rounded terminals,
+currentColor only (no baked fills). Optical overshoot on circular glyphs is
+intentional — do not renormalize to bounds.
+
+base-ui-icons/svg/     master vectors
+base-ui-icons/png/1x/  24px white on transparent
+base-ui-icons/png/2x/  48px white on transparent
+
+Apply state opacity at runtime. Do not ship separate per-state files.
+There is deliberately NO frame-step icon in this set.
