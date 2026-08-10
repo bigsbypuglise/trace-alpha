@@ -88,6 +88,15 @@ Nothing here is started. Pick with the owner rather than assuming.
    on playback. Item 9's honest target is the Step landing (§9).
 4. **LucidLink read-ahead** — two designs measured worse; try full-request buffered serving
    before partial reads, then benchmark. Not in progress.
+5. **CI does not assert the renderer initializes, and that gap got sharper on 2026-08-10.**
+   The workflow builds, deploys and checks that files exist; it never launches the app. With
+   `d3d11` now the default, a build whose GPU backend fails `initialize()` would go green and
+   every user would silently land on the CPU fallback — which is precisely the "a GPU path
+   that quietly never engages while the app looks fine" failure the whole renderer boundary
+   was designed against (plan §12), and precisely what the repo's own "green must mean
+   launchable" rule exists to catch. Plan §5 anticipated this: "CI runners have no GPU, so
+   D3D11 will land on WARP; have CI assert the renderer *initializes*." Not started. It needs
+   a headless launch that reports `name()` and exits, so it is real work rather than a flag.
 
 ## Working notes
 
