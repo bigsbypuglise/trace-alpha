@@ -1969,6 +1969,58 @@ thrash under two**, and nothing about the first workload predicts it.
 | SwitchMedia | clean |
 | PNG sequence, still image | present correctly — `adopt()` gives BGRA, GATE B path |
 
+### 22.8 The 4K H.264 stall number — settled, and it is measurement conditions
+
+§21.4 carried "~44 stalls of ~375 against §17.4's `2 of 394`, unexplained" as
+something to resolve before GATE E. Resolved. **It is not a regression, and the
+larger half of it is window size.**
+
+**It is not the code.** The prompt for this session said the range
+`8a7cdb3..be8ef63` was docs and chore only; that is wrong — `5499006` changed
+`MainWindow.cpp` (+72), `ViewerWidget.cpp` (+10) and `VideoRenderer.h` (+6). But
+the conclusion survives inspection: on the CPU path none of it is per-frame.
+`installOverlaySpike` is env-gated, `setOverlayHooks` is an empty virtual on the
+CPU backend so `installOverlayHooks()` costs one struct at startup, and
+`WA_PaintOnScreen` is set to *false* when there is no native surface. **Check
+the diff, not the commit subjects.**
+
+**Cache depth is a function of window size, and it dominates.** Previews convert
+to the size they will be drawn at (`b5a56af`) and the cache is budgeted in bytes,
+so a bigger window means bigger entries, fewer of them, and more misses. 4K
+H.264 reversals, cpu, one build, two runs each:
+
+| window | cache cap | rev-hit | dec f/s | supply | **stalls** |
+|---|---|---|---|---|---|
+| 900x854 | **76/76** | 98.2% | 154 | 98% | 46/375, 45/374 |
+| 1300x1106 | **41/41** | 97.1% | 124 | 79% | 56/315, 62/306 |
+| 1700x1354 | **27/27** | 94.9% | 79 | 49% | 140/228, 133/220 |
+| 2100x1460 | **22/22** | 92.0% | 76 | 47% | 136/217, 136/213 |
+
+Monotonic across every column. **A stall count quoted without the window it was
+taken in is not a number anyone can check**, which is the actual defect, and it
+is fixed: the HUD now carries `win WxH` in device pixels on the colour line, so
+every capture is self-documenting. `scripts/measure/stalls_vs_window.ps1` is the
+sweep.
+
+**What window size does NOT explain is the floor.** At the smallest geometry the
+app will take, stalls are 46–51, not 2. Note the window has a **minimum height of
+~854** with this media, so §14.10's recorded `1296x812` is not reproducible —
+requesting 812, 760 or 700 all clamp to 854, and 900/1280/1296 wide all give
+46–51 stalls. So the 2 → 46 gap is not geometry.
+
+**The remaining suspect is machine state, and it is documented rather than
+tested**, because testing it means closing the owner's applications. This box is
+now running `parsecd` (227s CPU), `sunshine`, Steam with several web helpers
+(117s on one), Adobe Desktop Service and Creative Cloud — and the display is
+**5120x1440 @ 239Hz** where §18.3 recorded `\.\DISPLAY1 2560x1440`. §"Display
+refresh rate is NOT the remaining smoothness gap" in CLAUDE.md explicitly notes
+its measurement was taken *with Parsec off*.
+
+**Do not re-open this as a bug.** If a clean-environment number is wanted, take
+it deliberately: Parsec and Sunshine closed, one display, and the window size
+written down. Until then, compare stalls only against runs from the same session
+at the same `win WxH`.
+
 ### 22.7 Open after GATE C
 
 1. **The 4444 release latency above.** Needs the owner, not another harness run.

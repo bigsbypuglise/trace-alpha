@@ -2154,7 +2154,27 @@ void MainWindow::refreshHud(const QString& action) {
             // Colour and resampling state: a picture that looks wrong is either
             // a matrix/range mismatch or a scaled presentation, and both are
             // otherwise invisible.
-            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | renderer %7")
+            //
+            // The WINDOW SIZE is on this line because a scrub measurement is not
+            // comparable across sessions without it, and that cost a session.
+            // Section 17.4 recorded `stalls 2 of 394` on 4K H.264 reversals and
+            // a later run of the same gesture on the same file read ~46 of ~380
+            // -- neither capture said how big the window was. Cache depth is a
+            // function of window size: previews convert to the size they will be
+            // drawn at (`b5a56af`) and the cache is budgeted in bytes, so a
+            // bigger window means bigger entries, fewer of them, a lower hit rate
+            // and more seek-and-GOP-walk stalls. Measured on 4K H.264 reversals,
+            // cpu, same build, same gesture:
+            //
+            //   window 900x854    cache 76/76   rev-hit 98.2%   stalls  46/375
+            //   window 1300x1106  cache 41/41   rev-hit 97.1%   stalls  56/315
+            //   window 1700x1354  cache 27/27   rev-hit 94.9%   stalls 140/228
+            //   window 2100x1460  cache 22/22   rev-hit 92.0%   stalls 136/217
+            //
+            // A stall count quoted without the window it was taken in is not a
+            // number anyone can check.
+            const double hudDpr = viewer_->devicePixelRatioF();
+            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
                 .arg(perf.srcFullRange ? "full" : "limited")
@@ -2162,6 +2182,10 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(drawPerf.lastDrawSize.height())
                 .arg(!drawPerf.lastDrawWasScaled ? "1:1"
                      : drawPerf.lastDrawWasFiltered ? "filtered" : "NEAREST")
+                // Device pixels, matching `display` above, so the two can be
+                // compared without knowing the scale factor.
+                .arg(static_cast<int>(std::lround(width() * hudDpr)))
+                .arg(static_cast<int>(std::lround(height() * hudDpr)))
                 // Which backend is actually presenting. A GPU path that quietly
                 // fell back to cpu would otherwise be invisible.
                 .arg(viewer_->rendererName());
