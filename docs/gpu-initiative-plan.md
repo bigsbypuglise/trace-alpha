@@ -3001,9 +3001,9 @@ makes it one number to change either way.
 
 ### 26.4 Open after this
 
-1. **Owner validation.** Every figure here says misses are rarer and the worst
-   gap is shorter. None says whether a drag *feels* better. This is the fourth
-   time the project has needed that split.
+1. ~~**Owner validation.**~~ **DONE — passed, 2026-08-10, see §26.6.** Every
+   figure here said misses are rarer and the worst gap is shorter; the owner has
+   now confirmed the drag feels good on the shipping build. §26 is closed.
 2. **The convert pool is sized in pre-GATE-C currency.** It prices the smallest
    entry as `w*h*4` at ≤1920 and `w*h` above, both BGRA assumptions, so at 1080p
    it provisions ~50 buffers for a cache that now holds 129. `alloc` is
@@ -3080,3 +3080,22 @@ The §26.3 table is unaffected: every capture in it reads `(>8.3ms)`, so the who
 sweep was taken at 240Hz, and `hitch` is threshold-independent by construction.
 **This is the second time in one session that the hazard §26.1 describes has
 fired live.** Quote `hitch`, and check the printed threshold.
+
+### 26.6 Owner sign-off on the finished build — §26 CLOSED (2026-08-10)
+
+The owner ran the subjective scrub test on the shipping build — 384MB reverse
+cache, `d3d11` default — and **it passed: the picture feels good.** That closes
+§26.4 item 1, and with it the whole scrub-stall pass and item 1 of CLAUDE.md's
+"Known open items". Nothing about scrub stalls carries forward as open.
+
+This is the fourth time the project has needed the split between "every figure
+improved" and "the bar holds", and the fourth time only the owner could supply
+the second half. The figures were §26.3: `hitch` 8 → 2 at 1080p, 3 → 1 at 4K
+H.264, worst gap 169.6 → 80ms. They were necessary and they were not sufficient.
+
+**One caveat recorded rather than glossed:** this session did not establish
+whether the test was taken at the machine or over Parsec. §25.2/CLAUDE.md now
+hold that subjective feel judgements are not valid over Parsec, because it
+re-times and re-encodes the screen. The sign-off is recorded as given; if it was
+a remote session it should be re-taken at the panel before being leaned on
+against any future regression.

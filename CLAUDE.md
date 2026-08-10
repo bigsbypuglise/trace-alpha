@@ -116,7 +116,7 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   `hitch` was **added**, not substituted: `stalls` is "slower than the panel could have shown it" and pairs with `wasted`; `hitch` is "the picture visibly stopped". `stalls` prints its own threshold now. **Third instance of the same failure** — GATE E's `jitter` read 34ms on a schedule within 1.8ms of its deadline. Check what a number is measured *against* before believing it.
 - **The reverse-cache budget is 384MB, and drag hitches were cache misses** (Aug 2026, `ac3ae21`, plan §26.3). Reversal drags at `win 1284x1067` on d3d11, 192 → 384MB: 1080p H.264 `hitch 8,8 → 3,2` with `seeks 11 → 4,3` and hit 96.8 → 98.9%; 4K H.264 `hitch 3 → 1,1`, worst gap **169.6 → 80/91ms**; 4444 `hitch 7 → 5`, worst gap 169.4 → 47.9ms. 768MB was measured and is past the knee. **Cost is memory and only memory** — working set 396 → 598MB at 1080p, 677 → 902MB at 4K H.264. `TRACE_REVERSE_CACHE_MB` is the control and the fallback.
 
-  **The footprint is APPROVED and the behaviour is verified** (owner, 2026-08-10, plan §26.5): bounded (six consecutive multi-gesture scrub runs plateau at 907–928MB; the HUD reads 382.2 of 384MB after **1357 inserts and 1245 evictions**, never over), discarded on a file change (`close()` clears it and `open()` calls `close()` first — measured 920 → 254MB working set, cache back to `1/129`), and playback-neutral (identical presented rate, frame count, doubling bucket and `handler>budget` on 1080p H.264, 4K H.264 and 4444, at both budgets, two runs each). **Adaptive caching and convert-pool changes were explicitly declined** — don't add them off the back of this.
+  **The footprint is APPROVED, the behaviour is verified, and the FEEL is signed off** (owner, 2026-08-10, plan §26.5 and §26.6 — the subjective scrub test on the shipping build passed): bounded (six consecutive multi-gesture scrub runs plateau at 907–928MB; the HUD reads 382.2 of 384MB after **1357 inserts and 1245 evictions**, never over), discarded on a file change (`close()` clears it and `open()` calls `close()` first — measured 920 → 254MB working set, cache back to `1/129`), and playback-neutral (identical presented rate, frame count, doubling bucket and `handler>budget` on 1080p H.264, 4K H.264 and 4444, at both budgets, two runs each). **Adaptive caching and convert-pool changes were explicitly declined** — don't add them off the back of this.
 
   **4444 moves least and that is structural**: every frame is a keyframe, a seek lands on the target, no intermediate frames exist, so there is nothing to cache. Don't try to fix its hit rate with more bytes.
 
@@ -158,6 +158,8 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 - **`d3d11` IS THE DEFAULT RENDERER as of 2026-08-10** (owner decision after testing both side by side; plan §25). `TRACE_RENDERER=cpu` is now the control and the escape hatch — **the first thing to try if anything about the picture looks wrong**. The measured case on 4444: doubled frames 1 → **0**, handlers over budget 1 → **0**, worst present gap 62.5 → **45.9ms**, tick jitter 11–14 → **2–3ms**, `sws` 16.6 → **5.6ms**, real time 99.3 → **99.8%**. It is a *headroom* win that GATE E converted into a cadence win, **not** a playback-rate win — §22.3 measured presented rate as unchanged by GATE C because none of these files was conversion-bound at 24fps.
 
   Two consequences. **Every scrub and playback baseline in the plan was taken on `cpu`** and most are not tagged with a renderer, because there was only one default; they remain valid as records but not as comparisons against a run taken today — re-tag as you re-measure. And **the untested-DPI gaps are now the shipping path**: real mixed-monitor DPI has never run (§20.4), and the display mode on this box was observed changing mid-session on 2026-08-10 (5120x1440 @ 239.999Hz in the morning, 1920x1200 @ 60Hz in the afternoon), so never assume a recorded refresh rate or geometry still holds.
+
+  **The cause of those mid-session mode changes is now known: Anj logging in over Parsec** (owner, 2026-08-10). Remote sessions present a virtual display at **1920x1200 @ 60Hz**; the physical panel is 5120x1440 @ 239.999Hz. This is predictable rather than random, and three things follow. **Ask which one a session is on before comparing any number to a record** — `scripts/measure/refresh.ps1` answers it. **Resolution changes with the refresh rate**, so a Parsec run also has a different window geometry, and window size dominates cache depth and stall counts (§22.8) — the two effects arrive together and neither is visible in a bare stall figure. And most importantly: **subjective smoothness and cadence judgements are not valid over Parsec at all.** Parsec captures, re-encodes and re-times the screen, so it imposes its own pacing on top of Trace's; any owner sign-off on playback smoothness, stutter or scrub feel must be taken **at the machine**. Picture-quality checks (colour, sharpness, framing) are also suspect because the stream is lossy. `hitch` is threshold-independent and stays comparable across both, which is exactly why it is the figure to quote.
 - **GATE E is PASSED and the playback stutter is gone — owner sign-off 2026-08-09, "wow, Playback is great!"** The detail that matters: asked which build, the owner had **just double-clicked the app**, i.e. the **CPU default with no GPU path involved**. So E1 alone cleared the complaint, and three things follow. The stutter was **cause A, the tick beat, essentially in full** — §23.5 predicted the owner was seeing beat *plus* a cause-B component on `cpu`, and they were not seeing enough of it to matter. **§23.6 (why 4444 specifically) stays open and is now unlikely to be answerable**, because the fault is gone and the evidence with it — do not re-open it speculatively. And the GPU path's remaining edge on 4444 (0 vs 1 doubled frame, 0 vs 1 over-budget handler, 99.8% vs 99.3%) is **real but below the owner's threshold** — an argument for flipping the default, not a requirement. **GATE E step 2 (vsync snapping, the present/decode swap) is NOT built and is stopped by owner decision**; the design is retained unbuilt at plan §24.4–24.6, and its phase source is settled by measurement as `GetFrameStatistics`, d3d11 only.
 - **The integer tick beat is FIXED — GATE E step 1, Aug 2026, plan §24.13.** The playback tick was a fixed integer-millisecond `QTimer` at `floor(1000/fps)`, so presents landed on a 41ms grid and every interval between two of them was 41 or 82ms and never 41.667. It is now **re-armed per frame against an absolute deadline** built from the source's exact rational: `deadline(slot) = epoch + slot × period`, in nanoseconds, never rounded. Only the delay handed to `QTimer` is rounded, and because the next delay comes from the next *absolute* deadline rather than from this one, that rounding cannot accumulate — the arms alternate 41/42 and average the true period.
 
@@ -459,8 +461,8 @@ perfectly on lag while stalling for 100ms.
 
 **Known open items, in the order they are likely worth attacking:**
 
-1. ~~**Stalls are the stutter, and Gate D did not remove them.**~~ **Largely
-   resolved 2026-08-10** (plan §26). Two things were wrong with this entry. The
+1. ~~**Stalls are the stutter, and Gate D did not remove them.**~~ **CLOSED
+   2026-08-10 with owner sign-off** (plan §26, §26.6). Two things were wrong with this entry. The
    *count* was mostly an artifact -- `stalls` is measured against the display
    refresh and this box's mode changed between sessions, so the same run reads
    51 or 3 (see the `stalls`/`hitch` entry in Decisions). And the *fix* named
@@ -472,11 +474,16 @@ perfectly on lag while stalling for 100ms.
    diagnosis in the original entry -- "cache misses forcing a seek plus a GOP
    walk" -- was right; the mechanism proposed to fix it was not.
 
-   **What is left is the owner's subjective scrub test on a finished build**:
-   every figure says misses are rarer and the worst gap shorter, none says
-   whether a drag *feels* better. Fourth time the project has needed that split.
-   The mechanism, the memory footprint and the verification are all approved
-   (plan §26.5); only the feel is outstanding.
+   **The owner's subjective scrub test on the finished build PASSED** (2026-08-10,
+   plan §26.6): the picture feels good on the 384MB cache with `d3d11` default.
+   That was the last open half of this item — fourth time the project has needed
+   the split between "every figure improved" and "the bar holds", and the fourth
+   time only the owner could answer the second. Mechanism, memory footprint,
+   verification (plan §26.5) and feel are all now approved. **Nothing about
+   scrub stalls is open.** Caveat worth keeping: the session did not record
+   whether the test was at the machine or over Parsec, and feel judgements are
+   not valid over Parsec — re-take at the panel before leaning on it against a
+   future regression.
 2. ~~**The slider handle itself trails the pointer**~~ **Fixed 2026-08-08**
    (`f77d472`) -- and the diagnosis in this entry was wrong, which is the part
    worth keeping. It was recorded as event-loop starvation: "the walk loop

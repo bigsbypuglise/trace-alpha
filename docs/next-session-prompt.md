@@ -66,6 +66,14 @@ of window size and dominate).
 **The untested-DPI gaps are now the shipping path.** Real mixed-monitor DPI has never
 run (§20.4), the box has one display, and its mode was observed changing mid-session on
 2026-08-10 — 5120x1440 @ 239.999Hz in the morning, 1920x1200 @ 60Hz in the afternoon.
+**That cause is now known: it is Anj logging in over Parsec.** Remote sessions present a
+virtual display at 1920x1200 @ 60Hz; the physical panel is 5120x1440 @ 239.999Hz. So ask
+which one a session is on before comparing to a record — resolution moves with the refresh
+rate, so a Parsec run also has a different window geometry, and window size dominates cache
+depth and stall counts (§22.8); the two effects arrive together and neither shows in a bare
+stall figure. **And no subjective smoothness, cadence or picture-quality judgement is valid
+over Parsec** — it captures, re-encodes and re-times the screen, imposing its own pacing and
+its own lossy compression. Owner sign-offs on feel must be taken at the machine.
 Never assume a recorded refresh rate or geometry still holds; `scripts/measure/refresh.ps1`
 reports the current one, and it matters because 24fps is exactly 10 refreshes at 240Hz
 and a 2:3 cadence at 60Hz.
@@ -103,10 +111,9 @@ explicitly declined.
 
 Nothing here is started. Pick with the owner rather than assuming.
 
-1. **The owner's subjective scrub test on the finished build is the one thing still open**
-   on the scrub pass. Every figure says misses are rarer and the worst gap is shorter; only
-   he says whether the bar holds. Fourth time the project has needed that split. If it
-   feels good the item is closed and the remaining GPU roadmap continues.
+1. ~~**The owner's subjective scrub test on the finished build**~~ — **DONE, PASSED
+   2026-08-10** (plan §26.6). The picture feels good on the 384MB cache with `d3d11`
+   default. §26 is closed and nothing about scrub stalls carries forward as open.
 2. **4K ProRes 4444 fast drag** — still decode-bound at ~15.4ms/frame, ~2.3x playback
    against the owner's stated ~4x. Not a bug; an explicit product decision about whether to
    skip frames on the heaviest media or run the worker ahead of the request chain. Note
