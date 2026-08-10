@@ -3,10 +3,23 @@
 **Status: GATE B PASSED, GATE C IMPLEMENTED AND MEASURED (2026-08-09).** Steps
 1-7 of §8 are committed and validated on the local Windows toolchain.
 
-**GATE E is pulled ahead of items 8-10 by owner decision (2026-08-09).** The
-design is written at **§24 and is awaiting review; no code has been changed.**
-Items 8, 9 and 10 are deferred, not cancelled. §23.5 recorded the argument and
-declined to act on it unilaterally; the owner has now taken it.
+**GATE E is pulled ahead of items 8-10 by owner decision (2026-08-09).** Items
+8, 9 and 10 are deferred, not cancelled. §23.5 recorded the argument and declined
+to act on it unilaterally; the owner has now taken it.
+
+**GATE E step 1 (E1) is IMPLEMENTED AND MEASURED — see §24.13.** The
+integer-tick beat is gone on every file and every renderer: the 1.5-2.5x bucket
+goes 5 -> 0 on 4444 with the planar path, long-gap spacing 58/61/62 -> none, and
+all three audio-mastered files improved with `rep` falling 4-5 -> 1. A negative
+control in the same binary (`TRACE_DEADLINE_SCHED=0`) still shows the fault.
+
+**E2 (the DXGI phase source and the present/decode swap) is NOT built, and
+§24.14 asks whether it should be** — E1 met every measurable criterion on its
+own, so E2's remaining value is a one-refresh wobble whose visibility only the
+owner can judge. Two design premises also changed under measurement:
+`DwmGetCompositionTimingInfo` **fails on this machine** (§24.4), so a
+renderer-independent phase source does not exist; and the panel is
+**239.999 Hz**, i.e. exactly 10 refreshes per 24.000fps frame (§24.2).
 
 **GATE B is signed off by the owner (§20.2, §17.5 item 2).** CPU and D3D11 are
 visually equivalent in fit-to-window and fullscreen; the 150% case is accepted
@@ -2287,6 +2300,23 @@ presented at constant cadence by any player, while 23.976 content maps exactly.
 The nominal mode number is not evidence; the phase source reports the real
 period and that is the number to use.
 
+> **MEASURED, 2026-08-09** (`scripts/measure/refresh.ps1`). This panel runs
+> **239999/1000 = 239.999 Hz**, from `QueryDisplayConfig`, which is the only
+> API that reports the rate as an exact rational — `EnumDisplaySettings` says
+> "240" and cannot separate the two candidates, which is why §22.8's "239Hz" was
+> unusable as evidence either way.
+>
+> | source fps | refreshes/frame | residual |
+> |---|---|---|
+> | **24.000** | **10.0000** | one slip per **24,000 frames** (~17 min) |
+> | 23.976 | 10.0100 | one per **100 frames** (~4s) |
+> | 30.000 | 8.0000 | one per 30,000 |
+> | 25.000 | 9.6000 | non-integer; pulldown, the display's |
+>
+> So for the 24.000fps test set the display imposes **effectively nothing**, and
+> the pass condition can be strict. Note the 23.976 row: that is the display's
+> beat, not Trace's, and it is why criterion 3 exists.
+
 So the honest claim GATE E can make is: **it replaces a 62-frame beat that Trace
 creates with its own integer-millisecond tick by whatever residual beat the
 display's refresh imposes, which is typically far longer and is the same one
@@ -2348,6 +2378,27 @@ would then be one decision taken at sign-off. With a renderer-independent phase
 source, the CPU path — still the default, and what the owner is running — gets
 the fix too, and the §23.3 1080p control (which was taken on `cpu`) is directly
 comparable before and after.
+
+> **MEASURED, 2026-08-09 — and the recommendation did not survive.**
+> `DwmGetCompositionTimingInfo` **fails on this machine**, returning
+> `0x88980090` for a NULL HWND, the desktop HWND and the shell HWND alike, at
+> three different `cbSize` values, from an interactive process on
+> `WinSta0\Default` with `DwmIsCompositionEnabled` reporting **true**. It is a
+> deprecated API and it is entitled to refuse; what matters is that it does.
+>
+> Two consequences. **The renderer-independent phase source does not exist**, so
+> the grid snap can only come from the swapchain
+> (`IDXGISwapChain::GetFrameStatistics`) and is therefore d3d11-only after all —
+> §24.11 Q2 is answered by measurement rather than by the review.
+>
+> **But E1 needs no phase source at all**, and E1 is renderer-independent. So
+> the owner's "yes, the CPU path too" is still honoured for the part that
+> removes the beat; what the CPU path cannot have is the sub-refresh tightening.
+> §24.13 measures how much that is actually worth.
+>
+> The first attempt at this probe got `0x88980090` from a struct declared 184
+> bytes instead of 320 and concluded nothing — the same error for two unrelated
+> reasons. Rule out marshalling before reading an HRESULT as an answer.
 
 **Two things to verify on the box before committing to it**, because this
 document's rule is to confirm rather than inherit:
@@ -2615,6 +2666,100 @@ Presentation timing only.
    running today. Saying yes means the default renderer changes behaviour in
    this gate; saying no means the owner sees no improvement until the default
    flips.
+
+### 24.13 E1 — IMPLEMENTED AND MEASURED (2026-08-09)
+
+`FrameSource::fpsRational` + the absolute-deadline scheduler in `MainWindow`.
+Renderer-independent, on by default, `TRACE_DEADLINE_SCHED=0` restores the old
+fixed-interval tick and its accumulator gate **in the same binary** — which is
+what §24.9's negative control asked for, and it is a better control than a build
+of the previous commit because the two runs differ in one branch rather than in
+a compile.
+
+All runs `win 1280x815`, `TRACE_NO_AUDIO=1` unless stated, 11s, `cpu` unless
+stated. Two repeats each; both are shown where they differ.
+
+**The negative control reproduces the fault, and predicts its own period.**
+The 1080p clip is **23.98fps**, so the predicted beat is
+`41.71 / (41.71 − 41) = 58.7` frames — not the 62.5 of a 24.000 file.
+
+| 1080p, `Universe_rc07` | control (`TRACE_DEADLINE_SCHED=0`) | **E1** |
+|---|---|---|
+| ~1x bucket | 269 / 266 | **275 / 270 — all of them** |
+| 1.5–2.5x | **5 / 4** | **0 / 0** |
+| long-gap spacing | **57/58/59** | **none** |
+| p50 | 41.0 *(the 41ms grid)* | **41.9** *(the true 41.71)* |
+| p99 / max | 81.5 / 82.9 | **43.3 / 43.9** |
+| present-late avg/max | 20.94 / 41.26 | **0.62 / 1.73** |
+| drift | −11.2 / −13.0 ms | **−1.5 / −0.0 ms** |
+| real time | 99.9% | **100.0%** |
+
+**4K ProRes 4444 — the owner's file.** The control matches §23.3's recorded
+baseline within noise (252/253 at ~1x, 5/4 long, spacing 58/61/62, one handler
+over budget at 52.9ms), which is the check that the two sessions are comparable.
+
+| 4444 | control, cpu | E1, cpu | **E1 + d3d11 planar** |
+|---|---|---|---|
+| 1.5–2.5x | 5 / 4 | 1 / 1 | **0 / 0** |
+| long-gap spacing | 58/61/62 | none | **none** |
+| p50 | 41.0 | 41.8 | **41.7** |
+| max gap | 82.6 | 62.5 | **45.9** |
+| handler > budget | 1 of 265 | 1 of 260 | **0 of 260** |
+| rephase | 0 | 1 | **0** |
+| real time | 99.4% | 99.3% | **99.8%** |
+| drift | −64 ms | −74 ms | **−25 ms** |
+
+The one long frame left on `cpu` is the one handler over budget — **cause B,
+which GATE E does not fix and is not being asked to.** GATE C's planar path
+already removes it (§23.4), and the right-hand column is the two together.
+
+**Audio-mastered non-regression — every file improved, and `rep` fell.**
+§24.5 named `rep` as the sharpest available check: under a deadline schedule the
+wake rate and the audio rate are both real time, so holds should collapse to
+genuine drift.
+
+| file | baseline | **E1** | rep | skip |
+|---|---|---|---|---|
+| 1080p H.264 | 99.1% | **99.6%** | 4–5 → **1** | **0** |
+| 4K H.264 | 98.3% | **99.1%** | **1** | **0** |
+| 4K ProRes 422 HQ | 98.4% | **99.2%** | **1** | **0** |
+
+`clk-upd 1/1` throughout, so telemetry is still not stepping the audio clock.
+Lifecycle: `PlayThroughDrag` 12.8% moved, `PausedThroughDrag` **0.0%**,
+step ±5 cycles and play-after-release both clean.
+
+**A metric of mine was wrong and the fix is worth recording.** The first 4444
+run read `sched tick 9ms | jitter 34.00/33.08/52.00` and looked like a disaster.
+It was not: the timer is re-armed at the *end* of the handler, so the armed
+interval excludes the handler's own 33ms while the wake-to-wake delta includes
+it, and `tickDelta − armedInterval` had silently become a measure of decode
+cost. Jitter is measured against the **frame period** now, which is what it
+always meant — before GATE E the armed interval *was* the period. Same run after
+the fix: **0.65 avg / 2.49 max**. A derived metric whose inputs changed meaning
+reads as a catastrophic result, not as a broken metric, and there is nothing in
+the number itself that says which.
+
+### 24.14 Open after E1 — is E2 still justified?
+
+**Every measurable criterion in §24.9 is met by E1 alone**, on `cpu` and on
+`d3d11`, with a working negative control. What is left is criterion 5 (the
+refresh sweep) and criterion 6 (the owner's eye).
+
+That was not the expectation. §24.1 argued E2 was structurally necessary because
+present time carries `handler_k − handler_{k−1}`, and 4444's handler spread of
+~12ms is ±3 refreshes. The measurement says the premise was overstated **for the
+planar path**: on d3d11 the 4444 handler is ~21.6ms total and the present-to-
+present spread is `p50 41.7 → max 45.9`, i.e. **about one refresh**, with
+nothing at all in the doubling bucket.
+
+So E2 now buys the removal of an occasional one-refresh wobble, at the cost of
+one frame of display latency and a reshaped tick handler. **Whether that is
+visible is an owner question, not a harness one** — which is the same split this
+project has recorded six times, and the honest place to stop and ask.
+
+The `cpu` path is the weaker case (max gap 62.5ms, one over-budget handler) and
+the fix for it is GATE C, not E2 — which folds back into the default-renderer
+decision at §24.12.
 
 ### 24.12 Before any code — the zero-cost A/B, put to the owner
 

@@ -83,6 +83,21 @@ private:
     // Restores playback after a scrub gesture, iff the user never asked for it
     // to stop. Called once the release has landed its exact frame.
     void resumePlaybackAfterScrub();
+
+    // GATE E step 1. Advances the grid slot and re-arms playTimer_ for that
+    // slot's absolute deadline. Called from a scope guard on EVERY exit path of
+    // the playback tick, because the timer no longer free-runs: a return that
+    // does not re-arm is a hang, not a dropped frame.
+    //
+    // Does nothing when playTimer_ is not active, which is how every existing
+    // playTimer_.stop() keeps working untouched.
+    void armNextPresent();
+    // Establishes the timeline for a run: epoch at now, slot 0, period from the
+    // source's exact rational and the current speed. Idempotent -- called from
+    // every tick, does something only when the timeline is unset or the period
+    // changed under it (a J-K-L speed change), because a new rate against an old
+    // epoch is a schedule with a step discontinuity in it.
+    void syncPresentTimeline(double frameDurationMs);
     void refreshHud(const QString& action = {});
     // Tell the decoder how big a scrub preview needs to be, in device pixels.
     void syncScrubPreviewSize();
@@ -176,13 +191,47 @@ private:
     // stops instead of decaying as the idle clock keeps running.
     double playbackRunElapsedS_ = 0.0;
 
-    // High-precision presentation scheduling. The timer runs far faster than
-    // the frame rate and presentation is gated on the playback accumulator,
-    // so the tick interval no longer quantizes the playback rate.
-    // Reference interval for the jitter metric: the timer runs at the frame
-    // interval, so jitter is reported against that.
-    // Set from the media's frame rate at open. Was a hardcoded 42, which made
-    // the jitter readout wrong for anything that was not 24fps.
+    // GATE E step 1 -- the presentation timeline.
+    //
+    // The tick used to be a FIXED integer-millisecond periodic timer at
+    // floor(1000/fps): 41ms against a 41.667ms frame. Presents therefore landed
+    // on a 41ms grid and every interval between two of them was 41ms or 82ms,
+    // never 41.667 -- 61 frames running 1.6% fast, then one held double, every
+    // 2.6s, on every file. That is the beat plan section 23 measured (median
+    // spacing 61-62 on all six runs) and it is what this replaces.
+    //
+    // The timer is now re-armed every wake against an ABSOLUTE deadline:
+    //
+    //     deadline(slot) = presentEpochNs_ + slot * presentPeriodNs_
+    //
+    // computed from the source's exact rational (FrameSource::fpsRational), in
+    // nanoseconds, never rounded. Only the delay handed to QTimer is rounded to
+    // a millisecond, and because the next delay is computed from the next
+    // absolute deadline rather than from this one, that rounding cannot
+    // accumulate -- the arms alternate 41/42 and the mean is the true period.
+    //
+    // presentSlot_ is a GRID SLOT, not a frame count. It advances on every wake
+    // whether or not a frame was presented, so the heartbeat stays regular and
+    // "which frame" remains entirely the audio clock's question (plan section
+    // 24.3: audio owns rate and position, the schedule owns phase).
+    qint64 presentEpochNs_ = -1;
+    long long presentSlot_ = 0;
+    double presentPeriodNs_ = 0.0;
+    // The deadline the current wake was armed for, and how far past it the wake
+    // actually landed. The latter is the honest presentation-latency figure now:
+    // the old one measured the wall-clock accumulator's surplus, which under a
+    // deadline schedule says nothing.
+    qint64 presentTargetNs_ = -1;
+    double presentSlotLatencyMs_ = 0.0;
+    // Times the schedule was re-phased because a handler overran its slot. This
+    // is the analogue of the old 4-frame accumulator backlog cap: a run that
+    // stalled resumes AT RATE rather than fast-forwarding through the arrears.
+    // Non-zero here means cost overrun (cause B), which GATE E does not fix and
+    // must not be blamed for -- it is the honest place that shows up now.
+    long long presentRephaseCount_ = 0;
+    // Reference interval for the jitter metric: the deadline the wake was armed
+    // for, so jitter measures the scheduler against its own intent rather than
+    // against a nominal rate. Still an int for the HUD's benefit.
     int schedulerIntervalMs_ = 42;
     QElapsedTimer schedulerTickClock_;
     long long schedulerTicks_ = 0;

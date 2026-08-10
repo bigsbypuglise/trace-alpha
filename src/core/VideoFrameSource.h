@@ -11,6 +11,7 @@ public:
 
     bool frameAt(long long frameIndex, VideoFrame& outFrame, QString& error) override;
     double fps() const override;
+    bool fpsRational(int& num, int& den) const override;
     long long currentFrame() const override { return currentFrame_; }
     void setCurrentFrame(long long frame) override { currentFrame_ = frame; }
     long long maxFrame() const override;

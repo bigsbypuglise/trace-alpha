@@ -124,6 +124,28 @@ bool asyncScrubEnabled() {
     return on;
 }
 
+// GATE E step 1. Default on; TRACE_DEADLINE_SCHED=0 restores the pre-GATE-E
+// fixed-interval tick and its wall-clock accumulator gate.
+//
+// This is a CONTROL SWITCH, selecting one of two whole schedulers -- it is not
+// a runtime blend of them, and nothing reads it per frame to decide how much of
+// each to apply. Plan section 24.3 forbids layering a second opinion about when
+// to present; having both implementations behind one flag is how that rule gets
+// tested rather than asserted.
+//
+// It exists because section 24.9 requires a negative control: a build that
+// still shows the old 62-frame beat, proving the harness can see the thing the
+// fix claims to have removed. Doing it with an env var rather than a control
+// BUILD means the two runs differ in one branch instead of in a compile.
+bool deadlineScheduleEnabled() {
+    static const bool on = [] {
+        const QByteArray raw = qgetenv("TRACE_DEADLINE_SCHED");
+        if (raw == "0") return false;
+        return true;
+    }();
+    return on;
+}
+
 // Preview sampling during an active drag. Default on.
 //
 // This is the one place Trace's "never skip a frame" rule is deliberately not
@@ -190,6 +212,13 @@ MainWindow::MainWindow() {
     setupTransportControls();
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
+        // GATE E: the timer is re-armed per wake against an absolute deadline,
+        // so it does not free-run. EVERY exit path below has to re-arm or
+        // playback stops dead -- hence a scope guard declared before the first
+        // return rather than a call at the end. armNextPresent() is a no-op
+        // when playTimer_ is inactive, so the stop paths inside stay correct.
+        const auto armNext = qScopeGuard([this]() { armNextPresent(); });
+
         if (!frameSource_ || !frameSource_->canPlay()) return;
         // A tick delivered by the event pump that runs during a slow remote
         // read must not re-enter the decoder. Skipping it is correct: the
@@ -268,10 +297,31 @@ MainWindow::MainWindow() {
         const int direction = playbackState.mode == PlaybackMode::PlayingReverse ? -1 : 1;
         const double speed = std::max(1.0, std::abs(playbackState.speed));
         const double fps = std::max(1.0, frameSource_->fps());
-        const double frameDurationMs = 1000.0 / (fps * speed);
+
+        // GATE E: the frame period comes from the EXACT rational when the
+        // container carries one. Everything else in this handler keeps using
+        // fps(), and should -- but a schedule built on 24000/1001 rounded to a
+        // double cannot be the reference for its own cadence error.
+        int fpsNum = 0;
+        int fpsDen = 0;
+        const bool exactRate = frameSource_->fpsRational(fpsNum, fpsDen);
+        const double frameDurationMs =
+            exactRate ? (1000.0 * static_cast<double>(fpsDen)) / (static_cast<double>(fpsNum) * speed)
+                      : 1000.0 / (fps * speed);
         // Published for the handler scope guard above, which needs the budget
         // this tick was actually working to.
         tickFrameDurationMs_ = frameDurationMs;
+
+        // Establishes the timeline on the first tick of a run, and re-epochs it
+        // if the speed changed. A no-op on every other tick.
+        syncPresentTimeline(frameDurationMs);
+
+        // How far past its armed deadline this wake landed. Measured before any
+        // work, so it is the scheduler's error and not this frame's cost.
+        if (presentTargetNs_ >= 0 && sessionClock_.isValid()) {
+            presentSlotLatencyMs_ =
+                static_cast<double>(sessionClock_.nsecsElapsed() - presentTargetNs_) / 1'000'000.0;
+        }
 
         if (!playbackClock_.isValid()) {
             playbackClock_.start();
@@ -307,8 +357,36 @@ MainWindow::MainWindow() {
             if (!schedulerTickClock_.isValid()) {
                 schedulerTickClock_.start();
             } else {
-                const double tickDeltaMs = static_cast<double>(schedulerTickClock_.restart());
-                lastTickJitterMs_ = tickDeltaMs - static_cast<double>(schedulerIntervalMs_);
+                // Nanoseconds, not restart(): restart() returns whole
+                // milliseconds, which is why this metric used to read as
+                // integers. Sub-millisecond precision is the point now that
+                // cadence is the thing being measured.
+                const double tickDeltaMs =
+                    static_cast<double>(schedulerTickClock_.nsecsElapsed()) / 1'000'000.0;
+                schedulerTickClock_.start();
+
+                // The reference is the FRAME PERIOD, not the armed interval.
+                //
+                // Under GATE E the timer is re-armed at the END of the handler,
+                // so the armed interval excludes the handler's own duration
+                // while tickDelta includes it: on 4444 (33ms handler, 41.67ms
+                // period) that read `tick 9ms` and `jitter 34ms` and looked
+                // like catastrophic scheduler error when the schedule was in
+                // fact within 1.8ms of its deadline all run. Measuring the
+                // wake-to-wake interval against the true period says what was
+                // meant, and stays comparable with the pre-GATE-E numbers in
+                // plan section 23.4, where the armed interval WAS the period.
+                //
+                // tickFrameDurationMs_ still holds the previous tick's budget
+                // here -- it is recomputed further down. At a steady speed the
+                // two are identical, and across a speed change one tick is
+                // measured against the old period, which is correct: that is
+                // the period the wake was actually scheduled under.
+                const double referenceMs =
+                    (deadlineScheduleEnabled() && tickFrameDurationMs_ > 0.0)
+                        ? tickFrameDurationMs_
+                        : static_cast<double>(schedulerIntervalMs_);
+                lastTickJitterMs_ = tickDeltaMs - referenceMs;
                 const double absJitter = std::abs(lastTickJitterMs_);
                 ++schedulerTicks_;
                 avgTickJitterMs_ += (absJitter - avgTickJitterMs_) / static_cast<double>(schedulerTicks_);
@@ -347,10 +425,32 @@ MainWindow::MainWindow() {
             // is exactly the 1-2/sec residue that survived every attempt to
             // filter the clock itself. With audio driving, the audio clock is
             // the only scheduler: it decides both when and which.
-            if (!audioActive && playbackAccumulatorMs_ < frameDurationMs) return;
+            //
+            // GATE E REMOVED THAT GATE ENTIRELY, for video and whether or not
+            // audio drives. The wake IS the due time now: playTimer_ is armed
+            // per frame at an absolute deadline computed from the exact source
+            // rational, so a tick that arrives is by construction a frame that
+            // is due. Gating it a second time against the wall-clock
+            // accumulator would put a second opinion about WHEN back into the
+            // path -- which is precisely the fault cd79d49 removed, and plan
+            // section 24.3 forbids re-introducing it under a different name.
+            //
+            // The accumulator is still fed above. It is the position source for
+            // the image-sequence branch below and it keeps a handover clean if
+            // audio stops mid-run; it simply has no vote on when to present.
+            //
+            if (!deadlineScheduleEnabled() && !audioActive
+                && playbackAccumulatorMs_ < frameDurationMs) {
+                return;
+            }
 
-            // Presentation latency: how far past its due time this frame went.
-            lastPresentLatencyMs_ = playbackAccumulatorMs_ - frameDurationMs;
+            // Presentation latency: how far past its armed deadline this wake
+            // landed. The old expression measured the accumulator's surplus,
+            // which under a deadline schedule is not an error term at all --
+            // so the control keeps the old one and only the control.
+            lastPresentLatencyMs_ = deadlineScheduleEnabled()
+                ? presentSlotLatencyMs_
+                : playbackAccumulatorMs_ - frameDurationMs;
             ++presentSamples_;
             avgPresentLatencyMs_ += (lastPresentLatencyMs_ - avgPresentLatencyMs_) / static_cast<double>(presentSamples_);
             maxPresentLatencyMs_ = std::max(maxPresentLatencyMs_, lastPresentLatencyMs_);
@@ -1116,16 +1216,29 @@ void MainWindow::openPath(const QString& path) {
     // periodic timer never pays. The residual gap is per-frame work, not
     // scheduler quantization, so the periodic timer stays.
     //
-    // The interval is floor(), not round(). round() puts the tick at 42ms for
-    // a 41.71ms frame (23.976fps) -- systematically SLOWER than the frame rate,
-    // so presentation can never keep up and the deficit shows as steady drift.
-    // Under the audio clock it showed as hold/skip churn (rep 14 skip 13 over
-    // 13s) on a file with 40x decode headroom, since every wasted tick had to
-    // be repaid by skipping a frame later. floor() makes the tick a *bound* on
-    // frame duration: opportunities always exist and the clock decides which
-    // ones to use, which is exactly what the hold branch is for. This is not
-    // the rejected short-poll scheduler above -- it stays a periodic timer at
-    // the frame interval, 1ms faster.
+    // GATE E SUPERSEDES THE floor()-VERSUS-round() ARGUMENT THAT USED TO BE
+    // HERE, and the reasoning is worth keeping because it explains why neither
+    // choice could have worked.
+    //
+    // The old rule was floor(1000/fps), because round() puts the tick at 42ms
+    // for a 41.71ms frame -- systematically slower than the frame rate, so
+    // presentation could never keep up. floor() made the tick a *bound* and let
+    // the playback clock choose which opportunities to use.
+    //
+    // But both are integers, and no integer divides 41.667. floor gave a 41ms
+    // grid, so presents landed 41ms or 82ms apart and never 41.667: 61 frames
+    // 1.6% fast, one held double, every 2.6s, on every file (plan section 23,
+    // median long-gap spacing 61-62 across all six runs). The tick could not
+    // be a bound AND a grid the presents land on, and it was both.
+    //
+    // The interval below is only a SEED. From the first tick of a run,
+    // armNextPresent() re-arms per frame against an absolute deadline built
+    // from the source's exact rational, so the arms alternate 41/42 and average
+    // the true period. This is NOT the "adaptive single-shot per frame" row in
+    // the table above: that one was measured on presented rate, which plan
+    // section 23.1 established cannot see the beat at all, and it is unknown
+    // whether it armed from an absolute deadline or a rounded period -- the
+    // code is not in history. See plan section 24.7.
     playTimer_.setSingleShot(false);
     schedulerIntervalMs_ = std::max(1, static_cast<int>(std::floor(1000.0 / fps)));
     playTimer_.setInterval(schedulerIntervalMs_);
@@ -1383,7 +1496,102 @@ void MainWindow::startPlaybackRun() {
     cadenceLongAt_.clear();
     handlerSamples_ = handlerOverBudget_ = 0;
     maxHandlerMs_ = 0.0;
+    // GATE E: invalidate the presentation timeline rather than establishing it
+    // here. The first tick sets the epoch, because the period depends on the
+    // playback speed and that is read inside the tick.
+    presentEpochNs_ = -1;
+    presentTargetNs_ = -1;
+    presentSlot_ = 0;
+    presentPeriodNs_ = 0.0;
+    presentSlotLatencyMs_ = 0.0;
+    presentRephaseCount_ = 0;
     playTimer_.start();
+}
+
+// GATE E step 1. Establishes the presentation timeline, and re-establishes it
+// when the period changes under it.
+//
+// Idempotent by design: it is called from every tick and does nothing on the
+// overwhelming majority of them. A speed change is the one thing that has to
+// re-epoch, because a new period measured from an old epoch is a schedule with
+// a step discontinuity in it -- the next deadline would land wherever the two
+// timelines happened to cross.
+void MainWindow::syncPresentTimeline(double frameDurationMs) {
+    if (!deadlineScheduleEnabled()) return;
+    const double periodNs = frameDurationMs * 1'000'000.0;
+    if (periodNs <= 0.0) return;
+
+    // 1us of tolerance. The period is recomputed from the rational every tick
+    // and is bit-identical across ticks at a steady speed, so this only trips
+    // on a real change; the tolerance is there so a future non-exact source
+    // cannot re-epoch itself continuously.
+    const bool periodChanged = std::abs(periodNs - presentPeriodNs_) > 1000.0;
+    if (presentEpochNs_ >= 0 && !periodChanged) return;
+
+    presentPeriodNs_ = periodNs;
+    presentEpochNs_ = sessionClock_.isValid() ? sessionClock_.nsecsElapsed() : 0;
+    presentSlot_ = 0;
+    presentTargetNs_ = presentEpochNs_;
+}
+
+// GATE E step 1. Advances the grid slot and arms playTimer_ for that slot's
+// absolute deadline.
+//
+// Called from a scope guard on every exit path of the playback tick. The slot
+// advances on EVERY wake, presented or held, so the heartbeat stays regular and
+// "which frame" is left entirely to the audio clock (plan section 24.3).
+void MainWindow::armNextPresent() {
+    // The control path leaves playTimer_ free-running at its open-time interval,
+    // which is exactly the pre-GATE-E behaviour.
+    if (!deadlineScheduleEnabled()) return;
+
+    // Every playTimer_.stop() in the codebase keeps working unchanged because
+    // of this line: a stopped run is not re-armed.
+    if (!playTimer_.isActive()) return;
+
+    if (presentEpochNs_ < 0 || presentPeriodNs_ <= 0.0) {
+        // No timeline yet -- the first tick has not run, or the media has no
+        // usable rate. Fall back to the nominal interval; the next tick
+        // establishes the timeline and takes over.
+        playTimer_.setInterval(schedulerIntervalMs_);
+        return;
+    }
+
+    const qint64 now = sessionClock_.isValid() ? sessionClock_.nsecsElapsed() : 0;
+    ++presentSlot_;
+    qint64 target = presentEpochNs_
+                  + static_cast<qint64>(std::llround(static_cast<double>(presentSlot_) * presentPeriodNs_));
+
+    if (target <= now) {
+        // The handler overran its slot. Re-phase to the next slot strictly
+        // after now instead of banking the debt -- this is the analogue of the
+        // old 4-frame accumulator cap, and it exists for the same reason: a run
+        // that stalled must resume AT RATE, not fast-forward through arrears.
+        //
+        // The epoch is NOT moved. Keeping it means the timeline stays anchored
+        // to where the run started, so a single long frame costs one slot
+        // rather than permanently shifting every deadline after it.
+        // Not named `slots`: Qt defines that as a macro, and `const double
+        // slots = ...` silently becomes `const double = ...`.
+        const double elapsedSlots = static_cast<double>(now - presentEpochNs_) / presentPeriodNs_;
+        presentSlot_ = static_cast<long long>(std::floor(elapsedSlots)) + 1;
+        target = presentEpochNs_
+               + static_cast<qint64>(std::llround(static_cast<double>(presentSlot_) * presentPeriodNs_));
+        ++presentRephaseCount_;
+    }
+
+    presentTargetNs_ = target;
+    const double delayMs = static_cast<double>(target - now) / 1'000'000.0;
+    // Rounded to a millisecond because QTimer takes an int -- but the NEXT arm
+    // is computed from the next absolute deadline, not from this one, so the
+    // rounding error does not accumulate. At 24fps the arms alternate 41/42 and
+    // average the true 41.667. That is the whole fix.
+    schedulerIntervalMs_ = std::max(0, static_cast<int>(std::lround(delayMs)));
+    // setInterval on an active timer restarts it, which is exactly the re-arm
+    // wanted here and is why playTimer_ stays a periodic timer rather than
+    // becoming single-shot: every existing isActive()/stop() call site keeps
+    // its meaning.
+    playTimer_.setInterval(schedulerIntervalMs_);
 }
 
 // Scrubbing suspends playback; it does not end it. The intent flag is what
@@ -2303,7 +2511,20 @@ void MainWindow::refreshHud(const QString& action) {
                       .arg(QString::number(vm.fps, 'f', 2))
                       .arg(playbackFramesPresented_);
 
-            const QString l5 = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | drift %8ms | ticks %9 | presents %10")
+            // `tick` is the delay the LAST wake was armed for, not a fixed
+            // interval: GATE E re-arms per frame against an absolute deadline,
+            // so at 24fps it alternates 41/42 and that alternation is the fix
+            // working. A tick pinned at one value means the timeline is not
+            // established -- no rational, or media that never started a run.
+            // `jitter` is wake-to-wake interval against the true frame period,
+            // which is what it always meant -- before GATE E the armed interval
+            // WAS the period, so the figures stay comparable with section 23.4.
+            // It is deliberately not measured against the armed interval any
+            // more; see the computation for why that read 34ms on a schedule
+            // that was within 1.8ms of its deadline.
+            // `rephase` counts slots abandoned because a handler overran, which
+            // is cost overrun (cause B) and is not something GATE E fixes.
+            const QString l5 = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | rephase %8 | drift %9ms | ticks %10 | presents %11")
                 .arg(schedulerIntervalMs_)
                 .arg(QString::number(lastTickJitterMs_, 'f', 2))
                 .arg(QString::number(avgTickJitterMs_, 'f', 2))
@@ -2311,6 +2532,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(lastPresentLatencyMs_, 'f', 2))
                 .arg(QString::number(avgPresentLatencyMs_, 'f', 2))
                 .arg(QString::number(maxPresentLatencyMs_, 'f', 2))
+                .arg(presentRephaseCount_)
                 .arg(QString::number(lastDriftMs_, 'f', 1))
                 .arg(schedulerTicks_)
                 .arg(presentSamples_);
