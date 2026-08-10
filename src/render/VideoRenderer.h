@@ -94,6 +94,22 @@ public:
     virtual const RenderStats& stats() const = 0;
 };
 
+// The host widget's size in device pixels, and the fitted destination rect
+// within it -- the two pieces of arithmetic every backend needs and both must
+// do identically.
+//
+// They are here rather than in each backend because they were written twice and
+// the copies disagreed. The CPU path fitted in logical pixels and let QPainter's
+// dpr transform land the rect where it may, while D3D11 fitted in device pixels;
+// at a fractional ratio that put the two destination rectangles a fraction of a
+// pixel apart, and the sampling phase offset that follows made the same frame
+// differ on 5-13% of the video band at dpr 1.25 and 1.5 while matching exactly
+// at dpr 1 and dpr 2. Even the truncation matters: qRound and static_cast<int>
+// of the same device size differ by one pixel often enough to move the centred
+// rect by half of one.
+QSize hostDeviceSize(const QWidget* host);
+QRect fitDeviceRect(QSize content, QSize deviceHost);
+
 // Builds the renderer selected by TRACE_RENDERER. "cpu" is the default and
 // always available; "d3d11" is opt-in and only exists in a Windows build. An
 // unknown or unavailable value warns and falls back to cpu, and name() then

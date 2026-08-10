@@ -4,7 +4,10 @@
 #include <QColor>
 #include <QElapsedTimer>
 #include <QPainter>
+#include <QRectF>
 #include <QWidget>
+
+#include <algorithm>
 
 namespace trace::render {
 namespace {
@@ -66,17 +69,17 @@ void CpuImageRenderer::paint(QWidget* host) {
         p.fillRect(host->rect(), QColor(0, 0, 0));
 
         if (hasImage_) {
-            const QSize fitted = image_.size().scaled(host->size(), Qt::KeepAspectRatio);
-            QRect target((host->width() - fitted.width()) / 2,
-                         (host->height() - fitted.height()) / 2,
-                         fitted.width(), fitted.height());
-            // Drawn in logical coordinates, but QPainter carries the widget's
-            // device-pixel-ratio transform, so the rectangle actually sampled
-            // into is `fitted * dpr`. That is the size the resample is really
-            // against, and it is what D3D11 reports for the same rectangle --
-            // the two disagreed by exactly the dpr until this was made explicit.
+            // Fit on the DEVICE grid -- the grid the frame is actually
+            // rasterised onto -- using the shared arithmetic, then express the
+            // result back in the logical coordinates QPainter takes. Fitting in
+            // logical pixels instead and letting the dpr transform land the rect
+            // where it may is what put this backend a fraction of a pixel away
+            // from D3D11 at fractional ratios; see hostDeviceSize().
             const double dpr = host->devicePixelRatioF();
-            const QSize drawn(qRound(fitted.width() * dpr), qRound(fitted.height() * dpr));
+            const QRect dev = fitDeviceRect(image_.size(), hostDeviceSize(host));
+            const QSize drawn = dev.size();
+            const QRectF target(dev.x() / dpr, dev.y() / dpr,
+                                dev.width() / dpr, dev.height() / dpr);
             // Nearest-neighbour point sampling is what jagged every diagonal
             // edge in the frame: any window that is not exactly the source
             // resolution drops whole pixel rows and columns. Filter whenever

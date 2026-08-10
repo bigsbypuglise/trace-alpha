@@ -567,8 +567,7 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     double drawMs = 0.0;
 
     const double dpr = host->devicePixelRatioF();
-    const QSize pixels(std::max(1, static_cast<int>(host->width() * dpr)),
-                       std::max(1, static_cast<int>(host->height() * dpr)));
+    const QSize pixels = hostDeviceSize(host);
 
     if (pixels != swapChainSize_) {
         // The surface window tracks the widget. Done here rather than in
@@ -599,16 +598,21 @@ void D3D11VideoRenderer::paint(QWidget* host) {
 
     // Letterbox by viewport. Everything outside it is the clear colour, so the
     // bars come for free and the shader never has to know about them.
-    QSize fitted = pixels;
+    //
+    // The fit goes through the shared helper so the CPU backend lands on exactly
+    // the same rectangle; they were separate expressions and disagreed by a
+    // fraction of a pixel at fractional DPI.
+    QRect dest(QPoint(0, 0), pixels);
     bool resampled = false;
     if (hasContent_ && !contentSize_.isEmpty()) {
-        fitted = contentSize_.scaled(pixels, Qt::KeepAspectRatio);
-        resampled = (fitted != contentSize_);
+        dest = fitDeviceRect(contentSize_, pixels);
+        resampled = (dest.size() != contentSize_);
     }
+    const QSize fitted = dest.size();
 
     D3D11_VIEWPORT vp = {};
-    vp.TopLeftX = static_cast<float>((pixels.width() - fitted.width()) / 2);
-    vp.TopLeftY = static_cast<float>((pixels.height() - fitted.height()) / 2);
+    vp.TopLeftX = static_cast<float>(dest.x());
+    vp.TopLeftY = static_cast<float>(dest.y());
     vp.Width = static_cast<float>(std::max(1, fitted.width()));
     vp.Height = static_cast<float>(std::max(1, fitted.height()));
     vp.MinDepth = 0.0f;
