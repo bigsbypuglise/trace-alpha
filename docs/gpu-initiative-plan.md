@@ -1725,3 +1725,122 @@ silently make interactive previews worse: the scrub path currently converts to
 *display size* in swscale (`b5a56af`), and a GPU path that uploads full-res
 planes instead would move that cost rather than remove it. Playback throughput
 would not show it; the scrub harness would.
+
+---
+
+## 21. GATE B close-out (2026-08-09, second session)
+
+The two items §20.2 left open are done, and §20.3 is answered. **Human visual
+review is the only thing still outstanding**, and it is the owner's to give.
+
+### 21.1 HUD units — fixed (`58ec879`)
+
+`RenderStats::lastDrawSize` is **device pixels** on both backends, and the unit
+is now stated on the field. The CPU backend draws in logical coordinates but
+QPainter carries the dpr transform, so the rectangle actually sampled into is
+`fitted * dpr`; that is what it reports. Verified at `QT_SCALE_FACTOR=1.5` on
+4K H.264: both backends read `display 960x540 filtered`, against 640x360 vs
+960x540 before.
+
+The resample *test* moved to the device size with it, which is a behaviour
+change rather than a reporting one: at dpr 1.5 a frame fitted to a logical rect
+of its own size is being upscaled by half again, and the logical comparison
+called that `1:1` and switched filtering off for it.
+
+### 21.2 §20.3 answered — the downscale ratio was a confound (`ddb38ca`)
+
+The recorded puzzle was that CPU and D3D11 differ at 1.5x (a 4x downscale) and
+not at dpr 1 (6x), which is backwards for a filter-quality story. **The ratio
+was never the variable.** The window opens at a fixed *logical* size, so raising
+the scale factor also makes the video band physically bigger — DPI and ratio
+moved together.
+
+Sweeping the window at dpr 1 across ratios 5.6x → 2.28x, **4.33x included**, the
+two backends are identical (0% differing, max channel delta 1–3). Holding one
+window and varying only the scale factor:
+
+| scale factor | differing | max Δ |
+|---|---|---|
+| 1.00 | 0% | 2 |
+| 1.25 | 8.9% | 146 |
+| 1.50 | 5.8% | 75 |
+| 2.00 | 0% | 2 |
+
+Integer ratios agree exactly, fractional ones do not. **The same-renderer
+control reads exactly 0 at every scale factor**, so this is a backend difference
+and not capture noise — that control did not exist before and no A/B number
+here meant anything without it.
+
+Cause: duplicated arithmetic. The CPU path fitted in logical pixels and let the
+dpr transform land the rect where it may; D3D11 fitted in device pixels. At a
+fractional ratio the two rectangles end up a fraction of a pixel apart. A
+parabola fit to the whole-pixel shift search puts the offset at about
+**(−0.25, +0.5) device pixels** — sub-pixel, which is why a whole-pixel search
+called the pictures aligned and nearly closed the investigation early.
+
+`hostDeviceSize()` and `fitDeviceRect()` are now the one expression both
+backends use, truncation included. **dpr 1.25: 8.9% → 2.6%, max 146 → 50.**
+dpr 1.5 is unchanged and its output is byte-identical across builds, so the
+rects already coincided there and the residual is a genuine filter difference
+between Qt's raster bilinear and the D3D11 sampler under a fractional-scale
+transform. That is the part that needs an eye.
+
+**This box runs at 100% scaling, where all of it is zero.**
+
+### 21.3 Visual A/B set — produced, awaiting the owner
+
+`scripts/measure/gateb_visual.ps1`, 4K ProRes 422 HQ (the bar) at frame 40,
+matched native-resolution pairs plus stacked 5x crops, in
+`Desktop\Trace_GateB_Visual`:
+
+| condition | pixel diff |
+|---|---|
+| fit-to-window (1400x1000) | **identical**, max Δ 2 |
+| maximized | **identical**, max Δ 2 |
+| fullscreen (2560x1440 client) | **identical**, max Δ 2 |
+| 150% scaling | 8.3% differing, max Δ 51 |
+
+Three of the four conditions are the same picture. Only fractional DPI differs,
+per §21.2, and on inspection the crops show equal colour, black level and edge
+sharpness — the difference reads as a sub-pixel phase shift, not a quality
+regression. **None of that is the sign-off**; 4K ProRes 422 HQ against the CPU
+path, judged by eye, still is.
+
+**True 1:1 is not reachable for 4K sources on this panel** and was not tested as
+such: 3840 wide needs a video rect the 5120x1440 display cannot give once chrome
+is accounted for. Maximized and fullscreen are the closest conditions available.
+
+*The fullscreen row nearly passed on a windowed capture.* The harness sent F11;
+the shortcut is **Ctrl+Return** (`MainWindow.cpp:593`), so nothing happened and
+the capture was of the 1400x1000 window, reported as a fullscreen pass. It is
+asserted now — the script fails if the window did not actually grow. Same shape
+as the black-first-frame trap in §18.1: a check that cannot fail is not a check.
+
+### 21.4 Deferred scrub tripwires — re-run, neither got worse
+
+§15.5 item 3 required these to be re-run after the surface landed, on the
+grounds that a tripwire never re-run is just a deferred bug.
+
+| gesture | cpu | d3d11 |
+|---|---|---|
+| 4K H.264 reversals | stalls 46/44/44, rev-hit 98.3% | stalls 67/44/46, rev-hit 98.1% |
+| 4K H.264 playback | 98.3 / 97.5 / 98.3% | 97.4 / 98.3 / 97.4% |
+| ProRes 4444 reversals | stalls 92 of 111, rev-hit 21.1% | stalls 93 of 104, rev-hit 18.9% |
+| ProRes 4444 snap release | stalls 62 of 62, `target 261 shown 261` | stalls 57 of 57, `target 261 shown 261` |
+
+All rows `delta 0`, `detach 0.00`, `stale-blocked 0`, `recov 0`. The d3d11
+`67 / ui-over-16ms 21` is a first-run-of-session warm-up outlier; the two
+repeats read 44 and 46 against CPU's 44.
+
+**Two things to carry, neither caused by this session's changes:**
+
+1. **The absolute stall count is ~20x the figure recorded in §17.4** (44 of 351
+   against "2 of 394") on the *same* file and gesture — and it is on **both**
+   renderers. A control build of the previous commit reads `stalls 44 of 351`,
+   `ui over 16ms 1 of 988`, so it predates the device-grid change and is not a
+   regression from it. It is either machine state (the panel now enumerates as
+   5120x1440 @ 239Hz, and Parsec virtual display adapters are installed) or
+   something between `8a7cdb3` and here. **Unexplained, and worth an hour before
+   GATE E**, because stalls are the metric the scrub complaints live in.
+2. Run any renderer comparison **twice**. The first run of a session on d3d11
+   carries a warm-up cost large enough to look like a regression.
