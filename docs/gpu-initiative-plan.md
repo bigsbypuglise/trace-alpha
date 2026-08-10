@@ -3393,3 +3393,11 @@ The HUD reports `display WxH filtered xN`. 4444 reads `x4` (ratio 6.4), 4K H.264
 6. **Step 10 (10-bit output) is unaffected and still deferred.** §9's warning
    holds: high-bit-depth *processing* has been done since GATE C; 10-bit *output*
    needs an `R10G10B10A2` swapchain and a display in 10-bit mode.
+7. **The tap cap is a precaution, not a verified bound.** It is set at 4 because
+   WARP has to run this backend, but CI's `--renderer-selftest=d3d11` deliberately
+   never `show()`s and never draws a video frame, so **the loop has never executed
+   on a software rasteriser**. The selftest confirms the shader *compiles* there
+   (run 65 on `e2bf799` is green at step 12, `planar=1`, no fallback) and that is
+   what it was built to catch — but nobody has measured a 4x4 reduction on WARP,
+   and a machine that falls back to it would be the first to find out. If the
+   selftest is ever extended to paint a frame, this is the reason to do it.
