@@ -452,6 +452,123 @@ acted on.
 
 ---
 
+## 11a. BUILT AND MEASURED (2026-08-10, same session)
+
+Sections 1–10 are the measurement pass and the proposal. This section is what was
+then built. Read it in preference to §7 where the two disagree — §7 is a design
+and this is what the design turned into once it met the machine.
+
+### 11a.1 The threading hypothesis is REFUTED
+
+§5 predicted that long-GOP `FF_THREAD_SLICE` would collapse the ~30ms seek
+intercept. It does — and the trade is catastrophic, so the answer is no.
+
+Added `TRACE_LONGGOP_SLICE_THREADS=1` as scaffolding (off by default) and
+re-ran the two-point solve on 4K H.264:
+
+| | intercept | per walked frame |
+|---|---|---|
+| frame threading (shipped) | 30.4ms | **2.59ms** |
+| slice only | **19.4ms** | 15.7ms |
+
+**About 11ms of the intercept really is pipeline refill.** Removing it costs
+**13ms on every walked frame**, which on a 30-frame GOP is +390ms. Reverse 1x
+measures 91.9% → **73.5%** with a worst handler of **565.8ms**; forward 4K H.264
+holds 98.9% but its handler goes 2.66 → **17.99ms**, which would not survive the
+60fps budget. Frame threading is what makes the GOP walk cheap and it is bought
+back many times over.
+
+Recorded as a closed question. The knob stays as the control.
+
+### 11a.2 The cache-pricing fix (`c55db40`)
+
+`reverseCacheCapacity` and `entriesThatFit()` priced an entry at `w × h × 4`,
+which has been the wrong currency since GATE C made entries planar. **Seeded at
+open and then replaced by the size of the first full-resolution frame actually
+stored** — observed rather than predicted, because a predicted size has to be
+kept in agreement with the converter forever and that is what lapsed.
+
+4K H.264 reverse 1x: **87.0/89.7% → 91.9%**, seeks 11/10 → **4**, hit 88.8 →
+94.8%, long-gap spacing 13 → **30 = exactly the GOP**. The same result
+previously required `TRACE_REVERSE_CACHE_MB=1024`; it reproduces at the shipped
+384MB, which is what proves the entry count was the binding term and memory
+never was.
+
+### 11a.3 The shuttle (`e9fd236`)
+
+Built as §7.1 + §7.2. §7.3's keyframe snap is **not** built — see 11a.5.
+
+Reverse decode runs on the existing `ScrubDecodeWorker` under the existing lease.
+Results are **queued**, not presented on arrival; the playback tick pops one per
+slot. The stride is the commanded speed, and presentation stays at one frame per
+source period at every speed.
+
+**4K H.264 (GOP 30), % of the demanded speed:**
+
+| speed | before | after | over budget | cadence p95 |
+|---|---|---|---|---|
+| 1x | 87.0% | **99.2%** | 11 of 114 → **0 of 113** | 118.9 → **43.1ms** |
+| 2x | 75.7% | **100.1%** | → **0 of 54**, starve 0 | **43.0ms** |
+| 5x | — | **95.0%** | 0 of 23 | 42.8ms |
+| 10x | — | ~9.8x | 0 of 14 | 43.8ms |
+| 30x | — | ~26x | 1 of 7 | — |
+
+Worst reverse handler **132.6 → 6.3ms** at 1x, and long cadence gaps disappear
+entirely (`long-gap min/med/max --`).
+
+**ProRes is the clearest case, because it has no GOP and the stride is the whole
+mechanism.** 4444 reverse 1x goes 99.7 → **100.0%** with the handler falling
+**24.46 → 3.87ms**; **10x runs in full at 24 presents/s with `starve 0` and p99
+42.9ms**, on the file that previously reached 33% of 4x.
+
+### 11a.4 What was verified, and the two faults measurement found
+
+Not regressed: forward 4K H.264 99.1%, `handler>budget 0 of 120`, worker
+`posted 0`; forward 4444 99.7%, `0 of 198`, stalls 0, hitch 0; backward drag
+`rev-hit 94.0%`, seeks 6, hitch 4, `delta 0`; `lifecycle -PlayThroughDrag` PASS
+and `-PausedThroughDrag` PASS. Landing exactness with a control leg: **+1 moved
+5.5%, −1 returned 0.1%**.
+
+Every exit from a run is enumerated and tested rather than sampled
+(`scripts/measure/revtransitions.ps1`): K, Space, L, stepping, slider press,
+media switch, quit. All pass.
+
+**Two faults the measurement caught, both worth keeping:**
+
+**Reaching the head of the file ended the run but did not stop playback.**
+`reverseRunActive_` went false while the mode stayed `PlayingReverse`, so the
+next tick took the ordinary synchronous path *at the shuttle's speed* — period
+41.71/30 = 1.39ms — and decoded on the UI thread as fast as it could. It was
+visible only in the tail of a run, as `sched tick 1ms` on a run that had
+otherwise presented perfectly.
+
+**The pipeline was silently disabled by a guard that reads like the opposite of
+what it means.** `isVideoScrubActive()` means "the media is a video file", not
+"a drag is in progress", so `if (isVideoScrubActive()) return;` refused every
+case the function exists to serve. Nothing looked wrong: the run behaved exactly
+as before, and the only symptom was `posted 0` on the worker line.
+
+### 11a.5 Open, in priority order
+
+1. **The keyframe snap (§7.3) is not built, and 30x is where it shows.** 4K
+   H.264 reaches ~26x because its GOP is 30 and a stride of 30 lands on
+   keyframes by arithmetic accident. **1080p (GOP 48) reaches ~20x of 30x**, with
+   `starve 6 of 17` — every sample falls mid-GOP and pays a walk. Snapping the
+   sample to the nearest keyframe at or below the ideal target is the fix, and
+   §5's numbers say it costs ~30ms instead of ~71ms there.
+2. **Owner question:** at 30x on a file whose GOP does not divide the stride,
+   is the exact speed at a lower presentation rate preferred, or a smoother
+   picture at a lower speed? Snapping can hit 30x exactly at ~15 presents/s, or
+   present at 24/s and land near 20x. This is a feel decision and it must be
+   taken **at the machine**, not over Parsec.
+3. **`outside` is still unattributed** (§10 item 3). It matters less now — the
+   shuttle holds presentation at 24/s at every speed, so the ~10ms ceiling is no
+   longer near — but it is still the term that would cap any future higher
+   presentation rate.
+4. **The rewind ladder changed `jogReverse` from 1/2/4 to 1/2/5/10/30.** That is
+   an engine change driven by the interface spec, not interface work, but it does
+   alter what J does today and the owner should know.
+
 ## 11. What the next session does, in order
 
 1. **Attribute `outside`** (§10 item 3). One instrumented run. It sets the presentation

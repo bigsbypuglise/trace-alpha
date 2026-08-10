@@ -43,9 +43,18 @@ they are where every previous reverse or scrub attempt in this project actually 
 validated async scrub/cache infrastructure where appropriate, but **do not weaken exact
 scrub release or increase normal playback cost.** Full brief in `docs/next-session-prompt.md`.
 
-**THE MEASUREMENT PASS AND THE PROPOSAL ARE DONE (2026-08-10, `docs/reverse-shuttle-plan.md`);
-no reverse-shuttle code was written, by instruction.** Read that document before proposing
-anything here. Three results decide the shape of the work and each is measured:
+**THE SHUTTLE IS BUILT AND MEASURED (2026-08-10, `e9fd236`; plan §11a).** Reverse decode
+runs on the existing scrub worker under the existing lease, results are **queued** and the
+tick pops one per slot, and **the stride is the commanded speed** while presentation stays
+at one frame per source period. 4K H.264 reverse: **1x 87.0 → 99.2% of real time** with
+`handler>budget 11 → 0` and worst handler **132.6 → 6.3ms**; **2x 75.7 → 100.1%**; 5x 95%;
+10x ~9.8x; 30x ~26x. ProRes 4444 1x **99.7 → 100.0%** (handler 24.46 → 3.87ms) and **10x in
+full at 24 presents/s, `starve 0`**. `TRACE_REVERSE_ASYNC=0` is the control. **Still open:
+the keyframe snap for high speeds on files whose GOP does not divide the stride — 1080p
+reaches ~20x of 30x — and an owner question about which way that trade should go.**
+
+**The measurement pass and the proposal are in `docs/reverse-shuttle-plan.md`.** Read that
+document before proposing anything here. Three results decide the shape of the work and each is measured:
 **(a) at reverse 1x the decoder is IDLE 80–93% of the time** on long-GOP and still misses
 real time — the deficit is burstiness, not throughput, which is the opposite of the drag
 path and is why §15.3's decline of directional prefetch **does not carry over**;
@@ -238,6 +247,49 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   **It was masking the real reverse-playback weakness.** Reverse on 4K H.264 now measures **86.7% of real time**, `handler>budget 11 of 110 (max 111.1ms)`, `p95 123.6ms` — the GOP-walk cost the roadmap describes. Any reverse-playback figure taken between GATE E and 2026-08-10 measured the scheduler fault instead.
 
+- **The reverse shuttle: queue the frames, and let the SPEED be the stride** (2026-08-10,
+  `e9fd236`, plan §11a.3). Two mechanisms, and the second is the one to remember.
+
+  **Reverse decode runs on the scrub worker under the same lease, and results are QUEUED
+  rather than presented on arrival.** The tick pops one per slot, so a ~130ms GOP walk is
+  absorbed by the queue instead of by the picture. What makes this legitimate where §15.3
+  declined it for the drag is that **a reverse target is arithmetic** — at stride S the next
+  frame is always `lastAsked − S` — so running ahead is not speculation. The drag's worker
+  measured 59–74% supply and was saturated; reverse at 1x measures 80–93% idle.
+
+  **The stride is the COMMANDED SPEED, and presentation stays at one frame per source
+  period at every speed.** Nothing measured feeds back into the stride, so it cannot run
+  away the way three of §15's four failed gate inferences did — every one of those inferred
+  a *cost*, and the stride changes the cost. It also makes cadence identical at 1x and 30x
+  by construction, which is the "stable, intentional" half of the goal rather than a tuning
+  outcome. The ladder is now 1x/2x/5x/10x/30x (`jogReverse`), the interface's speeds.
+
+  Results, % of the demanded speed: 4K H.264 **1x 87.0 → 99.2**, **2x 75.7 → 100.1**, 5x 95,
+  10x ~9.8x, 30x ~26x; worst handler **132.6 → 6.3ms** and long cadence gaps gone entirely.
+  ProRes 4444 **1x 99.7 → 100.0%** with the handler falling **24.46 → 3.87ms**, and **10x in
+  full at 24 presents/s with `starve 0` and p99 42.9ms** — the file that previously reached
+  33% of 4x. ProRes is where the stride is the whole mechanism, because there is no GOP.
+
+  **Reaching the head of the file must STOP playback.** Ending the run without stopping left
+  `reverseRunActive_` false while the mode stayed `PlayingReverse`, so the next tick took the
+  synchronous path *at the shuttle's speed* (period 41.71/30 = 1.39ms) and decoded on the UI
+  thread as fast as it could — visible only in the tail of a run, as `sched tick 1ms`.
+
+  **`isVideoScrubActive()` means "the media is a video file", not "a drag is in progress".**
+  Guarding the shuttle on it disabled the entire pipeline while every other counter looked
+  healthy; `posted 0` on the worker line was the only symptom. Use `scrubbing_`.
+
+  **Open: the keyframe snap for high speeds.** 4K H.264 reaches ~26x because its GOP is 30
+  and a stride of 30 lands on keyframes by arithmetic accident; **1080p (GOP 48) reaches
+  ~20x of 30x** with `starve 6 of 17`, because every sample falls mid-GOP and pays a walk.
+  Snapping to the nearest keyframe at or below the target costs ~30ms instead of ~71ms there.
+  It carries an owner question — see the reverse entries in `docs/reverse-shuttle-plan.md` §11a.5.
+- **Long-GOP slice-only threading is REFUTED as a reverse lever** (2026-08-10, plan §11a.1).
+  The ~30ms seek intercept really is ~11ms pipeline refill — and removing it costs **13ms on
+  every walked frame**, which on a 30-frame GOP is +390ms. Reverse 1x measures 91.9 → **73.5%**
+  with a worst handler of **565.8ms**, and forward 4K H.264's handler goes 2.66 → **17.99ms**,
+  which would not survive the 60fps budget. **Frame threading is what makes the GOP walk
+  cheap.** `TRACE_LONGGOP_SLICE_THREADS=1` is retained as the control. Closed question.
 - **Reverse playback is BURSTY, not slow — measured 2026-08-10, `docs/reverse-shuttle-plan.md`.**
   The first cross-format reverse measurement in the project, taken with the new
   `scripts/measure/revplay.ps1` (physical panel, d3d11, 384MB cache, `win 1280x829`).
@@ -710,8 +762,13 @@ back to swscale BGRA on the d3d11 path — the control for any planar measuremen
 `TRACE_GPU_REDUCE=0` (step 9 off, back to a single bilinear tap for the
 downscale — exact rather than approximate, and deliberately separate from
 `TRACE_PLANAR_UPLOAD` so a planar A/B does not change two things at once),
-and `TRACE_DEADLINE_SCHED=0` (GATE E step 1 off, back to the fixed integer tick
-and its accumulator gate — the negative control for any cadence measurement).
+`TRACE_DEADLINE_SCHED=0` (GATE E step 1 off, back to the fixed integer tick
+and its accumulator gate — the negative control for any cadence measurement),
+`TRACE_REVERSE_ASYNC=0` (reverse shuttle off, back to synchronous UI-thread
+reverse — its own knob rather than sharing `TRACE_ASYNC_SCRUB`, so a reverse A/B
+does not also change how dragging behaves), and `TRACE_LONGGOP_SLICE_THREADS=1`
+(slice-only threading for long-GOP codecs — **measured and refuted**, retained as
+the control for that closed question).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
 a default launch reports `renderer d3d11` (`renderer cpu` before 2026-08-10),

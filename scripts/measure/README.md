@@ -95,6 +95,23 @@ cache full of the frames the run is about to ask for.
 Reverse is silent by design, so unlike the cadence runs this needs no
 `TRACE_NO_AUDIO` control -- every file is on the same scheduler already.
 
+`revtransitions.ps1 -All -Clip $clip` covers every way OUT of a reverse run --
+K, Space, L, stepping, slider press, media switch, quit -- each on its own app
+instance. A reverse run holds the decoder LEASE, and a path that leaves one
+without returning it does not misbehave visibly; it strands the decoder on the
+worker. That is plan section 29.2's lesson applied in advance: enumerate the
+entry points rather than testing the one the harness happens to drive.
+
+Two things it teaches, both learned the hard way:
+
+- **Do not name a PowerShell helper `Diff`.** `diff` is a built-in alias for
+  `Compare-Object` and aliases outrank functions, so the helper is never called
+  and every verdict in the run is decided by something unrelated to the app.
+  `lifecycle.ps1` calls its version `SigDiff` for exactly this reason.
+- **The expectation is part of the test.** The first version asserted that
+  Space during a reverse run leaves the picture MOVING, and failed the app for
+  pausing -- which is what Space has always done to any active playback.
+
 `-Traverse` waits for the picture to stop changing instead of holding a fixed
 time. Its sampling resolution is ~200ms, which is too coarse for a fast traverse;
 the HUD's own `frames` and `elapsed` are exact and answer the same question.
