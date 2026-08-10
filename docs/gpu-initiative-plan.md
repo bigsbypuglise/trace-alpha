@@ -3687,3 +3687,190 @@ do not cite the decline, and do not assume the opposite either.
 CI green on `4fb4d31` (run 70, including `--renderer-selftest=d3d11` and the
 launchability check), everything pushed, tree clean. No reverse-playback
 implementation was begun, by instruction.
+
+---
+
+## 31. Interface-pass prerequisites — both built and measured (2026-08-10)
+
+The owner lifted the no-interface-work rule and chose the interface pass. §2 of
+`docs/interface-pass-1-spec.md` was re-derived first (see that document; it is no longer the
+2026-08-09 text), and it named two structural blockers, both renderer-boundary work rather
+than UI work. Both are now done. Phase 1 of the spec — the read-only audit — is
+`docs/interface-pass-1-audit.md`.
+
+### 31.1 Prerequisite 1 — the overlay is a real path, on BOTH backends (`5e1f834`)
+
+§19/§20.1 left a **disposable spike**: placeholder art, D3D11 only, off by default. That was
+defensible while `d3d11` was opt-in. **The default flip on 2026-08-10 inverted it**, and this
+is the part §2 item 1 could not have known: the composited path is what ships, and
+`TRACE_RENDERER=cpu` — the documented escape hatch, *"the first thing to try if anything about
+the picture looks wrong"* — had **no compositor at all**. A floating transport built only in
+`OverlayCompositor` would mean that advice costs the user their transport.
+
+So the split is by *responsibility*, not by backend. `OverlayModel` owns layout, artwork,
+hover, press, fade, auto-hide, hit-testing and the hooks, and emits **quads** in surface device
+pixels. `D3D11OverlayDrawer` is the old compositor with the state removed;
+`CpuImageRenderer` draws the same quads with `QPainter`.
+
+**The two agree because the arithmetic is the same, not because they were matched by eye.**
+Premultiplied source composited as `src + dst*(1 - srcA)` is what D3D11's ONE/INV_SRC_ALPHA
+and Qt's SourceOver on `ARGB32_Premultiplied` each already do. The only thing QPainter cannot
+express is the RGB-only `brighten`, so the CPU path caches tinted atlas copies — invalidated
+by the model's **atlas revision**, the same counter that tells the GPU path when to re-upload
+and the thing that makes "no per-frame upload" checkable rather than asserted.
+
+**Pixel snapping turned out to be load-bearing.** Measured before snapping, on the same frame:
+the panel body already agreed to a channel delta of **2**, but the play glyph differed on
+**8.1% of its pixels with a peak of 29** — two resamplers reconstructing the same art at a
+fractional offset. Snapping every rect to whole device pixels makes each blit 1:1 and removes
+the resample rather than trying to match it:
+
+| region | before snapping | after |
+|---|---|---|
+| play icon | 8.1% differ, max delta 29 | **0.0%, max delta 1** |
+| rewind icon | — | **0.0%, max delta 1** |
+| panel corner | 0.8%, max delta 2 | 0.8%, max delta 2 |
+| track line | 15.3%, max delta 4 | 3.4%, max delta 2 |
+
+The residual under the panel is the **video showing through the translucency**, which is the
+known CPU-vs-GPU scaling difference (step 9 fixed only the GPU path), not the overlay.
+
+The one genuinely stretched quad — the track, from an 8x8 white patch — samples an inset 6x6,
+because a source rect flush with the patch edge pulls the surrounding transparency in and
+fringes the ends on both backends.
+
+**Input** on d3d11 still arrives through the surface's window procedure with `MA_NOACTIVATE`.
+The CPU path had no route at all and now has ordinary Qt mouse events on `ViewerWidget`. The
+two cannot race: under d3d11 the child HWND is above the widget and takes the hit-test itself,
+which is the same fact that closed the Qt-widget overlay route (§18.4). Verified on both:
+clicking the overlay's Play starts playback, both land on frame 27, and
+`GetForegroundWindow()` is still the Qt main window afterwards.
+
+### 31.2 Cost — and the first control was not a control
+
+§19.3's number is a **static overlay held visible through a playback run**. That was right for
+the spike and is the wrong test for the shipping path: the case that can hurt is a **fade
+during a drag**, where the 16ms fade timer and the scrub worker want the same UI thread.
+
+The first attempt compared "drag the overlay track" against "the same drag with the overlay
+off" — and there is no overlay track to drag when it is off, so the control reported
+`paints 0/1` and a playhead that never moved. **It measured a drag against no drag.** The
+control had to become the validated **transport-groove drag**: same reversal sequence, same
+sweep durations, same 4ms spin-paced steps, same async scrub path underneath.
+`scripts/measure/overlay_drag.ps1`.
+
+4K H.264, `win 1280x843`, d3d11, physical panel at 239.999Hz, two runs each:
+
+| | overlay drag | groove control |
+|---|---|---|
+| `hitch` | **1, 1** | 1, 1 |
+| `ui over 16ms` | 2 of 885, 4 of 864 | 4 of 836, 10 of 872 |
+| `ui gap max` | 17.1, 17.5ms | 84.5, 84.1ms |
+| `stalls` (>8.3ms) | 50 of 409, 53 of 407 | 72 of 366, 65 of 371 |
+| `delta` | 0, 0 | 0, 0 |
+| `paints` | 547/413, 520/411 | 370/376, 375/376 |
+
+**The `ui gap max` difference is repeatable and is NOT attributed.** It is the control that is
+worse, twice, on both backends (cpu reads 19.0 against 135.6). Two candidate mechanisms were
+considered and neither survives: it is not "the overlay avoids Qt events", because the CPU
+overlay route *is* Qt events; and it is not obviously the press landing, because both gestures
+press at the left end with the playhead already there. **Do not quote it as an overlay win.**
+What the table supports is the weaker and sufficient claim: **the overlay costs the drag
+nothing.** `hitch` is 1 everywhere, the landing is exact everywhere, and the ~140 extra paints
+from fade and hover buy no worse timing.
+
+Playback, overlay held visible through a 4K run (the §19.3 test, re-taken on the promoted
+path): presented **99.1% both**, 120/120 frames both, p50/p95/p99 **41.6 / 42.8 / 43.4 both**,
+`handler>budget 0 of 120` both. Paint average **0.04 -> 0.06ms**, paints **120 -> 153**. On the
+CPU backend the same comparison during a drag reads paint average **0.23 -> 0.28ms** — that
+**+0.05ms per paint against a 41.67ms budget is the one cleanly attributable cost of drawing
+the entire overlay**, and it is the number to quote.
+
+**Still OFF by default**, deliberately: the mechanism is real, the artwork is still the
+spike's placeholder geometry until phase 2, and switching it on today puts two transports on
+screen at once. `TRACE_OVERLAY` is the name; `TRACE_OVERLAY_COMPOSITED` still works because
+the harness sets it. HUD reads `+overlay`.
+
+**Rewind and Fast-forward still call the single-frame step actions and are still named for
+it.** The spec re-points them at the shuttle in phases 4-5; renaming the hook now without
+changing what it calls is the trap `isVideoScrubActive()` set.
+
+### 31.3 Prerequisite 2 — the view-transform contract (`4b7174f`)
+
+`VideoRenderer::setViewTransform(const ViewTransform&)`. A **viewing** transform: no decoded
+pixel, frame identity, cache entry or timing changes. Rotating in the decode path would mean
+re-converting, re-caching and re-costing every frame for something a coordinate transform does
+for nothing.
+
+**D3D11 applies it in the vertex shader, to the texture coordinate — which is why neither
+pixel shader changed.** Both sample at `input.uv` and neither can tell the uv arrived rotated,
+so 4:2:0/4:2:2/4:4:4, every bit depth, the BGRA path and step 9's box average all inherit it
+without a variant. The matrix is a 2x2 about the centre of the unit square, at the *vertex*
+stage's `b0` (no collision with YuvParams at the *pixel* stage's `b0`), bound per draw because
+the overlay pass writes the vertex stage's `b0` too.
+
+The matrix maps a **destination** offset back to the source, so it is the inverse of what the
+viewer sees and its signs read backwards from the request. Derived by corners rather than by
+trusting a convention: a clockwise quarter turn must put the source's top-left at the
+destination's top-right.
+
+**Two things had to follow the transform, and both fail silently:**
+
+- **The fit.** A quarter turn exchanges the axes, so a 16:9 source letterboxes as 9:16. Both
+  backends fit the *displayed* size. Measured: `display 640x360` at rot0 and `202x360` at
+  rot90, **identical on cpu and d3d11**.
+- **The reduction.** Step 9's taps come from the reduction ratio and its footprint is a step
+  in **source** uv, so under a quarter turn the destination's horizontal extent is a step
+  along the source's vertical axis. Taps are recomputed from the post-transform fit and the
+  footprint components exchanged. Measured: `filtered x3` at rot0 becomes **`x4` at rot90** —
+  the ratio moving 6.0 -> 10.7, not a value left over from the unrotated fit. **This is §2's
+  named trap and it is the easiest thing here to get silently wrong**: on a square-ish
+  reduction it is invisible, and it is step 9's defect reintroduced by a coordinate mistake.
+
+The CPU path uses a `QPainter` transform rather than `QImage::transformed()`, which would
+allocate and copy ~37MB per present at 4K. **Its `scale` and `rotate` are named in the order
+that makes the rotation apply first and the flip second**, matching the shader: QPainter
+post-multiplies, so the last transform named is the innermost, and naming them the other way
+round turns `rot90 + flipH` into `rot90 + flipV` — two backends differing by a mirror while
+every number agrees.
+
+Verified on both backends at rot90 and rot90+flipH: same orientation, same mirror, same
+pillarboxed rect. `TRACE_VIEW_TRANSFORM` ("90", "180h", "v") is the knob; the HUD reports
+`view rot90 flipH`, because a transform that silently fails to apply looks identical to no
+transform.
+
+### 31.4 Regression across both prerequisites
+
+4K H.264, d3d11, `win 1280x843`, physical panel, `TRACE_NO_AUDIO=1` for cadence:
+
+| | before (pre-change baseline) | after both prerequisites |
+|---|---|---|
+| presented | 99.9 / 100.0% | 100.0 / 99.9% |
+| frames | 120 / 120 | 120 / 120 |
+| cadence p50 | 41.7 / 41.8 | 41.8 / 41.8 |
+| p99 | 43.2 / 43.3 | 43.2 / 43.5 |
+| `handler>budget` | 0 of 119 (max 4.0) | 0 of 119 (max 3.8) |
+| scrub reversals `hitch` | 1 | 1 |
+| `stalls` | 73 of 377 | 71 of 364 |
+| `rev-hit` | 98.7% | 98.7% |
+| landing | `delta 0` | `delta 0` |
+
+`-SnapRelease` lands `target 120 shown 120 delta 0` at full resolution.
+`lifecycle.ps1 -PlayThroughDrag` PASS (40.1% moved), `-PausedThroughDrag` PASS (0% moved).
+Renderer selftest `renderer=d3d11 fellback=0 planar=1`, exit 0.
+
+### 31.5 Open after the prerequisites
+
+1. **The `ui gap max` asymmetry above is unattributed** (§31.2). Repeatable on both backends
+   and in the control's favour to explain, not the overlay's. Worth an hour if the drag path
+   is ever revisited; not blocking.
+2. **The overlay's timeline press may not land exactly the way a groove click does.** A
+   groove click is an absolute set and lands through Step (`scrubJumpPending_`); the overlay
+   calls `setSliderDown(true)` then `setValue()`. Both reported `delta 0` here, but the
+   press-lands-exactly *path* was not isolated — test it in phase 6 with the playhead
+   deliberately far from the press point.
+3. **`src/ui/OverlaySpike.*` is now doubly superseded** — it was the Qt-widget probe §18.4
+   closed, and it holds the only `MouseButtonDblClick` in the tree. Retire it during phase 2's
+   icon-source reconciliation.
+4. The accessibility proxy tree (§19.7) is still a plan, not a prototype, and the overlay must
+   not be called final until a screen reader has driven one.

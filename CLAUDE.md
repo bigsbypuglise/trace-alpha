@@ -112,11 +112,40 @@ them from the *post-transform* fit or the box average filters the wrong axis. **
 premise was half wrong** — video is already zero-based including the right endpoint, but the
 image-sequence and still HUD lines print `currentFrame + 1`.
 
-**The two GPU prerequisites come first**, and both are renderer-boundary work rather than UI
-work: promote the composited overlay to a real path with a renderer-neutral home and its cost
-re-measured against a fade *during a drag* (`ui gap`, not presented rate — §19.3's number is
-a static overlay through a playback run), and add a view-transform contract to
-`VideoRenderer`, which has none.
+**BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
+phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
+both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
+`hitch 1`, `delta 0`, `-SnapRelease` landing exactly, both lifecycle through-drag gestures
+passing. Read plan §31 before touching either.
+
+- **The overlay is a real path on BOTH backends** (`5e1f834`). `OverlayModel` owns layout,
+  art, fade, hit-testing and the hooks and emits **quads**; `D3D11OverlayDrawer` and
+  `CpuImageRenderer` each just draw them. The two agree because the compositing arithmetic is
+  the same on both, and **pixel-snapping the layout is what made them agree**: before it the
+  play glyph differed on 8.1% of its pixels at max delta 29, purely from two resamplers
+  reconstructing the same art at a fractional offset; after it, 0.0% at max delta 1. **Still
+  OFF by default** — the mechanism is real, the artwork is still placeholder until phase 2,
+  and enabling it now puts two transports on screen. `TRACE_OVERLAY` (or the retained
+  `TRACE_OVERLAY_COMPOSITED`); the HUD reads `+overlay`.
+
+  **The first cost control was not a control**: "the same drag with the overlay off" has no
+  overlay track to drag, so it measured a drag against no drag (`paints 0/1`). The real
+  control is the transport-groove drag with the identical reversal sequence
+  (`scripts/measure/overlay_drag.ps1`). Result: `hitch 1` either way, landing exact either
+  way, and the only cleanly attributable cost is **+0.05ms per paint on the CPU backend**
+  (0.23 → 0.28ms against a 41.67ms budget). The `ui gap max` gap in the overlay's favour
+  (17 vs 84ms, repeatable) is **unattributed — do not quote it as a win**.
+
+- **`VideoRenderer` has a view-transform contract** (`4b7174f`). D3D11 applies it in the
+  **vertex shader's texture coordinate**, which is why neither pixel shader changed and every
+  subsampling, bit depth and the box average inherit it without a variant. Two things had to
+  follow it and both fail silently: the **fit** (a quarter turn re-letterboxes — measured
+  `display 640x360` → `202x360`, identical on both backends) and the **reduction taps**
+  (`filtered x3` → `x4` at rot90, recomputed from the post-transform fit with the footprint
+  axes exchanged). The CPU path names `scale` before `rotate` deliberately — QPainter
+  post-multiplies, so the other order turns `rot90 + flipH` into `rot90 + flipV` and the two
+  backends would differ by a mirror while every number agreed. `TRACE_VIEW_TRANSFORM=90|180h|v`
+  is the knob until phase 10 wires actions; the HUD reads `view rot90 flipH`.
 
 Owner context: Anj is a VFX/motion-design lead, not a programmer. Explain things plainly; he tests builds on a Windows RTX 4090 box; development happens on macOS. Don't ask him to debug code — give exact copy-paste terminal commands when he needs to run anything.
 
@@ -839,9 +868,12 @@ downscale — exact rather than approximate, and deliberately separate from
 and its accumulator gate — the negative control for any cadence measurement),
 `TRACE_REVERSE_ASYNC=0` (reverse shuttle off, back to synchronous UI-thread
 reverse — its own knob rather than sharing `TRACE_ASYNC_SCRUB`, so a reverse A/B
-does not also change how dragging behaves), and `TRACE_LONGGOP_SLICE_THREADS=1`
+does not also change how dragging behaves), `TRACE_LONGGOP_SLICE_THREADS=1`
 (slice-only threading for long-GOP codecs — **measured and refuted**, retained as
-the control for that closed question).
+the control for that closed question), `TRACE_OVERLAY=1` (the floating transport,
+**off by default** while its artwork is still placeholder; `TRACE_OVERLAY_COMPOSITED=1`
+is retained because the harness sets it), and `TRACE_VIEW_TRANSFORM=90|180|270|h|v`
+(rotate/flip, a test knob until spec phase 10 wires the real actions).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
 a default launch reports `renderer d3d11` (`renderer cpu` before 2026-08-10),
