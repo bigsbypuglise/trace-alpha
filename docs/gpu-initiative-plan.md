@@ -36,7 +36,12 @@ channel delta 2-3). Conversion cost falls 2.5-4.1x; presented rate is unchanged,
 so the win is headroom rather than throughput. Scrub is unchanged, which is what
 §20.7 asked to be verified.
 
-**`cpu` remains the default renderer.** GATE C changes nothing for it.
+**~~`cpu` remains the default renderer.~~ SUPERSEDED 2026-08-10: `d3d11` IS THE
+DEFAULT** (§25). `TRACE_RENDERER=cpu` is now the control and the escape hatch.
+Statements elsewhere in this file that `cpu` is the default are dated records of
+what was true when the measurement beside them was taken; they are left as
+written rather than rewritten, because a decision log that edits its own history
+cannot be checked.
 
 The overlay question is **settled and the work is stopped** (§20.1): the child
 HWND stays, `WA_PaintOnScreen` is not promoted, and renderer-composited
@@ -282,7 +287,8 @@ the CI rules exist to prevent. CI runners have no GPU, so D3D11 will land on WAR
 assert the renderer *initializes* so a broken path fails the build rather than silently
 falling back forever.
 
-`TRACE_RENDERER=cpu` stays the default until Gate E.
+`TRACE_RENDERER=cpu` stays the default until Gate E. **Fulfilled 2026-08-10:
+Gate E passed and the default is now `d3d11` — see §25.**
 
 ## 6. Post-mortem — the two reverted async attempts
 
@@ -534,7 +540,8 @@ Three decisions here that the audit left open:
   are properties of the host's event loop, not of any backend. `RenderStats` is
   folded into `ViewerPerfStats` after each paint so the HUD reads one struct.
 
-`TRACE_RENDERER` defaults to `cpu`; an unknown value warns on stderr and falls
+`TRACE_RENDERER` defaulted to `cpu` when this was written; **it defaults to
+`d3d11` as of 2026-08-10 (§25)**. An unknown value warns on stderr and falls
 back. The HUD `renderer` field names what is actually presenting — **a GPU path
 that quietly never engages while the app looks fine is the failure mode this is
 built against**, and it is the same reason CI should assert the renderer
@@ -2812,3 +2819,80 @@ A yes makes flipping the default to `d3d11` a live option to take *with* GATE E
 rather than after it. **It is not to be flipped unilaterally** — it is a product
 decision, and §5's "`TRACE_RENDERER=cpu` stays the default until Gate E" is a
 statement about when the question opens, not an instruction to answer it.
+
+---
+
+## 25. `d3d11` is the default renderer (2026-08-10, owner decision)
+
+**The owner tested both backends side by side and chose `d3d11`.** This is the
+product decision §24.12 and §5 both deferred to this moment, and it is taken
+here rather than inferred from the numbers, which is what those sections asked.
+
+Every gate that held it back has passed: **GATE B** with visual sign-off (§20.2),
+**GATE C**'s planar upload confirmed against swscale at 8, 10 and 12 bits (§22),
+and **GATE E**'s cadence work (§24.13). §5's "`TRACE_RENDERER=cpu` stays the
+default until Gate E" has run its course.
+
+### 25.1 The measured case, on 4K ProRes 4444
+
+| | `cpu` | **`d3d11` + planar** |
+|---|---|---|
+| doubled frames per 11s | 1 | **0** |
+| handlers over budget | 1 of 260 | **0 of 260** |
+| worst present gap | 62.5ms | **45.9ms** |
+| tick jitter max (§23.4) | 11–14ms | **2–3ms** |
+| conversion (`sws`) | 16.6ms | **5.6ms** |
+| real time | 99.3% | **99.8%** |
+
+Note what this is **not**: a playback-rate win. §22.3 established presented rate
+was unchanged at 98.3–99.6% by GATE C because none of these files was
+conversion-bound at 24fps. What the GPU path buys is **headroom** — and GATE E
+turned that headroom into the last doubled frame going away, because a 25ms
+handler delays the timer and a 10ms one does not.
+
+### 25.2 What changed, and what the escape hatch is
+
+`createRenderer()` returns `D3D11VideoRenderer` when `TRACE_RENDERER` is unset,
+on any build that has it (Windows + MSVC + fxc). **`TRACE_RENDERER=cpu` is now
+the control and the escape hatch, and it is the first thing to try if anything
+about the picture looks wrong.**
+
+Three properties that made this a one-line change rather than a project:
+
+- **Fallback already lives in the host.** `ViewerWidget`'s constructor adopts
+  `createCpuRenderer()` if the selected backend fails `initialize()`, and warns
+  which one is presenting. A GPU backend fails for reasons that only exist once
+  there is a device and a window, so this was always the right place for it
+  (§17.3) — and it is what makes flipping the default safe on a machine nobody
+  has tested.
+- **The HUD names what is actually presenting**, not what was requested. That is
+  the check that the flip took, and it is the reason "a GPU path that quietly
+  never engages while the app looks fine" (§12) is not a risk here.
+- **A non-Windows build has no d3d11 to default to**, so the `#else` arm returns
+  the CPU backend for an unset variable and lets an explicit `d3d11` request
+  fall through to the warning. A build that cannot honour the request says so.
+
+### 25.3 Verified after the flip
+
+Launched with **no environment variables at all** — what a double-click gets:
+
+- HUD reads **`renderer d3d11`**, `sws 5.05ms`, `dst` planar;
+- 4444: **99.8% of real time**, 0 in the doubling bucket, `handler>budget 0 of
+  260`, `rephase 0`, max gap 45.5ms;
+- `TRACE_RENDERER=cpu` still reads **`renderer cpu`** with `dst RGB32/BGRA`;
+- lifecycle on the new default: `PlayThroughDrag` 13.5% moved,
+  `PausedThroughDrag` **0.0%**, step ±5 cycles clean.
+
+### 25.4 What this obliges the next session to do
+
+**Every scrub and playback baseline in this document was taken on `cpu`**, and
+most are not tagged with a renderer because there was only one default. They are
+still valid as *records*; they are no longer valid as *comparisons* against a
+run taken today. Re-tag as you re-measure — and per §22.8, quote `win WxH` too,
+since stall counts are a function of window size and dominate.
+
+The two open items §20.4 and §24.4 leave behind are now **more** load-bearing,
+not less: real mixed-monitor DPI has never been tested and the box has one
+display, and the display's mode was observed to change mid-session on
+2026-08-10 (5120x1440 @ 239.999Hz in the morning, 1920x1200 @ 60Hz in the
+afternoon). A default GPU path makes both of those the shipping path.

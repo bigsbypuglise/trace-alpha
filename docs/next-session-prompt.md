@@ -19,7 +19,8 @@ repo root.
 ---
 
 Read `CLAUDE.md` and `docs/gpu-initiative-plan.md` first — §9, §22 (GATE C), §23 (the
-cadence characterisation) and §24 (GATE E) are the load-bearing sections.
+cadence characterisation), §24 (GATE E) and §25 (the default-renderer flip) are the
+load-bearing sections.
 
 ## What just happened, and the one thing not to undo
 
@@ -46,25 +47,28 @@ per 24.000fps frame. **Do not start E2 without a specific new cadence complaint.
 `TRACE_DEADLINE_SCHED=0` restores the old scheduler in the same binary. It is the negative
 control for any cadence measurement and it still shows the fault.
 
-## The open decision, and it is the owner's
+## `d3d11` is now the default renderer (2026-08-10)
 
-**Should `d3d11` become the default renderer?** GATE B passed with visual sign-off, GATE C
-landed, GATE E has now passed — so §5's "`cpu` stays the default until Gate E" no longer
-holds anything back. The measured case, on 4K ProRes 4444:
+The owner tested both side by side and chose it. Plan §25 has the measured case and
+the verification; the short version is that on 4K ProRes 4444 it takes doubled frames
+1 -> 0, handlers over budget 1 -> 0, worst present gap 62.5 -> 45.9ms and conversion
+16.6 -> 5.6ms. **`TRACE_RENDERER=cpu` is now the control and the escape hatch, and it
+is the first thing to try if anything about the picture looks wrong.**
 
-| | cpu (current default) | d3d11 + planar |
-|---|---|---|
-| doubled frames per 11s | 1 | **0** |
-| handlers over budget | 1 of 260 | **0 of 260** |
-| worst present gap | 62.5ms | **45.9ms** |
-| real time | 99.3% | **99.8%** |
-| conversion cost | `sws 16.6ms` | **`sws 5.6ms`** |
+**Two obligations follow and they are easy to forget.**
 
-Real, but **below the owner's threshold** — they are happy on `cpu`. So this is a
-"do we want the headroom" decision, not a fix. Ask; do not flip it unilaterally.
+**Every scrub and playback baseline in the plan was taken on `cpu`**, and most are not
+tagged with a renderer because there was only one default. They remain valid as records;
+they are *not* valid as comparisons against a run taken today. Re-tag as you re-measure,
+and quote `win WxH` with any stall or scrub number (§22.8 — stall counts are a function
+of window size and dominate).
 
-If it does flip, `TRACE_RENDERER=cpu` becomes the fallback control and every scrub and
-playback baseline in the plan needs re-tagging with which renderer it was taken on.
+**The untested-DPI gaps are now the shipping path.** Real mixed-monitor DPI has never
+run (§20.4), the box has one display, and its mode was observed changing mid-session on
+2026-08-10 — 5120x1440 @ 239.999Hz in the morning, 1920x1200 @ 60Hz in the afternoon.
+Never assume a recorded refresh rate or geometry still holds; `scripts/measure/refresh.ps1`
+reports the current one, and it matters because 24fps is exactly 10 refreshes at 240Hz
+and a 2:3 cadence at 60Hz.
 
 ## Candidate next work, in rough order
 
@@ -100,7 +104,8 @@ Nothing here is started. Pick with the owner rather than assuming.
   its deadline, because the timer is re-armed after the handler and the reference had
   quietly become decode cost. Check what a metric is measured *against* before believing a
   number that moved by an order of magnitude.
-- Harness: `scripts/measure/cadence.ps1` (cadence distribution — the only thing that can
+- Harness: `scripts/measure/sidebyside.ps1` (both backends on screen at once, with a
+  readback that proves which one each window actually adopted), `cadence.ps1` (cadence distribution — the only thing that can
   see a beat; presented rate cannot), `playhud.ps1` (taller crop, for `rep`/`skip` and the
   audio line), `refresh.ps1` (the display's true rational rate), `lifecycle.ps1`,
   `scrub.ps1`, `stalls_vs_window.ps1`. **Cadence controls need `TRACE_NO_AUDIO=1`** — 4444

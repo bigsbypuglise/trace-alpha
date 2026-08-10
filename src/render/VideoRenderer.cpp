@@ -41,10 +41,30 @@ std::unique_ptr<VideoRenderer> createCpuRenderer() {
 std::unique_ptr<VideoRenderer> createRenderer() {
     const QByteArray requested = qgetenv("TRACE_RENDERER").toLower();
 
-    if (requested.isEmpty() || requested == "cpu") return createCpuRenderer();
+    if (requested == "cpu") return createCpuRenderer();
 
 #ifdef TRACE_WITH_D3D11
-    if (requested == "d3d11") return std::make_unique<D3D11VideoRenderer>();
+    // D3D11 IS THE DEFAULT as of GATE E's close (2026-08-10, owner decision).
+    // Every gate that held it back has passed: GATE B with visual sign-off,
+    // GATE C's planar upload, and GATE E's cadence work -- so the plan's
+    // "TRACE_RENDERER=cpu stays the default until Gate E" has run its course.
+    //
+    // Measured on 4K ProRes 4444 against the cpu path: 0 doubled frames rather
+    // than 1, 0 handlers over budget rather than 1, worst present gap 45.9ms
+    // rather than 62.5, 99.8% of real time rather than 99.3%, and conversion
+    // cost 5.6ms rather than 16.6.
+    //
+    // `TRACE_RENDERER=cpu` is now the control and the escape hatch, and it is
+    // the first thing to try if anything about the picture looks wrong.
+    if (requested.isEmpty() || requested == "d3d11") {
+        return std::make_unique<D3D11VideoRenderer>();
+    }
+#else
+    // Not a Windows/MSVC/fxc build. The default is the only backend there is,
+    // and an explicit request for d3d11 falls through to the warning below --
+    // which is the point: a build that cannot honour the request should say so
+    // rather than quietly presenting through something else.
+    if (requested.isEmpty()) return createCpuRenderer();
 #endif
 
     // Say so rather than falling back silently. A GPU backend that never

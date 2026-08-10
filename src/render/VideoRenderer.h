@@ -120,10 +120,11 @@ public:
 QSize hostDeviceSize(const QWidget* host);
 QRect fitDeviceRect(QSize content, QSize deviceHost);
 
-// Builds the renderer selected by TRACE_RENDERER. "cpu" is the default and
-// always available; "d3d11" is opt-in and only exists in a Windows build. An
-// unknown or unavailable value warns and falls back to cpu, and name() then
-// reports what was actually created.
+// Builds the renderer selected by TRACE_RENDERER. **"d3d11" is the default** as
+// of 2026-08-10, on any build that has it (Windows + MSVC + fxc); "cpu" is
+// always available and is now the control and the escape hatch. An unknown or
+// unavailable value warns and falls back to cpu, and name() then reports what
+// was actually created.
 //
 // This can only decline a backend it knows cannot run. A backend that fails in
 // initialize() is the host's problem to fall back from, because only the host
