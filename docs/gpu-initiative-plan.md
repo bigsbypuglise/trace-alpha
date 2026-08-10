@@ -3013,3 +3013,70 @@ makes it one number to change either way.
 3. **§15.3 still holds.** Directional prefetch remains declined — supply is
    55–67% on the files that hitch, so the worker is saturated and has no idle
    time to spend speculating. Nothing here changes that.
+
+### 26.5 Verification of the 384MB default — owner-requested, 2026-08-10
+
+Owner kept the default and asked for three confirmations and no further work.
+No code changed for this; all three are measured on the shipping build.
+
+**(1) It does not grow without bounds.** Bounding is structural: there is exactly
+one insertion point (`pushReverseCache`'s `push_back`) and the eviction loop runs
+immediately after it, until `bytes <= budget` or one entry remains. The
+documented exception is a single frame larger than the whole budget, which is
+kept — bounded by one frame. The replace-in-place branch above it can overshoot
+by (new − old) size for one frame and is corrected by the next insert.
+
+Measured rather than asserted: six consecutive multi-gesture reversal runs on 4K
+H.264 in one process, working set sampled between each —
+
+    before any scrub  429MB
+    round 1  875MB    round 2  928MB    round 3  907MB
+    round 4  916MB    round 5  922MB    round 6  920MB
+
+It fills on the first run and then plateaus; rounds 2–6 vary ±20MB with no
+trend. The HUD after round 6 reads `cache FIFO | 111/111 (382.2/384 MB)` after
+**1357 inserts and 1245 evictions** — the budget was never exceeded.
+
+The convert pool is separately bounded by `convertPoolLimit` entries (clamped,
+max 132); when full it returns null and the converter allocates a private buffer
+the frame owns, so a full pool costs an allocation rather than growth.
+
+**(2) It is discarded on a file change.** `close()` clears the cache and its byte
+count, and `open()` calls `close()` first, so changing files cannot carry entries
+across. `open()` clears the convert pool too. `setScrubPreviewSize` (window
+resize) and `setPlanarOutputEnabled` also clear it, because an entry describes a
+decision and does not survive the decision changing.
+
+Measured by opening a second file in the same process after the six rounds
+above: working set **920 → 254MB**, and the HUD reads `cache FIFO | 1/129 (3.0/384
+MB) | hit 0.0% (0/1) | ins 1 evict 0` — empty, and the capacity re-derived for
+the new source. Note there is **no explicit close-file action in the UI**; opening
+another file and quitting are the only routes out, and both are covered.
+
+**(3) It does not affect playback.** A/B at 384 against `TRACE_REVERSE_CACHE_MB=192`,
+two runs each, `win 1280x829`/`1280x815`, d3d11. Note the display had changed to
+1920x1200 @ 59.999Hz by this point, so 24fps carries the display's own 2:3
+cadence in every row — that is imposed on all players equally and is not Trace's.
+
+| file | budget | real time | frames | `>2.5x` | `handler>budget` |
+|---|---|---|---|---|---|
+| 1080p H.264 (audio) | 192 | 99.6% | 240/240 | 0 | 0 of 240 |
+| 1080p H.264 (audio) | **384** | 99.6%, 99.6% | 240/240 | 0 | 0 of 240 |
+| 4K H.264 (audio) | 192 | 99.1%, 99.1% | 120/120 | 0 | 0 of 120 |
+| 4K H.264 (audio) | **384** | 99.1%, 99.1% | 120/120 | 0 | 0 of 120 |
+| ProRes 4444 | 192 | 99.8%, 99.8% | 261/261 | 0 | 0 of 260 |
+| ProRes 4444 | **384** | 99.8%, 99.8% | 261/261 | 0 | 0 of 260 |
+
+Rate, frame count, doubling bucket and over-budget handlers are identical
+throughout. **One figure is not identical and is reported rather than smoothed**:
+4444's `1.5-2.5x` bucket reads 0,1 at 192 and 2,2 at 384. The within-config
+spread overlaps, `>2.5x` is 0 in all four runs and the presented rate does not
+move, so this is at or below the noise floor — but it is two counts, not zero,
+and a future 4444 cadence question should know it was seen.
+
+**The display mode changed mid-session again**, 5120x1440 @ 239.999Hz to
+1920x1200 @ 59.999Hz, this time between the §26.3 sweep and this verification.
+The §26.3 table is unaffected: every capture in it reads `(>8.3ms)`, so the whole
+sweep was taken at 240Hz, and `hitch` is threshold-independent by construction.
+**This is the second time in one session that the hazard §26.1 describes has
+fired live.** Quote `hitch`, and check the printed threshold.
