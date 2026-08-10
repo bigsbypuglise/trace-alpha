@@ -507,6 +507,26 @@ struct VideoDecoderFFmpeg::Impl {
     // but still the right bound for things that must be sized before any frame
     // exists: the conversion pool, and how far a seek walk may fill.
     int reverseCacheCapacity = 12;
+    // Footprint of ONE full-resolution cache entry, in the layout actually being
+    // stored.
+    //
+    // This exists because the figure it replaces was `w * h * 4` -- the BGRA
+    // footprint -- and has been wrong since GATE C made full-resolution entries
+    // planar (`e8566a4`). At 4K it priced an 11.86MB yuv420p plane set at
+    // 33.2MB, so the derived entry count read 11 where the byte budget really
+    // holds 32, and that count is what clamps how far a seek walk may fill. The
+    // fault was invisible because nothing enforces the count -- eviction is by
+    // bytes -- so the cache filled correctly while every decision *derived* from
+    // the count was made on a third of the truth.
+    //
+    // Seeded at open with the BGRA worst case, because something has to be
+    // available before any frame exists, and then REPLACED by the size of the
+    // first full-resolution frame actually stored. Observing it rather than
+    // predicting it is deliberate: a predicted size has to be kept in agreement
+    // with the converter forever, and that agreement is exactly what lapsed. The
+    // same reasoning made `previewRes` a property set by the conversion rather
+    // than by the call site (`03d840e`).
+    long long fullResEntryBytes = 0;
     // -1 = adapt per request from measured conversion cost (see below).
     // Overridden by TRACE_SEEK_CACHE_WINDOW for A/B.
     int seekWalkCacheWindowOverride = -1;
@@ -813,7 +833,23 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     const AVCodecDescriptor* codecDesc = avcodec_descriptor_get(par->codec_id);
     const bool intraOnly = codecDesc && (codecDesc->props & AV_CODEC_PROP_INTRA_ONLY);
     impl_->codec->thread_count = 0;
-    impl_->codec->thread_type = intraOnly ? FF_THREAD_SLICE : (FF_THREAD_FRAME | FF_THREAD_SLICE);
+    // TRACE_LONGGOP_SLICE_THREADS=1 applies the intra-only rule to long-GOP too.
+    // Measurement scaffolding, off by default.
+    //
+    // Reverse playback measured a fixed cost of ~30ms per seek that does NOT
+    // scale with resolution -- 30.4ms at 4K and 30.2ms at 1080p, from a
+    // two-point solve (docs/reverse-shuttle-plan.md section 5) -- against a seek
+    // that itself measures 5.8-7.7ms. Something resolution-independent is
+    // spending 20-24ms on every seek, and the pipeline refill described in the
+    // comment above is the obvious candidate: it is the same mechanism, on the
+    // same code path, that moved intra-only codecs to slice threading.
+    //
+    // Forward playback throughput is what this trades against and is the control
+    // for any run with it set.
+    const bool forceSliceThreads = envFlagSet("TRACE_LONGGOP_SLICE_THREADS");
+    impl_->codec->thread_type = (intraOnly || forceSliceThreads)
+        ? FF_THREAD_SLICE
+        : (FF_THREAD_FRAME | FF_THREAD_SLICE);
     metadata_.intraOnly = intraOnly;
 
     if (avcodec_open2(impl_->codec, impl_->codecDef, nullptr) < 0) {
@@ -886,10 +922,18 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
         // Worst case: every entry full resolution. Half-res scrub entries cost
         // a quarter of this, so the byte budget will hold about four times as
         // many of them -- which is the point.
+        // Seed only. The first full-resolution frame stored replaces it with
+        // what an entry really costs; see fullResEntryBytes.
+        impl_->fullResEntryBytes = frameBytes;
         const int byFootprint = frameBytes > 0
             ? static_cast<int>(impl_->reverseCacheBudgetBytes / frameBytes)
             : 12;
-        impl_->reverseCacheCapacity = std::clamp(byFootprint, 4, 32);
+        // Upper bound raised 32 -> 256 with the pricing fix. The old cap was set
+        // when an entry was priced as BGRA and 32 was comfortably above anything
+        // reachable; priced honestly, 4K planar already reaches 32 exactly and
+        // 1080p reaches 123, so the cap had become a second wrong answer sitting
+        // behind the first. 256 matches entriesThatFit's own bound.
+        impl_->reverseCacheCapacity = std::clamp(byFootprint, 4, 256);
     }
     // One target per outstanding holder: the reverse cache, the viewer, the
     // frame in flight, plus slack. Buffers here are the same ones the old
@@ -914,11 +958,11 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     impl_->drainPacketSent = false;
     impl_->decoderFullyDrained = false;
     impl_->scrubWalkCacheBudgetMs = std::max(0, envInt("TRACE_SCRUB_FILL_MS", 60));
+    // Clamped at the USE site, not here. Clamping at open pinned it to a count
+    // derived from the seed footprint -- the BGRA one -- so asking for a
+    // 30-frame fill at 4K silently got 11 and the experiment that asked for it
+    // read as refuted. The bound belongs where the real entry size is known.
     impl_->seekWalkCacheWindowOverride = envInt("TRACE_SEEK_CACHE_WINDOW", -1);
-    if (impl_->seekWalkCacheWindowOverride >= 0) {
-        impl_->seekWalkCacheWindowOverride =
-            std::min(impl_->seekWalkCacheWindowOverride, impl_->reverseCacheCapacity);
-    }
     impl_->dstPixFmt = AV_PIX_FMT_BGRA;
 
     // Prime the full-resolution slot. The preview slot is built lazily on the
@@ -1090,6 +1134,17 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
             return;
         }
 
+        // Learn what a full-resolution entry really costs, from one that exists.
+        // Only full-res entries teach anything: a preview is a different size on
+        // purpose and is priced separately by entriesThatFit.
+        if (!frame.previewRes && frame.sizeInBytes() > 0
+            && frame.sizeInBytes() != impl_->fullResEntryBytes) {
+            impl_->fullResEntryBytes = frame.sizeInBytes();
+            impl_->reverseCacheCapacity = std::clamp(
+                static_cast<int>(impl_->reverseCacheBudgetBytes / impl_->fullResEntryBytes),
+                4, 256);
+        }
+
         impl_->reverseCache.push_back(frame);
         impl_->reverseCacheBytes += frame.sizeInBytes();
         ++perfStats_.cacheInserts;
@@ -1120,8 +1175,15 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     // actually being produced -- assuming the full-res worst case is exactly
     // the mistake the byte budget exists to correct.
     auto entriesThatFit = [&](bool previewRes) {
-        long long bytes = static_cast<long long>(metadata_.width) * metadata_.height * 4;
+        // Full-res entries are priced from what one really costs (planar since
+        // GATE C, and a third to a half of the BGRA figure this used to use).
+        // Previews stay on swscale and are still BGRA, so the preview branch
+        // keeps computing from w*h*4 -- that one is not stale.
+        long long bytes = impl_->fullResEntryBytes > 0
+            ? impl_->fullResEntryBytes
+            : static_cast<long long>(metadata_.width) * metadata_.height * 4;
         if (previewRes) {
+            bytes = static_cast<long long>(metadata_.width) * metadata_.height * 4;
             bytes /= 4;
             if (impl_->previewDisplayW > 0 && impl_->previewDisplayH > 0) {
                 const QSize fit = QSize(metadata_.width, metadata_.height)
@@ -1864,7 +1926,8 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     if (!didSeek) {
         cacheWindow = entriesThatFit(producesPreviewRes);
     } else if (impl_->seekWalkCacheWindowOverride >= 0) {
-        cacheWindow = impl_->seekWalkCacheWindowOverride;
+        cacheWindow = std::min<long long>(impl_->seekWalkCacheWindowOverride,
+                                          entriesThatFit(producesPreviewRes));
     } else {
         // Who is waiting decides how much to buy.
         //
