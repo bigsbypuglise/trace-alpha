@@ -123,11 +123,39 @@ Nothing here is started. Pick with the owner rather than assuming.
    `alloc` is 0.61–0.65ms of a 32ms frame at 4K — visible, not binding. Left alone on
    purpose so it would not confound the budget measurement. **The owner declined it as
    part of the cache work**, so it needs raising with him rather than picking up.
-4. **Deferred GPU items 8, 9, 10** — texture/upload reuse, GPU scaling, 10-bit output.
-   These buy headroom, and §23.4 established headroom is no longer the binding constraint
-   on playback. Item 9's honest target is the Step landing (§9).
+4. ~~**Deferred GPU items 8, 9, 10**~~ — **8 is CLOSED answered-no and 9 is DONE**
+   (2026-08-10, plan §27/§28). Only **step 10, 10-bit output**, is still deferred, and it
+   needs an `R10G10B10A2` swapchain and a display in 10-bit mode — a different thing from
+   the high-bit-depth *processing* that shipped at GATE C. Read the §28.6 open items before
+   picking anything up here; two of them are owner decisions.
 5. **LucidLink read-ahead** — two designs measured worse; try full-request buffered serving
    before partial reads, then benchmark. Not in progress.
+
+## The scaling pass, 2026-08-10 — read before touching the picture
+
+Plan §27 and §28 in full. Three things carry.
+
+**Step 8's premise had expired and step 8 is closed.** GATE B's own lazy creation already
+reused everything — `tex 3` across 261 frames of 4444 playback, `tex 4` across a 406-paint
+reversal drag — and the residual upload is memcpy bandwidth (56.6MB in 3.47ms = 16.3 GB/s).
+A staging buffer is strictly more work and its justification needs the draw to be the
+constraint, which at `draw 0.01ms` it is not. **Second deferred item in two sessions whose
+premise expired; §26.2 was the first. Re-derive before building.**
+
+**Every path in Trace was undersampling the downscale, and now the default one is not.**
+Measured against ffmpeg references at the exact drawn size: d3d11 **0.74**, cpu **0.73**,
+swscale drag preview **0.76** on an axis where `area` is 0 and `neighbor` is 1. A box
+reduction in the shader takes 4444 to **0.02** and 422 HQ from 0.89 to **0.00**, with no
+measurable playback or scrub cost. `TRACE_GPU_REDUCE=0` is the control and is exact.
+**This is why §9's "local contrast within 0.7%" saw nothing, and it re-reads §20.3/§21.2 —
+CPU and D3D11 agreeing was never evidence either was right.**
+
+**Two owner decisions came out of it.** The drag preview is still 0.76, so the picture now
+*sharpens* on release where it used to match; the fix is one swscale flag but previews are
+the drag path where supply is 19% on 4444, so **do not flip it without measuring the shuttle
+rate**. And `TRACE_RENDERER=cpu` is now the softer picture as well as the slower one, which
+matters when telling anyone to try it. **Owner visual sign-off on the new picture is
+outstanding and must be taken at the machine, not over Parsec.**
 
 ## Working notes
 
@@ -155,7 +183,12 @@ Nothing here is started. Pick with the owner rather than assuming.
   readback that proves which one each window actually adopted), `cadence.ps1` (cadence distribution — the only thing that can
   see a beat; presented rate cannot), `playhud.ps1` (taller crop, for `rep`/`skip` and the
   audio line), `refresh.ps1` (the display's true rational rate), `lifecycle.ps1`,
-  `scrub.ps1`, `stalls_vs_window.ps1`. **Cadence controls need `TRACE_NO_AUDIO=1`** — 4444
+  `scrub.ps1`, `stalls_vs_window.ps1`, and for scaling quality `abfilter.ps1` (calibrated
+  area-to-point axis, with `-Sensitivity` that refuses material too smooth to resolve
+  anything), `croprect.ps1` (video rect out of a window capture, size asserted against the
+  HUD) and `previewshot.ps1` (captures with the button held, so it is a preview and not a
+  landing). **Never use Trace as its own reference for a filtering question.**
+  **Cadence controls need `TRACE_NO_AUDIO=1`** — 4444
   has no audio track while 422 HQ and the 1080p clips do, so as shipped they run on
   different schedulers.
 - Update `CLAUDE.md` and the plan at the end of the session.

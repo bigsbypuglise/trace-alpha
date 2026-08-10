@@ -133,6 +133,17 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   Resume runs **after** `flushVideoScrub(true)`, and the ordering is load-bearing: the landing goes through `loadCurrentFrame` → `reclaimDecoder()`, which already bumps the generation *and* tells the worker, so no older preview frame can be painted afterwards — the release needs no second supersede call, and a bare `supersedeInFlightRequests()` would not have worked anyway since it deliberately does not tell the worker. Resuming earlier would also start audio at the *preview* position, because `startAudioForPlayback()` takes its offset from the current frame. Declined on `playbackAtEnd_` (Play owns the rewind, `c3335ec`) and on a storage-stalled landing. `startPlaybackRun()` is extracted so Play and resume share one setup — resume needs every cadence counter reset that Play does, and a resumed run measured from poisoned counters would corrupt step 6's cadence work.
 
   Validated with a negative control (plan §16.6): the new `lifecycle.ps1 -PlayThroughDrag` reads 0% moved on the pre-fix build and 13–95% after, with `-PausedThroughDrag` at 0.0% on every file. **Run both** — a check that can only report "moving" proves nothing.
+- **The downscale is FILTERED in the shader now, and before this every path in Trace was undersampling** (Aug 2026, `f2d6d57`, step 9, plan §28). The D3D11 sampler is a bilinear 2x2 tap over textures with no mips, so at the validation window's 6.4x reduction it read 4 source texels of every 41. Measured against ffmpeg references at the exact drawn size — `area` at position 0, `neighbor` at 1 — **d3d11 read 0.74, cpu 0.73, and the swscale drag preview 0.76.** Three unrelated mechanisms, one number, because a 2x2 tap is a 2x2 tap; the preview's is not luck, `swsFlagsFor(fast)` returns `SWS_FAST_BILINEAR` and that filter measures 0.74 on the same frame.
+
+  **This is why §9's "local contrast between preview and landing is within 0.7%" saw nothing** — they matched *because* they were equally wrong, and local contrast is exactly the statistic aliasing preserves while moving detail around. It also re-reads §20.3/§21.2: CPU and D3D11 agreeing was never evidence either was right, and the GATE B visual sign-off was taken on that comparison.
+
+  Fixed with a box average over the destination pixel's footprint, in **normalised** source coordinates — which is what keeps GATE C's one-shader design: a chroma plane is smaller, so the same uv offset spans proportionally the same area and 4:2:0/4:2:2/4:4:4 still differ in nothing but texture size. Taps are `ceil(ratio/2)` (each tap is itself a 2x2, so N reaches 2N texels) clamped to 4 **because WARP has to run this too**. Averaging happens *before* range normalisation and the matrix: both are affine so it is identical and costs one matrix multiply instead of sixteen — **it would not be identical with a tonemap in between**, so BT.2020 work must revisit the order.
+
+  Results: 4444 **0.74 → 0.02** (delta vs area max 46 → **2**), 422 HQ **0.89 → 0.00**. **No measurable cost** — 4444 99.8%/99.8%, 261/261, 0 doubled, `handler>budget 0 of 260`, max gap 44.3/44.8ms against 45.3 before; 4K H.264 99.1% and identical buckets; 4444 reversal `hitch` 5,9 on against 9,7 off. That is what the draw being idle buys (`draw 0.01ms` of 41.67).
+
+  `TRACE_GPU_REDUCE=0` is the control and is **exact, not approximate**: `taps == 1` collapses the loop to one sample at `input.uv`, and the control re-measures 0.74 / mean 1.32 / max 46, the pre-change figures to the digit. It is a **separate knob from `TRACE_PLANAR_UPLOAD`** on purpose — the reduction is in the YUV shader only, so without its own control the planar-vs-BGRA A/B would differ in two ways at once. HUD reads `display WxH filtered xN`; a preview still reads `1:1`.
+
+  **Two things carried, both owner decisions.** The drag preview is still 0.76, so the picture now *sharpens* on release where it used to match — the fix is one swscale flag, but previews are the drag path where supply is 19% on 4444, so **do not flip it without measuring the shuttle rate.** And `TRACE_RENDERER=cpu` is now the softer picture as well as the slower one, which matters when telling anyone to try it.
 - **Full-resolution frames go to the GPU as three planes; scrub previews do NOT** (Aug 2026, `e8566a4`, GATE C, plan §22). The D3D11 backend takes Y/U/V and applies the matrix in the pixel shader. **One shader covers everything**: subsampling is carried by the size of two textures and resolved by the sampler, so 4:2:0/4:2:2/4:4:4 differ in nothing else, and bit depth, range and the 3x3 are constants rather than compiled variants.
 
   **The range terms are computed at the actual bit depth.** Reusing the 8-bit 16/255 and 128/255 at 10-bit is wrong — black is code 64 of 1023, 0.062561 against 0.062745 — and the error is a lift of the black point across the whole picture, which is exactly the "global gamma/level shift" the colorimetry notes warn a wrong factor produces. Matrices with no exact coefficients (Fcc, Smpte240m) are **declined** by decoder and renderer alike and keep taking swscale, because an approximation there is a colour difference between backends that no A/B could attribute.
@@ -342,6 +353,8 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
 
    **GATE C is done** (`e8566a4`): planar YUV upload with the matrix in the shader, confirmed against swscale at 8/10/12 bits, conversion cost down 2.5–4.1x, scrub unchanged.
 
+   **Step 8 is CLOSED as answered-no and step 9 is DONE** (2026-08-10, plan §27/§28). Step 8's premise had expired — GATE B's own lazy creation already reuses everything (`tex 3` across 261 frames, `tex 4` across a 406-paint drag) and the residual upload is memcpy bandwidth at 16.3 GB/s. Step 9 was the opposite: a real, never-measured defect, and bigger than §9 described because *every* full-resolution frame went through one 2x2 sampler tap, not just the landing. Fixed, no measurable cost, **owner visual sign-off outstanding**. **Step 10 (10-bit output) is the only deferred GPU item left.**
+
    **GATE E is PASSED (2026-08-09, `e2b8655`, owner sign-off).** It was pulled ahead of steps 8–10 by owner decision and split in two: **step 11a (E1, the absolute-deadline scheduler) shipped and is what fixed the stutter**; **step 11b (E2, DXGI vsync snapping) is not built and is stopped**. Steps 8, 9 and 10 remain deferred, not cancelled. The reasoning is §23.5: locked real-time playback is priority #1, §23 measured the residual stutter as the universal integer-tick beat which only GATE E fixes, and §23.4 measured headroom — all steps 8–10 buy — as no longer the binding constraint on 4444 once the planar path is on. No technical dependency runs from 8–10 into 11; the flip-model swapchain landed at GATE B.
 
    **Four things from that design worth carrying even if it is rewritten.** (a) **Locking the wake does not lock the present** — `setFrame` calls `update()`, so the paint and `Present` run after the tick handler returns, and present intervals therefore carry `handler_k − handler_{k−1}` directly; 4444's 25→37ms handler spread is ±3 refreshes on this panel. Any design that only reschedules the timer inherits that. (b) **The waitable swapchain is the wrong instrument** — it answers "may I queue another frame", not "when is the next vblank"; at sync interval 0 it carries no phase, at ≥1 it forces a present every refresh, and blocking on it from the UI thread is the mistake `8b47e08` fixed. `DwmGetCompositionTimingInfo` is a read, never a wait, and is renderer-independent. (c) **Measure the panel's true refresh** — §22.8 recorded 239Hz, and a "240Hz" mode is often 239.76, on which 24.000fps content cannot have constant cadence in any player while 23.976 maps exactly. GATE E replaces a beat Trace creates with whatever the display imposes; it cannot promise zero without that number. (d) **E1 is a near-relative of the already-rejected "adaptive single-shot per frame"** (comparison table at the timer setup) — but that table is all presented-rate, which §23.1 proved blind to the beat, the starvation objection was about a 35ms handler that GATE C has since changed, and the reverted code is not in git history so the 0.7% cannot be attributed by reading. Re-measure on the cadence distribution; do not argue it down from the table.
@@ -537,6 +550,9 @@ footprint is too high),
 control and the escape hatch, and an unknown value warns and falls back),
 `TRACE_PLANAR_UPLOAD=0` (GATE C off,
 back to swscale BGRA on the d3d11 path — the control for any planar measurement),
+`TRACE_GPU_REDUCE=0` (step 9 off, back to a single bilinear tap for the
+downscale — exact rather than approximate, and deliberately separate from
+`TRACE_PLANAR_UPLOAD` so a planar A/B does not change two things at once),
 and `TRACE_DEADLINE_SCHED=0` (GATE E step 1 off, back to the fixed integer tick
 and its accumulator gate — the negative control for any cadence measurement).
 
@@ -559,6 +575,21 @@ is doing. `smooth` says when frames landed; `ui` says whether the app was alive.
 They answer different halves of "stable but not smooth" and the slider-yank bug
 above is what happens when you only have one of them. Note `uiblock seek` on the
 `resp` line measures the *worker* while a lease is out, not the UI.
+
+**Scaling quality has a harness now**: `scripts/measure/abfilter.ps1` places a
+capture on an axis between two ffmpeg references at the exact drawn size —
+`area` (0) and `neighbor` (1) — scored by mean |Laplacian|, because
+high-frequency energy is what separates aliasing from mere difference. It is
+**calibrated** (area 0.00, bicubic −0.01, lanczos 0.06, bilinear −0.20,
+fast_bilinear 0.74, neighbor 1.00) and `-Sensitivity` **refuses material whose
+two references agree** — it rejected the 4K milk splash and the 60fps drone
+plate, either of which would have passed silently. Use 4444 or 422 HQ.
+`croprect.ps1` cuts the video rect out of a window capture and asserts its size
+against the HUD's `display`, because a one-pixel crop error on a 6x reduction
+reads as a filtering difference. `previewshot.ps1` captures with the mouse button
+still **down**, since the release is what lands a full-resolution frame.
+**Never use Trace as its own reference here** — §20.3 spent a session on a
+CPU-vs-GPU difference where both sides were the same 2x2 tap.
 
 **Lifecycle gestures have a harness now**: `scripts/measure/lifecycle.ps1`
 covers step +/-5 determinism after a release, play-after-release, opening
