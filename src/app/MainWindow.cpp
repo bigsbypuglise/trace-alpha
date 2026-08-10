@@ -229,6 +229,7 @@ MainWindow::MainWindow() {
     setWindowTitle("Trace");
     setAcceptDrops(true);
     setupUi();
+    setupSharedActions();
     setupMenus();
     setupTransportControls();
 
@@ -791,6 +792,100 @@ void MainWindow::installOverlayHooks() {
     viewer_->setOverlayHooks(hooks);
 }
 
+// The QActions reached by more than one surface.
+//
+// Every other transport command already had one (see setupTransportControls);
+// these two did not. Fullscreen was four lines duplicated between the File menu
+// and the transport button, and the HUD toggle was an inline case in
+// keyPressEvent, so neither had a single source for its enabled state, its
+// checked state or its shortcut.
+//
+// Both are added to the window itself, not only to a menu: a QAction's shortcut
+// is only live while the action belongs to a widget in the active window, and
+// the View/Window menus that will hold them do not exist until spec phase 13.
+void MainWindow::setupSharedActions() {
+    fullscreenAction_ = new QAction(tr("Toggle &Fullscreen"), this);
+    fullscreenAction_->setCheckable(true);
+    // F11 and Alt+Enter are the spec's bindings; Ctrl+Return is Trace's existing
+    // one and is kept, because the spec's own rule is to preserve an existing
+    // shortcut on conflict. Putting them on ONE action rather than on a second
+    // handler is the whole point of promoting it.
+    //
+    // F11 is listed first deliberately: Qt advertises only the first sequence, in
+    // the menu and in whatever a tooltip is written to say, so the order decides
+    // what the user is told. The transport button's tooltip says F11, and a menu
+    // that named a different key for the same command would be the kind of small
+    // disagreement this phase exists to remove.
+    //
+    // Escape-exits-fullscreen, geometry save/restore and the monitor rule are
+    // spec phase 6 (fullscreen consolidation), deliberately not here: they change
+    // what the toggle DOES, and this phase only changes how many places define it.
+    fullscreenAction_->setShortcuts({QKeySequence(Qt::Key_F11),
+                                     QKeySequence(Qt::CTRL | Qt::Key_Return),
+                                     QKeySequence(Qt::ALT | Qt::Key_Return)});
+    connect(fullscreenAction_, &QAction::triggered, this, &MainWindow::toggleFullscreen);
+    addAction(fullscreenAction_);
+
+    // The dev diagnostics HUD. Owner request, 2026-08-10: a quick way to put the
+    // instrument away while judging feel, and back for measuring.
+    //
+    // H rather than I. `I` was bound to viewState_.showInfo, a flag nothing read
+    // -- so it repainted and did nothing -- and the spec claims Ctrl+I for the
+    // Movie Inspector, which would have left plain `I` as a second,
+    // differently-scoped info toggle. The dead flag is deleted rather than
+    // wired up; there is one HUD and it is this one. Return is kept as a second
+    // binding because it is what the shortcut has always been.
+    toggleHudAction_ = new QAction(tr("Show &Diagnostics HUD"), this);
+    toggleHudAction_->setCheckable(true);
+    toggleHudAction_->setChecked(viewState_.showHud);
+    toggleHudAction_->setShortcuts({QKeySequence(Qt::Key_H),
+                                    QKeySequence(Qt::Key_Return),
+                                    QKeySequence(Qt::Key_Enter)});
+    connect(toggleHudAction_, &QAction::triggered, this, &MainWindow::setHudVisible);
+    addAction(toggleHudAction_);
+}
+
+// Single-key shortcuts and text entry: there is NO text-entry control anywhere
+// in Trace today (phase 1 audit section 4), so the spec's "must not fire while
+// focus is inside a text-entry control" has nothing to guard yet. Qt's own
+// mechanism covers it when there is: QLineEdit and friends accept
+// QEvent::ShortcutOverride for printable keys, which suppresses the shortcut and
+// delivers the keystroke to the widget. That is untested here because it is
+// untestable here -- Go to Frame and Go to Timecode create the first text field,
+// at spec phase 7, and verifying `H` does not eat a digit belongs with them.
+void MainWindow::toggleFullscreen() {
+    // XOR on the window state rather than showFullScreen()/showNormal(): the
+    // other state bits (maximized in particular) have to survive the round trip,
+    // and this is the expression that has been shipping.
+    setWindowState(windowState() ^ Qt::WindowFullScreen);
+    // Read back what actually happened rather than trusting the toggle. A
+    // checkable action that flipped its own tick before this handler ran would
+    // otherwise be able to disagree with the window.
+    viewState_.fullscreen = isFullScreen();
+    if (fullscreenAction_) fullscreenAction_->setChecked(viewState_.fullscreen);
+    if (transportBar_) transportBar_->setFullscreen(viewState_.fullscreen);
+    refreshHud("Fullscreen");
+}
+
+void MainWindow::setHudVisible(bool visible) {
+    viewState_.showHud = visible;
+    if (toggleHudAction_) toggleHudAction_->setChecked(visible);
+    if (overlay_) overlay_->setVisible(visible);
+    // The viewer takes the HUD's height when it goes away, so scrub previews get
+    // bigger, so fewer of them fit the byte-budgeted reverse cache. Stall counts
+    // move purely from pressing H: measured on the same 4K H.264 reversal drag,
+    // `stalls 70 of 370` with the HUD shown and `127 of 450` with it hidden.
+    // The section 22.8 effect, and not a regression.
+    //
+    // AND THE USUAL SAFEGUARD DOES NOT CATCH IT. The rule is to quote `win WxH`
+    // with every scrub number, but the WINDOW does not change size here -- it
+    // read 1280x843 in both runs. What changes is the VIDEO RECT, which the HUD
+    // reports as `display`: 640x360 shown, 1280x720 hidden. Quote `display` too
+    // when a number is taken with the HUD toggled. `hitch` read 1 either way,
+    // which is again why it is the figure to compare across sessions.
+    refreshHud(visible ? "HUD On" : "HUD Off");
+}
+
 void MainWindow::setupMenus() {
     auto* fileMenu = menuBar()->addMenu("&File");
 
@@ -799,15 +894,8 @@ void MainWindow::setupMenus() {
     connect(openAction, &QAction::triggered, this, &MainWindow::openFileDialog);
     fileMenu->addAction(openAction);
 
-    auto* fullscreenAction = new QAction("Toggle &Fullscreen", this);
-    fullscreenAction->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_Return));
-    connect(fullscreenAction, &QAction::triggered, this, [this]() {
-        setWindowState(windowState() ^ Qt::WindowFullScreen);
-        viewState_.fullscreen = isFullScreen();
-        if (transportBar_) transportBar_->setFullscreen(isFullScreen());
-        refreshHud("Fullscreen");
-    });
-    fileMenu->addAction(fullscreenAction);
+    fileMenu->addAction(fullscreenAction_);
+    fileMenu->addAction(toggleHudAction_);
 
     fileMenu->addSeparator();
     auto* quitAction = new QAction("&Quit", this);
@@ -881,12 +969,11 @@ void MainWindow::setupTransportControls() {
             playPauseAction_, &QAction::trigger);
     connect(transportBar_, &trace::ui::TransportBar::nextFrameClicked,
             nextFrameAction_, &QAction::trigger);
-    connect(transportBar_, &trace::ui::TransportBar::fullscreenClicked, this, [this]() {
-        setWindowState(windowState() ^ Qt::WindowFullScreen);
-        viewState_.fullscreen = isFullScreen();
-        transportBar_->setFullscreen(isFullScreen());
-        refreshHud("Fullscreen");
-    });
+    // The same action the File menu and the shortcuts run. trigger() rather than
+    // a lambda: a checkable action must flip its own tick, and the button and the
+    // menu must not be able to disagree about which state that is.
+    connect(transportBar_, &trace::ui::TransportBar::fullscreenClicked,
+            fullscreenAction_, &QAction::trigger);
 
     timelineSlider_ = transportBar_->timelineSlider();
     // Keyboard is reserved for transport (arrow-key stepping, J-K-L). If the
@@ -1057,6 +1144,12 @@ void MainWindow::syncTransportBar() {
     nextFrameAction_->setEnabled(hasAnyMedia);
     playPauseAction_->setEnabled(hasPlayableRange);
     playPauseAction_->setText(playing ? "Pause" : "Play");
+
+    // Checked state comes from the window and from viewState_, never from
+    // whichever surface was clicked last. Menu tick, button highlight and
+    // shortcut therefore cannot drift apart.
+    if (fullscreenAction_) fullscreenAction_->setChecked(isFullScreen());
+    if (toggleHudAction_) toggleHudAction_->setChecked(viewState_.showHud);
 
     if (transportBar_) {
         transportBar_->setControlsEnabled(hasAnyMedia);
@@ -2742,6 +2835,28 @@ void MainWindow::refreshHud(const QString& action) {
         playbackAtEnd_ = false;
         playbackEndFrame_ = -1;
     }
+
+    // Hidden means NOT BUILT. Everything below this point formats strings for
+    // overlay_, and overlay_ is the widget H just hid -- several hundred bytes of
+    // QString construction on the UI thread, on every transport action and every
+    // playback tick, for a widget nobody can see. Building it anyway is what the
+    // pre-existing Return binding did, so "hide the HUD" cost exactly nothing
+    // before this; the owner's reason for wanting the toggle is to judge feel
+    // without the instrument, which means without its cost.
+    //
+    // The telemetry capture still runs, and that is deliberate. It is a struct
+    // copy, and it feeds `ra-walk` and the seek counters, which must not come to
+    // mean something different depending on whether the HUD happened to be
+    // visible. A counter that changes what it measures when an unrelated toggle
+    // moves is the exact failure this project keeps re-learning.
+    if (!viewState_.showHud) {
+        if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::VideoFile) {
+            captureDecoderTelemetry();
+        }
+        syncTransportBar();
+        return;
+    }
+
     QString mode = "Empty";
     switch (st.mode) {
         case PlaybackMode::Paused: mode = "Paused"; break;
@@ -3500,13 +3615,10 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_F: viewState_.readoutMode = PrimaryReadoutMode::Frame; refreshHud("Readout: Frame"); return;
         case Qt::Key_S: viewState_.readoutMode = PrimaryReadoutMode::Seconds; refreshHud("Readout: Seconds"); return;
         case Qt::Key_T: viewState_.readoutMode = PrimaryReadoutMode::Timecode; refreshHud("Readout: Timecode"); return;
-        case Qt::Key_I: viewState_.showInfo = !viewState_.showInfo; refreshHud("I"); return;
-        case Qt::Key_Return:
-        case Qt::Key_Enter:
-            viewState_.showHud = !viewState_.showHud;
-            overlay_->setVisible(viewState_.showHud);
-            refreshHud("Enter");
-            return;
+        // H / Return / Enter (HUD) and Ctrl+Return / F11 / Alt+Enter (fullscreen)
+        // are QAction shortcuts now and never reach here -- see
+        // setupSharedActions(). `I` is gone with the flag it toggled; Ctrl+I is
+        // the Movie Inspector at spec phase 12.
         default:
             QMainWindow::keyPressEvent(event);
             return;

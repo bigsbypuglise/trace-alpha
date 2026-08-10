@@ -25,9 +25,11 @@ struct OverlayHooks {
     //
     // The approved interface spec re-points them at the reverse and forward
     // shuttle and replaces the artwork with the continuous-scan icons, but that
-    // is spec phases 4 and 5. These are deliberately still named for what they
-    // do rather than for what they will become -- `isVideoScrubActive()` is the
-    // standing reminder of what a name that describes an intention costs.
+    // is spec phases 4 and 5, and the name, the artwork and the behaviour all
+    // move in that one commit. Phase 2 brought the artwork into line with the
+    // behaviour rather than ahead of it, for the same reason these are still
+    // named for what they do -- `isVideoScrubActive()` is the standing reminder
+    // of what a name that describes an intention costs.
     std::function<void()> stepBack;
     std::function<void()> stepForward;
 

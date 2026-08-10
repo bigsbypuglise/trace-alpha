@@ -3,11 +3,15 @@
 #include <QBrush>
 #include <QByteArray>
 #include <QColor>
+#include <QFile>
 #include <QFont>
 #include <QFontMetrics>
+#include <QHash>
+#include <QIcon>
 #include <QPainter>
 #include <QPainterPath>
 #include <QPen>
+#include <QPixmap>
 #include <QtGlobal>
 
 #include <algorithm>
@@ -32,43 +36,42 @@ constexpr double kPanelMarginLogical = 28.0;
 constexpr double kIconLogical = 30.0;
 constexpr double kHandleLogical = 16.0;
 
-void paintPlay(QPainter& p, const QRectF& r) {
-    QPainterPath path;
-    path.moveTo(r.left() + r.width() * 0.24, r.top() + r.height() * 0.16);
-    path.lineTo(r.left() + r.width() * 0.82, r.center().y());
-    path.lineTo(r.left() + r.width() * 0.24, r.bottom() - r.height() * 0.16);
-    path.closeSubpath();
-    p.fillPath(path, QColor(245, 245, 245));
-}
-
-void paintPause(QPainter& p, const QRectF& r) {
-    const double w = r.width() * 0.18;
-    p.fillRect(QRectF(r.left() + r.width() * 0.26, r.top() + r.height() * 0.16,
-                      w, r.height() * 0.68), QColor(245, 245, 245));
-    p.fillRect(QRectF(r.right() - r.width() * 0.26 - w, r.top() + r.height() * 0.16,
-                      w, r.height() * 0.68), QColor(245, 245, 245));
-}
-
-void paintChevrons(QPainter& p, const QRectF& r, bool forward) {
-    const double y0 = r.top() + r.height() * 0.22;
-    const double y1 = r.bottom() - r.height() * 0.22;
-    const double mid = r.center().y();
-    for (int i = 0; i < 2; ++i) {
-        const double x0 = r.left() + r.width() * (0.16 + i * 0.34);
-        const double x1 = x0 + r.width() * 0.30;
-        QPainterPath path;
-        if (forward) {
-            path.moveTo(x0, y0);
-            path.lineTo(x1, mid);
-            path.lineTo(x0, y1);
-        } else {
-            path.moveTo(x1, y0);
-            path.lineTo(x0, mid);
-            path.lineTo(x1, y1);
-        }
-        path.closeSubpath();
-        p.fillPath(path, QColor(235, 235, 235));
+// The approved artwork, drawn into the atlas cell.
+//
+// This is a rasterisation, not a per-frame cost: it happens inside
+// rebuildAtlas(), which runs only when the surface size, the DPI or the theme
+// changes. And it does not disturb the property the atlas exists for -- the cell
+// is still exactly the size of the destination rect layout() snapped, so both
+// backends still blit it 1:1 and still agree pixel for pixel. Only what is
+// inside the cell changed.
+//
+// WHICH GLYPH IS CHOSEN BY WHAT THE CONTROL DOES, not by what it will do. The
+// two side controls run the single-frame step actions today, so they carry the
+// frame-step artwork; the approved package's transport_scan_* pair is the
+// artwork for the shuttle and goes on at spec phases 4 and 5, in the same commit
+// as the behaviour. Before this the overlay drew continuous-scan chevrons over
+// stepping behaviour and the mismatch was recorded rather than fixed -- that was
+// the right call while the art was placeholder, and the wrong state to keep once
+// it is real.
+void paintIcon(QPainter& p, const QRectF& r, const QString& baseName) {
+    // Cached by base name: an atlas rebuild is rare, but a QIcon assembled from
+    // resources on each one is avoidable work for no benefit.
+    static QHash<QString, QIcon> cache;
+    auto it = cache.find(baseName);
+    if (it == cache.end()) {
+        QIcon icon;
+        icon.addFile(QStringLiteral(":/ui/%1-24.png").arg(baseName), QSize(24, 24));
+        icon.addFile(QStringLiteral(":/ui/%1-48.png").arg(baseName), QSize(48, 48));
+        const QString at3x = QStringLiteral(":/ui/%1-72.png").arg(baseName);
+        if (QFile::exists(at3x)) icon.addFile(at3x, QSize(72, 72));
+        it = cache.insert(baseName, icon);
     }
+
+    const QSize cell(std::max(1, static_cast<int>(std::lround(r.width()))),
+                     std::max(1, static_cast<int>(std::lround(r.height()))));
+    const QPixmap pm = it.value().pixmap(cell);
+    if (pm.isNull()) return;
+    p.drawPixmap(r.topLeft(), pm);
 }
 
 } // namespace
@@ -202,10 +205,10 @@ void OverlayModel::rebuildAtlas() {
 
     const double row = panelH + 8;
     double x = 4;
-    aPlay_ = QRectF(x, row, icon, icon);   paintPlay(p, aPlay_);      x += icon + 4;
-    aPause_ = QRectF(x, row, icon, icon);  paintPause(p, aPause_);    x += icon + 4;
-    aRewind_ = QRectF(x, row, icon, icon); paintChevrons(p, aRewind_, false); x += icon + 4;
-    aFfwd_ = QRectF(x, row, icon, icon);   paintChevrons(p, aFfwd_, true);    x += icon + 4;
+    aPlay_ = QRectF(x, row, icon, icon);   paintIcon(p, aPlay_, "play");        x += icon + 4;
+    aPause_ = QRectF(x, row, icon, icon);  paintIcon(p, aPause_, "pause");      x += icon + 4;
+    aRewind_ = QRectF(x, row, icon, icon); paintIcon(p, aRewind_, "prev-frame"); x += icon + 4;
+    aFfwd_ = QRectF(x, row, icon, icon);   paintIcon(p, aFfwd_, "next-frame");   x += icon + 4;
 
     aHandle_ = QRectF(x, row, handle, handle);
     p.setBrush(QColor(255, 255, 255));
@@ -400,9 +403,10 @@ bool OverlayModel::onMouseUp(int x, int y) {
     if (was != Region::None && was == r) {
         switch (r) {
             case Region::PlayPause:   if (hooks_.playPause) hooks_.playPause(); break;
-            // Still the single-frame step actions. The artwork in these two
-            // regions is continuous-scan and the approved spec re-points them
-            // at the shuttle, but that is phases 4 and 5 -- renaming the hook
+            // Still the single-frame step actions, and as of spec phase 2 the
+            // artwork in these two regions says so. The approved spec re-points
+            // them at the shuttle and swaps in transport_scan_*, but that is
+            // phases 4 and 5 and both halves move together -- renaming the hook
             // here without changing what it calls would put a lie in the
             // contract, which is the specific trap `isVideoScrubActive()` set.
             case Region::Rewind:      if (hooks_.stepBack) hooks_.stepBack(); break;

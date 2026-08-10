@@ -60,8 +60,17 @@ protected:
 
 private:
     void setupUi();
+    // The QActions that more than one surface reaches. Runs before setupMenus()
+    // because a menu is one consumer of an action, never its definition.
+    void setupSharedActions();
     void setupMenus();
     void setupTransportControls();
+    // The one place the window's fullscreen state is changed. Re-reads
+    // isFullScreen() afterwards rather than assuming the toggle took, so the
+    // action's checked state, viewState_ and the button icon all come from what
+    // the window manager actually did.
+    void toggleFullscreen();
+    void setHudVisible(bool visible);
     void syncTransportBar();
     // Wires the renderer-composited overlay spike to the existing actions.
     void installOverlayHooks();
@@ -281,6 +290,14 @@ private:
     QAction* prevFrameAction_ = nullptr;
     QAction* playPauseAction_ = nullptr;
     QAction* nextFrameAction_ = nullptr;
+    // Both created in setupSharedActions(), which runs BEFORE setupMenus():
+    // the menu adds the action, it does not define it. Before spec phase 2 the
+    // fullscreen toggle was four lines written twice -- once for the menu and
+    // once for the transport button -- with no action at all, which is the one
+    // place the spec's "menus, buttons, tooltips, shortcuts and checked states
+    // stay synchronized" requirement was not already met.
+    QAction* fullscreenAction_ = nullptr;
+    QAction* toggleHudAction_ = nullptr;
     QSlider* timelineSlider_ = nullptr;
 
     trace::core::PlaybackController playback_;

@@ -25,9 +25,13 @@ compile_commands.json
 # A shared .claude/settings.json would be committable; nothing here is.
 .claude/
 
-# Icon working files (superseded revisions, source zips)
-assets/icons/_old/
-assets/icons/*.zip
+# Icon working files (superseded revisions, source zips). assets/icons/ itself
+# was removed at spec phase 2 -- the 260807 package supersedes it -- but the
+# untracked working files can still be sitting there on a machine.
+assets/icons/
 
-# Interface design working files (source zips)
+# Interface design working files (source zips). The tracked part of
+# assets/Interface/ survives only for the two frame-step glyphs and leaves with
+# them at spec phases 4-5.
 assets/Interface/*.zip
+assets/260807 Trace Media Player Icon/*.zip

@@ -7,13 +7,24 @@
 #include <QSlider>
 #include <QLabel>
 #include <QHBoxLayout>
+#include <QFile>
 #include <QFontDatabase>
 #include <QProxyStyle>
 
 namespace trace::ui {
 namespace {
 
-// Design tokens (assets/Interface/export/player-icons/README.txt).
+// Design tokens. STATE VALUES are the approved set's
+// (assets/260807 Trace Media Player Icon/export/base-ui-icons/README.txt);
+// CONTROL GEOMETRY is still the first-pass set's, and that is deliberate.
+//
+// The approved package specifies 34x34 utility targets and a 44x44 play/pause
+// inside a rounded panel -- but that is the geometry of the FLOATING transport,
+// which is what spec phase 6 puts on screen when it removes this bar from the
+// layout entirely. Re-laying-out a bar that is about to be deleted is churn the
+// spec does not ask for at phase 2, and it would change the video rect (and
+// therefore `win WxH`, and therefore every scrub baseline) for a widget with no
+// future. The state opacities do apply to the artwork itself and are adopted.
 constexpr int kHit = 44;
 constexpr int kHitRadius = 10;
 constexpr int kCenter = 60;
@@ -21,12 +32,12 @@ constexpr int kCenterRadius = 15;
 constexpr int kMark = 24;        // icon mark inside a standard control
 constexpr int kCenterMark = 26;  // icon mark inside the center control
 
-constexpr double kOpacityRest = 0.78;
+constexpr double kOpacityRest = 0.82;
 constexpr double kOpacityFull = 1.00;
-constexpr double kOpacityDisabled = 0.26;
+constexpr double kOpacityDisabled = 0.28;
 
-constexpr double kBgHover = 0.08;
-constexpr double kBgPressed = 0.15;
+constexpr double kBgHover = 0.09;
+constexpr double kBgPressed = 0.17;
 constexpr double kBgActive = 0.12;
 constexpr double kStrokeActive = 0.22;
 
@@ -196,11 +207,17 @@ void TransportButton::paintEvent(QPaintEvent* event) {
     p.drawPixmap(markRect, pm);
 }
 
+// The approved base UI set ships 24px and 48px only; the superseded first-pass
+// set that still supplies the two frame-step glyphs also ships 72px. Adding a
+// resource that is not there is not an error in Qt, it is silently nothing --
+// which would make "is the 3x file being used" unanswerable by reading. Asking
+// is one line and makes the answer visible.
 QIcon TransportBar::loadIcon(const QString& baseName) {
     QIcon icon;
     icon.addFile(QStringLiteral(":/ui/%1-24.png").arg(baseName), QSize(24, 24));
     icon.addFile(QStringLiteral(":/ui/%1-48.png").arg(baseName), QSize(48, 48));
-    icon.addFile(QStringLiteral(":/ui/%1-72.png").arg(baseName), QSize(72, 72));
+    const QString at3x = QStringLiteral(":/ui/%1-72.png").arg(baseName);
+    if (QFile::exists(at3x)) icon.addFile(at3x, QSize(72, 72));
     return icon;
 }
 
@@ -229,7 +246,7 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
 
     fullscreenBtn_ = new TransportButton(this);
     fullscreenBtn_->setIcon(fullscreenIcon_);
-    fullscreenBtn_->setToolTip(tr("Fullscreen (Ctrl+Return)"));
+    fullscreenBtn_->setToolTip(tr("Fullscreen (F11)"));
 
     slider_ = new QSlider(Qt::Horizontal, this);
     slider_->setMinimum(0);
@@ -298,8 +315,8 @@ void TransportBar::setPlaying(bool playing) {
 void TransportBar::setFullscreen(bool fullscreen) {
     fullscreenBtn_->setIcon(fullscreen ? exitFullscreenIcon_ : fullscreenIcon_);
     fullscreenBtn_->setActive(fullscreen);
-    fullscreenBtn_->setToolTip(fullscreen ? tr("Exit fullscreen (Ctrl+Return)")
-                                          : tr("Fullscreen (Ctrl+Return)"));
+    fullscreenBtn_->setToolTip(fullscreen ? tr("Exit fullscreen (F11)")
+                                          : tr("Fullscreen (F11)"));
 }
 
 void TransportBar::setFrameText(const QString& text) {
