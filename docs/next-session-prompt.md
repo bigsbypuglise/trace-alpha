@@ -1,10 +1,9 @@
-# The shuttle phase is ACCEPTED. There is no assigned next phase.
+# The interface pass is the next phase. Priority 2 is LIFTED.
 
 Supersedes the previous version. The bounded reverse-shuttle phase closed with owner
 sign-off on 2026-08-10, and the accelerated fast-forward blocker found during that retest
-closed with it. **No phase is currently open**, so the first thing this session needs is an
-owner decision about what the next one is. Paste everything below the line into a fresh
-session in the repo root.
+closed with it. **The owner has chosen the next phase: the deferred interface pass.**
+Paste everything below the line into a fresh session in the repo root.
 
 ---
 
@@ -12,8 +11,10 @@ session in the repo root.
 
 1. **Performance is priority #1.** No interface feature may ever compromise lightweight,
    fast, smooth playback. If a feature and playback smoothness conflict, the feature loses.
-2. **No interface work.** `docs/interface-pass-1-spec-DEFERRED.md` is approved and
-   deliberately not started. Do not begin any of it.
+2. ~~**No interface work.**~~ **LIFTED by the owner, 2026-08-10.** The interface pass is
+   now the open phase. Priority 1 is unchanged and is now the binding constraint *on this
+   work*: every phase of it must be measured against the playback and scrub baselines, and
+   a feature that costs smoothness loses.
 3. **Smooth, responsive motion beats matching final-frame fidelity during motion.**
    Fidelity is owed to the frame the user stops on, not to the frames flying past on the way
    there. This settles a whole class of trades in advance — preview resolution, preview
@@ -43,7 +44,7 @@ wrong — see the deferred list.
   while the J/L keyboard convention keeps 1× as its first rung. The owner confirmed both
   readings on 2026-08-10. `startShuttleRun(direction, stride)` takes any stride, so this is
   a call site rather than engine work. Full spec in
-  `docs/interface-pass-1-spec-DEFERRED.md`; the note is inline at *Fast-forward behavior*.
+  `docs/interface-pass-1-spec.md`; the note is inline at *Fast-forward behavior*.
 - **Step 10, 10-bit display output** — two external gates, both outside the code: a
   10-bit-capable display confirmed, and the intended Windows Advanced Color / HDR /
   colour-management workflow defined. §9's warning still holds — this is 10-bit **output**,
@@ -62,20 +63,60 @@ wrong — see the deferred list.
 - **EXR / image sequences and OCIO.** `TRACE_WITH_OIIO` is undefined in vcpkg and CI, so EXR
   does not open today. Largest untouched area, and a feature rather than a fix.
 
-## Candidates for the next phase — the owner picks, not the session
+## THE OPEN PHASE — interface pass 1
 
-Listed with what is actually known about each, so the choice is informed:
+The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
+`docs/interface-pass-1-spec.md` — approved, complete, and written by the owner.
+**Rename it** (drop `-DEFERRED`) and replace its "do not begin any of this" header with the
+lift, as the first commit, so the tree stops saying two different things.
 
-1. **EXR / image sequences and OCIO.** The largest untouched area and the only one that is a
-   *feature* rather than a fix. Needs OpenImageIO in vcpkg and CI first, which is
-   infrastructure work before any of it is visible.
-2. **The deferred interface pass.** Approved and specified; the shuttle engine it depends on
-   now exists and is signed off. Blocked only by priority 2, which is the owner's to lift.
-3. **LucidLink read-ahead.** A real measured gap for remote review media in the ~100–600
-   Mbps class. Has a named next experiment and a warning not to promise it fixes 4 Gbps
-   plates.
-4. **Nothing — harden and ship.** The alpha has never had a packaging pass; Windows ships as
-   a portable ZIP with no installer by deliberate choice.
+### Do this before planning anything: re-derive §2 of that spec
+
+§2 is a list of ten dependencies and conflicts, and it was written on **2026-08-09** —
+before the reverse shuttle existed, before step 9, before `d3d11` became the default, and
+before the fast-forward shuttle. **A deferred item's premise expires** is the rule this
+project has re-learned five times, and it applies to a document as much as to a note.
+
+At least one item is already known stale: **§2 item 2 says reverse shuttle "will likely
+defer on first pass" because continuous reverse is GOP-walk bound.** It is not. The engine
+shipped at `e9fd236`/`dd21fe9`, was measured, and has owner sign-off — 4K H.264 reverse 1×
+went 87.0 → 99.2% of real time, and the full 2×/5×/10×/30× ladder works in both directions.
+So the spec's capability-detection-and-defer branch is no longer the expected outcome; the
+control is a **call site** onto `startShuttleRun(direction, stride)`.
+
+Check the other nine the same way rather than reading them as still true.
+
+### Then take the two GPU prerequisites first, because they are the structural blockers
+
+Both were deliberately left unbuilt because only this pass needs them. Neither is UI work.
+
+1. **The composited overlay, built for real.** §2 item 1 is the largest structural item in
+   the whole spec. Qt child widgets over the D3D11 child HWND are neither visible nor
+   hit-testable (§19/§20.1), so the auto-hiding floating transport cannot exist without it.
+   Renderer-composited translucency was *proven* to work with real alpha, full native input,
+   keyboard staying with Qt via `MA_NOACTIVATE`, and **no measured playback cost** — but
+   `TRACE_OVERLAY_COMPOSITED` is explicitly a disposable spike with placeholder art. Promote
+   it to a real path, and **re-measure the playback cost** rather than citing the spike's
+   number; the spike held a static overlay visible through one 9s run, which is not the same
+   as an animated fade during a scrub.
+2. **A view-transform contract on `VideoRenderer`.** §2 item 6. Rotate/flip has nowhere to
+   live today. The D3D11 backend already computes a letterbox viewport, which is the natural
+   home; the CPU backend applies it in its `QPainter`. Add it to the interface so both
+   backends implement one contract — separately hacking the two paths is what the spec's own
+   fallback exists to prevent.
+
+### Then the spec's own phasing, from its phase 1
+
+Its 14 phases are already ordered and each is meant to be an independently reviewable
+commit. Phase 1 is a read-only audit — **report the boundaries before implementing**, which
+is the same discipline that made the reverse-shuttle phase work.
+
+### Priority 1 is the constraint on all of it
+
+Every phase runs the playback and scrub regression, not just the last one. `cadence.ps1`,
+`scrub.ps1`, `lifecycle.ps1` and `stalls_vs_window.ps1` exist and the baselines are recorded.
+Quote `hitch` and `win WxH`. The overlay and the auto-hide animation are the two items most
+likely to cost something, and they are early — measure them when they land, not at phase 14.
 
 ## Loose ends worth knowing about, none of them blocking
 

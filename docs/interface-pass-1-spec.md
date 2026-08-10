@@ -1,15 +1,17 @@
-# Interface pass 1 — approved spec, DEFERRED
+# Interface pass 1 — approved spec, OPEN
 
-**Status: NOT STARTED. Do not begin any of this.** Interface work is paused by owner
-priority (see `CLAUDE.md`). This document exists so the spec and the assets are recorded
-now and are ready when the GPU initiative completes.
+**Status: THIS IS THE OPEN PHASE.** The owner lifted the no-interface-work rule on
+2026-08-10 and chose this pass as the next phase. The unblock condition the previous header
+named has been met: GATE B, GATE C and GATE E all passed, step 9 shipped, `d3d11` became the
+default renderer, and the reverse and forward shuttles were built, measured and signed off.
 
-**Unblocks when:** the GPU/smooth-presentation initiative reaches a state the owner signs
-off — realistically after GATE E (plan §8 item 11), since several items below depend on
-decisions that are still open inside it. See "Dependencies and conflicts" before planning
-any of it.
+**Priority 1 is unchanged and is now the binding constraint on this work.** No interface
+feature may compromise lightweight, fast, smooth playback. Every phase runs the playback and
+scrub regression — not just phase 14 — and a feature that costs smoothness loses. Quote
+`hitch` and `win WxH`, never a bare `stalls`.
 
-Author: Anj, 2026-08-09. The spec body in §3 is his and is reproduced as approved.
+Author: Anj, 2026-08-09. The spec body in §3 is his and is reproduced as approved. §2 was
+re-derived on 2026-08-10 and is no longer the 2026-08-09 text; see its header.
 
 ---
 
@@ -44,85 +46,214 @@ frame-step icon in the set — stepping becomes keyboard-only.
 Existing `assets/icons/` and `assets/Interface/` predate this set. Reconcile or retire them
 during phase 2 rather than leaving three icon sources in the tree.
 
-## 2. Dependencies and conflicts to resolve BEFORE scheduling this work
+## 2. Dependencies and conflicts — RE-DERIVED 2026-08-10
 
-These are flagged now because each one is cheaper to answer during the GPU work than after.
-None of them is a reason to change the spec yet; they are the reasons this pass cannot
-simply be picked up as written.
+**This section was rewritten on 2026-08-10 and is not the 2026-08-09 text.** The original
+was written before the reverse shuttle, before the forward shuttle, before step 9 and before
+`d3d11` became the default, and *a deferred item's premise expires* is the rule this project
+has now re-learned six times. Every item below was checked against the code as it stands, at
+the file and line given, rather than read forward as still true.
 
-1. **The auto-hiding transport floating over the video is blocked on the overlay
-   question, and that question is currently answered "no".** Plan §19 / §20.1: ordinary Qt
-   child widgets over the D3D11 child HWND are **neither visible nor hit-testable**, and
-   every native-window variant loses translucency. Renderer-composited translucency was
-   proven to work with no measured playback cost, but `TRACE_OVERLAY_COMPOSITED` is
-   explicitly a **disposable spike with placeholder art**, off by default. Today the
-   transport is a laid-out widget *below* the viewer, not over it.
+Result: **one item is stale** (2), **one is half-wrong in its premise** (8), **one is
+materially larger than written** (1), **two are sharpened by facts that did not exist when
+they were written** (6, 7), **one describes a fact that is worse than stated** (9), and the
+remaining four are confirmed (3, 4, 5, 10) — though 3 and 5 each need a distinction the
+original did not draw.
 
-   So "the transport floats over the video" and "overlay controls do not participate in
-   layout sizing" are not styling changes — they require the composited-overlay path to be
-   built for real, on the GPU backend, before any of the auto-hide behaviour can exist.
-   **This is the single largest structural item in the whole spec.** It should be a
-   deliberate deliverable of the GPU phase, not a surprise discovered in interface phase 6.
+---
 
-2. **Reverse shuttle (−2× … −30×) is the known-hard case and will likely defer on first
-   pass.** Roadmap item 6: continuous reverse playback beyond the reverse cache is still
-   GOP-walk bound on long-GOP H.264. Dragging is fast because it walks sequentially and the
-   cache absorbs misses; reverse *playback* does not share that. The spec already handles
-   this correctly (capability detection, disabled/experimental state, document the missing
-   core work separately) — expect that branch to be the one taken for H.264, and note that
-   ProRes may support it immediately since every frame is a keyframe.
+### Item 1 — the composited overlay. STILL TRUE, and BIGGER. Now prerequisite 1.
 
-3. **Shuttle rates must share one owner with J-K-L, which already exists.**
-   `PlaybackController` is the authoritative mode/speed state machine and J-K-L already
-   drives off-speed jog. The 2/5/10/30 button ladder must be a second *view* onto that
-   state, not a second rate machine. Note J-K-L above 1× currently clears `userPlayIntent_`
-   (`473b90e`); the ladder needs the same treatment or Play/Pause across a drag breaks.
+Everything the original said still holds and was re-confirmed: Qt children over the child
+HWND are neither visible nor hit-testable (§18.4/§19), and the transport is still a
+laid-out widget *below* the viewer — `MainWindow.cpp:720-734` stacks `viewer_`,
+`transportBar_` and the HUD `overlay_` in one `QVBoxLayout`. Nothing floats over anything.
 
-4. **The audio-during-shuttle policy the spec proposes is already the shipped policy.**
-   Audio is 1× forward only; off-speed, reverse, scrub and step are deliberately silent,
-   with one guard in the tick catching every way playback stops being 1× forward. So
-   "provisional safe behavior" is simply "keep what exists" — no new work, and no new
-   policy to isolate.
+**What changed is which backend the problem belongs to, and the polarity is now inverted.**
+The item was written while `cpu` was the default, so a composited overlay read as something
+the *opt-in* GPU path would need. `d3d11` became the default on 2026-08-10. So:
 
-5. **LucidLink detection already exists and is reusable — do not write a second one.**
-   `MediaIoSource` classifies storage per volume by *querying* it (LucidLink presents as
-   `DRIVE_FIXED`/NTFS and is recognised by advertising petabyte capacity with
-   `free == total`), never by drive letter or volume label, and never by writing a probe
-   file. That is exactly the spec's "do not assume all `V:\` paths are LucidLink"
-   requirement, already solved and already cached per volume.
+- the composited path is what ships to every user, and
+- `TRACE_RENDERER=cpu` — the documented escape hatch, *"the first thing to try if anything
+  about the picture looks wrong"* — has **no compositor at all**. `CpuImageRenderer::paint`
+  (`src/render/CpuImageRenderer.cpp:58-123`) is a `fillRect` plus a `drawImage` and nothing
+  else.
 
-   Also: **`V:\` is live client production storage and is strictly read-only.** Any
-   shell-extension prototyping must be read-only against files Anj nominates.
+A floating transport that lives only in `OverlayCompositor` therefore means **the escape
+hatch loses its transport**. That is a new requirement, not a refinement: the overlay needs
+a renderer-neutral home reachable by both backends, in the same way and for the same reason
+as the view transform in item 6.
 
-6. **Rotate/flip needs a transform concept the renderer boundary does not have yet.**
-   `VideoRenderer` (`src/render/VideoRenderer.h`) has no view-transform contract. The
-   D3D11 backend already computes a letterbox **viewport**, which is the natural place for
-   an orientation transform to live; the CPU backend would apply it in its `QPainter`. The
-   spec's own fallback (define the action/capability boundary, defer the rendering change)
-   is the right call if the contract isn't ready. Best outcome: add the transform to the
-   `VideoRenderer` interface *during* the GPU phase, while both backends are being touched
-   anyway, so the interface pass only has to wire actions to it.
+Two further findings the original could not have:
 
-7. **Aspect-locked resizing will interact with the frame cache.** `syncScrubPreviewSize()`
-   calls `reclaimDecoder()` and **clears the decoder's frame cache** on every resize,
-   because cache entries carry the preview size in force when they were made. Continuous
-   aspect-locked drag-resizing would therefore thrash the cache repeatedly. Under owner
-   priority #1 this needs a resize-settled debounce, or a cache that tolerates mixed sizes.
-   Measure it; do not assume it is free.
+- **The spike's hooks carry placeholder *semantics*, not just placeholder art.**
+  `installOverlayHooks()` (`MainWindow.cpp:757-791`) wires the overlay's Rewind and
+  Fast-forward to `prevFrameAction_` / `nextFrameAction_` — single-frame stepping. The
+  transport redesign changes exactly what those two controls mean, so the wiring has to be
+  re-pointed, not merely re-skinned.
+- **§19.3's cost number does not cover the case that matters.** It is a static overlay held
+  visible through one 9s 4K *playback* run. The fade is `QTimer`-driven (`animTimer_`,
+  `kFadeMs` 165) and asks the UI thread for repaints; the case to measure is a fade **during
+  a drag**, where the UI thread is the contended resource. The metric there is `ui gap`,
+  not presented rate.
 
-8. **Zero-based numbering is probably already the internal convention.** The HUD and
-   `PlaybackController` work in frame indices from 0. Confirm before writing any conversion
-   layer — the spec is explicit that internal frame identity must not change to alter a
-   displayed label, and the likely correct outcome is that no conversion is needed at all.
+### Item 2 — reverse shuttle "will likely defer". STALE. The opposite is true.
 
-9. **Exact source timecode is not currently read.** The Movie Inspector's "exact encoded FPS
-   rational" is now available (`7b924be`, stored as `int`/`int` on `VideoMetadata`), but
-   SMPTE start timecode and drop-frame metadata are not extracted today. The spec's rule —
-   never generate SMPTE from zero, never label an elapsed-time conversion as source
-   timecode — means this needs real extraction work, not a formatter.
+The engine shipped at `e9fd236` / `dd21fe9`, was measured across four formats and has owner
+sign-off. 4K H.264 reverse 1× went **87.0 → 99.2% of real time**; the 1×/2×/5×/10×/30×
+ladder runs in both directions; reverse 30× snaps to the keyframe grid at a stable ~15
+presents/s. The premise — "continuous reverse is GOP-walk bound" — was itself half wrong:
+reverse was **bursty, not slow**, idle 80–93% of the time while missing real time.
 
-10. **Double-click on the video to toggle fullscreen** — confirm it does not collide with
-    any established Trace gesture before claiming it.
+So the spec's capability-detection-and-defer branch is **no longer the expected outcome**.
+Phase 5 ("reverse shuttle behavior — only if safely supported") is a call site onto
+`startShuttleRun(direction, stride)`, which takes any stride. Keep the capability check as a
+guard, not as a plan.
+
+**But note what did *not* become free** — see item 3.
+
+### Item 3 — one rate owner with J-K-L. CONFIRMED, and the API it needs does not exist.
+
+`PlaybackController` is still the authoritative mode/speed machine and both ladders live in
+it as 1/2/5/10/30 (`PlaybackController.cpp:43-85`). The `userPlayIntent_` warning is still
+exactly right: J sets it false (`MainWindow.cpp:3416`), L sets it
+`|speed| <= 1.0001` (`:3460`).
+
+Three things to add, all of which decide how phases 3–5 are written.
+
+1. **The button contract and the keyboard contract differ in two transitions, and the
+   controller expresses only the keyboard one.** `jogForward()` and `jogReverse()` both
+   **enter the ladder at 1×** from a stop (`speed <= 0.0` / `speed >= 0.0` branches), and
+   both **reset to 1× on a direction change**. The buttons must start at **2×** in both of
+   those cases. That is the owner-confirmed reading, and it is not a call-site tweak that
+   pokes `speed` from outside — the smallest honest change is a controller entry that enters
+   the ladder at 2×, so there is still exactly one rate machine with two documented ways in.
+2. **`startShuttleRun` has exactly two call sites today, `Key_J` and `Key_L`**, and each
+   performs a fixed five-step sequence: `endShuttleRun` → controller ladder →
+   `prepareVideoRequest` → `beginPlaybackTimeline` → `startShuttleRun`. §29.2 is the
+   standing warning here — GATE E was validated on the Play action alone and every other
+   path that started the timer kept compiling silently. **Extract that sequence before
+   adding a third caller**; do not let a button re-implement it.
+3. The run mechanics (`shuttleDir_`, `shuttleStride_`, `shuttleSnapping_`) live in
+   `MainWindow` and are derived from `playback_.state().speed`. That is fine and is not a
+   second rate machine — but it does mean the button, the menu and J/L must all reach the
+   speed through the controller and never through `shuttleStride_`.
+
+### Item 4 — audio during shuttle. CONFIRMED, unchanged, still no work.
+
+`audioShouldDrive()` is still `mode == PlayingForward && |speed| <= 1.0001`
+(`MainWindow.cpp:1992`), and the tick still stops audio the moment that stops holding
+(`:319-320`). The forward shuttle added in `dd21fe9` is silent above 1× through that same
+one guard rather than through a new one. "Provisional safe behavior" remains "keep what
+exists", and the policy is already isolated in a single predicate.
+
+### Item 5 — LucidLink detection. CONFIRMED, with a distinction the original did not draw.
+
+`MediaIoSource.cpp:244-257` still classifies per volume by querying it, and is still keyed
+on petabyte-scale capacity with `free == total` rather than on drive letter or volume label.
+Reuse it; do not write a second one.
+
+**But it answers a storage-class question, not a vendor question.** "Virtual mount with
+free == total" is true of any such mount, not only LucidLink. The spec gates *Copy LucidLink
+Link* on the path being on a LucidLink filespace **or the shell extension declaring
+support** — so this classifier is a good *necessary* condition and a bad *sufficient* one.
+The authoritative gate must be the installed integration. Using the classifier alone would
+reintroduce, one level up, exactly the "assume all `V:\` paths are LucidLink" mistake the
+requirement exists to prevent.
+
+### Item 6 — view-transform contract. STILL TRUE, now cheaper, one new interaction. Prerequisite 2.
+
+`VideoRenderer.h` still has no transform of any kind. Two things have changed since, and
+they pull in opposite directions.
+
+**Cheaper:** the two backends no longer compute the destination rect separately. `ddb38ca`
+extracted `hostDeviceSize()` and `fitDeviceRect()` into shared free functions
+(`VideoRenderer.h:144-145`) precisely because the duplicated arithmetic disagreed at
+fractional DPI. So there is now **one** place the fitted rect is produced, and an
+orientation transform has one obvious home rather than the two the original item assumed.
+D3D11 turns that rect into a viewport (`D3D11VideoRenderer.cpp:903-917`); the CPU backend
+turns it into a `QRectF` for `drawImage` (`CpuImageRenderer.cpp:79-82`).
+
+**New interaction, from step 9:** the D3D11 downscale is now a box average whose tap count
+is derived from the reduction ratio — `updateReduction(contentSize_, fitted)`, called
+per draw. **A 90° rotation swaps which axis is reduced**, so the taps must be computed from
+the *post-transform* fit or the filter will average along the wrong axis and step 9's
+0.74 → 0.02 result will not hold under rotation. This did not exist when item 6 was written
+and is the single easiest thing to get silently wrong in prerequisite 2.
+
+### Item 7 — aspect-locked resize vs the frame cache. TRUE, but the mechanism is not quite as stated.
+
+The concern is real and the debounce is still needed. The detail is worth correcting because
+it changes what the fix is.
+
+`resizeEvent` calls `syncScrubPreviewSize()` on every resize (`MainWindow.cpp:985-987`).
+Inside it, `reclaimDecoder()` runs **first and unconditionally**, and only then
+`setScrubPreviewSize()`. But `setScrubPreviewSize` is itself **guarded**: it returns early
+when the size is unchanged (`VideoDecoderFFmpeg.cpp:599`), so the *cache clear* happens on a
+real size change and not on every event.
+
+So the two costs are different and only one is what the item describes:
+
+- **cache clear** — only on an actual size change. Harmless for a resize that settles;
+  a genuine thrash under continuous aspect-locked drag-resizing, which changes the size on
+  every event. The item's conclusion holds for exactly that gesture.
+- **`reclaimDecoder()`** — on **every** resize event, changed size or not, which is a
+  generation bump per event whatever the size did.
+
+Two fixes, and they are independent: hoist the size comparison above `reclaimDecoder()`
+(cheap, correct regardless of aspect lock), and debounce resize-settled before touching the
+preview size. Measure both; do not assume either is free.
+
+### Item 8 — zero-based numbering. CONCLUSION RIGHT, PREMISE HALF WRONG.
+
+"No conversion layer needed" is the right answer, and for video the spec's requirement is
+**already met, including the part most likely to be missed**: `syncTransportBar` prints
+`currentFrame / maxFrame` (`MainWindow.cpp:1065-1067`), so the right endpoint is already the
+last valid *index* rather than the count.
+
+But the premise "the HUD works in frame indices from 0" is not true for two of the three
+media kinds. The image-sequence and still HUD lines print `st.currentFrame + 1` against a
+frame *count* (`:3344` and `:3355`) — one-based. Internal identity is untouched in both
+cases, so this is two display strings to change, not a conversion layer, and it must not
+turn into one.
+
+### Item 9 — source timecode. TRUE, and the current state is worse than "not extracted".
+
+`VideoMetadata` has no timecode field at all, and `TimeFormat::frameToTimecode(frame, fps)`
+synthesises a timecode from the frame index. That is precisely the thing the spec forbids —
+*"do not label an elapsed-time conversion as source timecode"* — and the HUD **already does
+it**, printing `Timecode: %1` from that synthesised value (`MainWindow.cpp:2762`, also `T`
+in `keyPressEvent`).
+
+So this is not only missing extraction work. The existing readout is already non-conforming,
+and phase 7 has to decide what it becomes when no source timecode exists: relabel it as
+elapsed, or disable it. Real extraction (SMPTE start timecode, drop-frame metadata) is
+separate and still real work.
+
+### Item 10 — double-click for fullscreen. CONFIRMED FREE.
+
+`ViewerWidget` implements no mouse handlers whatsoever. The only `MouseButtonDblClick` in
+the tree is in `src/ui/OverlaySpike.cpp:31`, the superseded Qt-widget overlay probe that
+§18.4 closed. No established gesture to collide with.
+
+---
+
+### What this re-derivation changes about the plan
+
+**Two prerequisites come before any spec phase**, both of them renderer-boundary work rather
+than UI work, and both enlarged by the `d3d11` default flip:
+
+1. **Promote the composited overlay to a real path** — with a renderer-neutral home, because
+   the CPU escape hatch would otherwise ship without a transport; and re-measure the cost
+   against a fade **during a drag**, on `ui gap`, not against §19.3's static playback run.
+2. **Add the view-transform contract to `VideoRenderer`** — one contract, both backends, and
+   the D3D11 reduction taps derived from the post-transform fit.
+
+**And two items get cheaper than the spec expects**: reverse shuttle (item 2) is a call
+site, and zero-based video numbering (item 8) is already done.
+
+Also: **`V:\` is live client production storage and is strictly read-only.** Any
+shell-extension prototyping must be read-only against files Anj nominates.
 
 ---
 

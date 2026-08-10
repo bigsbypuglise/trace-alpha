@@ -94,12 +94,29 @@ else" was already an instance of. **The owner extended this to the reverse shutt
 accelerated reverse is now the third instance of the same rule, alongside the drag preview
 and §15's sampling. Fidelity is still owed to the frame rewind *stops* on.
 
-The approved interface pass is written up and **deferred** in
-`docs/interface-pass-1-spec-DEFERRED.md`, with the icon assets in
-`assets/260807 Trace Media Player Icon/`. Do not start any of it. Read its §2 during the GPU
-work though — the auto-hiding floating transport depends on the composited-overlay path
-(plan §19/§20.1), and rotate/flip needs a view-transform contract on `VideoRenderer` that is
-much cheaper to add while both backends are being touched than afterwards.
+**THE INTERFACE PASS IS THE OPEN PHASE as of 2026-08-10** — the owner chose it and lifted
+the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
+`assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
+runs the playback and scrub regression, and a feature that costs smoothness loses.
+
+**§2 of that spec was RE-DERIVED on 2026-08-10 and is no longer the 2026-08-09 text.** Read
+it as it now stands. Four results decide the shape of the work. **Item 2 was stale** —
+continuous reverse is built, measured and signed off, so the spec's capability-detect-and-
+defer branch is a call site rather than a plan. **Item 1 is materially larger than written,
+and the `d3d11` default flip is what enlarged it**: the composited overlay is now the path
+that *ships* while `TRACE_RENDERER=cpu` — the documented escape hatch — has no compositor at
+all, so a floating transport built only in `OverlayCompositor` would leave the escape hatch
+with no transport. It needs a renderer-neutral home. **Item 6 gained a trap from step 9**:
+the D3D11 reduction taps come from the reduction ratio, so a 90° rotation must recompute
+them from the *post-transform* fit or the box average filters the wrong axis. **Item 8's
+premise was half wrong** — video is already zero-based including the right endpoint, but the
+image-sequence and still HUD lines print `currentFrame + 1`.
+
+**The two GPU prerequisites come first**, and both are renderer-boundary work rather than UI
+work: promote the composited overlay to a real path with a renderer-neutral home and its cost
+re-measured against a fade *during a drag* (`ui gap`, not presented rate — §19.3's number is
+a static overlay through a playback run), and add a view-transform contract to
+`VideoRenderer`, which has none.
 
 Owner context: Anj is a VFX/motion-design lead, not a programmer. Explain things plainly; he tests builds on a Windows RTX 4090 box; development happens on macOS. Don't ask him to debug code — give exact copy-paste terminal commands when he needs to run anything.
 
