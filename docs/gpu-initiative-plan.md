@@ -1935,12 +1935,43 @@ Two reproducible differences on 4444, consistent across all three runs:
   the landing is now a plane copy rather than a full-res 4444 swscale;
 - **release latency 6.1/7.9/5.1 → 33.9/31.3/34.5ms** — worse.
 
-The second is **recorded, not explained**. Per-frame costs all moved the right
-way (`dec` 15.8 → 15.1, `sws` 2.5 → 1.9), so the release figure disagrees with
-the parts it is made of, and one plausible reading — that the BGRA release was
-being served without a fresh full-res decode — was not confirmed. **Owner feel
-on a 4444 release is the next evidence**, and if it reads as a lag on letting go
-of the handle, this is the number.
+~~The second is recorded, not explained.~~ **WRONG, and corrected below in
+22.4a. The release comparison was measuring two different gestures.**
+
+### 22.4a The release-latency "regression" was a measurement artefact
+
+The reading that "the BGRA release was being served without a fresh full-res
+decode" was the right suspicion, and it is now confirmed — which makes the
+regression disappear.
+
+`-Reversals` does not guarantee a landing. In the BGRA config it ended with
+`dst RGB32/BGRA 640x360` — **preview** resolution — and `dec 0.00 | sws 0.00`,
+i.e. no decode at all; in the planar config the same gesture ended on a full-res
+landing. The 6ms was not a fast release, it was **no release work happening**.
+Decomposing against the existing HUD fields confirms it arithmetically:
+
+    planar   dec 15.61 + copy 10.45 + handoff 6.85 = 32.9ms  (measured 33)
+    bgra     dec  0.00 + sws  0.00 + handoff 6.46 =  6.9ms  (measured 7)
+
+Re-run with **`-SnapRelease`**, which is the gesture that reliably ends in a
+release, 4K ProRes 4444, two runs each — every row `delta 0`, `target 261 shown
+261`, and a full-resolution `dst` on all three:
+
+| config | dst | release |
+|---|---|---|
+| cpu | `RGB32/BGRA` | 65.3 / 57.2ms |
+| d3d11 BGRA | `RGB32/BGRA` | 65.6 / 55.4ms |
+| **d3d11 planar** | `YUV444P12 planar` | **46.7 / 33.7ms** |
+
+**GATE C improved release latency by roughly 20ms**, which is what its cheaper
+conversion predicts. There was never a regression.
+
+**Consequences worth keeping.** Step 8 must not be justified on release latency
+— there is no target there, and shipping an upload optimisation against this
+number would have booked a win that did not exist. And the general lesson is the
+one this project keeps relearning: *before comparing two numbers, check the two
+runs did the same work.* `dst` and `dec`/`sws` said they had not, on the same
+line as the figure being compared.
 
 ### 22.5 The pool bug, worth keeping
 
