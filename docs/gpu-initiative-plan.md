@@ -3431,3 +3431,166 @@ The HUD reports `display WxH filtered xN`. 4444 reads `x4` (ratio 6.4), 4K H.264
    what it was built to catch — but nobody has measured a 4x4 reduction on WARP,
    and a machine that falls back to it would be the first to find out. If the
    selftest is ever extended to paint a frame, this is the reason to do it.
+
+---
+
+## 29. Item 1 re-derived, and a GATE E regression on the J-K-L path (2026-08-10)
+
+Two separate results. The first was the task; the second was found while
+answering "is the playback phase complete" and is a live defect on the shipping
+build.
+
+### 29.1 Candidate item 1 (4444 fast drag) is CLOSED by §15 — the premise expired
+
+The item read: *"still decode-bound at ~15.4ms/frame, ~2.3x playback against the
+owner's stated ~4x. Not a bug; an explicit product decision about whether to skip
+frames on the heaviest media or run the worker ahead of the request chain."*
+
+It was written in the "Where scrub stands" pass against `f77d472` (GATE D,
+2026-08-08). **Velocity-adaptive sampling shipped later the same day**
+(`77738f0`, gate corrected `f08f015`) and the owner signed it off on 2026-08-09
+(§15.5 item 3). The item was never re-read against it.
+
+**Both branches of the decision it proposes are already taken.** "Skip frames on
+the heaviest media" *is* §15 — shipped, gated to `AV_CODEC_PROP_INTRA_ONLY`,
+signed off. "Run the worker ahead of the request chain" is directional prefetch,
+measured and declined at §15.3 and listed under *Things not to undo* in the
+handoff. The item is a survivor of the pre-sampling world.
+
+**The arithmetic error underneath it.** `~15.4ms/frame → ~2.3x` converts a
+*decoder throughput* figure into a *drag speed* claim. That conversion is only
+valid while the shuttle presents every frame. Sampling broke it: one presented
+frame now advances `stride` frames, so the picture tracks the pointer at a rate
+the decoder never has to reach. The throughput fact is still true and unchanged
+— **the conclusion drawn from it is not.**
+
+Re-measured today on the shipping build (d3d11 default, 384MB cache, step 9
+shader), `win 1280x815`, physical panel 5120x1440 @ 239.999Hz, 4444 262 frames:
+
+| gesture | ptr f/s | dec f/s | supply | sampling | behind end/max | p2p mean/max | delta |
+|---|---|---|---|---|---|---|---|
+| fwd @ ~4x (2.7s sweep) | 82.3 | 42.9 | 52% | skipped 157 / 119 steps | **0 / 6f** | **26 / 71ms** | 0 |
+| rev @ ~4x (2.7s sweep) | 82.2 | 44.2 | 54% | ON, stride 2 | **0 / 6f** | **26 / 63ms** | 0 |
+| fwd fast (1.0s, ~11x) | 178.7 | 41.1 | 23% | ON, stride 4 | 0 / 21f | **22 / 102ms** | 0 |
+| reversals (~14.5x) | 347.0 | 43.1 | 12% | ON, stride 3 | 0 / 87f | 21 / 844ms | 0 |
+
+**At the owner's stated ~4x the picture ends exactly on the pointer and never
+trails more than 6 frames (0.25s), in both directions**, on 52–54% supply —
+which is the supply figure §15.1 predicted for 4444 at 4x ("**4444 54%**") and
+is the same decoder rate the item quotes. Supply below 100% simply stopped
+meaning "behind" once sampling shipped.
+
+The fast row reproduces §15.2's headline `p2p 22ms` **to the digit** on today's
+build, with max lag better than §15.4 recorded on `cpu` (`0/21f` against
+`0/48f`) — so the §15 figures survive the renderer flip and the cache raise.
+
+**Recommendation: strike item 1.** What remains true of it is one narrow,
+already-recorded fact — 4444 decode is ~23ms/frame and nothing has touched it —
+and one already-deferred behaviour: at 14.5x with 12% supply the mean p2p is
+21ms but the max is 844ms, which is §15.5 item 3's "4444 pausing briefly and
+then catching up under extreme back-and-forth", assessed and deferred by owner
+instruction. That is the fourth deferred note in three sessions whose premise had
+moved (after §26.2, §27, §28); this one had moved *two days* after it was
+written.
+
+### 29.2 GATE E never runs on the J-K-L path — playback decays quadratically
+
+**A real defect on the shipping default, found while checking whether reverse
+playback belongs inside the phase goal.** Not previously observed because GATE E
+was validated on the Play action alone.
+
+`playTimer_.start()` has three call sites: `startPlaybackRun()`, `Key_J`
+(MainWindow.cpp:3026) and `Key_L` (:3055). **`startPlaybackRun()` is the only
+one that calls `sessionClock_.start()`** (:1493), and `sessionClock_` is the
+clock the entire GATE E timeline is built on. J and L start the timer directly.
+
+So on any J or L run, `sessionClock_.isValid()` is false and both guarded reads
+fall through to their `: 0` branch — `presentEpochNs_ = 0` (:1550) and `now = 0`
+(:1578). `target = 0 + slot × period` is then **always greater than `now`**, so
+the rephase branch that exists to catch exactly this can never fire, and the
+armed delay is `slot × 41.667ms`, growing by one frame period every tick.
+
+Cumulative time to N ticks is `period × N(N+1)/2`. At 8 seconds that predicts
+N ≈ 19 and a final interval of 19 × 41.667 = **792ms**. Measured, on three
+unrelated runs: `ticks 19 | sched tick 792ms`, every time. It is media- and
+direction-independent because no media clock is involved.
+
+| run | scheduler | result |
+|---|---|---|
+| 4K H.264 reverse (J) | shipping | `ticks 19`, `sched tick 792ms`, 20 presents in 8s, frame 111 → 91 |
+| 4K H.264 reverse (J) | `TRACE_DEADLINE_SCHED=0` | `sched tick 41ms`, **111 presents, reached frame 0** |
+| 1080p H.264 reverse (J) | shipping | `ticks 19`, `sched tick 792ms`, 20 presents in 8s |
+| 1080p H.264 **forward (L)** | shipping | `ticks 19`, `sched tick 792ms`, `sync -5825.1ms`, **`skip 35`** |
+| 1080p H.264 forward (**Space**) | shipping | `sched tick 39ms`, `jitter -0.84/0.54/1.73`, **99.5% real time**, `skip 0` |
+
+**Three symptoms, one root cause.** The 792ms tick; `drift
+9223315866031.3ms`, which is `firstPresentNs_`/`lastPresentNs_` read stale for
+the same reason; and `presented -- / 24.000 fps` where Space reads `presented
+23.88 / 24.000 fps (99.5% real time)`, because `playbackRateClock_` is also only
+started in `startPlaybackRun()`. On the audio-mastered forward L run it is worse
+than slow: audio keeps real time while video presents at 1.26 fps, so video
+**skips 35 frames** to chase it — a "never skip a frame" violation outside the
+one sanctioned exception.
+
+**The obvious fix is wrong.** Calling `startPlaybackRun()` from J and L would
+also call `startAudioForPlayback()` (:1487), and J deliberately calls
+`stopAudio()` because reverse must be silent, as must L above 1x. The reset that
+J and L need is the *timeline and telemetry* half — `sessionClock_`,
+`playbackRateClock_`, `firstPresentNs_`/`lastPresentNs_`, `presentEpochNs_`,
+`presentSlot_`, the cadence counters — not the audio half. Extract that and call
+it from all three, the same way `startPlaybackRun()` was itself extracted at
+§16 so Play and scrub-resume could share one setup.
+
+### 29.3 Fixed — `beginPlaybackTimeline()`, shared by Play, J and L
+
+Owner decision 2026-08-10: fix it now, and harden before any feature.
+
+`startPlaybackRun()` split in two. The decoder request and `startAudioForPlayback()`
+stay in it; everything else — `playbackClock_`, `playbackRateClock_`,
+`sessionClock_`, `firstPresentNs_`/`lastPresentNs_`, the cadence and handler
+counters, the whole `presentEpochNs_`/`presentSlot_`/`presentPeriodNs_` timeline,
+and `playTimer_.start()` — moves to **`beginPlaybackTimeline()`**, which all
+three paths call. J and L call it *instead of* their bare
+`playTimer_.start()`, so they get the timeline without the audio: J still calls
+`stopAudio()` first because reverse is silent, and L still calls
+`startAudioForPlayback()` itself so the >1x shuttle speeds stay silent.
+
+It is called on **every** J/L press, not only the first. Each press is a new
+speed or direction, so it is a new run and its cadence figures should start
+there — which is also what makes `syncPresentTimeline`'s re-epoch-on-period-change
+unnecessary as a second mechanism on this path.
+
+**Verified, all at `win 1280x829`/`1280x815`, physical panel, d3d11 default:**
+
+| run | before | after |
+|---|---|---|
+| 4K H.264 reverse (J) | `tick 792ms`, **20 presents in 8s** | `tick 41ms`, **111 presents**, reaches frame 0 |
+| 1080p forward (L) | `tick 792ms`, `sync -5825.1ms`, **`skip 35`** | `99.5% real time`, `sync -28.3ms`, **`skip 0`** |
+| 1080p forward (Space) | `99.5%`, `skip 0` | `99.5%`, `skip 0`, `stalls 0`, `hitch 0` — unchanged |
+| 4444 forward (Space) | — | `99.7% real time`, `handler>budget 0 of 222`, `jitter −0.74/0.70/2.66`, `stalls 0`, `hitch 0` |
+| 4444 drag @ ~4x | `behind 0/6f`, `p2p 26/71ms` | `behind 0/6f`, `p2p 29/59ms`, `delta 0` — unchanged |
+| `lifecycle -PlayThroughDrag` | — | PASS, 42.7% moved |
+| `lifecycle -PausedThroughDrag` | — | PASS, 0.0% moved |
+
+L forward is now **bit-for-bit the Space control** on the same file (both
+`23.88 / 24.000 fps`, `ticks 202 presents 203`, `rep 1 skip 0`), which is the
+right check: J-K-L at 1x forward *is* ordinary playback and had no business
+measuring differently.
+
+**Both lifecycle gestures were run, not just the positive one** — a
+play-through-drag check that can only report "moving" proves nothing (§16.6).
+
+**What this un-masked.** Reverse playback on 4K H.264 now reads **86.7% of real
+time** with `handler>budget 11 of 110 (max 111.1ms)`, `seeks 13`, `rev-hit 88.5%`
+and a cadence tail of `p95 123.6 / p99 150.1ms`. **That is the real
+GOP-walk-bound reverse playback** the roadmap has described all along — it was
+completely hidden behind the scheduler fault, and any reverse figure taken
+between GATE E and today was measuring the wrong thing. It is a genuine
+remaining weakness and is *not* claimed as fixed here.
+
+**The lesson is the companion rule again, from the other side.** §24.13 recorded
+that GATE E's own `jitter` metric broke because its inputs changed meaning. This
+is the same shape one level up: GATE E moved playback from a free-running timer
+to a timeline that has to be *established*, and every path that started the timer
+without establishing it silently kept compiling. The validation only exercised
+the one path that did.
