@@ -55,6 +55,12 @@ public:
     // Whether the adopted backend can take Y/U/V planes and convert them
     // itself, so the decoder may skip swscale for full-resolution frames.
     bool rendererAcceptsPlanarYuv() const;
+    // True when the backend TRACE_RENDERER selected failed to initialize and the
+    // CPU backend was adopted in its place. rendererName() alone cannot answer
+    // this: the D3D11 backend renames itself "d3d11 (warp)" when it lands on the
+    // software rasteriser, so comparing names before and after would read a
+    // successful WARP init as a fallback and a genuine fallback as a rename.
+    bool rendererFellBack() const { return rendererFellBack_; }
     void setOverlayHooks(const trace::render::OverlayHooks& hooks);
 
 protected:
@@ -73,6 +79,7 @@ private:
     // fallback is adopted in its place.
     bool nativeSurface_ = false;
     bool hostHwndSpike_ = false;
+    bool rendererFellBack_ = false;
     // Kept here as well as in the renderer so "which frame is displayed" is
     // answerable without asking the backend.
     trace::core::VideoFrame frame_;

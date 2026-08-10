@@ -206,6 +206,44 @@ jobs:
           $sizeMb = [math]::Round(((Get-ChildItem $dist -Recurse | Measure-Object -Property Length -Sum).Sum / 1MB), 1)
           Write-Host "Package verified: $($required.Count) required files present, $sizeMb MB total."
 
+      # Files existing is not the same as the app working, and since 2026-08-10
+      # d3d11 is the DEFAULT renderer -- so a build whose GPU backend fails to
+      # initialize would go green and every user would silently land on the CPU
+      # fallback. That is the exact failure the renderer boundary was built to
+      # make visible (plan section 12), and plan section 5 asked for this check
+      # by name.
+      #
+      # Runners have no GPU. The backend retries on WARP for that reason, so
+      # "d3d11 (warp)" is a pass and the prefix match accepts it. What fails is a
+      # backend that was requested and could not initialize (exit 3), or one that
+      # never got built because fxc was missing (exit 4) -- the second is why
+      # there is no separate configure-time check for the shader compiler.
+      #
+      # Runs against the DEPLOYED folder, not the build tree, so it also proves
+      # the packaged exe starts with the Qt runtime windeployqt actually shipped.
+      - name: Verify the renderer initializes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD "dist\trace-alpha-windows-x64\Trace.exe"
+
+          $out = & $exe --renderer-selftest=d3d11 2>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+
+          if ($code -ne 0) {
+            throw "Renderer self-test failed (exit $code). See the line above."
+          }
+
+          # Reported, not asserted, for now. A failed YUV shader is deliberately
+          # non-fatal (GATE C): the backend keeps presenting BGRA. Whether WARP
+          # supplies it has never been observed, so this prints the answer rather
+          # than turning the first run red -- promote it to a hard assertion once
+          # a run has shown planar=1.
+          if ($out -match 'planar=0') {
+            Write-Host "::warning::Renderer self-test reports planar=0 - the GATE C YUV shader path is not active on this runner."
+          }
+
       # Uploaded as a FOLDER, not a .zip. upload-artifact always zips what it
       # is given, so uploading a zip produced a zip-inside-a-zip: unzipping the
       # download left another archive instead of the app.

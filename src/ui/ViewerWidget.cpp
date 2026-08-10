@@ -19,6 +19,7 @@ ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
         // one is actually presenting.
         qWarning().noquote() << "Trace: renderer failed to initialize:" << error
                              << "- falling back to cpu.";
+        rendererFellBack_ = true;
         QString cpuError;
         if (!adoptRenderer(trace::render::createCpuRenderer(), cpuError)) {
             qWarning().noquote() << "Trace: cpu renderer failed to initialize:" << cpuError;
