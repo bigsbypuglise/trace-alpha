@@ -7,6 +7,7 @@
 
 #include "core/VideoFrame.h"
 #include "render/OverlayHooks.h"
+#include "render/ViewTransform.h"
 
 class QWidget;
 
@@ -130,6 +131,22 @@ public:
     // mean the advice "try TRACE_RENDERER=cpu" silently costs the user their
     // transport.
     virtual void setOverlay(OverlayModel* model) { (void)model; }
+
+    // How the frame is oriented on its way to the screen. A viewing transform
+    // only: no decoded pixel, frame identity, cache entry or timing changes,
+    // which is why it is here and not anywhere near the decoder.
+    //
+    // BOTH backends must honour it, from this one description. Implementing
+    // rotate twice -- once in a shader, once in a QPainter -- is how two paths
+    // end up differing by a flip, and the interface spec's own fallback
+    // ("define the actions and defer the rendering") exists to prevent exactly
+    // that. Identity is free on both: the CPU path skips installing a
+    // QTransform, the GPU path uploads an identity matrix once and the vertex
+    // shader multiplies by it.
+    //
+    // A backend that cannot honour it must not silently ignore it; there is no
+    // such backend today, and adding one means answering this first.
+    virtual void setViewTransform(const ViewTransform& transform) { (void)transform; }
 
     // Identifies the backend in the HUD, so a fallback is visible rather than
     // silent -- a GPU path that quietly never engages is the failure mode worth

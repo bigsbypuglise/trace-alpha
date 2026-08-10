@@ -79,6 +79,13 @@ public:
     // is reported.
     bool overlayEnabled() const { return overlayModel_.enabled(); }
 
+    // Rotate/flip. Held here as well as handed to the backend, so a renderer
+    // that fails and is replaced by the CPU fallback inherits the orientation
+    // rather than quietly resetting it -- the same reason the overlay model
+    // lives here.
+    void setViewTransform(const trace::render::ViewTransform& transform);
+    const trace::render::ViewTransform& viewTransform() const { return viewTransform_; }
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -106,6 +113,7 @@ private:
     // adoptRenderer hands it &overlayModel_. A member constructed afterwards
     // would be handed to the backend before it existed.
     trace::render::OverlayModel overlayModel_;
+    trace::render::ViewTransform viewTransform_{};
     std::unique_ptr<trace::render::VideoRenderer> renderer_;
     // Mirrors the active renderer's usesNativeSurface(), so the widget-level
     // attributes can be undone if a backend fails to initialize and the CPU

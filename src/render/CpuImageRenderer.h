@@ -29,6 +29,7 @@ public:
     void resize(QSize size) override;
     void paint(QWidget* host) override;
     void setOverlay(OverlayModel* model) override { overlayModel_ = model; }
+    void setViewTransform(const ViewTransform& transform) override { transform_ = transform; }
     QString name() const override { return QStringLiteral("cpu"); }
     const RenderStats& stats() const override { return stats_; }
 
@@ -51,6 +52,7 @@ private:
     QImage image_;
     bool hasImage_ = false;
     QString placeholder_ = QStringLiteral("Drop media or File > Open");
+    ViewTransform transform_{};
     RenderStats stats_{};
 
     // Non-owning; the host owns it. Null when there is no overlay.

@@ -2837,12 +2837,21 @@ void MainWindow::refreshHud(const QString& action) {
             // two together are the whole scaling story: the size it was drawn at
             // and how many source samples each output pixel came from. `x1` at a
             // real downscale is the undersampling case -- see RenderStats.
-            const QString resampleState =
+            QString resampleState =
                 !drawPerf.lastDrawWasScaled
                     ? QStringLiteral("1:1")
                     : (drawPerf.lastDrawWasFiltered
                            ? QStringLiteral("filtered x%1").arg(drawPerf.reduceTaps)
                            : QStringLiteral("NEAREST"));
+            // A view transform that silently fails to apply looks identical to
+            // no transform from every other number, which is the same reason
+            // `renderer` and `+overlay` are reported.
+            if (const auto vt = viewer_->viewTransform(); !vt.isIdentity()) {
+                resampleState += QStringLiteral(" view");
+                if (vt.quarterTurns) resampleState += QStringLiteral(" rot%1").arg(vt.quarterTurns * 90);
+                if (vt.flipH) resampleState += QStringLiteral(" flipH");
+                if (vt.flipV) resampleState += QStringLiteral(" flipV");
+            }
             const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9%10")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")

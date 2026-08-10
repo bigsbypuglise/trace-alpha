@@ -131,6 +131,7 @@ add_executable(Trace
   # the CPU renderer draws the same overlay and must build without D3D11.
   ../src/render/OverlayModel.h
   ../src/render/OverlayModel.cpp
+  ../src/render/ViewTransform.h
   ../src/render/VideoRenderer.h
   ../src/render/VideoRenderer.cpp
   ../src/render/CpuImageRenderer.h

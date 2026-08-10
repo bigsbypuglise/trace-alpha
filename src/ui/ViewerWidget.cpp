@@ -32,6 +32,12 @@ ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
         setMouseTracking(true);
     }
 
+    // A test knob until spec phase 10 wires the real actions; identity unless
+    // TRACE_VIEW_TRANSFORM says otherwise, and identity costs nothing on either
+    // backend. Read before the renderer is adopted so the first frame is
+    // already oriented rather than snapping a moment later.
+    viewTransform_ = trace::render::viewTransformFromEnvironment();
+
     renderer_ = trace::render::createRenderer();
     QString error;
     if (!adoptRenderer(std::move(renderer_), error)) {
@@ -89,7 +95,15 @@ bool ViewerWidget::adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> r
     // both backends unconditionally: whether anything is drawn is the model's
     // enabled() to decide, not the renderer's.
     renderer_->setOverlay(&overlayModel_);
+    renderer_->setViewTransform(viewTransform_);
     return true;
+}
+
+void ViewerWidget::setViewTransform(const trace::render::ViewTransform& transform) {
+    if (transform == viewTransform_) return;
+    viewTransform_ = transform;
+    if (renderer_) renderer_->setViewTransform(viewTransform_);
+    update();
 }
 
 // Logical -> device. The model lays out in device pixels because the D3D11

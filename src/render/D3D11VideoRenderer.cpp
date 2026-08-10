@@ -345,6 +345,24 @@ bool D3D11VideoRenderer::createPipeline(QString& error) {
                                     nullptr, &pixelShader_);
     if (FAILED(hr)) { error = hrText("CreatePixelShader", hr); return false; }
 
+    // The view transform's 2x2, at the vertex stage. Fatal if it fails, unlike
+    // the YUV buffer below: the vertex shader reads it unconditionally, so a
+    // missing buffer is not a lost capability but an undefined texture
+    // coordinate on every frame.
+    {
+        D3D11_BUFFER_DESC bd = {};
+        bd.ByteWidth = 16;   // one float4
+        bd.Usage = D3D11_USAGE_DYNAMIC;
+        bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+        hr = device_->CreateBuffer(&bd, nullptr, &viewParams_);
+        if (FAILED(hr)) { error = hrText("CreateBuffer(ViewParams)", hr); return false; }
+        if (!uploadViewParams()) {
+            error = QStringLiteral("failed to seed the view-transform constants");
+            return false;
+        }
+    }
+
     // GATE C. A failure here is NOT fatal: without the YUV shader the backend
     // still presents every BGRA frame exactly as it did at GATE B, and the
     // decoder is told not to send planes because acceptsPlanarYuv() is answered
@@ -691,6 +709,61 @@ bool D3D11VideoRenderer::uploadYuvParams() {
     return true;
 }
 
+// source_uv = M * (dest_uv - 0.5) + 0.5, so M maps a DESTINATION offset back to
+// the source it should be read from -- the inverse of the transform the viewer
+// sees. Rotating the picture a quarter turn clockwise therefore means reading
+// the source a quarter turn anticlockwise, which is why the signs below look
+// like the opposite of what is being asked for.
+//
+// Derived by corners rather than by trusting a sign convention: under a
+// clockwise quarter turn the source's top-left must arrive at the destination's
+// TOP-RIGHT, i.e. dest (0,0) reads source (0,1) and dest (1,0) reads source
+// (0,0). That gives source.x = dest.y and source.y = 1 - dest.x, which in
+// centred coordinates is [[0,1],[-1,0]].
+//
+// The flip is applied to the DESTINATION coordinate before the rotation, which
+// is what makes "flip horizontally" mean flipping what the user can currently
+// see rather than flipping the source and then rotating the flip somewhere else.
+static void viewMatrix2x2(const ViewTransform& t, float out[4]) {
+    // Rotation, clockwise quarter turns, in centred uv space (y down).
+    float r[4];
+    switch (t.quarterTurns) {
+        case 1:  r[0] =  0; r[1] =  1; r[2] = -1; r[3] =  0; break;
+        case 2:  r[0] = -1; r[1] =  0; r[2] =  0; r[3] = -1; break;
+        case 3:  r[0] =  0; r[1] = -1; r[2] =  1; r[3] =  0; break;
+        default: r[0] =  1; r[1] =  0; r[2] =  0; r[3] =  1; break;
+    }
+    const float fx = t.flipH ? -1.0f : 1.0f;
+    const float fy = t.flipV ? -1.0f : 1.0f;
+    // r * diag(fx, fy): scaling the columns, because the flip is applied first.
+    out[0] = r[0] * fx; out[1] = r[1] * fy;
+    out[2] = r[2] * fx; out[3] = r[3] * fy;
+}
+
+bool D3D11VideoRenderer::uploadViewParams() {
+    if (!context_ || !viewParams_) return false;
+    float m[4];
+    viewMatrix2x2(viewTransform_, m);
+    D3D11_MAPPED_SUBRESOURCE mapped = {};
+    if (FAILED(context_->Map(viewParams_.Get(), 0, D3D11_MAP_WRITE_DISCARD, 0, &mapped))) {
+        return false;
+    }
+    std::memcpy(mapped.pData, m, sizeof(m));
+    context_->Unmap(viewParams_.Get(), 0);
+    return true;
+}
+
+void D3D11VideoRenderer::setViewTransform(const ViewTransform& transform) {
+    if (transform == viewTransform_) return;
+    viewTransform_ = transform;
+    uploadViewParams();
+    // The fit and the reduction both depend on it and are both recomputed in
+    // paint(), so there is nothing else to invalidate -- but the picture has
+    // changed without a new frame arriving, and only the host can ask for a
+    // repaint.
+    if (host_) host_->update();
+}
+
 void D3D11VideoRenderer::updateReduction(QSize content, QSize fitted) {
     float taps = 1.0f;
     float fu = 0.0f;
@@ -723,6 +796,18 @@ void D3D11VideoRenderer::updateReduction(QSize content, QSize fitted) {
         const int want = static_cast<int>(std::ceil(ratio / 2.0));
         taps = static_cast<float>(std::clamp(want, 1, 4));
     }
+
+    // `content` arrives ROTATED, so everything above is in the space the picture
+    // is displayed in. The shader, however, offsets its taps in SOURCE uv -- so
+    // under a quarter turn the destination's horizontal extent is a step along
+    // the source's vertical axis, and the two components have to be exchanged
+    // on the way into the constant buffer.
+    //
+    // Getting this wrong is invisible on a square-ish reduction and obvious on
+    // an anamorphic one: the box average would filter along the wrong axis,
+    // which is step 9's defect reintroduced by a coordinate mistake rather than
+    // by a missing loop.
+    if (viewTransform_.swapsAxes()) std::swap(fu, fv);
 
     if (taps == yuvParamsData_.taps
         && fu == yuvParamsData_.footprint[0]
@@ -894,11 +979,16 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     // The fit goes through the shared helper so the CPU backend lands on exactly
     // the same rectangle; they were separate expressions and disagreed by a
     // fraction of a pixel at fractional DPI.
+    // The fit is computed from the DISPLAYED size, not the decoded one: a
+    // quarter turn exchanges the axes, so a 16:9 source letterboxes as 9:16 and
+    // the viewport has to follow it. The placeholder deliberately does not
+    // rotate -- it is a message, not the media.
+    const QSize displayedSize = viewTransform_.apply(contentSize_);
     QRect dest(QPoint(0, 0), pixels);
     bool resampled = false;
-    if (hasContent_ && !contentSize_.isEmpty()) {
-        dest = fitDeviceRect(contentSize_, pixels);
-        resampled = (dest.size() != contentSize_);
+    if (hasContent_ && !displayedSize.isEmpty()) {
+        dest = fitDeviceRect(displayedSize, pixels);
+        resampled = (dest.size() != displayedSize);
     }
     const QSize fitted = dest.size();
 
@@ -928,6 +1018,12 @@ void D3D11VideoRenderer::paint(QWidget* host) {
         // triangle from SV_VertexID.
         context_->IASetInputLayout(nullptr);
         context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
+        // The view transform, at the vertex stage. Bound per draw because the
+        // overlay's own pass writes the vertex stage's b0 as well, so leaving it
+        // set from last frame would make this draw depend on whether the overlay
+        // happened to be visible.
+        ID3D11Buffer* viewCbs[] = {viewParams_.Get()};
+        context_->VSSetConstantBuffers(0, 1, viewCbs);
 
         // Both paths share the vertex shader, the sampler, the rasteriser and
         // the viewport. Only the pixel shader and what is bound to it differ,
@@ -935,7 +1031,7 @@ void D3D11VideoRenderer::paint(QWidget* host) {
         if (drawPlanar) {
             // Before the draw and after the fit, because the ratio is a property
             // of the destination rect. A resize changes it with no new frame.
-            updateReduction(contentSize_, fitted);
+            updateReduction(displayedSize, fitted);
             context_->PSSetShader(yuvPixelShader_.Get(), nullptr, 0);
             ID3D11ShaderResourceView* srvs[] = {planeSrv_[0].Get(), planeSrv_[1].Get(),
                                                 planeSrv_[2].Get()};

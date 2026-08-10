@@ -78,7 +78,11 @@ void CpuImageRenderer::paint(QWidget* host) {
             // where it may is what put this backend a fraction of a pixel away
             // from D3D11 at fractional ratios; see hostDeviceSize().
             const double dpr = host->devicePixelRatioF();
-            const QRect dev = fitDeviceRect(image_.size(), hostDeviceSize(host));
+            // Fit the DISPLAYED size, exactly as the D3D11 backend does: a
+            // quarter turn exchanges the axes, so a 16:9 source letterboxes as
+            // 9:16 and the destination rect has to follow.
+            const QSize displayed = transform_.apply(image_.size());
+            const QRect dev = fitDeviceRect(displayed, hostDeviceSize(host));
             const QSize drawn = dev.size();
             const QRectF target(dev.x() / dpr, dev.y() / dpr,
                                 dev.width() / dpr, dev.height() / dpr);
@@ -92,7 +96,7 @@ void CpuImageRenderer::paint(QWidget* host) {
             // dpr 1.5 a frame fitted to a logical rect of its own size is being
             // upscaled by half again, and comparing logical sizes called that
             // 1:1 and switched filtering off for it.
-            const bool resampled = drawn != image_.size();
+            const bool resampled = drawn != displayed;
             const bool filtered = resampled && !nearestScaleForced();
             p.setRenderHint(QPainter::SmoothPixmapTransform, filtered);
             stats_.lastDrawWasScaled = resampled;
@@ -100,7 +104,38 @@ void CpuImageRenderer::paint(QWidget* host) {
             stats_.lastDrawSize = drawn;
             QElapsedTimer drawTimer;
             drawTimer.start();
-            p.drawImage(target, image_);
+            if (transform_.isIdentity()) {
+                p.drawImage(target, image_);
+            } else {
+                // Rotate and flip about the CENTRE of the destination rect, then
+                // draw the image into the rect it would have occupied before the
+                // axes were exchanged. Doing it this way rather than pre-rotating
+                // the QImage matters: QImage::transformed() would allocate and
+                // copy a whole frame every paint, which at 4K is ~37MB of work
+                // per present for a viewing change that costs the GPU one 2x2
+                // multiply.
+                //
+                // The flip is applied AFTER the rotation, in the destination's
+                // own frame, so "flip horizontally" flips what the user can see
+                // -- the same composition order the shader's matrix uses.
+                p.save();
+                p.translate(target.center());
+                // scale BEFORE rotate in call order, which means the rotation is
+                // applied to the geometry FIRST and the flip second -- QPainter
+                // post-multiplies, so the last transform named is the innermost.
+                // Naming them the other way round is the same two operations in
+                // the opposite order, and for a quarter turn plus a horizontal
+                // flip that is a VERTICAL flip on screen: the two backends would
+                // then differ by a mirror while every number agreed.
+                p.scale(transform_.flipH ? -1.0 : 1.0, transform_.flipV ? -1.0 : 1.0);
+                p.rotate(transform_.quarterTurns * 90.0);
+                const QSizeF pre = transform_.swapsAxes()
+                    ? QSizeF(target.height(), target.width())
+                    : target.size();
+                p.drawImage(QRectF(QPointF(-pre.width() / 2.0, -pre.height() / 2.0), pre),
+                            image_);
+                p.restore();
+            }
             drawImageMs = static_cast<double>(drawTimer.nsecsElapsed()) / 1'000'000.0;
         } else {
             p.setPen(QColor(150, 150, 150));

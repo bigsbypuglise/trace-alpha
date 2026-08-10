@@ -55,6 +55,11 @@ public:
     // OverlayModel and OverlayHooks.
     void setOverlay(OverlayModel* model) override;
 
+    // Rotate/flip, applied to the texture coordinate in the vertex shader --
+    // which is why neither pixel shader knows about it, and why it costs one
+    // 2x2 multiply for three vertices rather than anything per pixel.
+    void setViewTransform(const ViewTransform& transform) override;
+
     QString name() const override { return name_; }
     const RenderStats& stats() const override { return stats_; }
 
@@ -91,6 +96,9 @@ private:
     // then -- a resize changes the ratio with no new frame arriving.
     void updateReduction(QSize content, QSize fitted);
     bool uploadYuvParams();
+    // Writes the view transform's 2x2 into the vertex shader's constant buffer.
+    // Called on change only; the buffer is otherwise untouched between frames.
+    bool uploadViewParams();
     void releasePlaneTextures();
     // The empty state. Rendered on the CPU into an image and uploaded through
     // the same path as a frame, so the placeholder survives the move to a
@@ -144,6 +152,10 @@ private:
     ComPtr<ID3D11Texture2D> planeTexture_[3];
     ComPtr<ID3D11ShaderResourceView> planeSrv_[3];
     ComPtr<ID3D11Buffer> yuvParams_;
+    // cbuffer ViewParams in FullscreenQuad.vs.hlsl. Bound to the VERTEX stage's
+    // b0, which does not collide with the YUV params at the pixel stage's b0.
+    ComPtr<ID3D11Buffer> viewParams_;
+    ViewTransform viewTransform_{};
 
     // Mirrors cbuffer YuvParams in YuvToRgb.ps.hlsl. Held rather than built on
     // the stack because the colour terms come from the frame (setFrame) and the

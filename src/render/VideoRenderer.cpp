@@ -34,6 +34,24 @@ QRect fitDeviceRect(QSize content, QSize deviceHost) {
                  fitted.width(), fitted.height());
 }
 
+ViewTransform viewTransformFromEnvironment() {
+    static const ViewTransform t = [] {
+        ViewTransform v;
+        const QByteArray raw = qgetenv("TRACE_VIEW_TRANSFORM").toLower();
+        if (raw.isEmpty()) return v;
+        // Degrees first, so "180h" and "h" both parse without needing a
+        // separator. An unrecognised rotation leaves 0 turns rather than
+        // guessing, because a silently ignored 45 is better than a surprising 90.
+        if (raw.contains("270")) v.quarterTurns = 3;
+        else if (raw.contains("180")) v.quarterTurns = 2;
+        else if (raw.contains("90")) v.quarterTurns = 1;
+        v.flipH = raw.contains('h');
+        v.flipV = raw.contains('v');
+        return v;
+    }();
+    return t;
+}
+
 std::unique_ptr<VideoRenderer> createCpuRenderer() {
     return std::make_unique<CpuImageRenderer>();
 }
