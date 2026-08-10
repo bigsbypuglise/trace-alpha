@@ -1,16 +1,15 @@
 # Trace GPU / smooth-presentation initiative — active plan
 
-**Status: GATE C IMPLEMENTED; GATE B PENDING OWNER VISUAL SIGN-OFF ONLY
-(2026-08-09, second session).** Steps 1-7 of §8 are committed and validated on
-the local Windows toolchain.
+**Status: GATE B PASSED, GATE C IMPLEMENTED AND MEASURED (2026-08-09).** Steps
+1-7 of §8 are committed and validated on the local Windows toolchain.
 
-**GATE B's two blocking items are done (§21).** The HUD unit bug is fixed
-(`58ec879`), and the 150% divergence of §20.3 is explained and mostly fixed
-(`ddb38ca`) -- the downscale ratio was a confound and the real variable is
-fractional DPI. **The one thing still outstanding is human visual review**, and
-it is the owner's to give: 4K ProRes 422 HQ against the CPU path. The material
-is built and waiting in `Desktop\Trace_GateB_Visual` (§21.3); three of its four
-viewing conditions are pixel-identical.
+**GATE B is signed off by the owner (§20.2, §17.5 item 2).** CPU and D3D11 are
+visually equivalent in fit-to-window and fullscreen; the 150% case is accepted
+with no meaningful softness, scaling artifacts, colour or framing difference, so
+§20.3 closes as acceptable rather than as a defect. ProRes 4444 scrub passed
+too. Verdict: **proceed with D3D11.** The two measurable blockers were fixed
+first -- the HUD unit bug (`58ec879`) and the fractional-DPI rect divergence
+(`ddb38ca`), where the downscale ratio turned out to be a confound.
 
 **GATE C is implemented and measured (§22).** Planar YUV upload with the matrix
 in the pixel shader, confirmed against the CPU path at 8, 10 and 12 bits (max
@@ -1323,11 +1322,18 @@ summary.
    H.264 reversal gesture measures unchanged through the D3D11 path, so the
    surface did not make the stall profile worse. The extreme-speed gestures the
    owner reported have not been re-run by hand.
-2. **Owner validation has not happened.** Every number above is the harness. The
-   split this project has recorded four times now applies here too, and it
-   applies with particular force to a *rendering* change: nothing in the table
-   says the picture looks right, only that it is the right frame at the right
-   size. 4K ProRes 422 HQ remains the bar.
+2. ~~**Owner validation has not happened.**~~ **GATE B PASSED — owner visual
+   sign-off, 2026-08-09.** CPU and D3D11 are visually equivalent in
+   fit-to-window and in fullscreen. **The 150% result is accepted**: no
+   meaningful softness, no scaling artifacts, no colour difference, no framing
+   difference — so §20.3, which was the one thing that needed an eye rather than
+   a number, is closed as acceptable rather than as a defect. **ProRes 4444
+   scrub also passed.** Verdict: proceed with D3D11.
+
+   This is the fifth time the project has recorded the same split, and it held
+   again: the harness said the right frame was at the right size, and only the
+   owner could say the picture looks right. `cpu` remains the default renderer
+   until GATE E — sign-off is on the *rendering*, not on changing the default.
 3. **No planar YUV yet** — the frame is still converted by swscale on the CPU
    and uploaded as BGRA, so the upload is 4 bytes per pixel of a frame the GPU
    could have assembled from 1.5. That is GATE C and is where the conversion
@@ -1645,23 +1651,34 @@ by default, and it announces itself on stderr when switched on.
 The accessibility plan in §19.7 is a *plan* and is preserved for the interface
 phase. It has not been prototyped and must not be treated as a commitment.
 
-### 20.2 GATE B is pending on exactly two things
+### 20.2 GATE B — PASSED (owner sign-off, 2026-08-09)
 
-1. **Human visual review.** Every number says the right frame is at the right
-   size; none says the picture looks right. 4K ProRes 422 HQ is the bar.
-2. **The HUD logical/device-pixel correction.** At 1.5x DPI the CPU backend
-   reports `display 640x360` (logical) and D3D11 reports `display 960x540`
-   (device) for the *same on-screen rectangle*. D3D11's is the honest figure.
-   They agree at dpr 1, which is why it went unnoticed until §18.2. This is a
-   reporting bug, not a rendering one, and it should be fixed before sign-off so
-   the field means one thing.
+Both blocking items are closed.
+
+1. ~~**Human visual review.**~~ **PASSED.** CPU and D3D11 are visually
+   equivalent in fit-to-window and in fullscreen, and the 150% case is accepted
+   with no meaningful softness, scaling artifacts, colour difference or framing
+   difference. ProRes 4444 scrub passed as well. Verdict: **proceed with
+   D3D11.** See §17.5 item 2.
+2. ~~**The HUD logical/device-pixel correction.**~~ **FIXED** (`58ec879`), and
+   the divergence behind it explained and mostly fixed (`ddb38ca`) — see §21.1
+   and §21.2. `RenderStats::lastDrawSize` is device pixels on both backends and
+   both fit the video rect with one shared expression.
+
+Everything else GATE B asked for had already passed: non-black frames render,
+CPU/GPU frame identity matches, aspect is correct, resize and fullscreen are
+reliable, performance is at the CPU baseline, there is no CPU-path regression,
+and shutdown is clean.
+
+**`cpu` remains the default renderer until GATE E.** The sign-off is on the
+rendering being correct, not on changing which backend ships enabled.
 
 Everything else GATE B asked for has passed: non-black frames render, CPU/GPU
 frame identity matches, aspect is correct, resize and fullscreen are reliable,
 performance is at the CPU baseline, there is no CPU-path regression, and
 shutdown is clean.
 
-### 20.3 The 150% scaling difference — for visual review, not yet explained
+### 20.3 The 150% scaling difference — EXPLAINED (§21.2) and ACCEPTED by the owner
 
 At `QT_SCALE_FACTOR=1.5`, CPU and D3D11 differ on **3.9% of the sampled video
 band, max channel delta 75**, bounding box entirely inside the video. Same
