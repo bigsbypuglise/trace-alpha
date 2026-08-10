@@ -3859,6 +3859,14 @@ transform.
 `lifecycle.ps1 -PlayThroughDrag` PASS (40.1% moved), `-PausedThroughDrag` PASS (0% moved).
 Renderer selftest `renderer=d3d11 fellback=0 planar=1`, exit 0.
 
+**ProRes 4444 was run as well, because it is the file with the least headroom** and both
+prerequisites touch the paint path on both backends: 4K H.264 has a 2.3ms handler against a
+41.67ms budget and could absorb a real regression without showing one. 4444 reads **99.8 /
+99.8% of real time, 261/261 frames, 0 doubled, `handler>budget 0 of 260`**, handler
+**25.29 / 25.17ms**, max present gap 45.3 / 44.9ms, `draw 0.01`. That is §25.1's recorded
+d3d11 figures to the digit (99.8%, 0 doubled, 0 over budget, handler 25.22ms, worst gap
+45.9ms), which is the check that the tightest file did not move either.
+
 ### 31.5 Open after the prerequisites
 
 1. **The `ui gap max` asymmetry above is unattributed** (§31.2). Repeatable on both backends
