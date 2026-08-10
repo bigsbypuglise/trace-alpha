@@ -217,6 +217,20 @@ MainWindow::MainWindow() {
             lastHandlerMs_ = static_cast<double>(handlerTimer.nsecsElapsed()) / 1'000'000.0;
             const double hn = static_cast<double>(cycleSamples_ + 1);
             avgHandlerMs_ += (lastHandlerMs_ - avgHandlerMs_) / hn;
+            // The count that identifies cause B. A handler that runs past the
+            // frame budget is late immediately -- decode is synchronous and
+            // there is no read-ahead absorbing it -- so this being non-zero is
+            // the signature of per-frame cost overrun rather than of the tick
+            // beat, which overruns nothing and simply skips an opportunity.
+            //
+            // Read from the member rather than captured: the budget is derived
+            // from fps and speed further down this handler, and this guard runs
+            // after that, so by the time it fires the value is this tick's.
+            if (tickFrameDurationMs_ > 0.0) {
+                ++handlerSamples_;
+                if (lastHandlerMs_ > tickFrameDurationMs_) ++handlerOverBudget_;
+                maxHandlerMs_ = std::max(maxHandlerMs_, lastHandlerMs_);
+            }
         });
 
         // Clock-update accounting, measured between consecutive tick entries so
@@ -255,6 +269,9 @@ MainWindow::MainWindow() {
         const double speed = std::max(1.0, std::abs(playbackState.speed));
         const double fps = std::max(1.0, frameSource_->fps());
         const double frameDurationMs = 1000.0 / (fps * speed);
+        // Published for the handler scope guard above, which needs the budget
+        // this tick was actually working to.
+        tickFrameDurationMs_ = frameDurationMs;
 
         if (!playbackClock_.isValid()) {
             playbackClock_.start();
@@ -446,6 +463,37 @@ MainWindow::MainWindow() {
             // so rate from this span is the honest steady-state figure.
             const qint64 nowNs = sessionClock_.isValid() ? sessionClock_.nsecsElapsed() : 0;
             if (firstPresentNs_ < 0) firstPresentNs_ = nowNs;
+
+            // Cadence distribution, not just its mean. The presented rate reads
+            // 98-99% under two completely different faults and therefore cannot
+            // tell them apart, which is why a file can measure 99% and still
+            // visibly stutter:
+            //
+            //   the integer tick beat -- floor(1000/fps) is 41ms against a
+            //   41.667ms frame, so the accumulator falls 0.667ms short each
+            //   frame and roughly every 62nd frame needs two ticks. That is one
+            //   doubled (~83ms) frame every ~2.6s, REGULARLY spaced, on every
+            //   file. It is a presentation-clock problem and GATE E owns it.
+            //
+            //   per-frame cost overrun -- playback decodes synchronously with no
+            //   read-ahead, so a frame that misses the budget is late at once and
+            //   nothing absorbs it. Ragged, irregular, and specific to whichever
+            //   file is expensive. A presentation clock supplies phase, not
+            //   headroom, so GATE E does NOT fix this one.
+            //
+            // The spacing between long frames is what separates them: a beat is
+            // regular, an overrun is not. Sampling intervals BETWEEN PRESENTS
+            // rather than between ticks is deliberate -- a held frame produces no
+            // present, so the doubled interval only appears here.
+            if (lastPresentNs_ > 0) {
+                const double gapMs = static_cast<double>(nowNs - lastPresentNs_) / 1'000'000.0;
+                if (cadenceGapsMs_.size() < kCadenceSampleCap) {
+                    cadenceGapsMs_.push_back(gapMs);
+                    if (frameDurationMs > 0.0 && gapMs > frameDurationMs * 1.5) {
+                        cadenceLongAt_.push_back(playbackFramesPresented_);
+                    }
+                }
+            }
             lastPresentNs_ = nowNs;
             // Clock drift: ideal media time for the frames presented so far
             // versus wall clock. Positive = ahead of real time, negative =
@@ -1331,6 +1379,10 @@ void MainWindow::startPlaybackRun() {
     audioRepeatedFrames_ = audioSkippedFrames_ = 0;
     lastClockUpdateMark_ = -1;
     lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
+    cadenceGapsMs_.clear();
+    cadenceLongAt_.clear();
+    handlerSamples_ = handlerOverBudget_ = 0;
+    maxHandlerMs_ = 0.0;
     playTimer_.start();
 }
 
@@ -2263,6 +2315,58 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(schedulerTicks_)
                 .arg(presentSamples_);
 
+            // Cadence distribution. The rate above averages and reads 98-99%
+            // whether the fault is the tick beat or per-frame cost overrun, so
+            // this is the line that says which. Percentiles come from a sorted
+            // copy -- a 10s run is ~240 samples, so exact beats approximate.
+            QString l5b = QStringLiteral("cadence | no samples yet");
+            if (!cadenceGapsMs_.empty()) {
+                std::vector<double> g = cadenceGapsMs_;
+                std::sort(g.begin(), g.end());
+                const auto pct = [&g](double p) {
+                    const std::size_t i = std::min(g.size() - 1,
+                        static_cast<std::size_t>(p * static_cast<double>(g.size() - 1) + 0.5));
+                    return g[i];
+                };
+                const double budget = tickFrameDurationMs_ > 0.0 ? tickFrameDurationMs_ : 41.667;
+                // Buckets as multiples of the frame budget. A regular beat piles
+                // up in [1.5,2.5) and nowhere else; ragged overrun smears.
+                int b[5] = {0, 0, 0, 0, 0};
+                for (double v : g) {
+                    const double r = v / budget;
+                    if (r < 0.9) ++b[0];
+                    else if (r < 1.1) ++b[1];
+                    else if (r < 1.5) ++b[2];
+                    else if (r < 2.5) ++b[3];
+                    else ++b[4];
+                }
+                // Spacing between long frames: regular means a beat, scattered
+                // means overrun. Reported as min/median/max so one outlier
+                // cannot make a ragged run look periodic.
+                QString spacing = QStringLiteral("--");
+                if (cadenceLongAt_.size() >= 2) {
+                    std::vector<long long> d;
+                    d.reserve(cadenceLongAt_.size() - 1);
+                    for (std::size_t i = 1; i < cadenceLongAt_.size(); ++i) {
+                        d.push_back(cadenceLongAt_[i] - cadenceLongAt_[i - 1]);
+                    }
+                    std::sort(d.begin(), d.end());
+                    spacing = QString("%1/%2/%3").arg(d.front()).arg(d[d.size() / 2]).arg(d.back());
+                }
+                l5b = QString("cadence n%1 | p50 %2 p95 %3 p99 %4 max %5 | <0.9x %6 ~1x %7 1.1-1.5x %8 "
+                              "1.5-2.5x %9 >2.5x %10 | long-gap min/med/max %11 | handler>budget %12 of %13 (max %14)")
+                    .arg(g.size())
+                    .arg(QString::number(pct(0.50), 'f', 1))
+                    .arg(QString::number(pct(0.95), 'f', 1))
+                    .arg(QString::number(pct(0.99), 'f', 1))
+                    .arg(QString::number(g.back(), 'f', 1))
+                    .arg(b[0]).arg(b[1]).arg(b[2]).arg(b[3]).arg(b[4])
+                    .arg(spacing)
+                    .arg(handlerOverBudget_)
+                    .arg(handlerSamples_)
+                    .arg(QString::number(maxHandlerMs_, 'f', 1));
+            }
+
             // Span-based rate: N presented frames cover N-1 intervals, so this
             // excludes both startup before frame 1 and any end-of-stream hold.
             const double spanS = (firstPresentNs_ >= 0 && lastPresentNs_ > firstPresentNs_)
@@ -2548,7 +2652,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(scrubWorker_.maxCancelWaitMs(), 'f', 2))
                 .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2));
 
-            line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l6
+            line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l5b + "\n" + l6
                  + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;

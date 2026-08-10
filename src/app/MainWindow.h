@@ -232,6 +232,27 @@ private:
     double avgOutsideMs_ = 0.0;
     double maxPeriodMs_ = 0.0;
     long long cycleSamples_ = 0;
+
+    // Cadence distribution for the current run. The presented RATE averages, and
+    // reads 98-99% under two unrelated faults, so it cannot say which one a file
+    // is suffering from -- see the long comment at the present site. These are
+    // the numbers that can.
+    //
+    // Every interval between consecutive PRESENTS (not ticks: a held frame
+    // produces no present, so a doubled interval only exists here), capped so a
+    // long session cannot grow this without bound. 10s at 24fps is 240 samples.
+    static constexpr std::size_t kCadenceSampleCap = 4096;
+    std::vector<double> cadenceGapsMs_;
+    // Presented-frame index of each interval longer than 1.5x the budget. The
+    // SPACING between these is what separates a regular beat from ragged
+    // overrun, which the count alone cannot.
+    std::vector<long long> cadenceLongAt_;
+    // Frame budget this tick worked to, published for the handler scope guard,
+    // which runs before the local is in scope.
+    double tickFrameDurationMs_ = 0.0;
+    long long handlerSamples_ = 0;
+    long long handlerOverBudget_ = 0;
+    double maxHandlerMs_ = 0.0;
     // Wall-clock span between the first and last presented frame, which is
     // what (N-1) frame intervals actually cover.
     qint64 firstPresentNs_ = -1;

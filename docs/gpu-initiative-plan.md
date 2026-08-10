@@ -2021,6 +2021,107 @@ it deliberately: Parsec and Sunshine closed, one display, and the window size
 written down. Until then, compare stalls only against runs from the same session
 at the same `win WxH`.
 
+## 23. ProRes 4444 playback cadence — characterised (2026-08-09)
+
+Owner report: 4444 playback is not locked to real time, slight perceptible
+stutter. Measurement only, no fix — the project has three reverted scheduler
+experiments on record precisely because the measurement came second.
+
+### 23.1 Why the rate metric could not answer this
+
+Presented rate reads 98–99% under two unrelated faults, so a file can measure
+99.6% and still stutter. The new HUD `cadence` line reports the distribution
+instead: percentiles, buckets as multiples of the frame budget, the **spacing
+between long frames**, and a count of handlers that exceeded the budget.
+
+The spacing is what separates the causes. A tick beat is *regular*; cost overrun
+is not. Sampling intervals between **presents** rather than between ticks is
+deliberate: a held frame produces no present, so a doubled interval only exists
+on that timeline.
+
+### 23.2 Exact rates, taken first
+
+`TRACE_OPEN_LOG=1`: all three files are **`fps=24.000000`, `fpsQ=24/1`** — not
+23.976. So the beat period is `41.667 / (41.667 − 41) = 62.5 frames`, i.e. one
+doubled frame every **2.6s**.
+
+**4444 has no audio track**; 422 HQ and the 1080p clip both do. That matters more
+than it looks — see 23.4.
+
+### 23.3 The answer: cause A dominates, and it is not 4444-specific
+
+11s runs, `win 1280x815`, cpu unless stated:
+
+| run | ~1x | 1.5–2.5x | >2.5x | long-gap min/med/max | handler>budget | max handler |
+|---|---|---|---|---|---|---|
+| **4444** rep1 | 253 | **4** | 0 | **61/61/63** | 1 of 265 | 52.6ms |
+| **4444** rep2 | 252 | **5** | 0 | **56/62/63** | 1 of 265 | 53.4ms |
+| 422 HQ, `TRACE_NO_AUDIO` | 164 | **3** | 0 | **60/62/62** | 0 of 170 | 34.1ms |
+| 1080p, `TRACE_NO_AUDIO` | 235 | **4** | 0 | **60/62/62** | 0 of 243 | **3.8ms** |
+| 1080p, with audio | 234 | 5 | 0 | 43/61/62 | 0 of 245 | 4.3ms |
+| 422 HQ, with audio | 162 | 5 | 0 | 7/61/62 | 0 of 172 | 34.0ms |
+
+**Median spacing is 61–62 on every row against a prediction of 62.5.** Nothing
+lands in the 1.1–1.5x or >2.5x buckets on any run — the distribution is a tight
+spike at 1x plus a handful of clean doublings, `max ≈ 2 × p50`. That is the
+integer-tick beat and nothing else.
+
+**The 1080p row is the proof it is not about cost.** Its worst handler is
+**3.8ms** against a 41.67ms budget — a 10x margin — and it shows the *same* four
+doubled frames at the *same* 62-frame spacing. Decode cost cannot explain a
+defect that is identical on a file with ten times the headroom.
+
+**Audio does not remove it either**, which is worth recording because it is
+easy to assume otherwise: the audio clock decides *which* frame, but a frame can
+still only be presented on a tick, so a held frame still produces a doubled
+interval. `rep`/`skip` stay 0 while the presented interval doubles.
+
+### 23.4 Cause B existed on 4444, and GATE C has already removed it
+
+The 4444-specific signal is not in the buckets, it is in tick jitter:
+
+| 4444 config | `sws` | **jitter max** | handler>budget | max handler |
+|---|---|---|---|---|
+| cpu (the default) | 16.9ms | **11–12ms** | **1** of 265 | 52.6 / 53.4ms |
+| d3d11 BGRA | 17.0ms | **14ms** | **1** of 265 | 55.6 / 55.1ms |
+| **d3d11 planar** | **5.6ms** | **2–3ms** | **0** of 265 | **37.6 / 38.6ms** |
+
+A 25ms handler delays the timer itself; a 10ms one does not. GATE C took the
+worst handler from 55.6ms — *over* the 41.67ms budget — to 37.6ms, inside it,
+and tick jitter from 14ms to 2ms, which is what the light files read.
+
+**So the owner's report almost certainly includes a cause-B component that the
+planar path no longer has**, because `cpu` is still the default and that is what
+they were running. The beat is unchanged on every path, as expected: GATE C
+supplies headroom, not phase.
+
+### 23.5 What this means for ordering — owner's call, not taken here
+
+Cause A is essentially all of what is left, it is universal, and **GATE E is the
+only thing that fixes it**. Items 8 and 9 will not: they buy headroom, and the
+measurement says headroom is no longer the binding constraint on 4444 once the
+planar path is on.
+
+That is an argument to **pull GATE E ahead of items 8–10**. It is recorded here
+rather than acted on, per the plan's own rule about not reordering unilaterally.
+Two things worth weighing with it:
+
+- The fix is cheap to state and has a written composition rule already (§9):
+  **audio stays the rate and position authority; vsync becomes the phase
+  authority.** The flip-model swapchain that makes it possible landed at GATE B.
+- Until GATE E or a default renderer change, the owner sees beat *plus* the
+  cause-B component, because `cpu` is the default. Making `d3d11` the default is
+  a separate decision the plan defers to GATE E, but it is now a decision with a
+  measured benefit attached.
+
+### 23.6 What was NOT established
+
+Why the owner notices this on 4444 specifically. The beat is identical on 1080p
+and 422 HQ, and no number here says 4444 is worse in that respect. The cause-B
+component (jitter 11–14ms on the default renderer) is the only measured
+difference, and whether that is what they are seeing needs their eye, not
+another run. Do not assume content or resolution explains it without evidence.
+
 ### 22.7 Open after GATE C
 
 1. **The 4444 release latency above.** Needs the owner, not another harness run.
