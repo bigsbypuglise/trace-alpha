@@ -44,6 +44,23 @@ namespace {
 // rather than one each. Deliberately NOT used to pace shuttle catch-up.
 constexpr int kScrubCoalesceMs = 12;
 
+// A gap between shuttle paints long enough to read as the picture stopping.
+//
+// ABSOLUTE, and that is the whole point. The `stalls` counter beside it is
+// `gap > 2 x refresh`, which on this box is 8.33ms at 239.999Hz and 33.3ms at
+// 60Hz -- so the same drag on the same build scores four times worse on the
+// faster panel, and every stall figure recorded in the plan is silently in
+// whichever unit that session's display mode happened to impose. The display
+// mode on this box was observed changing between sessions, and no recorded
+// stall number is tagged with a refresh rate.
+//
+// 33.3ms is where the project's own recorded hitches start ("30-116ms gaps
+// where a cache miss forces a seek and a GOP walk") and it is close to a frame
+// at 24fps, so a hitch here means the picture held for about as long as a
+// played frame. What matters more than the exact value is that it does not
+// move when the monitor does.
+constexpr double kScrubHitchMs = 33.3;
+
 // Fraction of the remaining distance a shuttle slice covers. Sets how tightly
 // the picture tracks the pointer: the steady-state lag under a constant drag
 // is roughly (frames the pointer moves per slice) / kScrubEase, so halving the
@@ -1088,6 +1105,7 @@ void MainWindow::openPath(const QString& path) {
     scrubShownExact_ = false;
     scrubPaintGapLastMs_ = scrubPaintGapMaxMs_ = scrubPaintGapSumMs_ = 0.0;
     scrubPaintGapSamples_ = scrubPaintsWasted_ = scrubPaintStalls_ = 0;
+    scrubPaintHitches_ = 0;
     stopUiServiceMeasurement();
     uiServiceGapMaxMs_ = uiServiceGapSumMs_ = 0.0;
     uiServiceSamples_ = uiServiceGapsOver_ = 0;
@@ -2004,6 +2022,7 @@ void MainWindow::onScrubResult() {
             ++scrubPaintGapSamples_;
             if (gapMs < refreshMs) ++scrubPaintsWasted_;
             if (gapMs > refreshMs * 2.0) ++scrubPaintStalls_;
+            if (gapMs > kScrubHitchMs) ++scrubPaintHitches_;
         }
         scrubLastPresentNs_ = nowNs;
 
@@ -2270,6 +2289,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
                     const double refreshMs = 1000.0 / refreshHz;
                     if (gapMs < refreshMs) ++scrubPaintsWasted_;
                     if (gapMs > refreshMs * 2.0) ++scrubPaintStalls_;
+                    if (gapMs > kScrubHitchMs) ++scrubPaintHitches_;
                 }
                 scrubLastPresentNs_ = nowNs;
             }
@@ -2783,21 +2803,36 @@ void MainWindow::refreshHud(const QString& action) {
 
             // Smoothness rather than throughput: the gap between consecutive
             // paints, how many landed too fast for the display to have shown
-            // the previous one, and how many were slow enough to read as a
-            // hitch. A drag can be perfect on `shuttle`/`lag` and bad here.
+            // the previous one, and how many were long enough to notice. A drag
+            // can be perfect on `shuttle`/`lag` and bad here.
+            //
+            // TWO thresholds, and the reason is that the first one moves.
+            // `stalls` is `gap > 2 x refresh`, so it reads 8.3ms on this
+            // 239.999Hz panel and 33.3ms on the 60Hz mode the same box was
+            // observed in -- a factor of four, from the monitor. It is printed
+            // WITH its threshold now, because a count in a unit the display
+            // chose is not comparable to one recorded in another session and
+            // nothing said which unit was in force. `hitch` is absolute and is
+            // the one to quote.
             const double gapAvg = scrubPaintGapSamples_ > 0
                 ? scrubPaintGapSumMs_ / static_cast<double>(scrubPaintGapSamples_) : 0.0;
             const double wastedPct = scrubPaintGapSamples_ > 0
                 ? 100.0 * static_cast<double>(scrubPaintsWasted_)
                       / static_cast<double>(scrubPaintGapSamples_) : 0.0;
-            const QString l7b = QString("smooth | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | stalls %6 of %7")
+            const QScreen* smoothScr = screen();
+            const double smoothHz = (smoothScr && smoothScr->refreshRate() > 1.0)
+                ? smoothScr->refreshRate() : 60.0;
+            const QString l7b = QString("smooth | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
                 .arg(QString::number(scrubPaintGapLastMs_, 'f', 1))
                 .arg(QString::number(gapAvg, 'f', 1))
                 .arg(QString::number(scrubPaintGapMaxMs_, 'f', 1))
                 .arg(QString::number(wastedPct, 'f', 0))
                 .arg(scrubPaintsWasted_)
                 .arg(scrubPaintStalls_)
-                .arg(scrubPaintGapSamples_);
+                .arg(scrubPaintGapSamples_)
+                .arg(QString::number(2000.0 / smoothHz, 'f', 1))
+                .arg(scrubPaintHitches_)
+                .arg(QString::number(kScrubHitchMs, 'f', 0));
 
             // Responsiveness of the thread rather than of the picture. `ui gap`
             // is measured by a 1ms timer that only fires when the event loop is

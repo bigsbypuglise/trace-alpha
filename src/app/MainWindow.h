@@ -328,14 +328,22 @@ private:
     // measure the interval between consecutive paints during a drag.
     //   wasted  - painted sooner than the display could possibly show the
     //             previous one, so the previous frame was overwritten unseen
-    //   stalls  - gaps longer than two refresh intervals, which is what the eye
-    //             actually registers as a hitch
+    //   stalls  - gaps longer than two refresh intervals. RELATIVE TO THE
+    //             DISPLAY, so it is 8.3ms on a 240Hz panel and 33.3ms on a
+    //             60Hz one: it says "slower than the panel could have shown
+    //             it", which is the right companion to `wasted` and is NOT a
+    //             measure of what the eye registers as a hitch, whatever this
+    //             comment used to claim.
+    //   hitch   - gaps over kScrubHitchMs, an absolute duration. This is the
+    //             one to compare across sessions; `stalls` silently changes
+    //             unit when the display mode does.
     double scrubPaintGapLastMs_ = 0.0;
     double scrubPaintGapMaxMs_ = 0.0;
     double scrubPaintGapSumMs_ = 0.0;
     long long scrubPaintGapSamples_ = 0;
     long long scrubPaintsWasted_ = 0;
     long long scrubPaintStalls_ = 0;
+    long long scrubPaintHitches_ = 0;
 
     // How long the event loop went unserviced, which is a different question
     // from how long a paint took to arrive. Every other scrub metric is
