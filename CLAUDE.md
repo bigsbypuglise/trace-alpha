@@ -15,6 +15,34 @@ for the current phase is the core playback experience alone: smooth playback, lo
 playback, responsive polished scrubbing at slow and fast speeds in both directions, and strong
 GPU integration. Everything else comes after that foundation is working extremely well.
 
+**THAT PHASE IS ACCEPTED AS COMPLETE (owner, 2026-08-10)**, for four things stated
+deliberately narrowly: **smooth *forward* playback; exact real-time scheduling; responsive
+*bidirectional scrubbing*; and the *SDR* D3D11 GPU integration.** Read each at its stated
+width and do not let a later summary widen it — it is *forward* playback, not playback in
+general, because **continuous reverse is explicitly the next item and was not accepted**;
+and it is the *SDR* integration, because 10-bit output and HDR are out.
+
+**Step 10, 10-bit display output, is FORMALLY DEFERRED with two external gates** (owner,
+2026-08-10): it is *not* a playback-performance or GPU-integration blocker for the current
+SDR base version, and it is not to be built until (a) a 10-bit-capable output display is
+confirmed and (b) the intended Windows Advanced Color / HDR / colour-management workflow is
+defined. Both gates are outside the code. §9's warning still applies — do not conflate it
+with the high-bit-depth *processing* that shipped at GATE C.
+
+**THE CURRENT PHASE IS REVERSE SHUTTLE, and it is bounded** (owner, 2026-08-10). The planned
+interface includes 2x, 5x, 10x and 30x rewind, and reverse at 1x measures 86.7% of real time
+on 4K H.264 (plan §29.3), so exposing rewind controls now would surface a known weakness.
+Note this is an interface spec driving an *engine* requirement — starting it is not a breach
+of the no-interface-work rule. **At accelerated reverse speeds, every source frame is NOT
+required.** The goals: immediate response when rewind is pressed; stable, intentional visual
+cadence; newest-target-wins; no UI-thread saturation; rapid direction changes; appropriate
+sampling at each speed; **exact frame landing when rewind stops**; and **no regression to
+forward playback, scrubbing, stepping or audio state.** The last two are the invariants, and
+they are where every previous reverse or scrub attempt in this project actually failed.
+**Begin with measurement and an architecture proposal, before implementation.** Reuse the
+validated async scrub/cache infrastructure where appropriate, but **do not weaken exact
+scrub release or increase normal playback cost.** Full brief in `docs/next-session-prompt.md`.
+
 **Corollary for the drag path (owner, 2026-08-10): smooth, responsive scrubbing takes
 priority over matching final-frame scaling quality during motion.** Fidelity is owed to the
 frame the user stops on, not to the frames flying past on the way there. This resolves a
@@ -22,7 +50,10 @@ whole class of trades in advance — preview resolution, preview filtering, samp
 paint pacing — so do not re-open any of them on quality grounds alone. It is what settled
 the drag preview staying unfiltered after step 9 sharpened the landing (plan §28.6 item 2),
 and it is the principle §15's "sampling may skip frames during an active drag and nowhere
-else" was already an instance of.
+else" was already an instance of. **The owner extended this to the reverse shuttle on
+2026-08-10** — "at accelerated reverse speeds, do not require every source frame" — so
+accelerated reverse is now the third instance of the same rule, alongside the drag preview
+and §15's sampling. Fidelity is still owed to the frame rewind *stops* on.
 
 The approved interface pass is written up and **deferred** in
 `docs/interface-pass-1-spec-DEFERRED.md`, with the icon assets in
@@ -551,10 +582,16 @@ perfectly on lag while stalling for 100ms.
 4. **Backward *playback* (not dragging)** beyond the cache is still GOP-walk
    bound on long-GOP H.264. The drag path is fast because it walks sequentially
    and the cache absorbs misses; reverse playback does not share that.
-   **Read the J-K-L scheduler entry in Decisions before measuring this**: as of
-   2026-08-10 reverse playback is capped near 1.26 fps by a GATE E defect that
-   has nothing to do with GOP walks, and any reverse-playback figure taken today
-   is measuring that instead.
+   **This is now THE CURRENT PHASE** (owner, 2026-08-10) — reverse shuttle at
+   2x/5x/10x/30x, bounded, starting with measurement and an architecture
+   proposal before implementation. See the phase statement at the top of this
+   file and the brief in `docs/next-session-prompt.md`.
+
+   **The only valid reverse baseline is `29.3`'s**: 4K H.264 reverse 1x at
+   **86.7% of real time**, `handler>budget 11 of 110 (max 111.1ms)`, `seeks 13`,
+   `rev-hit 88.5%`, `p50 41.8 / p95 123.6 / p99 150.1ms`, `win 1280x829`, d3d11,
+   physical panel. **Every reverse figure recorded between GATE E and 2026-08-10
+   is void** — it was measuring the J-K-L scheduler fault, not the GOP walk.
 5. ~~**1080p backward is still "a lil glitchy"**~~ **Very likely closed by the
    384MB cache, 2026-08-10** — but read the qualification. Item 1 was named as
    the likely cause and item 1 is now fixed and signed off: 1080p was the file

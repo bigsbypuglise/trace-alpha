@@ -3594,3 +3594,96 @@ is the same shape one level up: GATE E moved playback from a free-running timer
 to a timeline that has to be *established*, and every path that started the timer
 without establishing it silently kept compiling. The validation only exercised
 the one path that did.
+
+---
+
+## 30. Phase close (owner, 2026-08-10)
+
+### 30.1 What was accepted
+
+The core-playback phase is **accepted as complete** for four things, each stated
+deliberately narrowly:
+
+- smooth **forward** playback;
+- exact real-time scheduling;
+- responsive **bidirectional scrubbing**;
+- the **SDR** D3D11 GPU integration.
+
+**Read each at its stated width.** It is *forward* playback, because continuous
+reverse is explicitly the next item and was **not** accepted. It is the *SDR*
+integration, because 10-bit output and HDR are out. A later summary that says
+"playback is done" or "the GPU work is done" has widened both, and the widened
+version is wrong.
+
+### 30.2 Deferred, with the conditions attached
+
+**Step 10, 10-bit display output — two external gates.** *"Not a
+playback-performance or GPU-integration blocker for the current SDR base
+version. Do not build it until we confirm a 10-bit-capable output display and
+define the intended Windows Advanced Color / HDR / colour-management workflow."*
+Neither gate is in the code, so no amount of engineering opens them. §9's warning
+still holds: this is 10-bit **output**, not the high-bit-depth **processing**
+that shipped at GATE C, and the two are routinely confused.
+
+**Mixed-monitor DPI (§20.4) — tabled for hardware.** `AllScreens` returns one
+display and Parsec replaces it rather than adding one, so monitor-to-monitor
+moves, per-monitor DPI changes and fullscreen-on-secondary are **not executable
+on this box at all**. That is a stronger statement than "untested" and is the
+reason not to re-propose it. Single-display, what remains reachable is a runtime
+scale change on the primary — a real `WM_DPICHANGED`, swapchain resize,
+video-rect recompute — plus a code audit of that path.
+
+### 30.3 The next phase — reverse shuttle
+
+**Bounded, and it starts with measurement and an architecture proposal rather
+than with implementation.** The driver is the planned interface's 2x/5x/10x/30x
+rewind against §29.3's measured 86.7% at reverse 1x: shipping rewind controls on
+top of that would surface a known weakness. Note the shape of this — an
+interface spec generating an *engine* requirement — which is why starting it does
+not breach the standing no-interface-work rule.
+
+Owner goals, verbatim in substance: immediate response when rewind is pressed;
+stable, intentional visual cadence; newest-target-wins; no UI-thread saturation;
+rapid direction changes; appropriate frame sampling at 2x, 5x, 10x and 30x;
+**exact frame landing when rewind stops**; and **no regression to forward
+playback, scrubbing, stepping or audio state.** At accelerated reverse speeds,
+**every source frame is not required** — which makes accelerated reverse the
+third instance of the standing drag-path priority, after the drag preview and
+§15's sampling.
+
+**The last two goals are the invariants and are where the real risk is.** Every
+previous reverse or scrub attempt in this project failed on exactly them, not on
+throughput: `e76eabb` returned true carrying a stale frame under a new index; the
+two reverted async attempts broke frame ordering (§6); and the July 2026 scrub
+exception displayed keyframe 30 for seven consecutive frames while the HUD
+asserted `delta 0`. A reverse shuttle is a machine for producing all three faults
+at once.
+
+**Constraints on the design:** reuse the validated async scrub/cache
+infrastructure where appropriate, but do not weaken exact scrub release and do
+not increase normal playback cost.
+
+**Three things already known that the proposal should build on rather than
+re-derive.** The cost is the GOP walk, not decode or conversion. ProRes is
+structurally different and must be measured separately — every frame is a
+keyframe, so a backward seek lands on the target, nothing intermediate is
+produced and `rev-hit` reads 0.0% by construction. And §15's sampling gate is the
+precedent for the sampling half, but **`AV_CODEC_PROP_INTRA_ONLY` exists
+precisely to refuse long-GOP sampling** — a 30x reverse shuttle on H.264 is the
+case that gate was built to reject, so it needs a different mechanism rather than
+the same one turned up. The four *failed* gate inferences in
+`computeScrubStride`'s comment are the cheapest available education on how that
+goes wrong.
+
+**One decline that does not automatically carry over.** Directional prefetch was
+declined at §15.3 and §26.4 because the worker has no idle time on the files that
+hitch — but that was measured on the **drag** path, where the target is the
+pointer and is unpredictable. Continuous reverse at a fixed rate has a
+*predictable* target, which is the one property the drag lacked. Re-derive it;
+do not cite the decline, and do not assume the opposite either.
+
+### 30.4 Session close
+
+CI green on `4fb4d31` (run 70, including `--renderer-selftest=d3d11` and the
+launchability check), everything pushed, tree clean. No reverse-playback
+implementation was begun, by instruction.
