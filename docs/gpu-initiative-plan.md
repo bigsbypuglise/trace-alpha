@@ -3,6 +3,11 @@
 **Status: GATE B PASSED, GATE C IMPLEMENTED AND MEASURED (2026-08-09).** Steps
 1-7 of §8 are committed and validated on the local Windows toolchain.
 
+**GATE E is pulled ahead of items 8-10 by owner decision (2026-08-09).** The
+design is written at **§24 and is awaiting review; no code has been changed.**
+Items 8, 9 and 10 are deferred, not cancelled. §23.5 recorded the argument and
+declined to act on it unilaterally; the owner has now taken it.
+
 **GATE B is signed off by the owner (§20.2, §17.5 item 2).** CPU and D3D11 are
 visually equivalent in fit-to-window and fullscreen; the 150% case is accepted
 with no meaningful softness, scaling artifacts, colour or framing difference, so
@@ -356,10 +361,21 @@ Each is independently reviewable and revertable. Gates in **bold**.
 6. `feat(gpu): add experimental native D3D11 video surface` — **GATE B** (frame, stride,
    aspect, resize, fallback). *(done — see §17)*
 7. `feat(gpu): add planar YUV upload and shader colour conversion` — **GATE C.**
-8. `perf(gpu): reuse textures and upload resources`
-9. `perf(gpu): add GPU scaling and telemetry`
-10. `feat(gpu): add high-bit-depth ProRes presentation`
+   *(done, `e8566a4` — see §22)*
+8. `perf(gpu): reuse textures and upload resources` — **deferred**, see below
+9. `perf(gpu): add GPU scaling and telemetry` — **deferred**
+10. `feat(gpu): add high-bit-depth ProRes presentation` — **deferred**
 11. `perf(gpu): add DXGI presentation timing` — **GATE E** before any default change.
+    **Pulled ahead of 8-10 (2026-08-09, owner decision).** Design at §24, awaiting
+    review. §24.11 asks whether to split it into E1 (renderer-independent
+    deadline scheduling) and E2 (the DXGI phase source proper).
+
+**On the reorder.** Locked real-time playback is priority #1; §23 measured the
+residual stutter as the integer-tick beat, which is universal and which only
+item 11 fixes; and §23.4 measured headroom — which is all items 8-10 buy — as no
+longer the binding constraint on 4444 once the planar path is on. There is no
+technical dependency from 8, 9 or 10 into 11: the flip-model swapchain item 11
+needs landed at GATE B. §22.7 items 2-5 stand unchanged.
 
 Steps 4–5 deliberately precede the GPU work: they are renderer-independent, they address the
 half of the product complaint that GPU presentation cannot fix, and with §4 in place they do
@@ -2143,7 +2159,12 @@ planar path no longer has**, because `cpu` is still the default and that is what
 they were running. The beat is unchanged on every path, as expected: GATE C
 supplies headroom, not phase.
 
-### 23.5 What this means for ordering — owner's call, not taken here
+### 23.5 What this means for ordering — owner's call, TAKEN 2026-08-09
+
+> **The call has since been made: GATE E is pulled ahead of items 8-10.** The
+> reasoning below is what it was taken on; the design is at §24. The rest of
+> this section is preserved as written.
+
 
 Cause A is essentially all of what is left, it is universal, and **GATE E is the
 only thing that fixes it**. Items 8 and 9 will not: they buy headroom, and the
@@ -2184,3 +2205,435 @@ another run. Do not assume content or resolution explains it without evidence.
    high-bit-depth *processing* (done now) with 10-bit *output* (step 10).
 5. **BT.2020 still has no tonemap**, exactly as on the CPU path. Known gap,
    carried forward unchanged.
+
+---
+
+## 24. GATE E — presentation timing (DESIGN, NOT IMPLEMENTED)
+
+**Status: written for review, 2026-08-09. No code has been changed.** §23.5
+recorded the argument for pulling GATE E ahead of items 8–10 and declined to act
+on it; **the owner has now taken that decision**, on the grounds that locked
+real-time playback is priority #1, that §23 measured the residual stutter as the
+universal integer-tick beat which only GATE E fixes, and that §23.4 measured
+headroom as no longer the binding constraint on 4444 once the planar path is on.
+Items 8, 9 and 10 are **deferred, not cancelled**; §22.7 items 2–5 stand.
+
+There is no technical dependency from 8, 9 or 10 into 11 — the flip-model
+swapchain GATE E needs landed at GATE B (§17, `DXGI_SWAP_EFFECT_FLIP_DISCARD`,
+two buffers, `MakeWindowAssociation` already taken off DXGI).
+
+**Read §24.7 before agreeing to any of this.** The project has three reverted
+scheduler experiments on record and one of them is a near-relative of the first
+half of this design.
+
+### 24.1 The fault, restated on the timeline it actually lives on
+
+§23 measured it at the presented-frame level: median spacing between long frames
+of **61–62 on all six runs**, `max ≈ 2 × p50`, nothing in the 1.1–1.5x or >2.5x
+buckets. This section restates the mechanism in terms of *when a present
+happens*, because that is what a fix has to move and it is not the same quantity
+as *when a tick happens*.
+
+A present today lands at:
+
+```
+present_k  =  tick_at_or_after(due_k)  +  handler_k  +  dispatch_k
+```
+
+with `due_k = k × 41.667ms`, ticks on a fixed 41ms grid
+(`MainWindow.cpp:1130`, `floor(1000/fps)`), and `dispatch_k` the queued
+`update()` → `paintEvent` latency, because `ViewerWidget::setFrame` calls
+`update()` and the paint — and therefore `Present()` — runs after the handler
+returns.
+
+Two independent errors are stacked in that line, and neither is visible to the
+presented-rate metric:
+
+- **Tick-grid quantisation (cause A).** Presents land on the 41ms grid, so the
+  interval between two of them is 41ms or 82ms and **never 41.667ms**. The mean
+  is correct, every individual interval is wrong: 61 frames run 1.6% fast, then
+  one is held double. That is the §23 signature, and describing it as "a dropped
+  frame every 2.6s" undersells it — the 61 fast frames are part of the artefact.
+- **Handler-time modulation.** `present_k − present_{k−1}` carries
+  `handler_k − handler_{k−1}` directly. 4444's handler runs 25→37ms on the
+  planar path (§23.4), so presents are modulated by a ~12ms spread; 1080p's
+  worst handler is 3.8ms, so they are not.
+
+**The consequence that shapes the whole design: locking the wake does not lock
+the present.** Anything that only reschedules the timer inherits `handler_k` as
+present jitter. On this box a refresh period is ~4.2ms, so a 12ms handler spread
+is ±3 refreshes of presentation error on the one file the owner reported.
+
+### 24.2 What is being locked to what
+
+**Nothing in Trace is aware of refresh phase today** (§20.5 item 3;
+`Present(0, 0)`, sync interval 0). DWM composites at refresh so at most one
+present is *seen* per refresh, but which refresh is an accident.
+
+A display-synchronised player makes the number of refreshes a frame occupies a
+controlled integer. At 24.000fps:
+
+| refresh | refreshes per frame | result |
+|---|---|---|
+| 240.000 Hz | 10.000 | exact, no residual beat |
+| 120.000 Hz | 5.000 | exact |
+| 60.000 Hz | 2.500 | 2:3 cadence — imposed by the display on every player |
+| 239.760 Hz | 9.990 | a 9-refresh frame every ~100 frames |
+
+**Measure the panel's true refresh before believing any of these rows.** §22.8
+recorded this display as 5120x1440 **@ 239Hz**, and a "240Hz" mode reported as
+239 is very often 240000/1001 = 239.76 — on which 24.000fps content cannot be
+presented at constant cadence by any player, while 23.976 content maps exactly.
+The nominal mode number is not evidence; the phase source reports the real
+period and that is the number to use.
+
+So the honest claim GATE E can make is: **it replaces a 62-frame beat that Trace
+creates with its own integer-millisecond tick by whatever residual beat the
+display's refresh imposes, which is typically far longer and is the same one
+every other player has.** At an exact 240 or 120Hz mode the residual is zero.
+Do not promise zero without the measured refresh.
+
+### 24.3 The composition rule, applied
+
+§9, unchanged and not negotiable: **audio stays the rate and position authority;
+vsync becomes the phase authority.** Concretely, per presented frame:
+
+| question | owner |
+|---|---|
+| at what instant does a present happen | the phase scheduler (§24.5) |
+| which frame is presented at that instant | the audio clock when it drives, otherwise the deadline index |
+
+**The wall-clock accumulator is removed from the gating decision, not layered
+underneath it.** `cd79d49` is the precedent and the warning: when the audio
+clock and `playbackAccumulatorMs_` both decided when to present, they beat
+against each other and produced matched hold/skip pairs, and the fix was to make
+the audio clock the *only* scheduler. Adding a third opinion about *when* is how
+this becomes revert number four. The gate at `MainWindow.cpp:350` goes away for
+video under the phase scheduler; it is not made conditional and then left in.
+
+What replaces the accumulator's position role is the deadline index `k` measured
+from the run start, which is a stronger reference because it is computed from
+the exact rational rather than accumulated. **Late presents slip the timeline;
+they never skip a frame** — ordering over rate is unchanged, and the existing
+4-frame backlog cap becomes a re-phase rule (§24.5 step 5).
+
+The audio clock is not touched. `advanceClock()` stays the one place it is
+stepped, `peekClock()` stays the observer, the discipline loop, slew, snap and
+latency EMA are all out of scope.
+
+### 24.4 Phase source — four candidates, one recommendation
+
+| candidate | what it gives | cost | verdict |
+|---|---|---|---|
+| `DwmGetCompositionTimingInfo` | `qpcVBlank`, `qpcRefreshPeriod`, `rateRefresh` — an absolute vblank time and the measured period | one call, never waits; needs `dwmapi` | **recommended primary** |
+| `IDXGISwapChain::GetFrameStatistics` | `SyncQPCTime`, `SyncRefreshCount`, `PresentCount`, `PresentRefreshCount` | one call per present; d3d11 only | **recommended as cross-check and late-present detector** |
+| waitable swapchain (`FRAME_LATENCY_WAITABLE_OBJECT` + `GetFrameLatencyWaitableObject`) | a HANDLE signalled when the swapchain will accept another frame | blocks, or needs `QWinEventNotifier` | **declined — see below** |
+| `IDXGIOutput::WaitForVBlank` | blocks until the next vblank | a dedicated thread, plus a cross-thread post per refresh | declined |
+
+**The waitable swapchain is declined and the reason is worth writing down so it
+is not re-proposed.** It answers "may I queue another frame", not "when is the
+next vblank". At sync interval 0 it signals almost immediately and carries no
+phase information at all; at sync interval ≥1 it becomes a refresh-rate
+heartbeat, which means presenting every refresh — 240 draws per second of the
+same picture, against a standing priority that says no feature may compromise
+lightweight playback. And **blocking on it from the UI thread is the same class
+of mistake as the synchronous remote read `8b47e08` fixed**: the app would be
+unable to deliver a mouse move between frames. `QWinEventNotifier` makes the
+wait non-blocking but does not make the signal informative.
+
+**Why DWM first rather than DXGI first.** It decouples GATE E from the
+default-renderer question. §24 would otherwise only work on `d3d11`, which the
+prompt for this session correctly flagged: the cadence fix and the default flip
+would then be one decision taken at sign-off. With a renderer-independent phase
+source, the CPU path — still the default, and what the owner is running — gets
+the fix too, and the §23.3 1080p control (which was taken on `cpu`) is directly
+comparable before and after.
+
+**Two things to verify on the box before committing to it**, because this
+document's rule is to confirm rather than inherit:
+
+1. `DwmGetCompositionTimingInfo` takes an HWND that is **ignored on Windows 8+**
+   — it is one composition clock for the desktop, not per-monitor. On a
+   multi-monitor setup with mixed refresh rates it describes the primary. This
+   box has one display, so the limitation is *untested*, not *broken* — the same
+   status as §20.4, which GATE E promotes from "untested" to "untested and now
+   load-bearing".
+2. That `qpcRefreshPeriod` on this panel reads the true period and not a rounded
+   one. If it disagrees with `GetFrameStatistics`' implied period on the d3d11
+   path, that disagreement is the finding, and the cross-check exists to expose
+   it.
+
+If neither source is available, the scheduler degrades to §24.6's E1 — unsnapped
+deadlines against the exact rational. **It must never degrade to a wait.**
+
+### 24.5 The scheduler
+
+State per playback run: the QPC time at the run's first present `t0`, the frame
+index `k` from the run start, the exact period
+
+```
+T = 1000 × fpsDen / fpsNum        (ms, double, never rounded)
+```
+
+read from `VideoMetadata::fpsNum`/`fpsDen`. **This is the first thing in the
+codebase to read the rational** (`7b924be` is foundation only, §20.5 item 2);
+every other consumer keeps `FrameSource::fps()`. When the pair is absent or
+zero, `T = 1000/fps` from the double and everything else is unchanged.
+
+Per frame:
+
+1. **Ideal due** `D_k = t0 + k × T`. Computed in QPC ticks as a double; nothing
+   here is rounded to a millisecond.
+2. **Grid snap** `V_k` = the vblank nearest `D_k` on the measured grid
+   `vblank0 + n × P`, with `vblank0` and `P` re-read from the phase source (see
+   staleness, §24.8). Skipped when there is no phase source; `V_k = D_k`.
+3. **Wake** `W_k = V_k − lead`, where `lead` is a measured EMA of the
+   prepare-to-present cost (upload + `update()` dispatch + `Present`) plus a
+   jitter margin, clamped below one refresh period. Being early is safe —
+   `Present(0,0)` hands the frame to DWM, which shows it at the next composition
+   — and being late costs a whole refresh, so the margin is deliberately
+   asymmetric.
+4. **Arm** a single-shot `Qt::PreciseTimer` at `max(0, round(W_k − now))`.
+   Rounding here does **not** accumulate, because the next arm is computed from
+   the absolute `D_{k+1}` and not from this one.
+5. **Re-phase on overrun.** If the handler ran long and `now > V_k`, the next
+   deadline is `max(D_k + T, the first grid point after now)` rather than a
+   banked debt. This is the analogue of today's 4-frame backlog cap
+   (`MainWindow.cpp:367`) and it exists for the same reason: a run that stalled
+   must resume *at rate*, not fast-forward through the arrears. **Never more
+   than one frame presented per wake**, exactly as today (`steps = 1`).
+
+With audio driving, step 1–4 are unchanged and the *frame* comes from the audio
+clock as it does now (`MainWindow.cpp:387-432`), including the hold branch and
+the bounded 3-frame catch-up. Under GATE E the wake rate and the audio rate are
+both real time, so `delta` should be 1 nearly always and `rep`/`skip` should
+fall to genuine sound-card-versus-display drift, which is a ppm effect. **If
+`rep` does not fall, the phase scheduler is not doing what this section claims**
+— that is the sharpest available check and it costs nothing to read.
+
+### 24.6 Two commits, separately revertable
+
+Plan §8 item 11 is one line; this design is two changes with different blast
+radii, and folding them into one commit would make it impossible to say which
+one bought what. **Splitting item 11 is a decision for the review** (§24.11).
+
+**E1 — `perf(playback): schedule presents against the exact source rate`.**
+Steps 1, 4 and 5 of §24.5 without the grid snap. Replaces the fixed integer
+periodic tick and the accumulator gate with an absolute-deadline single-shot.
+Renderer-independent, so it lands on the default path. Expected effect: the
+41/82 quantisation is gone, present intervals become ~41.667 ± handler jitter,
+the 62-frame signature disappears. Expected non-effect: handler-modulated
+jitter on 4444 is untouched.
+
+**E2 — `perf(gpu): add DXGI presentation timing` (GATE E).** Adds the phase
+source, the grid snap, the late-present telemetry, and the one change that
+§24.1 says is structurally necessary:
+
+> **The present and the decode swap places inside the handler.** Today the wake
+> decodes frame `k` and then requests the paint, so the present carries the
+> decode cost. E2 presents the frame prepared during the previous interval
+> *first*, then decodes the next one into a pending slot. Present time becomes
+> wake + `lead`, independent of decode cost; a decode that overruns the interval
+> makes the *next* present late, which is the genuine cost-overrun case (cause
+> B) reported honestly instead of smeared into every frame.
+
+This is a small change and it is important that it stays one: **same thread,
+same synchronous decode, same one frame per interval, same linear-forward
+order.** It is not the async decode thread, and it does not reopen that
+question — the only new state is one pending `VideoFrame`, which is a refcount.
+It costs **one frame interval of added display latency** at the start of a run,
+and it needs care at three points, all listed in §24.8.
+
+### 24.7 The three reverted scheduler experiments — E1 is a near-relative of one
+
+The comparison table at `MainWindow.cpp:1109-1117`, on the 4K ProRes 4444
+benchmark, 261 frames, Release:
+
+| scheduler | wall | fps | rate |
+|---|---|---|---|
+| periodic precise @ frame interval *(shipped)* | 11.00s | 23.74 | **98.9%** |
+| 6ms poll + accumulator gate | 11.34s | 23.01 | 95.9% |
+| **adaptive single-shot per frame** | 11.07s | 23.57 | **98.2%** |
+
+**The third row is E1's ancestor and it was rejected.** Three things are
+different now, and all three are claims to test rather than assert:
+
+1. **The metric that rejected it cannot see the fault it addresses.** Every
+   number in that table is presented rate, and §23.1 established that presented
+   rate reads 98–99% under both causes and therefore cannot distinguish them.
+   Nothing in the table says whether the beat differed between the three rows —
+   the instrument that could say so (the `cadence` distribution) was built four
+   months later. **The re-run is judged on the distribution, not the rate.**
+2. **The starvation argument was about a 35ms handler.** The recorded reasoning
+   is that "the ~35ms blocking handler starves the event loop, so a short tick
+   is only delivered every ~13ms". That is a sound objection to the *6ms poll*
+   row. GATE C has since taken 4444's worst handler to 37.6ms with tick jitter
+   of 2–3ms on the planar path (§23.4), and **the 1080p control — 3.8ms worst
+   handler, ten times the headroom — has never been run against a single-shot
+   scheduler at all.** Run 1080p first for exactly this reason.
+3. **A checkable hypothesis for the 0.7%.** E1 re-arms from an *absolute*
+   deadline. If the reverted implementation armed a rounded `round(T) = 42ms`
+   instead, that is a 0.8% systematic rate deficit — which matches
+   98.9% → 98.2% almost exactly, and is the same `round`-versus-`floor` error
+   already documented at `MainWindow.cpp:1119-1128`. **The reverted code is not
+   in git history** (searched: no `-S"singleShot"` hit on `MainWindow.cpp`, no
+   matching commit), so this cannot be settled by reading. It is stated as a
+   hypothesis so that a re-run either confirms it or refutes it, and so that
+   nobody argues E1 down from a table whose implementation is unknown.
+
+The 6ms-poll row stays rejected and E1 is not it: E1 arms one wake per frame at
+a computed deadline; it does not poll.
+
+### 24.8 Failure modes, edge cases and what each must degrade to
+
+- **Non-integer refresh:frame ratio.** 24fps at 60Hz is 2:3; at 239.76Hz it is a
+  9-refresh frame every ~100. Both are the display's cadence, not a defect, and
+  the scheduler produces them naturally by snapping to the nearest grid point.
+  **This is expected output and must be written into the pass condition
+  (§24.9), or the first 60Hz run will look like a regression.**
+- **Refresh changes mid-session** (mode change, monitor move, DWM restart). The
+  grid must be re-acquired, never cached at open: a stale period is a slowly
+  drifting phase, which reads exactly like the fault being removed. Re-read on a
+  cheap cadence and on window move; treat a period that has changed by more than
+  a small tolerance as a re-acquire, not a filter input.
+- **Multi-monitor.** §20.4 records that real per-monitor DPI transitions have
+  never run on this one-display box. GATE E promotes that from a gap to a
+  load-bearing gap, because a DWM composition clock describes the primary
+  display. Say so at sign-off rather than discovering it.
+- **Device loss / renderer fallback.** Losing the swapchain must degrade to E1's
+  unsnapped deadlines. Never to a wait, never to a hang, never to the old
+  integer tick silently — the HUD must say which phase source is live, for the
+  same reason `renderer` names the backend: a path that quietly never engages
+  while the app looks fine is the failure mode this whole boundary is built
+  against.
+- **Media with no rational.** `fpsNum`/`fpsDen` absent → `T` from the double.
+  Unchanged behaviour otherwise.
+- **Image sequences** keep today's path (fixed 24, multi-step catch-up).
+  Out of scope, and the `isVideo` branch already separates them.
+- **J-K-L off-speeds and reverse playback.** `T` becomes `T/speed`; the grid
+  snap still applies. Audio is 1x-forward only, so these are wall-clock, and
+  they are **not** part of the sign-off — they must merely not regress.
+- **`storageBusy_` deferral.** A wake dropped because a remote read is in
+  flight must not lose the timeline; §24.5 step 5's re-phase covers it, and it
+  is the case to write a test for because it is the one that only appears on
+  LucidLink.
+- **E2's swap, three care points.** (a) The first interval of a run has nothing
+  prepared — present the frame already loaded by open/step and decode the next.
+  (b) `playbackAtEnd_` and the exhausted-decoder branch (`MainWindow.cpp:441`)
+  now fire one interval after the decode that discovered the end; the rewind on
+  Play (`c3335ec`) must still be correct. (c) Audio catch-up may want `k+2` or
+  `k+3` when only `k+1` is prepared — decode forward within the same interval,
+  which is what the existing bounded catch-up already does.
+
+### 24.9 Success criteria — defined before building
+
+**Pass conditions.**
+
+1. **The 62-frame signature is gone.** §23 measured median spacing between long
+   frames at 61–62 on all six runs, `max ≈ 2 × p50`, nothing in the 1.1–1.5x or
+   >2.5x buckets. That signature disappearing is the pass condition. Report the
+   **whole distribution**, not a replacement median: a beat that moves from 62
+   to some other tight value is the same fault at a different period.
+2. **The 1080p control improves first.** Worst handler 3.8ms against a 41.67ms
+   budget, the same four doubled frames at the same 62-frame spacing (§23.3). It
+   has ten times the headroom, so if the fix is real it works there before
+   anywhere else. If 1080p does not improve, stop — the mechanism is wrong and
+   no amount of 4444 tuning will show it.
+3. **A residual display-imposed beat is allowed and must be reported as such**,
+   with the *measured* refresh period beside it (§24.2). At an exact 240 or
+   120Hz mode the expectation is none.
+4. **No regression on the audio-mastered path**: 1080p H.264 99.1%, 4K H.264
+   98.3%, 4K ProRes 422 HQ 98.4%, skips 0. And `rep` should *fall* (§24.5).
+5. **Refresh sweep at ~60 / 120 / 240 Hz** on the Odyssey G95SC, as a
+   regression check only. The prior measurement at 59 / 119.98 / 240 Hz had flat
+   counters (99.1 / 99.1 / 98.7%) and an owner verdict of "about the same" and
+   "hard to tell", with two runs at one rate spanning the same range as all
+   three rates. **Do not expect a win.** The point is that a display-synchronised
+   path must not be *worse* at any of them, including the non-integer 59Hz case.
+6. **Owner sign-off on 4K ProRes 4444 playback.** The harness says the mechanism
+   works; only the owner says the stutter is gone. This project has recorded
+   that split six times.
+
+**Protocol.**
+
+- **`TRACE_NO_AUDIO=1` on every control, and this is not optional.** 4444 has no
+  audio track while 422 HQ and the 1080p clip both do, so as shipped they run on
+  different schedulers; comparing them directly would "prove" 4444 is uniquely
+  bad when the only difference is which clock is driving.
+- **Quote `win WxH` with every number** (§22.8). The HUD carries it.
+- **Run both renderers** for every row, since E1 is renderer-independent and E2
+  is not.
+- **A negative control is required.** A build with the phase source forced off
+  must still show the old 62-frame signature, so the harness is proven able to
+  see the thing it is claiming to have removed. §16.6 is the precedent: a check
+  that can only report success proves nothing.
+
+**One new instrument is needed and does not exist.** The honest cadence answer
+under GATE E is the distribution of **refreshes occupied per presented frame** —
+an integer, ideally constant — plus a count of presents that missed their
+intended refresh. On d3d11 that comes from `GetFrameStatistics`
+(`PresentCount` against `PresentRefreshCount`); renderer-independently it comes
+from present QPC times against the measured grid. `cadence.ps1` extends to read
+it. Without this the sweep in criterion 5 cannot be judged, because presented
+rate is blind here for exactly the reason §23.1 gives.
+
+### 24.10 Scope — what GATE E is not
+
+Presentation timing only.
+
+- **Not** items 8 (texture reuse), 9 (GPU scaling) or 10 (10-bit output).
+- **Not** the scrub path. §22.4 established it is unchanged by GATE C and it
+  must stay that way; nothing in §24 touches `flushVideoScrub`, the worker, the
+  lease or the sampled preview.
+- **Not** the audio clock. It keeps the rate and position question entirely.
+- **Not** the default-renderer flip. That is a separate product decision, now
+  with a measured benefit attached (§23.4) and a live A/B in front of the owner
+  (§24.12).
+- **Not** image sequences, exclusive fullscreen, or any interface work.
+
+### 24.11 Open questions for the review
+
+1. **Split plan item 11 into E1 and E2?** It is one line in §8 and two changes
+   with different blast radii here. Recommendation: split, because E1 is
+   renderer-independent and lands on the default path while E2 does not, and
+   because a single commit would make it impossible to attribute the win.
+2. **Phase source: DWM (renderer-independent) or DXGI-only?** DWM decouples the
+   cadence fix from the default-renderer question and reaches the CPU path the
+   owner is running; DXGI-only keeps the entire blast radius off the default
+   renderer. Recommendation: DWM primary with `GetFrameStatistics` as
+   cross-check on d3d11 — but this is the decision to take at review, not one to
+   discover at sign-off.
+3. **Is E2's present/decode swap acceptable?** It adds one frame interval of
+   display latency at run start and reshapes the tick handler. It is the only
+   thing that decouples present time from decode cost, so declining it caps GATE
+   E at E1's precision — which may be enough for 1080p and is measurably not
+   enough for 4444.
+4. **What is the panel's true refresh period?** 239 vs 239.76 vs 240.000 changes
+   what "exact cadence" can even mean for 24.000fps content (§24.2). Measure
+   before promising.
+5. **Does the CPU path get E1?** It is the default and it is what the owner is
+   running today. Saying yes means the default renderer changes behaviour in
+   this gate; saying no means the owner sees no improvement until the default
+   flips.
+
+### 24.12 Before any code — the zero-cost A/B, put to the owner
+
+§23.4 measured that the planar d3d11 path already removes 4444's cause-B
+component: tick jitter **11–14ms → 2–3ms**, worst handler **55.6ms (over budget)
+→ 37.6ms (under)**, zero handlers over budget. `cpu` is still the default, so
+the owner's stutter report includes a component the planar path no longer has.
+
+The ask: play 4K ProRes 4444 twice, once at the default and once with
+`TRACE_RENDERER=d3d11`, and say whether the d3d11 run feels better.
+`Run Trace (cpu).bat` and `Run Trace (d3d11).bat` in the repo root do this; the
+HUD `renderer` field confirms which one actually engaged.
+
+It costs nothing and buys two things: it may improve the owner's experience
+immediately, and it is **the only available evidence for §23.6, which is still
+open — why the owner notices this on 4444 specifically**, when the beat is
+identical on 1080p and 422 HQ. Do not assume content or resolution explains it.
+
+A yes makes flipping the default to `d3d11` a live option to take *with* GATE E
+rather than after it. **It is not to be flipped unilaterally** — it is a product
+decision, and §5's "`TRACE_RENDERER=cpu` stays the default until Gate E" is a
+statement about when the question opens, not an instruction to answer it.

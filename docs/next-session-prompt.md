@@ -1,7 +1,7 @@
-# Prompt for the next Claude Code session — the GATE E decision, then step 8
+# Prompt for the next Claude Code session — GATE E, pulled forward
 
-Supersedes the previous version (housekeeping / stall number / 4444 cadence, all now
-done at `2ddbe8b`). Paste everything below the line into a fresh session in the repo root.
+Supersedes the previous version of this file. We are at `627c2ed`, tree clean, nothing
+unpushed. Paste everything below the line into a fresh session in the repo root.
 
 ---
 
@@ -10,101 +10,135 @@ done at `2ddbe8b`). Paste everything below the line into a fresh session in the 
 1. **Performance is priority #1.** No interface feature may ever compromise lightweight,
    fast, smooth playback. If a feature and playback smoothness conflict, the feature loses.
 2. **No interface work.** `docs/interface-pass-1-spec-DEFERRED.md` is approved and
-   deliberately not started. The icon assets are committed; that is storage, not permission.
+   deliberately not started. Do not begin any of it.
 3. The goal for this whole phase is the core playback experience alone: smooth playback,
    locked real-time playback, responsive polished scrubbing at slow and fast speeds in both
    directions, and strong GPU integration.
 
 ---
 
-Read `CLAUDE.md` and `docs/gpu-initiative-plan.md` first. We are at `2ddbe8b`.
+Read `CLAUDE.md` and `docs/gpu-initiative-plan.md` first — §9 (composition rule), §20.5
+(source-rate audit), §22 (GATE C) and §23 (cadence characterisation) are the load-bearing
+sections. GATE B is passed with owner sign-off; GATE C landed at `e8566a4`.
 
-**GATE B is PASSED** (owner sign-off, recorded in plan §20.2 and §17.5 item 2).
-**GATE C is implemented and measured** (§22). `cpu` is still the default renderer.
+## The ordering decision, taken
 
-## 0. First: the decision that reorders everything below
+§23.5 recorded the argument and correctly declined to act on it. **The owner's decision is
+to pull GATE E — plan §8 item 11, DXGI presentation timing — ahead of items 8, 9 and 10.**
 
-**Plan §23 measured the ProRes 4444 playback stutter and it is the integer tick beat —
-cause A — and it is on every file, not just 4444.** Median spacing between doubled frames
-is 61–62 against a predicted 62.5, on all six runs, including a 1080p clip whose worst
-handler is 3.8ms against a 41.67ms budget. Cost cannot explain a defect identical on a file
-with ten times the headroom.
+The reasoning, so it is not re-litigated: locked real-time playback is priority #1; §23
+measured the residual stutter as **cause A, the integer-tick beat, which is universal and
+which only GATE E fixes**; and items 8–10 buy headroom, which §23.4 measured as no longer the
+binding constraint on 4444 once the planar path is on. There is no technical dependency from
+8, 9 or 10 into 11 — the flip-model swapchain GATE E needs landed at GATE B.
 
-**Only GATE E fixes this.** Items 8 and 9 buy headroom, and §23.4 shows headroom is no
-longer the binding constraint on 4444 once the planar path is on (GATE C took its tick
-jitter from 11–14ms to 2–3ms and its worst handler from 55.6ms to 37.6ms, inside budget).
+Items 8, 9 and 10 are **deferred, not cancelled**. §22.7 items 2–5 stand.
 
-So the first thing this session needs is the owner's answer to: **pull GATE E (plan §8 item
-11, DXGI presentation timing) ahead of items 8–10?** Do not reorder unilaterally — §23.5
-records the argument and explicitly leaves the call to him. If the answer is yes, the rest
-of this file is the fallback, not the plan.
+## 1. Before writing any code — the zero-cost experiment
 
-Two things to have ready when asking:
+§23.5 notes that until GATE E *or a default renderer change*, the owner sees the beat **plus**
+the cause-B component, because `cpu` is still the default. §23.4 measured that the planar
+d3d11 path already removes cause B on 4444: tick jitter **11–14ms → 2–3ms**, worst handler
+**55.6ms (over budget) → 37.6ms (under)**, zero handlers over budget.
 
-- The composition rule is already written and must not be renegotiated (§9): **audio stays
-  the rate and position authority; vsync becomes the phase authority.** Vsync picks the
-  instant, the audio clock picks the frame for that instant. Unifying those under one owner
-  is what removed the hold/skip churn in `cd79d49`; giving vsync the "which frame" question
-  brings the two-scheduler bug straight back.
-- The flip-model swapchain that makes waitable presentation possible landed at GATE B, and
-  `Present(0, 0)` today is sync interval 0 — not vsync-throttled, not phase-aligned (§20.5).
-- **Making `d3d11` the default is a separate decision** the plan defers to GATE E, but it
-  now has a measured benefit attached (§23.4) and the owner has signed off the rendering.
+So: ask the owner to run 4K ProRes 4444 playback twice, once with `TRACE_RENDERER=d3d11` and
+once at the default, and say whether the d3d11 run feels better. That costs nothing and buys
+two things — it may improve his experience immediately, and it is the only available evidence
+for **§23.6, which is still open: why he notices this on 4444 specifically**, when the beat is
+identical on 1080p and 422 HQ. Do not assume content or resolution explains it.
 
-## 1. Step 8 — texture and upload-resource reuse, IF it is still next
+If the answer is yes, flipping the default to `d3d11` becomes a live option to take *with*
+GATE E rather than after it. Do not flip it unilaterally; it is a product decision.
 
-Plan §8 item 8. **Do not justify it on release latency.** §22.4a retracted that: the
-"6 → 33ms regression" was a gesture artefact — `-Reversals` never landed a full-res frame
-in the BGRA config (`dst RGB32/BGRA 640x360`, `dec 0.00`, `sws 0.00`), so it compared a
-landing against no landing. Re-run with `-SnapRelease`, where all three configs land
-full-res, planar is the **fastest**: 33.7–46.7ms against 55.4–65.6ms. GATE C improved
-release latency by ~20ms.
+## 2. GATE E — design before implementation
 
-So this step needs a **new motivating measurement before any code**. Candidates, and be
-willing to conclude that none of them justifies it yet:
+Write the design into the plan as a new section and get it reviewed before building. The
+project has **three reverted scheduler experiments** on record; the difference between them
+and this is that this one has a stated composition rule and a measured target.
 
-- Per-frame cost *variance* during playback on 4444, now that the mean is 25ms. §23 shows
-  handler>budget is already 0 on the planar path, so this may be closed too.
-- Textures are recreated on any geometry change (`ensureTexture`, `ensurePlaneTextures`) —
-  a resize or a media switch pays three allocations. Measure a resize, not a steady state.
-- `D3D11_MAP_WRITE_DISCARD` on ~56MB of DYNAMIC planes asks the driver for fresh backing
-  every map. A staging resource plus `CopyResource`, or `MAP_WRITE_NO_OVERWRITE` with
-  fencing, is the usual answer — but measure first: playback handoff is 3.9–4.5ms on planar
-  against 2.3ms on BGRA, which is 1.6ms, not 27ms.
+### The composition rule is already written and is not negotiable
 
-**Scope discipline:** resource reuse only. GPU scaling is item 9 and changes what the
-picture *is*, not just how it is uploaded. Keep the BGRA path working — it is the control
-for every planar measurement.
+§9: **audio stays the rate and position authority; vsync becomes the phase authority.** Vsync
+picks the instant, the audio clock picks the frame for that instant. One owner per question.
 
-## 2. Carried, unresolved, do not re-open casually
+This has already been got wrong once in this codebase, and expensively. When audio drove *and*
+the wall-clock accumulator also gated presentation, the two clocks beat against each other and
+produced matched hold/skip pairs; the fix was to make the audio clock the **only** scheduler.
+So when vsync takes the phase question, the accumulator must be **removed from the gating
+decision**, not layered underneath it. Adding a third opinion about when to present is how
+this becomes revert number four.
 
-- **The 4K H.264 stall floor.** §22.8 settled that window size dominates (cache capacity
-  76 → 22 as the window grows, stalls 46 → 136) and the HUD now carries `win WxH`. What it
-  does *not* explain is 46–51 stalls at the smallest geometry against §17.4's `2 of 394`.
-  The box now runs `parsecd`, `sunshine`, Steam and Adobe services, and the display is
-  5120x1440 @ 239Hz where §18.3 recorded 2560x1440. **If a clean number is wanted, take it
-  deliberately** — those closed, one display, window size written down. Otherwise compare
-  stalls only within a session at the same `win WxH`.
-- **Why the owner notices the beat on 4444 and not 1080p** (§23.6). The beat is identical
-  on both. The only measured difference is the cause-B component on the default `cpu`
-  renderer. Needs his eye, not another run.
-- **Real mixed-monitor DPI is still untested** (§20.4). One display on this box.
-- **BT.2020 has no tonemap**, on either path. Known gap.
+### What is actually there today, audited at GATE B (§20.5)
+
+- The exact rational **is stored** (`VideoMetadata::fpsNum`/`fpsDen`, `7b924be`) and
+  **nothing reads it** — every consumer goes through `FrameSource::fps()`, a double.
+- The tick is `floor(1000.0/fps)`, an **integer-millisecond QTimer** — 41ms at both 24 and
+  23.976.
+- `Present(0, 0)` is **sync interval 0**: not vsync-throttled, not phase-aligned. DWM
+  composites at refresh so at most one present is seen per refresh, but nothing in Trace knows
+  the refresh phase.
+- The accumulator does not drift — `frameDurationMs` is a double fed by `nsecsElapsed()` and
+  carries its residue forward. The tick **bounds** the rate rather than setting it.
+
+GATE E is where the stored rational finally becomes the reference. A rate that is already
+rounded cannot be the reference for late-present or jitter.
+
+### Mechanisms to evaluate, and state the choice with reasons
+
+A waitable swapchain (`DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT` plus
+`GetFrameLatencyWaitableObject`) and/or `IDXGISwapChain::GetFrameStatistics` for
+`PresentCount` / `SyncQPCTime`, against a non-zero sync interval. Say what each gives, what
+it costs on the UI thread, and why the chosen one wins — a waitable object that blocks the UI
+thread is the same class of mistake as the synchronous remote read that `8b47e08` fixed.
+
+**GATE E only works on the d3d11 backend.** The CPU renderer has no swapchain and therefore no
+phase source; it keeps the current tick. That is fine, but it means the cadence fix and the
+default-renderer question are coupled — say so in the design rather than discovering it at
+sign-off.
+
+### Success criteria — define these before building, not after
+
+The characterisation in §23 is the baseline and gives an unambiguous target:
+
+- **The 62-frame-spaced doubled frames must disappear.** §23 measured median spacing between
+  long frames at **61–62 across all six runs**, with `max ≈ 2 × p50` and nothing in the
+  1.1–1.5x or >2.5x buckets. That signature going away is the pass condition. A presented-rate
+  figure is **not** — it reads 98–99% under the fault and cannot see it, which is the whole
+  reason §23 exists.
+- The **1080p control** (worst handler 3.8ms against a 41.67ms budget) must show the same
+  improvement. It has ten times the headroom and the same beat, so if the fix is real it works
+  there first.
+- No regression on the **audio-mastered** path: 1080p H.264 99.1%, 4K H.264 98.3%, 4K ProRes
+  422 HQ 98.4%, skips 0.
+- **Controls must use `TRACE_NO_AUDIO=1`.** 4444 has no audio track while 422 HQ and the 1080p
+  clip do, so as shipped they run on different schedulers; comparing them directly would
+  "prove" 4444 is uniquely bad when the only difference is which clock is driving.
+- **Refresh-rate sweep at ~60 / 120 / 240 Hz** on the Odyssey G95SC, as a regression check.
+  Note the prior measurement: at 59 / 119.98 / 240 Hz the counters were flat (99.1 / 99.1 /
+  98.7%) and the owner's verdict was "about the same" and "hard to tell". Two runs at a single
+  rate span the same range as all three rates. **Do not expect a win there** — the point of
+  the sweep is that a display-synchronised path must not be *worse* at any of them, including
+  the non-integer 59Hz case where 24fps lands on a 2:3 cadence.
+- **Owner sign-off on 4K ProRes 4444 playback.** The harness says the mechanism works; only
+  the owner says the stutter is gone. This project has recorded that split six times.
+
+### Scope discipline
+
+Presentation timing only. Do not fold in texture reuse (item 8), GPU scaling (item 9) or
+10-bit output (item 10). Do not touch the scrub path — §22.4 established it is unchanged by
+GATE C and it must stay that way. Do not change the audio clock; it keeps the rate and
+position question.
+
+Commit as `perf(gpu): add DXGI presentation timing` — **GATE E**.
 
 ## Working notes
 
 - github.com is reachable from the Windows box and you can push directly. Verify with
-  `git remote -v` and `git rev-list --count @{u}..HEAD` rather than assuming — the
-  `~/Claude/Trace` path is macOS-only and handing it to Anj here fails silently.
+  `git remote -v` and `git rev-list --count @{u}..HEAD` rather than assuming.
 - Build locally with the VS2022 / Qt 6.10.2 / vcpkg commands in `CLAUDE.md` before pushing.
   Check the configure lines for `audio output enabled` and `D3D11 renderer enabled`.
-- Line endings are pinned by `.gitattributes` (`c7c5bda`). If `git status` ever shows mass
-  modifications again, check `git ls-files --eol` before believing them.
-- **Run any renderer comparison twice** — the first d3d11 run of a session carries a warm-up
-  cost large enough to read as a regression (§21.4).
-- **`-SnapRelease` for anything about the landing**; `-Reversals` does not guarantee one.
-- **Before comparing two numbers, check the two runs did the same work.** `dst`, `dec` and
-  `sws` sit on the same HUD lines as the figure being compared, and twice this session they
-  were what showed a "regression" was not one.
 - `V:\` is live client production storage and is strictly read-only.
+- Two habits from the last session that are worth keeping: **quote the window size with any
+  scrub number** (§22.8 — the HUD carries `win WxH` now), and **check the diff, not the commit
+  subjects**, before concluding a range changed nothing.
 - Update `CLAUDE.md` and the plan at the end of the session.
