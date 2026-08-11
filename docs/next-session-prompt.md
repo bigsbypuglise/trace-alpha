@@ -16,23 +16,29 @@ clears**, because nothing refills it while the pointer is down, and `syncScrubPr
 returns at its first line when no lease is out, and a resize drag cannot be a scrub drag. **So
 no debounce was built and none is wanted.** Eighth premise-expiry.
 
-**FOUR THINGS ARE STILL OPEN AND ONE OF THEM IS AN OWNER DECISION.**
+**THE OPENING WINDOW IS CAPPED — OWNER DECISION, 2026-08-11, and it AMENDS §4.** Media
+determines the opening window's *aspect ratio*, not an unlimited source-pixel-sized window.
+Natural size only when already small; a **1280x720-equivalent logical-pixel AREA** cap reshaped
+to the media's aspect; never past **80% of the work area** including chrome; the settled 460px
+transport sets a floor small media is enlarged to meet; **one proportional scale**, never a
+per-axis clamp. **The cap is an AREA and that is what makes it shape-neutral.** It did what it
+was taken for: 4K H.264 reversal drag `hitch 2 → 1`, `cache 77 → 141`, `rev-hit 96.7 → 98.2%`,
+with the media-shaped window kept. **Do not re-open it as a question.**
 
-1. **OWNER QUESTION — the default opening size.** §4 says "start with the source's natural
-   displayed size when practical" and that is what ships, so 4K media now opens into a very
-   large window. Measured consequence, with the aspect lock as the only difference between two
-   runs of one binary: `display 1474x830` against the old `640x360`, so `cache 215 → 77`,
-   `rev-hit 98.7 → 96.7%`, **`hitch 1 → 2`** on a 4K H.264 reversal drag. That is §22.8's
-   window-size effect, not a new cost in the code, and unlocking restores the old numbers
-   exactly. **Capping the opening size would contradict the spec's own wording, so it is a
-   decision rather than a fix.** Put it to the owner with the numbers.
-2. **DPI IS ENTIRELY UNTESTED and it is the largest technical risk in the phase.** `dpr` is
-   **1.00** on this box, so every `devicePixelRatioF()` term in the sizing arithmetic is
-   currently the identity and has never executed with a real value. §4's matrix names 100 /
-   125 / 150 / 200%. `QT_SCALE_FACTOR` is the reachable instrument, as it was at §20.3.
-3. **Image sequences and stills** go through the same path (`currentImage_`) and only video has
+**DPI: THE ARITHMETIC IS TESTED, THE HARDWARE CASE IS NOT, AND THE TWO MUST NOT BE CONFLATED.**
+`src/app/WindowShape.cpp` is a pure function taking `dpr` as an argument, driven across
+**11 shapes × 4 scale factors** by `Trace.exe --window-shape-selftest`, now a CI step. The
+shipping path calls the same function. **Real mixed-monitor DPI remains UNTESTED** for want of a
+second display (§20.4) — synthetic DPR proves the calculation and nothing about a real
+`WM_DPICHANGED`, a swapchain resize, or a monitor-to-monitor move. The selftest prints that
+caveat itself; keep it attached to any claim of DPI coverage.
+
+**TWO THINGS ARE STILL OPEN.**
+
+1. **Image sequences and stills** go through the same path (`currentImage_`) and only video has
    been measured.
-4. **CI has not run on any phase 12 commit**, and owner visual sign-off has not been taken.
+2. **Owner visual sign-off has not been taken** — including whether the carried
+   transport-width item on 1×1 and 4×5 media is now closed.
 
 **One carried item may have closed and needs an eye, not a measurement:** the floating
 transport is 460 logical px wide, and the 4×5 window is now **725 px** wide where the picture

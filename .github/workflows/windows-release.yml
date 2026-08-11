@@ -250,6 +250,33 @@ jobs:
             throw "Renderer self-test reports planar=0 - the GATE C YUV shader path did not build, so every frame would take the BGRA fallback."
           }
 
+      # Spec phase 12. The opening-window geometry has to be right at 125%, 150%
+      # and 200% DPI, and the only machine that can run this application by hand
+      # is set to 100% -- so every devicePixelRatioF() term in that arithmetic is
+      # the identity there and three quarters of section 4's DPI matrix cannot be
+      # exercised locally at all. computeViewerSize() takes dpr as an argument
+      # for exactly this reason, and the check is pure arithmetic: no window, no
+      # renderer, no display needed, so a headless runner is a perfectly good
+      # place to run it and it will keep running on every push.
+      #
+      # THIS IS NOT MIXED-MONITOR DPI VALIDATION. It proves the calculation. A
+      # real WM_DPICHANGED, a swapchain resize and a window dragged between two
+      # differently-scaled monitors remain untested for want of a second display
+      # (plan section 20.4), and the self-test prints that caveat itself.
+      - name: Verify the window-shape geometry across DPI
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD "dist\trace-alpha-windows-x64\Trace.exe"
+
+          $out = & $exe --window-shape-selftest 2>&1
+          $code = $LASTEXITCODE
+          $out | ForEach-Object { Write-Host $_ }
+
+          if ($code -ne 0) {
+            throw "Window-shape self-test failed (exit $code). The failing rows are above; each names the media, the scale factor and the property that did not hold."
+          }
+
       # Uploaded as a FOLDER, not a .zip. upload-artifact always zips what it
       # is given, so uploading a zip produced a zip-inside-a-zip: unzipping the
       # download left another archive instead of the app.

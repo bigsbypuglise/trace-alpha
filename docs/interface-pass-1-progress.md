@@ -2740,3 +2740,116 @@ wording. Not a defect; a decision.
 A helper named `R` is `Invoke-History`, and aliases outrank functions — so a
 window-rect helper called `R` produced five "Cannot locate most recent history"
 errors and no measurement. `Diff` and `Move` are already on this list.
+
+### OWNER POLICY, 2026-08-11: the opening window is capped
+
+**Media determines the opening window's aspect ratio, not an unlimited
+source-pixel-sized window.** This **amends** section 4's "natural displayed size
+when practical" rather than implementing it literally, and it was taken on the
+measurement above: the uncapped window gave 4K H.264 `hitch 2` where the old
+default gave 1.
+
+The policy as decided, and as `src/app/WindowShape.cpp` implements it:
+
+- preserve the exact display aspect ratio — sample aspect, rotation metadata and
+  the phase 10 viewing transforms included;
+- natural displayed size **only when it is already reasonably small**;
+- cap the initial viewer to a **1280x720-equivalent logical-pixel AREA**,
+  reshaped to the media's aspect;
+- never exceed **80% of the work area**, chrome and frame included;
+- enforce the minimum width the **settled 460px transport** needs;
+- very small media may be **enlarged** enough to keep the application and
+  transport usable;
+- **one proportional scale**, never an independent clamp per axis;
+- ordinary resizing stays aspect-locked, and maximized / snapped / fullscreen
+  stay Windows' business and are never forced back to the startup cap.
+
+**THE CAP IS AN AREA, AND THAT IS WHAT MAKES IT SHAPE-NEUTRAL.** Capping a width
+would give a 9:16 clip a window a quarter the size of a 16:9 one. At equal area:
+16:9 lands on 1280x720, 1:1 on 960x960, 4:5 on 859x1073, 9:16 on 720x1280 —
+the owner's own figures, reproduced by `widthForArea(area, aspect)`.
+
+**One proportional scale is what makes ratio preservation a property.** Every
+constraint contributes a scale, the smallest (or, for the minimum, the largest)
+wins, and the second axis is then recomputed from the first. Two independent
+clamps are the only way this calculation could silently distort a picture's
+shape, so there are none.
+
+**Precedence, where the rules disagree:** the transport minimum may push past the
+80% budget, because a transport too narrow to use is worse than a large window —
+but never past the work area itself, because a window bigger than the screen
+cannot be moved or closed. On any monitor this application supports that last
+branch never runs; it exists so "never off screen" is a property rather than an
+assumption about monitor sizes.
+
+#### The cache comparison, re-run as the decision required
+
+4K H.264 reversal drag, bar mode, physical panel:
+
+| | `win` | `display` | `cache` | `rev-hit` | `hitch` |
+|---|---|---|---|---|---|
+| uncapped phase 12 | 1476x1313 | 1474x830 | 77/77 | 96.7% | **2** |
+| **capped** | 1066x1083 | **1066x600** | **141/141** | **98.2%** | **1** |
+| lock off (pre-phase-12 default) | 1280x843 | 640x360 | 215/298 | 98.7% | **1** |
+
+**The cap returns `hitch` to the control's figure while keeping the media-shaped
+window**, which is exactly what it was asked to do. The video rect is still 2.8x
+the old default's area and cache depth is still lower than the old default's; the
+threshold-independent figure is what matters and it is back.
+
+### DPI: the arithmetic is tested, the hardware case is not
+
+**`src/app/WindowShape.cpp` is separated from `MainWindow` for one reason.**
+Section 4's matrix names 100 / 125 / 150 / 200%, and **this box runs at 100%**,
+so every `devicePixelRatioF()` term in the sizing arithmetic is the identity on
+the only machine that can run the application by hand. `computeViewerSize()`
+takes `dpr` as an **argument**, and `Trace.exe --window-shape-selftest` drives
+**11 shapes x 4 scale factors** with no window, no renderer and no display —
+the same shape as the renderer selftest CI already runs, and it is in the
+workflow now so it runs on every push.
+
+**The shipping path calls the same function**, so this is not a second
+implementation that happens to agree today.
+
+The assertions are properties rather than a golden table, which would have to be
+regenerated whenever a policy constant moved and would then assert whatever the
+code last did: the aspect is preserved to within a pixel of rounding, the area
+cap holds, the outer window fits the work area, the 460px transport fits, and
+**the DPR rows relate correctly**.
+
+**THE FIRST VERSION OF THAT LAST CHECK ASSERTED THE WRONG INVARIANT AND FAILED
+SEVEN ROWS ON CORRECT CODE.** "The same logical size at every scale factor" is
+false when natural size binds, because **natural displayed size is a PHYSICAL
+statement**: a 1920-wide source occupies 1920 panel pixels, which is 960 logical
+at 200%. Which quantity is invariant depends on **which rule bound the result**,
+and that is why `ShapeBound` is reported rather than inferred:
+
+| bound | invariant | why |
+|---|---|---|
+| `Natural` | `logical x dpr` = the source's own pixel size | 1:1 physical mapping |
+| `Cap` / `WorkArea` / `Minimum` | the **logical** size | all three are stated in logical px |
+
+A build that multiplies by `dpr` where it should divide fails **both** halves:
+natural-bound rows come out at dpr² of the source size, and rows that should be
+capped stop being capped at all. 44 rows pass.
+
+**The real 1.00 DPR path was run on this machine** and matches the selftest for
+the same inputs — 4K H.264 `scale 0.3128 bound work` → viewer `1201x676`, 4x5
+`0.5004 bound work` → `540x675`, 1x1 `0.6256 bound work` → `676x676`, 9:16
+`0.4260 bound minimum` → `460x818`, 2.39:1 `0.7001 bound cap` → `1613x571`.
+
+**SYNTHETIC DPR IS NOT MIXED-MONITOR VALIDATION AND MUST NEVER BE QUOTED AS
+SUCH.** It proves the arithmetic. It says nothing about a real `WM_DPICHANGED`
+arriving, the swapchain resizing, or a window dragged between two
+differently-scaled monitors. **Real mixed-monitor DPI remains UNTESTED** for want
+of a second display (plan §20.4) — `AllScreens` returns one and Parsec replaces
+it rather than adding one. The selftest prints that caveat on its own last line
+so the limit travels with the result.
+
+#### Regression after the cap
+
+Same panel, same harness: 4K H.264 cadence x3 **99.1 / 99.2 / 99.2%** with
+`handler>budget 0 of 120` and identical buckets; ProRes 4444 x2 **99.8%** with
+`handler>budget 0 of 260`; `-SnapRelease` `target 120 shown 120 delta 0`
+full-res planar and **`hitch 0`**; both lifecycle legs (83.6% moved / 0% moved);
+**25 of 25 transitions**.

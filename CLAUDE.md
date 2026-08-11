@@ -742,12 +742,46 @@ window-size effect with the lock as the only difference between the two runs. **
 baseline recorded before phase 12 was taken in a much smaller window and is not comparable to a
 default-size run today.**
 
-**OPEN OWNER QUESTION:** §4 says to open at natural displayed size "when practical" and that is
-what ships, but on 4K media the default window is now very large and scrub `hitch` goes 1 → 2
-because of it. A cap on the opening size would contradict the spec's wording. **Not a defect, a
-decision.** Also **untested: 125/150/200% DPI** — `dpr` is 1.00 on this box, so every DPI term
-in the arithmetic is currently the identity — image sequences and stills, and owner visual
-sign-off.
+**THE OPENING WINDOW IS CAPPED — OWNER DECISION, 2026-08-11, and it AMENDS §4 rather than
+implementing it.** Media determines the opening window's *aspect ratio*, not an unlimited
+source-pixel-sized window; 4K must not open enormous. Natural size only when already small; a
+**1280x720-equivalent logical-pixel AREA** cap reshaped to the media's aspect; never past **80%
+of the work area** including chrome; the **settled 460px transport** sets a floor that very
+small media is enlarged to meet; **one proportional scale**, never a per-axis clamp. **The cap
+is an AREA and that is what makes it shape-neutral** — capping a width would give a 9:16 clip a
+quarter the window of a 16:9 one. At equal area: 16:9 → 1280x720, 1:1 → 960x960, 4:5 →
+859x1073, 9:16 → 720x1280. Precedence where they disagree: the transport minimum may push past
+the 80% budget, never past the work area itself.
+
+**It did what it was taken for.** 4K H.264 reversal drag: `display 1474x830 → 1066x600`,
+`cache 77 → 141`, `rev-hit 96.7 → 98.2%`, **`hitch 2 → 1`** — back to the lock-off control's
+figure while keeping the media-shaped window. Regression after: cadence ×3 99.1/99.2/99.2% with
+`handler>budget 0 of 120`, 4444 ×2 99.8% at 0 of 260, `-SnapRelease` `delta 0` / `hitch 0`,
+both lifecycle legs, **25 of 25 transitions**.
+
+**`src/app/WindowShape.cpp` IS SEPARATE FROM `MainWindow` BECAUSE THIS BOX CANNOT TEST DPI.**
+§4's matrix names 100/125/150/200% and this machine runs at **100%**, so every
+`devicePixelRatioF()` term is the identity on the only box that can drive the app by hand.
+`computeViewerSize()` takes `dpr` as an **argument**, and `Trace.exe --window-shape-selftest`
+drives **11 shapes × 4 scale factors** with no window, renderer or display — now a CI step, so
+it runs on every push. The shipping path calls the same function, so it is not a second
+implementation that agrees today.
+
+**THE SELFTEST'S FIRST INVARIANT WAS WRONG AND FAILED SEVEN ROWS ON CORRECT CODE.** "The same
+logical size at every scale factor" is false when natural size binds, because **natural
+displayed size is a PHYSICAL statement** — a 1920-wide source is 960 logical px at 200%. Which
+quantity is invariant depends on **which rule bound the result**, which is why `ShapeBound` is
+reported rather than inferred: `logical × dpr` for natural-bound rows, the logical size alone
+for cap/work/minimum rows. A build that multiplies where it should divide fails both halves.
+44 rows pass, and the real 1.00 path on this machine matches the selftest for the same inputs.
+
+**SYNTHETIC DPR IS NOT MIXED-MONITOR VALIDATION AND MUST NEVER BE QUOTED AS SUCH.** Real
+`WM_DPICHANGED`, swapchain resize and monitor-to-monitor moves stay **UNTESTED** for want of a
+second display (§20.4). The selftest prints that caveat on its own last line so the limit
+travels with the result.
+
+**Still open:** image sequences and stills go through the same path and only video has been
+measured, and **owner visual sign-off has not been taken**.
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
