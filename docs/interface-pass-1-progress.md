@@ -1187,8 +1187,9 @@ section it points at wins.
 | **5 reverse shuttle** | **COMPLETE** | `90140f9` |
 | **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE, owner sign-off** | `bc84431` (CI run 90 green) |
 | **7 Time Display + zero-based frame UI** | **COMPLETE** | `f15e368` (CI run 92 green) |
-| **8 Share menu + ordinary path copying** | **COMPLETE** | `a6447aa` + `f39eb67` |
-| **9 LucidLink shell-integration prototype** | **NEXT** | — |
+| **8 Share menu + ordinary path copying** | **COMPLETE** | `a6447aa` + `f39eb67` (CI run 94 green) |
+| **9 LucidLink shell-integration prototype** | **COMPLETE** | `9b62ab0` |
+| **10 Temporary view transforms** | **NEXT** | — |
 
 Phases 4 and 5 together complete the **transport redesign**; phase 6 makes the
 floating overlay the only transport and consolidates fullscreen; phase 7 makes
@@ -1468,3 +1469,281 @@ approximation twice over.
 **Still no non-file media source exists**, so "disable for non-file sources" is enforced by
 construction (`fileBacked` is asked of the `MediaItem`, not inferred from the path) and has
 never executed with a real non-file source. The no-media case is the closest thing that runs.
+
+---
+
+## Phase 9 — the LucidLink shell-integration prototype (2026-08-11)
+
+### The mechanism, and why the obvious one is the wrong one
+
+The requirement's order is: a supported API first, then the registered shell
+command. **Both were investigated and the first one loses on its own merits.**
+
+**LucidLink runs a local REST service and it is authoritative.** The CLI's
+`--rest-endpoint` option is its front door; the daemon serving `V:\` is instance
+501 on port 8279. For the nominated file:
+
+```
+GET /fsEntry?path=/Live/.../Universe_Full_Takes_v005_16x9.mp4
+  { "id" : "2955:105901", "type" : "file", "size" : 12496458, ... }
+```
+
+`2955:105901` is **exactly** the identifier in the expected link. But no endpoint
+returns a link — it returns the *ingredients*, and assembling
+`lucid://<filespace>/file/<id>/<name>?reveal=true` from them is hard-coding
+LucidLink's URL format, which the requirement forbids outright. The vendor's own
+extension does that assembly internally: `LucidShellExt.dll` carries the literals
+`lucid://`, `/file/`, `?reveal=true`, `/fsEntry?path=` and `127.0.0.1`. **That
+format belongs to LucidLink**, newer installations may emit an
+`app.lucidlink.com` HTTPS link instead, and the only way to accept "whatever the
+installed integration actually produces" is to make the integration produce it.
+
+So the shipped mechanism is the **registered shell command, invoked through shell
+interfaces** — the requirement's option 2, and explicitly not screen automation.
+The REST API is not wasted: it is what proves the id in a returned link is the
+one the daemon holds, and it is the right tool if that check is ever wanted.
+
+### Only the Lucid handler is created, and that is a safety property
+
+The merged Explorer context menu for the nominated file carries items from a
+dozen vendors — Adobe, OneDrive, PowerToys, Tailscale, Copilot. Building it loads
+every one of those DLLs into the calling process, which is not something a media
+player should do to itself, and it puts "Copy link" in a menu whose composition
+Trace does not control.
+
+`CoCreateInstance` on the one CLSID, `IShellExtInit::Initialize` with the file's
+`IDataObject`, then `QueryContextMenu` on a private popup, yields a menu with
+**only LucidLink's commands in it**:
+
+```
+LucidContextMenu Initialize -> 0x00000000
+QueryContextMenu -> 0x00000005 (5 items)
+  item id=2 text='Pin'
+  item id=3 text='Copy link'
+SUPPORTED via LucidContextMenu (offset 2)
+```
+
+**The item next to the one Trace wants is `Pin`, and pinning hydrates the file
+onto the mount.** The mount is live client production storage. That is why
+identification is an exact, case-insensitive match on the display text and never
+positional, and why a miss reports unavailable rather than falling back to
+anything.
+
+The CLSIDs are **discovered from the registry, not hard-coded**: the
+`ContextMenuHandlers` keys are enumerated and those whose registration name says
+Lucid are taken, with the `InprocServer32` path used to corroborate. Both
+generations are present on this box and both are tried —
+`LucidContextMenu {b5fd958e-...}` under `Program Files\Lucid`, and
+`LucidLinkContextMenu {2BAF8C7E-...}` under `Common Files\LucidLink`.
+
+### The display-string risk, stated because it is real
+
+**The extension exposes no canonical verb.** `GetCommandString(GCS_VERBW)` fails
+for every item it contributes, so there is nothing stable to ask for by name and
+the item must be recognised by the text it renders. The requirement anticipates
+exactly this and asks for it to be documented before shipping:
+
+- measured against **LucidShellExt 1.0.15**, which renders `Copy link`;
+- a **localized** Windows would render a translated string, and Trace would then
+  report the integration as unavailable rather than invoke the wrong item;
+- **failing closed is the design**, for the `Pin` reason above.
+
+### The gate: what makes it Available is the integration's own answer
+
+The storage classifier stays a **necessary** condition and can still only move
+the verdict from Unavailable to Disabled. What supplies Available is
+`probeLucidSupport()` — and the discrimination is the extension's own: on a file
+outside a linked filespace `IShellExtInit::Initialize` returns **E_INVALIDARG**
+and no command is offered.
+
+| case | HUD gate | evidence |
+|---|---|---|
+| local NTFS file | **`lucid unavailable`** | the `[lucid]` log is **empty** — the probe is never started, so no COM and no third-party DLL is loaded for a local file at all |
+| local file, `TRACE_REMOTE_IO=1` (eligible, integration declines) | **`lucid disabled`** | both handlers `Initialize -> 0x80070057`, then `no handler offered a copy-link command` |
+| **nominated LucidLink file** | **`lucid ok`** | `SUPPORTED via LucidContextMenu (offset 2)` |
+
+The middle row is the negative control the requirement names directly —
+*eligible LucidLink files without a working integration: disabled, not falsely
+available* — and it is a real path through the code rather than a simulated one,
+because `TRACE_REMOTE_IO` forces only the classifier and leaves the extension to
+answer honestly.
+
+### The link
+
+Driven from the **overlay's** Share menu, on the nominated file:
+
+```
+InvokeCommand(offset 2) -> 0x00000000
+clipboard accepted after 21ms:
+lucid://projects.omcprod/file/2955:105901/Universe_Full_Takes_v005_16x9.mp4?reveal=true
+```
+
+Compared with `8_LucidLink\LucidLink.txt` using a **case-sensitive** comparison:
+**exact match**. The clipboard held a sentinel immediately before the press.
+
+The clipboard is snapshotted before invocation, the change is waited for by
+`GetClipboardSequenceNumber` with a 4s timeout, and the result is validated as a
+supported link form (`lucid://` or `https://app.lucidlink.com/`, one token, no
+whitespace) — **anything else is rejected and the previous value is put back**. A
+timeout leaves the clipboard untouched and says so. Trace never writes a composed
+value. One limitation, stated rather than hidden: only `CF_UNICODETEXT` is
+snapshotted, so a clipboard holding an image or a file list cannot be restored.
+
+### The instrument was the bug, and it nearly became a mechanism
+
+The first build read **`lucid disabled`** on the nominated file. Switching the
+worker's apartment from `CoInitializeEx` to `OleInitialize` made it read
+`lucid ok`, and "a shell extension needs the full OLE stack" is an appealing
+explanation that was about to be written down as the fix.
+
+**It is wrong.** That build also failed to call `refreshHud()` after the probe
+landed, and a paused file does not refresh on its own — so the HUD was showing
+the state from media-open time and said nothing about the probe at all. The
+**menu**, which reads live state, had been correct the whole time.
+
+`TRACE_LUCID_COINIT=1` is the control that settles it, retained the way
+`TRACE_LONGGOP_SLICE_THREADS` is. Measured on the nominated file:
+
+| apartment | Initialize | verdict |
+|---|---|---|
+| `OleInitialize` (default) | `0x00000000` | `SUPPORTED (offset 2)` |
+| `CoInitializeEx` (`TRACE_LUCID_COINIT=1`) | `0x00000000` | `SUPPORTED (offset 2)` |
+
+`OleInitialize` is kept as a **precaution** — it is what Explorer does — and is
+not claimed to have fixed anything. **A stale instrument accuses the code, and
+this is the second time in two phases**: phase 8 read menu-icon luminance and
+called a correct build broken.
+
+`TRACE_LUCID_LOG=1` exists because of this. The gate is three refusals deep and
+`disabled` looks identical whether the handler was not found, the extension
+declined the file, or the menu had no matching item.
+
+### The 1x1 and 4x5 ProRes assets
+
+Both are 23.976 ProRes 10-bit, 528 frames, carrying a **non-drop start timecode
+of `00:59:53:00`**, read from the container and not synthesised:
+
+| | encoded | video rect | frame 0 | frame 24 |
+|---|---|---|---|---|
+| 1x1 | 1080x1080 | square, pillarboxed | `00:59:53:00` | `00:59:54:00` |
+| 4x5 | 1080x1350 | `display 288x360` | `00:59:53:00` | `00:59:54:00` |
+
+Twenty-four frames at 23.976 non-drop is exactly one timecode second, and both
+files step it correctly. `TRACE_OPEN_LOG` reports `timecode=00:59:53:00` for
+each, so the extraction and the readout agree rather than being two answers.
+
+**CPU and D3D11 framing agree exactly** on the 4x5: `display 288x360` and
+`win 1280x767` on both backends. (`filtered x2` against `x1` is the step-9
+reduction tap count, a GPU-path figure, not a framing one.)
+
+**One defect is carried forward rather than fixed, per instruction.** The
+floating transport is **460 logical px wide against a 288px video rect** on the
+4x5 at the default window size, so the panel is 1.6x wider than the picture: it
+overhangs the image on both sides and covers the lower part of it. The transport
+remains usable — it reveals, hides and responds normally — but it occupies far
+more of a 1x1 or 4x5 picture than of a 16:9 one. This is an **owner
+visual-review item**, not a phase 9 blocker, and fixing it is aspect-ratio and
+window-sizing work the instruction explicitly excludes. Note the approved
+package's section 8 "media-shaped window" would change the premise entirely,
+since the window would adopt the source display aspect ratio and the panel would
+be sized against a picture that fills it.
+
+### Regression
+
+Control binary built from `579ffaa` in a separate worktree and **verified by hash on every
+swap** (`07179488…` control, `43784BDE…` phase 9). Same **1920x1080 @ 59.999Hz display** as
+phases 5–8. `d3d11` default. Cadence in overlay mode; the drag, reverse and matrix runs in bar
+mode with `TRACE_TRANSPORT_BAR=1`, `win 1280x843`, `display 640x360 filtered x3`.
+
+| run | control | phase 9 |
+|---|---|---|
+| 4K H.264 cadence ×2 valid | 100.0 / 100.0%, 120 frames, `handler>budget 0 of 119` (max 4.4 / 4.4), p50 41.6 / 41.7, max 43.5 / 43.5 | 100.0 / 100.0%, 120 frames, `0 of 119` (max 4.2 / 4.5), p50 41.7 / 41.7, max 43.3 / 44.0 |
+| 4444 cadence ×1 valid | 99.8%, 261 frames, `0 of 260` (max 38.3), max 46.6 | 99.8%, 261 frames, `0 of 260` (max 36.7), max 45.6 |
+| reverse 1× ×3 | 88.2 / 100.0 / 100.0% | 88.1 / 88.2 / 100.0% |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, `walk 0f`, full-res planar, `hitch 0`, `stalls 0 of 113`, `ui gap max 67.0ms`, `release 23.6ms` | same landing, `hitch 0`, `stalls 0 of 113`, `ui gap max 69.5ms`, `release 24.2ms` |
+| lifecycle `-PlayThroughDrag` ×3 | **PASS 39.6 / 39.6 / 39.6%** | **PASS 39.6 / 40.3 / 39.6%** |
+| lifecycle `-PausedThroughDrag` | PASS 0% | PASS 0% |
+| transitions | **25 of 25 PASS** | **25 of 25 PASS** |
+
+Cadence buckets identical on 4K H.264 (`~1x 119`, every other bucket 0) on both binaries.
+`paints 152/121` on both, so the phase adds nothing to the paint path — it adds no drawing at
+all. Landing exact on every run.
+
+**Reverse 1× went bimodal on both binaries and that is the known property of the gesture, not
+a regression.** The two populations are exactly the recorded ones — `frames 114 / elapsed
+4.75s` at 100.0%, or `frames 97 / 4.58s` at 88.1–88.2% — and **both binaries produced both**.
+The split differs (control 1 of 3 slow, phase 9 2 of 3) and three runs cannot distinguish
+those. This is the reason that gesture has always been recorded as "take three", and it is
+also why the `SNAP gop 2` item was closed rather than carried: a single run of it supports
+nothing.
+
+**The first cadence rep of each file is VOID on both legs, in the same way.** It reads
+`presented -- / 24.00 fps | frames 0`, `paints 0/1`, `cadence no samples yet` — the capture
+lands before playback has produced anything, on the first run after a binary swap. It is
+symmetric across the two legs so it does not bias the comparison, and phase 5 recorded a
+related first-run-after-swap outlier. **Discard rep 1 or give cadence an extra repeat.**
+
+### The lifecycle FAIL was the harness, and it is the sharpest instance yet of a leg that could not pass
+
+Both legs first reported `-PlayThroughDrag: FAIL - picture frozen (0%)`. Re-run three times
+per binary: **3 of 3 FAIL on phase 9 and 3 of 3 FAIL on the control** — the same phase 8 binary
+that passed this gesture at phase 8. That symmetry said it was not phase 9's, and the cause
+turned out to be in `lifecycle.ps1`:
+
+**`SetForegroundWindow` does not work from a background process.** Windows refuses foreground
+activation to a process that does not own the current foreground window; the call returns, and
+`GetForegroundWindow()` still names something else. Measured directly:
+`SetForegroundWindow worked: False (fg=6688278 trace=22416776)`, and a Space keystroke after
+it moved the picture by **0**. The same sequence preceded by a synthetic **click** on the title
+bar reads `foreground is Trace now: True` and a picture delta of **3663**.
+
+**Why it hid, and why it is worse than a check that cannot fail**: the mouse-driven gestures
+are unaffected, because `mouse_event` goes wherever the cursor is. Only `-PlayThroughDrag`
+needs a keystroke — it starts playback with Space — so a lost keystroke leaves the app paused
+and the check reports exactly the product regression it exists to catch. And **its control
+could not fail**: `-PausedThroughDrag` expects no motion, so it passes whether or not its
+keystrokes arrive. The pair read as "the feature broke and its control is fine" when the truth
+was "one leg never ran".
+
+`lifecycle.ps1` now takes focus with a real click when `GetForegroundWindow()` disagrees, and
+**exits with `FOCUS FAIL` if it still cannot** — so the failure can never again be mistaken for
+a frozen picture. With that fix: **3 of 3 PASS on both binaries**, 39.6–40.3%.
+
+The title bar is clicked rather than the video, because a click on the video reveals the
+overlay and a second one inside the double-click interval toggles fullscreen.
+
+### What phase 9 changes about the plan
+
+**Phase 10 is the open phase and is wiring only** — five `QAction`s onto
+`viewer_->setViewTransform()` plus a reset on new media. `TRACE_VIEW_TRANSFORM`
+leaves with it, the way `TRACE_SHUTTLE_ENTRY` left with phase 5. The 1x1 and 4x5
+assets are the right material: a square clip makes a quarter turn's letterboxing
+arithmetic visible in a way 16:9 does not.
+
+**`lifecycle.ps1` no longer trusts `SetForegroundWindow`, and every other script
+that sends keystrokes should be read with that in mind.** `transitions.ps1`,
+`revplay.ps1` and `overlay_ladder.ps1` all drive keys at some point. They passed
+throughout this session, so whatever they do works today — but the failure mode
+is silent, one-sided and indistinguishable from a product regression, so if any
+of them ever reports a frozen picture, **check `GetForegroundWindow()` before
+believing it**.
+
+**Cadence's first repeat after a binary swap is unreliable.** Both legs of this
+phase produced a void rep 1 (`frames 0`, `paints 0/1`). Ask `cadence.ps1` for one
+more repeat than needed, or discard the first.
+
+**The Share menu now has a command that can take seconds.** Copy LucidLink Link
+reaches a daemon, so it runs on a worker with a 4s clipboard timeout and a
+one-at-a-time guard. Anything else that talks to LucidLink should inherit that
+shape rather than block a click.
+
+**`hasSourceTimecode_` held up on new material.** The 1x1 and 4x5 assets are the
+first production files in the set with a non-zero, non-drop start timecode other
+than the 4444 clip, and the extraction, the readout and `TRACE_OPEN_LOG` all
+agree on `00:59:53:00`. Phase 7's single-gate design needed no change.
+
+**Two owner visual-review items are carried, neither blocking**: the Share glyph
+is a `>>` double-chevron beside Fast-forward's `>>`-with-triangles, and **the
+floating transport is wider than the picture on 1x1 and 4x5 media** (460 logical
+px against a 288px video rect on the 4x5). Both are recorded in
+`docs/next-session-prompt.md`.

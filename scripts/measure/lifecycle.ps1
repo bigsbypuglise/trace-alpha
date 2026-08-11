@@ -53,6 +53,7 @@ public class L {
   [StructLayout(LayoutKind.Sequential)] public struct RECT { public int L, T, R, B; }
   [DllImport("user32.dll")] public static extern bool GetWindowRect(IntPtr h, out RECT r);
   [DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
   [DllImport("user32.dll")] public static extern bool SetCursorPos(int x, int y);
   [DllImport("user32.dll")] public static extern void mouse_event(uint f, uint x, uint y, uint d, IntPtr e);
   public const uint DOWN = 0x0002, UP = 0x0004, WHEEL = 0x0800;
@@ -68,6 +69,38 @@ Start-Sleep -Milliseconds 400
 $r = New-Object L+RECT
 [L]::GetWindowRect($h, [ref]$r) | Out-Null
 $winW = $r.R - $r.L; $winH = $r.B - $r.T
+
+# SetForegroundWindow IS NOT ENOUGH, AND ITS FAILURE IS SILENT AND ONE-SIDED.
+#
+# Windows refuses foreground activation to a process that does not own the
+# current foreground window: the call returns, GetForegroundWindow still names
+# something else, and every SendKeys after it goes to that other window. The
+# gestures here that drive the mouse are unaffected -- mouse_event goes wherever
+# the cursor is -- but -PlayThroughDrag starts playback with a Space keystroke,
+# so a lost keystroke leaves the app paused and the check reports
+# "picture frozen", which is indistinguishable from the product regression it
+# exists to catch.
+#
+# It is one-sided, which is what made it dangerous: -PausedThroughDrag EXPECTS
+# no motion, so it passes whether or not its keystrokes arrive. The pair looked
+# like "the feature broke and its control is fine" when the truth was "one leg
+# could not run at all".
+#
+# A synthetic click IS honoured, because it is real input. The title bar is used
+# rather than the video: a click on the video reveals the overlay and, paired
+# with a second click inside the double-click interval, toggles fullscreen.
+if ([L]::GetForegroundWindow() -ne $h) {
+    [L]::SetCursorPos($r.L + [int]($winW / 2), $r.T + 14) | Out-Null
+    Start-Sleep -Milliseconds 150
+    [L]::mouse_event([L]::DOWN, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 60
+    [L]::mouse_event([L]::UP, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 400
+}
+if ([L]::GetForegroundWindow() -ne $h) {
+    Write-Output "FOCUS FAIL: could not bring the Trace window to the foreground; keystroke gestures would report a frozen picture that is really a lost keystroke."
+    exit 1
+}
 
 # Same groove scan as scrub.ps1: longest run of the UNFILLED track colour
 # within the transport band. See that script for why both qualifiers matter.

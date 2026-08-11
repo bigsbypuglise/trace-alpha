@@ -1,14 +1,15 @@
-# The interface pass is open, phase 8 shipped, and phase 9 is next.
+# The interface pass is open, phase 9 shipped, and phase 10 is next.
 
 Supersedes the previous version. **Spec phase 6 shipped and is signed off by the owner** — the
 floating overlay is the only transport, the docked bar is out of the layout behind
 `TRACE_TRANSPORT_BAR=1`, and fullscreen is consolidated. **Spec phase 7 shipped** — the time
 readout is honest (source SMPTE, or elapsed, never one labelled as the other), Trace has its
 first text-entry controls, and zero-based numbering is finished. **Spec phase 8 shipped** —
-the Share menu, Copy File Path, Show in File Explorer, and the *gate* on Copy LucidLink Link,
-which today always says no. **The next thing to do is spec phase 9, the LucidLink
-shell-integration prototype.** Paste everything below the line into a fresh session in the
-repo root.
+the Share menu, Copy File Path, Show in File Explorer, and the *gate* on Copy LucidLink Link.
+**Spec phase 9 shipped** — Copy LucidLink Link works, driven through the installed
+integration's own shell command, and Trace never composes a link. **The next thing to do is
+spec phase 10, the temporary view transforms, which is wiring only.** Paste everything below
+the line into a fresh session in the repo root.
 
 **Two owner decisions were taken on 2026-08-11 and are recorded rather than open.**
 Accessibility: **the alpha ships with the overlay invisible to a screen reader, and phase 13
@@ -81,7 +82,7 @@ identity as a transport**. It is not a sign-off on the Time Display readouts (ph
 them), on the menus (phase 13), or on the overlay being finished: **plan §31.5 item 4 stands
 — the overlay is not final until a screen reader has driven one.**
 
-## THE OPEN PHASE — interface pass 1, now at phase 9
+## THE OPEN PHASE — interface pass 1, now at phase 10
 
 The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 `docs/interface-pass-1-spec.md`; the phase record is `docs/interface-pass-1-progress.md`.
@@ -113,58 +114,72 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 - **Phase 8 shipped on 2026-08-11** — the Share menu on three surfaces from one `QAction` set
   and one `QMenu`, Copy File Path, Show in File Explorer, and the LucidLink gate. Full record
   in the progress doc.
+- **Phase 9 shipped on 2026-08-11** — the LucidLink integration is real. The link is produced
+  by the installed shell extension, invoked through `IShellExtInit`/`IContextMenu` on the one
+  discovered CLSID, and validated before it is accepted. Full record in the progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
   run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0`, **run 90 on `bc84431`
   (phase 6)**, **run 92 on `f15e368` (phase 7)** and **run 94 on `1bec8c5` (phase 8)**, all
   including the renderer selftest.
 
-### Start at spec phase 9, and read `docs/interface-pass-1-progress.md` first
+### Start at spec phase 10, and read `docs/interface-pass-1-progress.md` first
 
-**Phase 9 is the LucidLink shell-integration prototype**, and phase 8 has already built
-everything around it. What is missing is one function body.
+**Phase 10 is the temporary view transforms, and it is wiring only.** Rotate Left, Rotate
+Right, Flip Horizontal, Flip Vertical, Reset View Transform — five `QAction`s onto
+`viewer_->setViewTransform()`, plus a reset when new media opens. The renderer-neutral
+contract was built and measured back at plan §31 (`4b7174f`); `TRACE_VIEW_TRANSFORM=90|180h|v`
+is the interim knob and **it leaves with this phase**, the way `TRACE_SHUTTLE_ENTRY` left with
+phase 5.
 
-**`trace::app::lucidLinkIntegrationAvailable(QString& reason)` in `src/app/MediaShare.cpp` is
-the whole seam.** It returns false today with the reason *"LucidLink integration is not
-available in this build."* — deliberately a statement about the build rather than the design
-package's *"LucidLink is not running"*, which asserts a cause nothing has checked. Phase 9
-replaces the body **and** the string together, and adds the command itself; the gate, the
-three states, the menu, the three surfaces and the artwork are all already there and
-measured.
+**Two traps are already recorded and both fail silently.** A quarter turn **re-letterboxes** —
+`display 640x360` becomes `202x360`, identical on both backends — and the **reduction taps must
+be recomputed from the post-transform fit** with the footprint axes exchanged, or the box
+average filters the wrong axis (`filtered x3` → `x4` at rot90). The CPU path names `scale`
+before `rotate` deliberately, because QPainter post-multiplies and the other order turns
+`rot90 + flipH` into `rot90 + flipV` — the two backends would then differ by a mirror while
+every number agreed.
 
-**The gate is already correct and you must not loosen it.** `evaluateShare` treats
-`MediaIoSource::classifyStorage` as a **necessary** condition only — it can move the verdict
-from Unavailable to Disabled, never to Available — because "virtual mount with
-`free == total`" is true of any such mount. Making it sufficient would reintroduce, one level
-up, exactly the "assume all `V:\` paths are LucidLink" mistake the requirement exists to
-prevent. **The installed integration is the authoritative answer**, and that is what this
-phase supplies.
+**The spec's rules for it**: viewing transforms only, never modify source media, never write
+metadata, never remux; reset on new media; keep the transform through seek, scrub and play; do
+not change authoritative frame identity. Menu home is **Edit** per the spec, and phase 7's
+precedent applies — put the group where it belongs now and let phase 13 restructure.
 
-**The spec's implementation order is explicit and worth following literally**: a supported
-LucidLink API or local command first; otherwise the registered Explorer shell extension for
-the selected file; invoked through **shell interfaces**, never by simulating clicks in File
-Explorer; never depending on the command's menu position or on "More options"; a stable
-canonical verb if one is exposed. **Never construct a `lucid://` or HTTPS link by parsing a
-mounted path**, and never hard-code filespace IDs, inode IDs, domains or URL formats.
+**The 1×1 and 4×5 ProRes assets are the right material for it** (`9_1x1_ProRes`,
+`10_4x5_ProRes`): a square clip makes a 90° rotation's letterboxing arithmetic visible in a way
+16:9 does not, and the 4×5 is the case where a quarter turn changes which axis binds.
 
-**The clipboard rules are phase 9's, not phase 8's**, and they are the fiddly part: preserve
-the previous clipboard contents until invocation succeeds, observe clipboard changes with a
-short **non-blocking** timeout, validate that the result is a supported LucidLink direct-link
-form, never freeze the UI while waiting, and **never overwrite the clipboard with an invalid
-or guessed value**. Phase 8 never writes a link at all, so it satisfies the last rule
-trivially and gives you a clean starting point.
+### What phase 9 leaves behind
 
-**`V:\` is live client production storage and is strictly read-only.** Any shell-extension
-prototyping is read-only, against **files Anj nominates**, and never by writing a probe file.
-**Phase 8 could not test a real LucidLink path for that reason** — the virtual-mount branch
-was exercised through `TRACE_REMOTE_IO=1` instead, which is a genuine negative control for the
-*gate* but says nothing about the *integration*. **Ask Anj to nominate a file before starting.**
+- **`src/app/LucidLinkIntegration.*` is the whole vendor surface.** If LucidLink ever needs
+  re-visiting, the two entry points are `probeLucidSupport()` (does the integration offer a
+  link for this file) and `copyLucidLinkViaShell()` (run it and validate what comes back).
+- **`TRACE_LUCID_LOG=1`** prints one stderr line per probe and copy. Reach for it first: the
+  gate is three refusals deep and `lucid disabled` looks identical whether the handler was not
+  found, the extension declined the file, or the menu had no matching item.
+- **`TRACE_LUCID_COINIT=1`** is the retained control for a closed question — `CoInitializeEx`
+  instead of `OleInitialize`, measured identical.
+- **The display-string dependency is the one real fragility.** The extension exposes no
+  canonical verb, so the item is matched on the text `Copy link` as rendered by
+  **LucidShellExt 1.0.15**. A LucidLink update that renames it, or a localized Windows, turns
+  the command unavailable — which is the safe direction, because the neighbouring item is
+  `Pin` and pinning writes to the mount. **If a user ever reports Copy LucidLink Link greyed
+  out on a real LucidLink file, check that string first.**
+- **A `V:\` file must be nominated for any future LucidLink testing.** The mount is live client
+  production storage and is strictly read-only; phase 9 used only the nominated file and
+  invoked only the copy-link command.
 
-**Verify the gate from the HUD, not from a screenshot.** The storage line reads
-`share path <state> explorer <state> lucid <state>`. Phase 8 spent real time discovering that
-menu-item luminance cannot distinguish a disabled row from a shorter label — it read a correct
-build as a broken one. Expect `lucid disabled` on a virtual mount today; a working phase 9
-turns that into `lucid ok` on a real LucidLink path and leaves it `disabled` when the client
-is not running.
+### Carried owner visual-review items
+
+- **The Share glyph is a `»` double-chevron** (the approved package's `share_menu`) sitting
+  beside Fast-forward's `▶▶`. Shipped as delivered — artwork follows behaviour and the package
+  is the approved source — but the two are similar in silhouette. Unchanged by instruction
+  during phase 9.
+- **The floating transport is wider than the picture on 1×1 and 4×5 media.** Measured on the
+  4×5 at the default window size: a **460 logical px panel against a 288px video rect**, so it
+  overhangs the image on both sides and covers its lower part. The transport still reveals,
+  hides and responds normally. Fixing it is aspect-ratio and window-sizing work, and the
+  approved package's §8 **media-shaped window** would change the premise entirely by making the
+  window adopt the source display aspect ratio.
 
 **Three things phase 7 leaves for whatever adds UI next**:
 
@@ -220,11 +235,7 @@ own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
 
 ### The rest of the phase list, with what is known about each
 
-9. **Phase 9 is the LucidLink shell-integration prototype** — the open phase, briefed in full
-   above.
-10. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
-    reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob, and it leaves with the
-    phase, the way `TRACE_SHUTTLE_ENTRY` did at phase 5.
+10. **Phase 10 is the open phase** — briefed in full above.
 12. **Phase 12's Movie Inspector has most of its data already**, and `VideoMetadata` gained
     the start timecode at phase 7. Its rule is the one this project keeps proving: display
     Unknown or Untagged honestly, and do not infer missing colour metadata inside the

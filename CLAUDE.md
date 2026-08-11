@@ -462,6 +462,72 @@ thread. **A real `V:\` LucidLink path was NOT tested** — it is live client sto
 was nominated — so the virtual-mount branch was exercised through `TRACE_REMOTE_IO`. Phase 9
 needs a nominated file.
 
+**SPEC PHASE 9 IS DONE (2026-08-11): Copy LucidLink Link works, and Trace never composes a
+link.** The gate's third condition is now answered by the **installed integration, for the
+specific file**, and the link itself is produced by that integration. Code in
+`src/app/LucidLinkIntegration.*`.
+
+Six things to carry.
+
+- **THE DAEMON'S REST API IS AUTHORITATIVE AND IS STILL NOT THE MECHANISM.** LucidLink runs a
+  local REST service (the CLI's own `--rest-endpoint`), and `GET /fsEntry?path=...` returns
+  **`"id" : "2955:105901"`** for the nominated file — exactly the identifier in the expected
+  link. But **no endpoint returns a link**. Assembling
+  `lucid://<filespace>/file/<id>/<name>?reveal=true` from the parts is hard-coding LucidLink's
+  URL format, which the requirement forbids, and newer installations may emit an
+  `app.lucidlink.com` HTTPS link instead. The vendor's own extension does that assembly
+  internally — `LucidShellExt.dll` carries `lucid://`, `/file/`, `?reveal=true` and
+  `/fsEntry?path=` as literals — which is the point: **the format is theirs.** The REST API
+  remains the right tool for *validating* an id.
+- **ONLY THE LUCID HANDLER IS CREATED, AND THAT IS A SAFETY PROPERTY.** Building the merged
+  Explorer context menu would load every registered handler into Trace's process (Adobe,
+  OneDrive, PowerToys, Tailscale, Copilot on this box). `CoCreateInstance` on the one
+  discovered CLSID → `IShellExtInit::Initialize` with the file's `IDataObject` →
+  `QueryContextMenu` on a private popup gives a menu of **only LucidLink's commands**. That
+  matters because the item beside the wanted one is **`Pin`, which hydrates the file onto the
+  mount**, and `V:\` is live client production storage. Identification is an **exact match on
+  the display text, never positional**, and a miss reports unavailable rather than falling
+  back to anything.
+- **The extension exposes NO canonical verb** — `GetCommandString(GCS_VERBW)` fails for every
+  item it contributes — so the display string is all there is. Measured against
+  **LucidShellExt 1.0.15**, which renders `Copy link`. A localized Windows would render
+  something else and Trace would report the integration unavailable rather than invoke the
+  wrong item. **Failing closed is deliberate.** CLSIDs are discovered from the registry rather
+  than hard-coded, and both installed generations are tried.
+- **The classifier is still only a necessary condition.** What supplies Available is the
+  extension's own answer for the file: outside a linked filespace its `Initialize` returns
+  **E_INVALIDARG** and it offers nothing. Three states, all measured — local file
+  **`lucid unavailable`** (and **no probe is started at all**, so no COM and no third-party
+  DLL is loaded for local media); local file under `TRACE_REMOTE_IO=1`, i.e. eligible but
+  declined, **`lucid disabled`**; nominated file **`lucid ok`**. The middle row is the
+  requirement's own negative control and is a real path rather than a simulated one.
+- **The link is exact.** Driven from the overlay's Share menu: `InvokeCommand -> 0x00000000`,
+  clipboard accepted after **21ms**, and a **case-sensitive** comparison against
+  `8_LucidLink\LucidLink.txt` matches. The clipboard is snapshotted, the change waited for by
+  `GetClipboardSequenceNumber` with a 4s timeout, and the result validated as a supported form
+  (`lucid://` or `https://app.lucidlink.com/`) — anything else is rejected and the old value
+  restored. Only `CF_UNICODETEXT` is snapshotted, so a clipboard holding an image cannot be
+  restored; that is stated rather than hidden.
+- **THE INSTRUMENT WAS THE BUG AND IT NEARLY BECAME A MECHANISM.** The first build read
+  `lucid disabled`; switching the worker's apartment from `CoInitializeEx` to `OleInitialize`
+  made it read `lucid ok`, and "a shell extension needs the full OLE stack" was about to be
+  written down as the fix. **It is wrong** — that build also failed to `refreshHud()` after the
+  probe landed, and a paused file does not refresh, so the HUD was showing open-time state
+  while the *menu* had been correct all along. `TRACE_LUCID_COINIT=1` is the retained control:
+  **both apartments read `Initialize 0x00000000` and `SUPPORTED (offset 2)`**. `OleInitialize`
+  is kept as a precaution, not as a fix. **Second time in two phases that a stale instrument
+  accused a correct build** — phase 8's was menu-icon luminance.
+
+**The 1×1 and 4×5 ProRes assets are in the set** (`9_1x1_ProRes`, `10_4x5_ProRes`): 23.976
+ProRes 10-bit, 528 frames, both carrying a **non-drop start timecode of `00:59:53:00`** which
+is read from the container and honoured — frame 0 reads it and frame 24 reads `00:59:54:00`,
+which is exactly one timecode second. **CPU and D3D11 framing agree exactly** on the 4×5
+(`display 288x360`, `win 1280x767` on both). **One carried defect, not fixed by instruction:
+the floating transport is 460 logical px wide against a 288px video rect on the 4×5**, so the
+panel is 1.6× wider than the picture and covers much more of a 1×1 or 4×5 image than of a
+16:9 one. Owner visual-review item; the approved package's §8 media-shaped window would change
+the premise entirely.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
@@ -1236,7 +1302,7 @@ and `TRACE_OVERLAY_COMPOSITED=0` select it too, so turning the overlay off asks 
 transport rather than for none), `TRACE_OVERLAY=1` (the floating transport — **on by default
 since spec phase 6**; `TRACE_OVERLAY_COMPOSITED=1` is retained because the harness sets it),
 and `TRACE_VIEW_TRANSFORM=90|180|270|h|v`
-(rotate/flip, a test knob until spec phase 10 wires the real actions).
+(rotate/flip, a test knob until spec phase 10 wires the real actions), **`TRACE_LUCID_LOG=1`** (spec phase 9: one stderr line per LucidLink probe and copy -- the gate is three refusals deep and `disabled` looks identical whichever one fired) and **`TRACE_LUCID_COINIT=1`** (the retained control for the apartment question: `CoInitializeEx` instead of `OleInitialize`, measured identical).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
 a default launch reports `renderer d3d11 +overlay` (`renderer cpu` before 2026-08-10; **the
