@@ -81,7 +81,7 @@ identity as a transport**. It is not a sign-off on the Time Display readouts (ph
 them), on the menus (phase 13), or on the overlay being finished: **plan §31.5 item 4 stands
 — the overlay is not final until a screen reader has driven one.**
 
-## THE OPEN PHASE — interface pass 1, now at phase 7
+## THE OPEN PHASE — interface pass 1, now at phase 9
 
 The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 `docs/interface-pass-1-spec.md`; the phase record is `docs/interface-pass-1-progress.md`.
@@ -115,7 +115,8 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
   in the progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
   run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0`, **run 90 on `bc84431`
-  (phase 6)** and **run 92 on `f15e368` (phase 7)**, all including the renderer selftest.
+  (phase 6)**, **run 92 on `f15e368` (phase 7)** and **run 94 on `1bec8c5` (phase 8)**, all
+  including the renderer selftest.
 
 ### Start at spec phase 9, and read `docs/interface-pass-1-progress.md` first
 
