@@ -1,6 +1,7 @@
 ﻿#include "app/MainWindow.h"
 
 #include <QScreen>
+#include <QWindow>
 
 #include <QAction>
 #include <QActionGroup>
@@ -17,6 +18,7 @@
 #include <QMessageBox>
 #include <QPointer>
 #include <QPushButton>
+#include <QSettings>
 #include <QThreadPool>
 #include <QMimeData>
 #include <QResizeEvent>
@@ -66,6 +68,14 @@ namespace {
 
 // Coalescing window for slider events, so a burst of moves costs one decode
 // rather than one each. Deliberately NOT used to pace shuttle catch-up.
+// Spec section 4: "reserve a safe margin around the outer window". Per side, in
+// logical pixels, applied to both axes -- so a source that exactly matches the
+// work area still opens with the frame visible rather than flush against a
+// taskbar edge. Deliberately modest: this reduces how large media can open, and
+// a generous margin would make every 4K file open noticeably smaller than it
+// needs to.
+constexpr int kWorkAreaMarginPx = 24;
+
 constexpr int kScrubCoalesceMs = 12;
 
 // A gap between shuttle paints long enough to read as the picture stopping.
@@ -1527,6 +1537,12 @@ void MainWindow::applyViewTransform(const trace::render::ViewTransform& next,
     if (!viewer_) return;
     viewer_->setViewTransform(next);
     syncViewTransformActions();
+    // Section 4: "re-evaluate the ratio after a temporary 90-degree rotation"
+    // and "restore the original media ratio when transforms reset". Both are the
+    // same call, because the ratio is composed from media shape and session
+    // transform every time rather than remembered -- so Reset needs no separate
+    // path and cannot drift from Rotate.
+    applyMediaWindowShape();
     // No decoder request and no reload: the frame on screen is the frame that
     // was already there, drawn through a different coordinate transform. That is
     // the whole reason this is cheap during playback, and it is why the HUD's
@@ -1812,6 +1828,31 @@ void MainWindow::setupMenus() {
     editMenu->addSeparator();
     editMenu->addAction(resetViewTransformAction_);
 
+    // View, which spec section 4 names as the home for the aspect lock. Phase 14
+    // builds out the rest of it; this is the first item in it, and it is here
+    // rather than in Edit because the spec says "View > Lock Window to Media
+    // Aspect Ratio" literally.
+    auto* viewMenu = menuBar()->addMenu(tr("&View"));
+    lockAspectAction_ = new QAction(tr("&Lock Window to Media Aspect Ratio"), this);
+    lockAspectAction_->setCheckable(true);
+    // CHECKED BY DEFAULT, as the spec requires -- and the default is what the
+    // settings read falls back to, so a fresh installation and one whose INI
+    // predates this key behave identically rather than differing by which
+    // version wrote the file.
+    lockAspectAction_->setChecked(
+        trace::app::settings().value(QLatin1String(kLockAspectKey), true).toBool());
+    connect(lockAspectAction_, &QAction::toggled, this, [this](bool on) {
+        trace::app::settings().setValue(QLatin1String(kLockAspectKey), on);
+        // Turning it ON reshapes immediately, so the tick and the window agree
+        // at once rather than at the next resize. Turning it OFF changes
+        // nothing: "the user may freely resize" means leaving the window where
+        // they put it, and snapping it to the ratio on the way out would be the
+        // opposite of unlocking.
+        if (on) applyMediaWindowShape();
+        refreshHud(on ? "Lock aspect" : "Unlock aspect");
+    });
+    viewMenu->addAction(lockAspectAction_);
+
     fileMenu->addSeparator();
     auto* quitAction = new QAction("&Quit", this);
     quitAction->setShortcut(QKeySequence::Quit);
@@ -2014,17 +2055,373 @@ void MainWindow::syncScrubPreviewSize() {
     syncPreviewMsMax_ = std::max(syncPreviewMsMax_, ms);
 }
 
-// Counting only. Every branch falls through to Qt's default handling, so this
-// changes no behaviour -- see the declaration for why it exists before the
-// aspect lock that will use these messages.
+double MainWindow::currentDisplayAspect() const {
+    if (!viewer_ || !currentMedia_.has_value()) return 0.0;
+    QSize pixels;
+    if (currentMedia_->kind == MediaKind::VideoFile) {
+        const auto& vm = videoDecoder_.metadata();
+        pixels = QSize(vm.width, vm.height);
+    } else if (currentImage_.has_value()) {
+        pixels = currentImage_->image.size();
+    }
+    if (pixels.isEmpty()) return 0.0;
+    // Through the viewer, because the composition of media shape and session
+    // transform lives there and must not be written a second time here.
+    return viewer_->displayedAspect(pixels);
+}
+
+QSize MainWindow::windowChromeLogical() const {
+    if (!viewer_) return QSize();
+    // Force the pending layout before measuring. The HUD sets its own fixed
+    // height from the number of lines it was given, and that invalidation is
+    // not applied until the layout next runs -- so measuring straight after a
+    // refreshHud that added a line reads the height from before it.
+    if (auto* central = centralWidget(); central && central->layout()) {
+        central->layout()->activate();
+    }
+    // Measured, not assembled from constants. The HUD's height depends on how
+    // many lines the media produces, the docked bar is present or not depending
+    // on TRACE_TRANSPORT_BAR, and the frame depends on the window state -- a sum
+    // of named parts would be a list that goes stale the next time one of them
+    // moves. The difference between the two widgets is all of it at once.
+    return QSize(width() - viewer_->width(), height() - viewer_->height());
+}
+
+// SECTION 4'S EXCEPTIONS, IN ONE PREDICATE. Fullscreen, maximized and any
+// Windows-imposed geometry (Snap Layouts) are states where "never fight Windows
+// by continuously resizing a snapped or maximized window" applies, and where an
+// exact no-black-bar guarantee cannot hold anyway. A snapped window reports
+// neither fullscreen nor maximized, which is why the interactive-resize path is
+// the only place the ratio is enforced: Snap resizes through SetWindowPos and
+// sends no WM_SIZING at all, so declining to fight it is automatic rather than
+// something this has to detect.
+bool MainWindow::windowGeometryIsOurs() const {
+    return !isFullScreen() && !isMaximized() && !isMinimized();
+}
+
+void MainWindow::applyMediaWindowShape() {
+    if (!viewer_ || !windowGeometryIsOurs()) return;
+    const double aspect = currentDisplayAspect();
+    if (!(aspect > 0.0)) return;
+
+    // The minimum has to follow the shape before the size is chosen, or the
+    // resize below is clamped by a floor computed for the previous media.
+    viewer_->setMinimumAspect(aspect);
+    if (!lockAspectAction_ || !lockAspectAction_->isChecked()) return;
+
+    // UP TO THREE PASSES, BECAUSE THE CHROME CANNOT BE MEASURED FROM A WINDOW
+    // TOO SMALL TO SHOW IT.
+    //
+    // Chrome is `window height - viewer height`, which is only the chrome while
+    // the layout can actually satisfy everything. When the window is smaller
+    // than the layout's minimum -- the ordinary case at open, before the window
+    // has been shaped -- the viewer is pinned at its own minimum instead and the
+    // difference is whatever is left, not what the chrome needs. Measured on the
+    // 4x5: chrome read 310 where it is really 407, so the window came out 97px
+    // short and pillarboxed the picture inside it.
+    //
+    // Iterating fixes it without a hand-written list of "menu bar plus status
+    // bar plus HUD plus transport bar", which is the alternative and is a list
+    // that goes stale the next time one of those moves -- exactly what phase
+    // 6's transport change would have broken. After the first pass the window is
+    // large enough for the measurement to be honest, so the second agrees and
+    // the third never runs. It converges or it stops; it cannot oscillate,
+    // because each pass only ever reads what the layout did.
+    for (int pass = 0; pass < 3; ++pass) {
+        if (!applyMediaWindowShapePass(aspect, pass)) break;
+    }
+}
+
+// One pass. Returns true when the layout did not give the viewer the size that
+// was asked for, i.e. when another pass is worth running.
+bool MainWindow::applyMediaWindowShapePass(double aspect, int pass) {
+    QScreen* screen = windowHandle() ? windowHandle()->screen() : QGuiApplication::primaryScreen();
+    if (!screen) return false;
+    const QRect work = screen->availableGeometry();
+    const double dpr = viewer_->devicePixelRatioF();
+
+    // Natural displayed size, in LOGICAL pixels. The source's pixels are device
+    // pixels -- a 1920-wide frame should occupy 1920 physical pixels so the
+    // image maps 1:1 to the panel -- so on a scaled display the logical size it
+    // wants is smaller, not the same. This is the whole of "use DPI-aware window
+    // calculations": getting it backwards puts a 4K frame in a window 1.5x too
+    // big on a 150% display and then scales it down again.
+    QSize natural;
+    if (currentMedia_->kind == MediaKind::VideoFile) {
+        natural = videoDecoder_.metadata().naturalDisplaySize();
+    } else if (currentImage_.has_value()) {
+        natural = currentImage_->image.size();
+    }
+    if (natural.isEmpty()) return false;
+    // The user's transform can turn it on its side; the media's own rotation is
+    // already inside naturalDisplaySize().
+    if (viewer_->viewTransform().swapsAxes()) natural.transpose();
+    double targetW = natural.width() / dpr;
+    double targetH = natural.height() / dpr;
+
+    // Everything that is not video, in both directions: the client chrome (menu
+    // bar, status bar, the HUD's own height, the docked transport bar when it is
+    // present) plus the window FRAME, which setGeometry does not include and
+    // which still occupies work area. Leaving the frame out here is what makes a
+    // window that "fits" overhang the taskbar by a title bar.
+    const QSize chrome = windowChromeLogical();
+    const QRect frameNow = frameGeometry();
+    const QRect clientNow0 = geometry();
+    const int frameW = frameNow.width() - clientNow0.width();
+    const int frameH = frameNow.height() - clientNow0.height();
+    const int availW = work.width() - chrome.width() - frameW - 2 * kWorkAreaMarginPx;
+    const int availH = work.height() - chrome.height() - frameH - 2 * kWorkAreaMarginPx;
+    if (availW <= 0 || availH <= 0) return false;
+
+    // SCALE DOWN ONLY. "Do not upscale small media beyond its natural displayed
+    // size by default" -- so a 320x240 clip opens small rather than filling the
+    // monitor, which for a review tool is the honest presentation: the window
+    // says how big the media is.
+    const double fit = std::min({1.0, availW / targetW, availH / targetH});
+    targetW *= fit;
+    targetH *= fit;
+
+    // The RATIO is what must be exact, so recompute the second axis from the
+    // first after clamping rather than trusting two independently rounded
+    // numbers to still divide correctly.
+    int viewerW = std::max(1, static_cast<int>(std::lround(targetW)));
+    int viewerH = std::max(1, static_cast<int>(std::lround(viewerW / aspect)));
+    if (viewerH > availH) {
+        viewerH = availH;
+        viewerW = std::max(1, static_cast<int>(std::lround(viewerH * aspect)));
+    }
+    // The viewer's own minimum wins over the fit -- a floor that can be
+    // overridden is not a floor -- and it is aspect-correct by construction now,
+    // so honouring it does not break the ratio.
+    const QSize floorSize = viewer_->minimumSize();
+    viewerW = std::max(viewerW, floorSize.width());
+    viewerH = std::max(viewerH, floorSize.height());
+
+    const QSize client(viewerW + chrome.width(), viewerH + chrome.height());
+
+    // THE FRAME IS NOT THE CLIENT RECT, AND setGeometry TAKES THE CLIENT ONE.
+    // On a top-level widget both geometry() and setGeometry() exclude the
+    // window frame, so centring the client rect on the work area pushes the
+    // TITLE BAR off the top of it -- measured at exactly -7px on this box, on
+    // every shape, which looks like a rounding error and is a whole title bar.
+    // Centre the frame, then set the client rect inset inside it.
+    const QRect frame = frameGeometry();
+    const QRect clientNow = geometry();
+    const QMargins frameMargins(clientNow.left() - frame.left(), clientNow.top() - frame.top(),
+                                frame.right() - clientNow.right(),
+                                frame.bottom() - clientNow.bottom());
+    const QSize outer(client.width() + frameMargins.left() + frameMargins.right(),
+                      client.height() + frameMargins.top() + frameMargins.bottom());
+
+    // Centred on the monitor the window is ALREADY on -- section 4's "do not
+    // move the window unexpectedly to a different monitor" -- and clamped back
+    // inside the work area, so a window that grew cannot end up with its title
+    // bar somewhere the user cannot reach it.
+    QRect target(QPoint(0, 0), outer);
+    target.moveCenter(work.center());
+    if (target.right() > work.right()) target.moveRight(work.right());
+    if (target.bottom() > work.bottom()) target.moveBottom(work.bottom());
+    if (target.left() < work.left()) target.moveLeft(work.left());
+    if (target.top() < work.top()) target.moveTop(work.top());
+    setGeometry(QRect(target.topLeft() + QPoint(frameMargins.left(), frameMargins.top()), client));
+
+    // TRACE_SHAPE_LOG=1. Every term of the calculation and, crucially, what the
+    // LAYOUT actually did with the result -- because the two disagreeing is the
+    // failure mode here, and it is invisible from outside: a viewer that came
+    // out wider than its own ratio pillarboxes the picture inside a window whose
+    // whole purpose was to have no bars, and the window looks deliberate.
+    // `win WxH` cannot show it, which is the same reason the settings home
+    // needed its own log rather than a HUD field.
+    // fprintf, not qWarning: in a GUI-subsystem build Qt's default handler does
+    // not reliably reach a console's stderr, and the first version of this log
+    // printed nothing at all while FFmpeg's own stderr messages came through
+    // from the same run -- which reads as "the function never ran". Settings.cpp
+    // reached the same conclusion at phase 11 and this follows it.
+    if (!qgetenv("TRACE_SHAPE_LOG").isEmpty()) {
+        const QString msg =
+            QString("[shape] aspect %1 natural %2x%3 dpr %4 | chrome %5x%6 frame %7x%8 "
+                       "avail %9x%10 | want viewer %11x%12 client %13x%14 | got viewer %15x%16 (%17)")
+                   .arg(QString::number(aspect, 'f', 4))
+                   .arg(natural.width()).arg(natural.height())
+                   .arg(QString::number(dpr, 'f', 2))
+                   .arg(chrome.width()).arg(chrome.height())
+                   .arg(frameW).arg(frameH)
+                   .arg(availW).arg(availH)
+                   .arg(viewerW).arg(viewerH)
+                   .arg(client.width()).arg(client.height())
+                   .arg(viewer_->width()).arg(viewer_->height())
+                   .arg(QString::number(viewer_->height() > 0
+                                            ? static_cast<double>(viewer_->width()) / viewer_->height()
+                                            : 0.0,
+                                        'f', 4));
+        fprintf(stderr, "[pass %d] %s\n", pass, msg.toLocal8Bit().constData());
+        fflush(stderr);
+    }
+
+    // Did the layout actually give the viewer what was asked for? A mismatch
+    // means the chrome measurement this pass was built on was taken from a
+    // window too small to show the chrome, and the next pass -- measuring the
+    // window this one just made -- will be right. Answered by asking the layout
+    // rather than by predicting it, which is the only way to notice that a
+    // widget nobody here knows about took some of the height.
+    return viewer_->width() != viewerW || viewer_->height() != viewerH;
+}
+
+#ifdef Q_OS_WIN
+// Reshapes the proposed outer rect so the VIDEO CLIENT AREA ends up at the
+// media's ratio, moving only the edges the user is not dragging. Returns false
+// -- changing nothing -- whenever the lock does not apply, so every decline is
+// a no-op rather than a differently-shaped window.
+//
+// The rect is in PHYSICAL pixels and Qt's sizes are logical, so the chrome has
+// to cross that boundary; on this box dpr is 1 and the conversion is the
+// identity, which is exactly why it has to be written correctly rather than
+// tested into place.
+bool MainWindow::constrainSizingRect(RECT* rect, int edge) {
+    if (!rect || !viewer_) return false;
+    if (!lockAspectAction_ || !lockAspectAction_->isChecked()) return false;
+    if (!windowGeometryIsOurs()) return false;
+    const double aspect = currentDisplayAspect();
+    if (!(aspect > 0.0)) return false;
+
+    const double dpr = devicePixelRatioF();
+    const QSize chromeLogical = windowChromeLogical();
+    const int chromeW = static_cast<int>(std::lround(chromeLogical.width() * dpr));
+    const int chromeH = static_cast<int>(std::lround(chromeLogical.height() * dpr));
+
+    const int proposedW = rect->right - rect->left;
+    const int proposedH = rect->bottom - rect->top;
+    int videoW = proposedW - chromeW;
+    int videoH = proposedH - chromeH;
+    if (videoW <= 0 || videoH <= 0) return false;
+
+    // Which axis the user is actually driving. The side edges give width, the
+    // top and bottom give height, and a CORNER gives both -- so for a corner the
+    // axis is whichever has moved further from where the drag started. Measured
+    // against the START rect rather than the previous proposal, because a
+    // per-message comparison can change its mind mid-drag and that reads exactly
+    // like the oscillation this is here to avoid.
+    bool widthDrives = true;
+    switch (edge) {
+        case WMSZ_LEFT:
+        case WMSZ_RIGHT:
+            widthDrives = true;
+            break;
+        case WMSZ_TOP:
+        case WMSZ_BOTTOM:
+            widthDrives = false;
+            break;
+        default: {
+            const int dw = std::abs(proposedW - sizeMoveStartRect_.width());
+            const int dh = std::abs(proposedH - sizeMoveStartRect_.height());
+            widthDrives = dw >= dh;
+            break;
+        }
+    }
+
+    if (widthDrives) videoH = std::max(1, static_cast<int>(std::lround(videoW / aspect)));
+    else videoW = std::max(1, static_cast<int>(std::lround(videoH * aspect)));
+
+    // The viewer's minimum is aspect-correct now, so clamping to it cannot
+    // itself break the ratio -- but the clamp has to drive the OTHER axis from
+    // whichever one it moved, or a floor on one axis silently produces a
+    // wrong-shaped window at the smallest size, which is where a user is most
+    // likely to notice.
+    const QSize floorLogical = viewer_->minimumSize();
+    const int floorW = static_cast<int>(std::lround(floorLogical.width() * dpr));
+    const int floorH = static_cast<int>(std::lround(floorLogical.height() * dpr));
+    if (videoW < floorW || videoH < floorH) {
+        videoW = std::max(videoW, floorW);
+        videoH = std::max(1, static_cast<int>(std::lround(videoW / aspect)));
+        if (videoH < floorH) {
+            videoH = floorH;
+            videoW = std::max(1, static_cast<int>(std::lround(videoH * aspect)));
+        }
+    }
+
+    const int wantW = videoW + chromeW;
+    const int wantH = videoH + chromeH;
+
+    // Move only the edges that are NOT being dragged. This is the whole of
+    // "the dragged edge or corner remains authoritative": the pointer stays
+    // glued to the edge it grabbed, and the picture grows or shrinks away from
+    // it. Adjusting the wrong side makes the window crawl out from under the
+    // cursor, which is the classic symptom of an aspect lock written without
+    // reading wParam.
+    switch (edge) {
+        case WMSZ_LEFT:
+        case WMSZ_TOPLEFT:
+        case WMSZ_BOTTOMLEFT:
+            rect->left = rect->right - wantW;
+            break;
+        default:
+            rect->right = rect->left + wantW;
+            break;
+    }
+    switch (edge) {
+        case WMSZ_TOP:
+        case WMSZ_TOPLEFT:
+        case WMSZ_TOPRIGHT:
+            rect->top = rect->bottom - wantH;
+            break;
+        default:
+            rect->bottom = rect->top + wantH;
+            break;
+    }
+    return true;
+}
+#endif
+
 bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
 #ifdef Q_OS_WIN
     if (eventType == "windows_generic_MSG" && message) {
-        const MSG* msg = static_cast<const MSG*>(message);
+        MSG* msg = static_cast<MSG*>(message);
         switch (msg->message) {
-            case WM_SIZING: ++wmSizing_; break;
-            case WM_ENTERSIZEMOVE: ++wmEnterSizeMove_; break;
-            case WM_EXITSIZEMOVE: ++wmExitSizeMove_; break;
+            case WM_SIZING:
+                ++wmSizing_;
+                // THE CONSTRAINT GOES HERE, NOT IN resizeEvent, and section 4's
+                // three separate requirements -- "the dragged edge or corner
+                // remains authoritative", "adjust the other dimension smoothly",
+                // "avoid resize-event recursion and visible oscillation" -- are
+                // one requirement with one answer.
+                //
+                // Correcting after the fact is what PRODUCES oscillation: by the
+                // time resizeEvent runs, Qt has laid out and painted a
+                // wrong-shaped window, and the correction is itself a resize
+                // that arrives as another resizeEvent. WM_SIZING hands over the
+                // proposed rect BEFORE any of that happens, and its wParam names
+                // the edge being dragged, so "authoritative edge" is read off
+                // the message rather than inferred.
+                if (constrainSizingRect(reinterpret_cast<RECT*>(msg->lParam),
+                                        static_cast<int>(msg->wParam))) {
+                    // TRUE, not the default FALSE: the documented contract for
+                    // WM_SIZING is that a handler which modified the rect says
+                    // so, and returning false here would leave the modified rect
+                    // in place but let Qt's own handler run over it.
+                    if (result) *result = TRUE;
+                    return true;
+                }
+                break;
+            case WM_ENTERSIZEMOVE: {
+                ++wmEnterSizeMove_;
+                RECT r{};
+                if (GetWindowRect(reinterpret_cast<HWND>(winId()), &r)) {
+                    sizeMoveStartRect_ = QRect(QPoint(r.left, r.top), QPoint(r.right - 1, r.bottom - 1));
+                }
+                inSizeMove_ = true;
+                break;
+            }
+            case WM_EXITSIZEMOVE:
+                ++wmExitSizeMove_;
+                inSizeMove_ = false;
+                // Measured at experiment 1: deferring the preview-size sync to
+                // here saves NOTHING, because the drag discards one cache's
+                // worth of entries however many times it clears -- nothing
+                // refills the cache while the pointer is down. So nothing is
+                // deferred to this message and it stays a counter. The bracket
+                // is kept because the corner-drag axis choice needs the rect the
+                // drag started from.
+                break;
             // Not part of the design -- it is the CONTROL on the other three.
             // WM_SIZE fires on every resize, interactive or programmatic, so a
             // run where the window demonstrably changed size and this still
@@ -2528,6 +2925,18 @@ bool MainWindow::openPath(const QString& path) {
 
     statusBar()->showMessage("Opened", 1200);
     refreshHud("Open file");
+    // THE SHAPE IS APPLIED HERE, AFTER refreshHud, AND THAT ORDER IS THE WHOLE
+    // CORRECTNESS OF IT.
+    //
+    // The window is sized so that the VIDEO CLIENT AREA is the media's ratio,
+    // and everything that is not video has to be subtracted first -- including
+    // the HUD, whose height is the number of lines the media produces.
+    // refreshHud is what sets those lines, so a shape applied before it
+    // subtracts the PREVIOUS media's chrome, the HUD then grows and takes the
+    // difference out of the viewer, and the picture is pillarboxed inside a
+    // window that was supposed to eliminate bars. Measured on the 4x5: the
+    // viewer came out 982x905 for a 0.8 ratio that wanted 724x905.
+    applyMediaWindowShape();
     return true;
 }
 

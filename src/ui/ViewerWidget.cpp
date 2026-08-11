@@ -9,7 +9,7 @@
 namespace trace::ui {
 
 ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
-    setMinimumSize(640, 360);
+    applyMinimumForAspect();
     clock_.start();
 
     // Read once, here, so both backends get the same answer. It used to be read
@@ -150,6 +150,31 @@ void ViewerWidget::applySourceShape() {
         ((viewTransform_.quarterTurns + sourceRotationDegrees_ / 90) % 4 + 4) % 4;
     renderer_->setViewTransform(composed);
     renderer_->setPixelAspect(sourcePixelAspect_);
+}
+
+// A FIXED 640x360 FLOOR IS ITSELF A 16:9 ASSUMPTION, and it fights the aspect
+// lock on every other shape: a 1x1 clip could not go below 640x640, a 4x5 below
+// 640x800, and a 9:16 below 640x1138 -- taller than many work areas at 125% DPI,
+// which would make the lock silently unsatisfiable on exactly the assets phase
+// 10 used.
+//
+// The rule that replaces it keeps the INTENT of the old number rather than the
+// number: 360 logical px on the SHORTER displayed axis. At 16:9 that is
+// 640x360 to the pixel, so nothing about startup geometry moves for 16:9 media
+// and every recorded `win` figure stays comparable; at 1:1 it is 360x360, at
+// 4:5 360x450, at 9:16 360x640 -- all smaller than the old floor rather than
+// larger, so no shape becomes harder to make small than it was.
+void ViewerWidget::applyMinimumForAspect() {
+    const double a = minimumAspect_;
+    if (!(a > 0.0)) { setMinimumSize(640, 360); return; }
+    if (a >= 1.0) setMinimumSize(qMax(1, static_cast<int>(std::lround(360.0 * a))), 360);
+    else setMinimumSize(360, qMax(1, static_cast<int>(std::lround(360.0 / a))));
+}
+
+void ViewerWidget::setMinimumAspect(double aspect) {
+    if (!(aspect > 0.0) || aspect == minimumAspect_) return;
+    minimumAspect_ = aspect;
+    applyMinimumForAspect();
 }
 
 double ViewerWidget::displayedAspect(QSize sourcePixels) const {

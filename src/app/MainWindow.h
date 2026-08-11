@@ -34,6 +34,13 @@ class QAction;
 class QMenu;
 QT_END_NAMESPACE
 
+// Forward-declared at GLOBAL scope, and that placement is the point: written
+// inside namespace trace::app it would declare a brand new trace::app::tagRECT
+// that no Win32 call can be given. windows.h is deliberately not included here
+// -- this header is reached by most of the application, and pulling the Win32
+// world into all of it to name one pointer type would be a poor trade.
+struct tagRECT;
+
 namespace trace::ui {
 class ViewerWidget;
 class TransportOverlay;
@@ -210,6 +217,32 @@ private:
     void refreshHud(const QString& action = {});
     // Tell the decoder how big a scrub preview needs to be, in device pixels.
     void syncScrubPreviewSize();
+
+    // SPEC SECTION 4. The on-screen display aspect of whatever is open, media
+    // shape composed with the user's view transform, or 0 when there is nothing
+    // to shape the window to.
+    double currentDisplayAspect() const;
+    // Size the window so the VIDEO CLIENT AREA -- not the outer frame -- is the
+    // media's ratio, at natural displayed size where it fits and scaled down
+    // where it does not, centred on the monitor the window is already on.
+    // Declines in every state where Windows owns the geometry.
+    void applyMediaWindowShape();
+    // One pass of it. Returns true when the layout did not honour the size it
+    // was given, which means the chrome it measured was wrong and another pass
+    // is worth running. See applyMediaWindowShape for why that can happen.
+    bool applyMediaWindowShapePass(double aspect, int pass);
+    // Chrome is measured rather than computed: the difference between the window
+    // and the viewer is menu bar, status bar, frame, the HUD's own height and
+    // the docked transport bar if it is present, and every one of those changes
+    // with state. Anything that adds them up from constants is a list that goes
+    // stale.
+    QSize windowChromeLogical() const;
+    bool windowGeometryIsOurs() const;
+#ifdef Q_OS_WIN
+    // Reshapes a proposed WM_SIZING rect in place, moving only the edges the
+    // user is not dragging. Returns whether it changed anything.
+    bool constrainSizingRect(::tagRECT* rect, int edge);
+#endif
     // Tells the decoder whether the installed renderer can take Y/U/V planes
     // (GATE C). Asked of the adopted renderer, not of TRACE_RENDERER.
     void syncPlanarOutput();
@@ -931,6 +964,19 @@ private:
     long long wmExitSizeMove_ = 0;
     // The control on the three above -- see the switch in nativeEvent().
     long long wmSize_ = 0;
+    // View > Lock Window to Media Aspect Ratio (spec section 4), checked by
+    // default and persisted through trace::app::settings() -- the home phase 11
+    // built, which this is the second consumer of and must not become a second
+    // one of.
+    QAction* lockAspectAction_ = nullptr;
+    static constexpr const char* kLockAspectKey = "view/lockWindowToMediaAspect";
+    // The outer rect at WM_ENTERSIZEMOVE, in physical pixels. A corner drag
+    // moves both axes at once and the constraint has to pick one to honour;
+    // comparing against where the drag STARTED is what makes that choice stable
+    // for the whole gesture, where comparing against the previous proposed rect
+    // would let it flip axis mid-drag and read as oscillation.
+    QRect sizeMoveStartRect_;
+    bool inSizeMove_ = false;
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;

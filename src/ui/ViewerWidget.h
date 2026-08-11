@@ -111,6 +111,9 @@ public:
     // composed onto it. This is what the window is sized to, and it is here
     // rather than in MainWindow because the composition rule lives here.
     double displayedAspect(QSize sourcePixels) const;
+    // The shape the minimum size is computed for. 16:9 until media says
+    // otherwise, which reproduces the old fixed 640x360 exactly.
+    void setMinimumAspect(double aspect);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -147,6 +150,8 @@ private:
     // the renderer, plus the pixel aspect. The one place either reaches a
     // backend.
     void applySourceShape();
+    double minimumAspect_ = 16.0 / 9.0;
+    void applyMinimumForAspect();
     std::unique_ptr<trace::render::VideoRenderer> renderer_;
     // Mirrors the active renderer's usesNativeSurface(), so the widget-level
     // attributes can be undone if a backend fails to initialize and the CPU
