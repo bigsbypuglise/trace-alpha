@@ -2019,6 +2019,29 @@ void MainWindow::setupTransportControls() {
     syncTransportBar();
 }
 
+// Section 4: "returning from fullscreen, maximize or snap to normal mode ...
+// reapply the media aspect lock". The same paragraph also says to restore the
+// previous normal window position, and those two pull against each other --
+// reshaping recentres, which throws away the position that was just restored.
+//
+// They only conflict when the restored geometry is already wrong, so that is
+// what is tested. A window that left normal mode under the lock comes back at
+// the right ratio and is left exactly where it was; one that does not -- the
+// lock was switched on while maximized, or Windows imposed a size -- is
+// reshaped. The tolerance is 1%, which is wider than the rounding a chrome
+// measurement can introduce and far narrower than any real mismatch.
+void MainWindow::changeEvent(QEvent* event) {
+    QMainWindow::changeEvent(event);
+    if (event->type() != QEvent::WindowStateChange) return;
+    if (!viewer_ || !windowGeometryIsOurs()) return;
+    if (!lockAspectAction_ || !lockAspectAction_->isChecked()) return;
+    const double wanted = currentDisplayAspect();
+    if (!(wanted > 0.0) || viewer_->height() <= 0) return;
+    const double have = static_cast<double>(viewer_->width()) / viewer_->height();
+    if (std::abs(have - wanted) <= wanted * 0.01) return;
+    applyMediaWindowShape();
+}
+
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     ++resizeEvents_;

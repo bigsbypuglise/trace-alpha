@@ -65,6 +65,10 @@ protected:
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
+    // Reapplies the aspect lock on the way back to normal from fullscreen,
+    // maximize or snap -- but only when the restored geometry is actually the
+    // wrong shape, so a correctly-shaped restore keeps its position.
+    void changeEvent(QEvent* event) override;
     // Only for the timeline slider, and only to classify a wheel notch. See
     // userPlayIntent_: a wheel over the groove is a stepping gesture that
     // arrives as a bare valueChanged with no press and no release, so it is the
