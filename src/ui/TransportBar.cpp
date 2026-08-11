@@ -265,6 +265,12 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     fullscreenBtn_->setIcon(fullscreenIcon_);
     fullscreenBtn_->setToolTip(tr("Fullscreen (F11)"));
 
+    // Spec phase 8. Last in the row and last in the design's tab order, which
+    // are the same thing: "... forward -> fullscreen -> share".
+    shareBtn_ = new TransportButton(this);
+    shareBtn_->setIcon(loadIcon(QStringLiteral("share")));
+    shareBtn_->setToolTip(tr("Share — copy path, show in File Explorer"));
+
     slider_ = new QSlider(Qt::Horizontal, this);
     slider_->setMinimum(0);
     slider_->setMaximum(0);
@@ -330,6 +336,14 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     row->addWidget(rateLabel_);
     row->addWidget(frameLabel_);
     row->addWidget(fullscreenBtn_);
+    row->addWidget(shareBtn_);
+
+    // The button knows where it is and the menu does not, so the position is
+    // computed here. Below the button and left-aligned with it, which is where
+    // Windows puts a menu dropped from a toolbar control.
+    connect(shareBtn_, &TransportButton::clicked, this, [this]() {
+        emit shareClicked(shareBtn_->mapToGlobal(QPoint(0, shareBtn_->height())));
+    });
 
     connect(rewindBtn_, &TransportButton::clicked, this, &TransportBar::rewindClicked);
     connect(playPauseBtn_, &TransportButton::clicked, this, &TransportBar::playPauseClicked);
@@ -378,6 +392,12 @@ void TransportBar::setControlsEnabled(bool enabled) {
     rewindBtn_->setEnabledControl(enabled);
     playPauseBtn_->setEnabledControl(enabled);
     fastForwardBtn_->setEnabledControl(enabled);
+    // With no media open there is nothing to share, so the button is disabled
+    // rather than opening a menu of three unavailable rows. Once media IS open
+    // the button stays enabled whatever the gate decides -- the design's rule is
+    // that the ROWS are shown-and-unavailable, never hidden, and a button that
+    // refuses to open would hide all three at once.
+    shareBtn_->setEnabledControl(enabled);
     slider_->setEnabled(enabled);
 }
 

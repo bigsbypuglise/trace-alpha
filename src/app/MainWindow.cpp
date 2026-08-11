@@ -854,6 +854,19 @@ void MainWindow::installOverlayHooks() {
     };
     hooks.toggleFullscreen = [this]() { if (fullscreenAction_) fullscreenAction_->trigger(); };
 
+    // Spec phase 8. The overlay gives a point in SURFACE DEVICE PIXELS, because
+    // that is the only coordinate space it has; the host divides by the device
+    // pixel ratio to reach Qt's logical widget coordinates and maps to the
+    // screen. Doing that conversion here rather than in the model is what keeps
+    // the model free of any notion of a screen -- the same split that lets one
+    // OverlayModel serve two backends.
+    hooks.shareMenu = [this](int x, int y) {
+        if (!viewer_) return;
+        const double dpr = viewer_->devicePixelRatioF();
+        const QPoint local(static_cast<int>(x / dpr), static_cast<int>(y / dpr));
+        showShareMenu(viewer_->mapToGlobal(local));
+    };
+
     hooks.requestRepaint = [this]() { if (viewer_) viewer_->update(); };
 
     viewer_->setOverlayHooks(hooks);
@@ -946,6 +959,53 @@ void MainWindow::setupSharedActions() {
     // an action, because QAction is what resolves modifier ambiguity properly
     // and ShortcutTable's own dispatcher deliberately ignores modifiers.
     syncTimeDisplayActions();
+
+    // Share (spec phase 8). Three actions, created here for the same reason
+    // fullscreen was promoted at phase 2: the menu bar, the docked bar's button
+    // and the composited overlay's button are three surfaces onto one command,
+    // and the spec requires their enabled state, tooltips and accessibility
+    // names to stay synchronized. One QAction is what makes that structural.
+    //
+    // The icons come from the approved package. copy-lucidlink is a NEUTRAL
+    // CHAIN GLYPH and deliberately not a LucidLink brand mark.
+    copyFilePathAction_ = new QAction(tr("&Copy File Path"), this);
+    copyFilePathAction_->setIcon(trace::ui::TransportBar::loadIcon(QStringLiteral("copy-path")));
+    connect(copyFilePathAction_, &QAction::triggered, this, &MainWindow::copyMediaFilePath);
+    addAction(copyFilePathAction_);
+
+    copyLucidLinkAction_ = new QAction(tr("Copy &LucidLink Link"), this);
+    copyLucidLinkAction_->setIcon(
+        trace::ui::TransportBar::loadIcon(QStringLiteral("copy-lucidlink")));
+    // NOT CONNECTED, and that is the phase boundary rather than an omission.
+    // Producing the link is spec phase 9 and needs the installed integration;
+    // this phase builds the GATE, which currently always says no. An action with
+    // a handler that cannot work would be the `showInfo` failure phase 2 deleted
+    // -- a command that appears to exist and changes nothing.
+    addAction(copyLucidLinkAction_);
+
+    showInExplorerAction_ = new QAction(tr("Show in File &Explorer"), this);
+    showInExplorerAction_->setIcon(
+        trace::ui::TransportBar::loadIcon(QStringLiteral("show-in-explorer")));
+    connect(showInExplorerAction_, &QAction::triggered, this,
+            &MainWindow::showMediaInFileExplorer);
+    addAction(showInExplorerAction_);
+
+    // One QMenu instance, popped by both transport surfaces and reused as the
+    // menu bar's submenu. Two QMenus built from the same actions would still be
+    // two things to keep in step -- the ordering, the separators, the icons --
+    // and this phase exists partly to not create that.
+    shareMenu_ = new QMenu(tr("&Share"), this);
+    shareMenu_->addAction(copyFilePathAction_);
+    shareMenu_->addAction(copyLucidLinkAction_);
+    shareMenu_->addSeparator();
+    shareMenu_->addAction(showInExplorerAction_);
+    // Qt hides a disabled item's tooltip in a menu unless the menu is told to
+    // show them, and the whole point of the Unavailable state is that the row
+    // states WHY. Without this the design's tooltips would be written, shipped
+    // and invisible.
+    shareMenu_->setToolTipsVisible(true);
+
+    syncShareActions();
 
     // The dev diagnostics HUD. Owner request, 2026-08-10: a quick way to put the
     // instrument away while judging feel, and back for measuring.
@@ -1234,6 +1294,86 @@ void MainWindow::refreshSourceTimecode() {
     syncTimeDisplayActions();
 }
 
+// Spec phase 8. Evaluated ONCE per media open, for the same reason the timecode
+// above is parsed once: the gate asks MediaIoSource to classify the volume,
+// which issues real Win32 volume queries, and the spec's performance list
+// forbids filesystem probing in paint or timeline updates outright.
+void MainWindow::refreshShareState() {
+    QString path;
+    bool fileBacked = false;
+    if (currentMedia_.has_value()) {
+        path = QString::fromStdString(currentMedia_->path);
+        // Every media kind Trace opens today is a file on disk -- a video file,
+        // a still, or one frame of a numbered sequence. `fileBacked` is asked as
+        // a question about the MediaItem rather than assumed from the path so
+        // that a future non-file source (a capture device, a URL) declines both
+        // path commands by construction instead of by being remembered.
+        fileBacked = !path.isEmpty();
+    }
+    shareState_ = trace::app::evaluateShare(path, fileBacked);
+    syncShareActions();
+}
+
+void MainWindow::syncShareActions() {
+    using trace::app::ShareAvailability;
+    // Disabled and Unavailable render identically -- both are a greyed row with
+    // a tooltip stating why -- and differ in what the tooltip SAYS. Trace does
+    // not need two visual treatments to honour the distinction; it needs to not
+    // hide either one, and to not tell the user "not right now" when the honest
+    // answer is "not for this file, ever".
+    const auto apply = [](QAction* action, ShareAvailability state, const QString& reason,
+                          const QString& enabledTip) {
+        if (!action) return;
+        const bool on = state == ShareAvailability::Available;
+        action->setEnabled(on);
+        action->setToolTip(on ? enabledTip : reason);
+        // The accessibility name the spec requires to stay synchronized with the
+        // rest of the action. It costs one line here and it is the only
+        // accessibility affordance the Share commands have on the overlay path.
+        action->setStatusTip(on ? enabledTip : reason);
+    };
+
+    apply(copyFilePathAction_, shareState_.copyPath, shareState_.copyPathReason,
+          tr("Copy the file's full Windows path to the clipboard"));
+    apply(showInExplorerAction_, shareState_.showInExplorer, shareState_.showInExplorerReason,
+          tr("Open the containing folder with this file selected"));
+    apply(copyLucidLinkAction_, shareState_.lucidLink, shareState_.lucidLinkReason,
+          tr("Copy a direct LucidLink link to this file"));
+}
+
+void MainWindow::showShareMenu(const QPoint& globalPos) {
+    if (!shareMenu_) return;
+    // The gate is re-evaluated as the menu opens, not only at open time. A file
+    // can be deleted or a mount can drop while it is on screen, and this is the
+    // one moment the user is about to act on the answer -- it costs one cached
+    // volume lookup and it is not on any per-frame path.
+    refreshShareState();
+    // popup(), not exec(). exec() runs a nested event loop, and on the D3D11
+    // backend this is reached from inside a raw WM_LBUTTONUP handler on the
+    // child surface window -- blocking there would run the whole menu's
+    // lifetime inside a window procedure.
+    shareMenu_->popup(globalPos);
+}
+
+void MainWindow::copyMediaFilePath() {
+    refreshShareState();
+    QString error;
+    if (!trace::app::copyPathToClipboard(shareState_, error)) {
+        statusBar()->showMessage(error, 3000);
+        return;
+    }
+    // The spec's "non-blocking confirmation". The status bar is what every other
+    // confirmation in Trace already uses, so this needed no new mechanism.
+    statusBar()->showMessage(tr("File path copied."), 2000);
+}
+
+void MainWindow::showMediaInFileExplorer() {
+    refreshShareState();
+    trace::app::revealInFileExplorer(shareState_, this, [this](const QString& message) {
+        statusBar()->showMessage(message, 3000);
+    });
+}
+
 QString MainWindow::sourceTimecodeAt(long long frame) const {
     const auto tc = trace::core::TimeFormat::framesToTimecode(
         sourceTimecodeStartFrames_ + std::max(0LL, frame),
@@ -1387,6 +1527,18 @@ void MainWindow::setupMenus() {
     timeMenu->addAction(goToFrameAction_);
     timeMenu->addAction(goToTimecodeAction_);
 
+    // Share (spec phase 8), the same submenu object the two transport buttons
+    // pop. The spec's Menus section does not give Share a top level of its own,
+    // and the full File/Edit/View/Window/Help structure is phase 13 -- so it
+    // goes under File beside Time Display, which is exactly where phase 7 put
+    // its group and for the same reason: reachable now, restructured then.
+    //
+    // This is also the ONLY keyboard-reachable Share surface, and after phase 6
+    // that matters more than it reads. The floating overlay has no widget tree,
+    // so its Share button is invisible to a screen reader; a real QMenu in the
+    // menu bar is not.
+    fileMenu->addMenu(shareMenu_);
+
     fileMenu->addSeparator();
     auto* quitAction = new QAction("&Quit", this);
     quitAction->setShortcut(QKeySequence::Quit);
@@ -1453,6 +1605,11 @@ void MainWindow::setupTransportControls() {
     // menu must not be able to disagree about which state that is.
     connect(transportBar_, &trace::ui::TransportBar::fullscreenClicked,
             fullscreenAction_, &QAction::trigger);
+    // Spec phase 8. The bar computes where its own button is; the menu is the
+    // same object the overlay and the menu bar use, so there is one Share menu
+    // in the application reached from three places.
+    connect(transportBar_, &trace::ui::TransportBar::shareClicked,
+            this, &MainWindow::showShareMenu);
 
     timelineSlider_ = transportBar_->timelineSlider();
     // Keyboard is reserved for transport (arrow-key stepping, J-K-L). If the
@@ -1846,6 +2003,9 @@ void MainWindow::openPath(const QString& path) {
     // here is what stops a file WITH timecode handing its mode to a file
     // WITHOUT one.
     refreshSourceTimecode();
+    // Same shape and the same reason (spec phase 8): computed here so no
+    // surface has to probe the filesystem to draw itself.
+    refreshShareState();
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
     // Before the first frame: the decoder sizes scrub previews from this, and a
@@ -3911,7 +4071,16 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.classifyCached ? "(cached)" : "")
                 .arg(QString::number(perf.openFileMs, 'f', 1))
                 .arg(QString::number(perf.openDemuxMs, 'f', 1))
-                .arg(QString::number(perf.openStreamInfoMs, 'f', 1));
+                .arg(QString::number(perf.openStreamInfoMs, 'f', 1))
+              // The Share gate (spec phase 8), on the line that already reports
+              // the storage classification it is built from -- so the necessary
+              // condition and the verdict it feeds are read together and a
+              // disagreement between them is visible rather than inferred from
+              // whether a menu item looked grey in a screenshot.
+              + QString(" | share path %1 explorer %2 lucid %3")
+                .arg(shareAvailabilityName(shareState_.copyPath))
+                .arg(shareAvailabilityName(shareState_.showInExplorer))
+                .arg(shareAvailabilityName(shareState_.lucidLink));
 
             const QString lprobe = QString("probe | limit %1 KB / %2 ms | rd %3 | %4 KB | seek %5 | streams %6 | fps %7 | dur %8s | frames %9")
                 .arg(perf.probeSizeLimit / 1024)

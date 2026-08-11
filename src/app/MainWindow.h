@@ -20,6 +20,7 @@
 #include "core/ScrubDecodeWorker.h"
 #include "core/AudioOutput.h"
 #include "app/ShortcutTable.h"
+#include "app/MediaShare.h"
 
 QT_BEGIN_NAMESPACE
 class QKeyEvent;
@@ -28,6 +29,7 @@ class QDropEvent;
 
 class QSlider;
 class QAction;
+class QMenu;
 QT_END_NAMESPACE
 
 namespace trace::ui {
@@ -94,6 +96,20 @@ private:
     long long frameForSourceTimecode(const QString& text) const;
     void promptGoToFrame();
     void promptGoToTimecode();
+    // Spec phase 8. Re-evaluates the Share gate ONCE per media open -- the spec
+    // forbids filesystem probing in paint or timeline updates and the gate
+    // queries the volume, so this follows refreshSourceTimecode()'s shape
+    // exactly: compute at open, cache, and let every surface read the cache.
+    void refreshShareState();
+    // Pushes the cached gate onto the three actions: enabled state, and the
+    // tooltip that says why when it is not. One function so the menu bar, the
+    // docked bar's menu and the overlay's menu cannot show three answers.
+    void syncShareActions();
+    // Pops the Share menu at a GLOBAL point. Both surfaces call this; neither
+    // owns the menu.
+    void showShareMenu(const QPoint& globalPos);
+    void copyMediaFilePath();
+    void showMediaInFileExplorer();
     // One validated, exact jump, shared by both prompts. Uses the existing Step
     // path, so neither prompt needed any decoder work.
     void goToFrame(long long frame, const char* action);
@@ -401,6 +417,18 @@ private:
     QAction* timeDisplayTimecodeAction_ = nullptr;
     QAction* goToFrameAction_ = nullptr;
     QAction* goToTimecodeAction_ = nullptr;
+
+    // Share (spec phase 8). The gate is computed at open and read from here by
+    // every surface, so "can this file be shared, and how" has one answer.
+    trace::app::ShareState shareState_;
+    QAction* copyFilePathAction_ = nullptr;
+    QAction* showInExplorerAction_ = nullptr;
+    // Present, visible and unavailable until spec phase 9 builds the
+    // integration. The design's state semantics require the row to be shown and
+    // to say why, never hidden -- a command that comes and goes reads as a
+    // broken build rather than as an answer about the file.
+    QAction* copyLucidLinkAction_ = nullptr;
+    QMenu* shareMenu_ = nullptr;
 
     QAction* fullscreenAction_ = nullptr;
     // Escape, as a second surface onto fullscreenAction_. Its ENABLED state is

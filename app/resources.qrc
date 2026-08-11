@@ -23,9 +23,11 @@
 
   <!--
     Transport icons. Only controls that exist in the app are embedded; the rest
-    of the base UI set (volume, share, inspector, zoom, rotate, loop, ...) is
-    deliberately left out until those features are real, which is why
-    assets/interface/common/ is an empty directory rather than a populated one.
+    of the base UI set (volume, inspector, zoom, rotate, loop, ...) is
+    deliberately left out until those features are real. Spec phase 8 is the
+    first time assets/interface/common/ is not empty: the Share menu is real, so
+    its three item glyphs arrived with it, and share_menu became the transport
+    button's artwork under the name of the control it drives.
 
     The approved set ships 24px @1x and 48px @2x. It has no @3x, so a 3x display
     scales the 48px master rather than picking a dedicated file. Nothing here
@@ -72,5 +74,27 @@
          composited overlay's left region. -->
     <file alias="rewind-24.png">../assets/interface/transport/rewind-24.png</file>
     <file alias="rewind-48.png">../assets/interface/transport/rewind-48.png</file>
+
+    <!-- In use from spec phase 8: the transport Share button, on the docked bar
+         and in the composited overlay's right region. This is share_menu from
+         the approved package, renamed to the control it drives. -->
+    <file alias="share-24.png">../assets/interface/transport/share-24.png</file>
+    <file alias="share-48.png">../assets/interface/transport/share-48.png</file>
+
+    <!-- Share MENU ITEMS, not transport controls, which is why they are in
+         common/ rather than transport/. copy-lucidlink is a NEUTRAL CHAIN
+         GLYPH and not a LucidLink brand mark; the package says so, and it may
+         only be replaced with a licensed official asset. It is embedded even
+         though its command cannot run until phase 9, because the design's state
+         semantics require the row to be shown-and-unavailable rather than
+         hidden. -->
+    <file alias="copy-path-24.png">../assets/interface/common/copy-path-24.png</file>
+    <file alias="copy-path-48.png">../assets/interface/common/copy-path-48.png</file>
+
+    <file alias="show-in-explorer-24.png">../assets/interface/common/show-in-explorer-24.png</file>
+    <file alias="show-in-explorer-48.png">../assets/interface/common/show-in-explorer-48.png</file>
+
+    <file alias="copy-lucidlink-24.png">../assets/interface/common/copy-lucidlink-24.png</file>
+    <file alias="copy-lucidlink-48.png">../assets/interface/common/copy-lucidlink-48.png</file>
   </qresource>
 </RCC>

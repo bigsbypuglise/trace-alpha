@@ -124,6 +124,8 @@ add_executable(Trace
   ../src/app/MainWindow.cpp
   ../src/app/ShortcutTable.h
   ../src/app/ShortcutTable.cpp
+  ../src/app/MediaShare.h
+  ../src/app/MediaShare.cpp
   ../src/ui/ViewerWidget.h
   ../src/ui/ViewerWidget.cpp
   ../src/ui/OverlaySpike.h
@@ -181,6 +183,15 @@ endif()
 
 target_include_directories(Trace PRIVATE ../src)
 target_link_libraries(Trace PRIVATE Qt6::Widgets)
+
+if(WIN32)
+  # Spec phase 8: SHOpenFolderAndSelectItems / SHParseDisplayName for Show in
+  # File Explorer. The shell interface rather than `explorer.exe /select,<path>`
+  # -- there is no process-argument quoting of that command line that works for
+  # every path, and the spec's phase 9 rule (invoke through shell interfaces,
+  # never screen automation) is the same house style one phase early.
+  target_link_libraries(Trace PRIVATE shell32 ole32)
+endif()
 
 if(TRACE_D3D11_FOUND)
   # The generated shader headers live in the build tree.

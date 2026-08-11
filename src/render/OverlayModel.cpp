@@ -212,6 +212,17 @@ void OverlayModel::layout() {
     dFfwd_ = QRectF(snap(cx + gap - utilPx_ / 2.0), snap(rowCy - utilPx_ / 2.0),
                     utilPx_, utilPx_);
 
+    // Spec phase 8, and it fits INSIDE the settled panel rather than growing it.
+    // kPanelWidthLogical, kPanelHeightLogical and the 44/34 control sizes are
+    // owner-signed-off numbers as of phase 6 -- changing one reopens a decision
+    // rather than tuning a constant -- and the three centred controls only reach
+    // 78 logical px either side of centre, so the right end of the row was
+    // already empty. That is also where the design package puts it: the top row
+    // is "rewind - play/pause - forward | fullscreen - share".
+    const double edgeInset = snap(16.0 * s);
+    dShare_ = QRectF(snap(dPanel_.right() - edgeInset - utilPx_),
+                     snap(rowCy - utilPx_ / 2.0), utilPx_, utilPx_);
+
     const double trackInset = snap(24.0 * s);
     const double trackY = snap(top + panelH * 0.76);
     dTrack_ = QRectF(left + trackInset, snap(trackY - 2.0 * s),
@@ -232,8 +243,11 @@ void OverlayModel::rebuildAtlas() {
     const double panelH = dPanel_.height();
 
     // Layout the atlas: panel on top, then a row of icons.
+    // play x2 (play, pause), util x3 (rewind, fast-forward, share), the handle,
+    // the 8px solid patch, and the 4px gaps between them. Undercounting here
+    // silently clips the LAST cell, which is why the count is spelled out.
     const int atlasW = static_cast<int>(
-        std::ceil(std::max(panelW, play * 2 + util * 2 + handle + 40)));
+        std::ceil(std::max(panelW, play * 2 + util * 3 + handle + 40)));
     const int atlasH = static_cast<int>(std::ceil(panelH + rowH + 16));
     if (atlasW <= 0 || atlasH <= 0) return;
 
@@ -262,6 +276,7 @@ void OverlayModel::rebuildAtlas() {
     // and neither frame-step glyph is in the tree any more.
     aRewind_ = QRectF(x, row, util, util); paintIcon(p, aRewind_, "rewind");       x += util + 4;
     aFfwd_ = QRectF(x, row, util, util);   paintIcon(p, aFfwd_, "fast-forward");   x += util + 4;
+    aShare_ = QRectF(x, row, util, util);  paintIcon(p, aShare_, "share");         x += util + 4;
 
     aHandle_ = QRectF(x, row, handle, handle);
     p.setBrush(QColor(255, 255, 255));
@@ -348,6 +363,7 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
          OverlayQuad::Source::Atlas);
     push(dRewind_, aRewind_, a, hoverBoost(Region::Rewind), OverlayQuad::Source::Atlas);
     push(dFfwd_, aFfwd_, a, hoverBoost(Region::FastForward), OverlayQuad::Source::Atlas);
+    push(dShare_, aShare_, a, hoverBoost(Region::Share), OverlayQuad::Source::Atlas);
 
     // Track, filled portion, then handle. All three are the same white patch
     // tinted differently, so none of them can invalidate the atlas.
@@ -371,7 +387,19 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
          OverlayQuad::Source::Atlas);
 
     if (!text_.isNull()) {
-        const QRectF textRect(dPanel_.right() - text_.width() - 14 * dpr_,
+        // TOP-LEFT since spec phase 8, and this is the one thing the Share
+        // button did move. The chip used to sit at the panel's top-right, which
+        // is where the Share control now is: at 84px of panel height the chip
+        // spans y 10..31 and a 34px control centred on the row spans 13..47, so
+        // they overlapped outright. Left is the smallest change that resolves
+        // it -- the panel, the controls, the fade and the auto-hide are all
+        // untouched, and the chip stays inside the panel where it has been seen.
+        //
+        // Note the approved package actually specifies the rate chip CENTRED
+        // ABOVE the transport rather than inside it (section 6, with its own
+        // padding, radius and 900ms/200ms timing). That remains unimplemented
+        // and is not this phase's to change.
+        const QRectF textRect(dPanel_.left() + 14 * dpr_,
                               dPanel_.top() + 10 * dpr_,
                               text_.width(), text_.height());
         push(textRect, QRectF(QPointF(0, 0), QSizeF(text_.size())), a, 1.0f,
@@ -389,6 +417,7 @@ OverlayModel::Region OverlayModel::regionAt(int x, int y) const {
     if (dPlay_.contains(p)) return Region::PlayPause;
     if (dRewind_.contains(p)) return Region::Rewind;
     if (dFfwd_.contains(p)) return Region::FastForward;
+    if (dShare_.contains(p)) return Region::Share;
     if (trackHit.contains(p)) return Region::Timeline;
     return Region::None;
 }
@@ -479,6 +508,12 @@ bool OverlayModel::onMouseUp(int x, int y) {
             // `isVideoScrubActive()` set.
             case Region::Rewind:      if (hooks_.rewind) hooks_.rewind(); break;
             case Region::FastForward: if (hooks_.fastForward) hooks_.fastForward(); break;
+            // Spec phase 8. The point is passed in surface device pixels and
+            // the host converts; the overlay does not know what a screen
+            // coordinate is on either backend.
+            case Region::Share:       if (hooks_.shareMenu) hooks_.shareMenu(
+                                          static_cast<int>(dShare_.left()),
+                                          static_cast<int>(dShare_.bottom())); break;
             default: break;
         }
         if (hooks_.requestRepaint) hooks_.requestRepaint();

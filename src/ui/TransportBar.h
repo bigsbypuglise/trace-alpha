@@ -74,6 +74,12 @@ public:
     // through a second constant that has to be kept equal by hand.
     static int rateFlashMs();
 
+    // The one place a `:/ui/<name>-<size>.png` icon is built. Public since spec
+    // phase 8, because the Share menu's items need icons and a second loader
+    // would be a second answer to "is the 3x file being used" -- the question
+    // the -72 branch inside exists to keep answerable by reading.
+    static QIcon loadIcon(const QString& baseName);
+
 signals:
     // Spec phases 4 and 5: the two visible side controls are Rewind and
     // Fast-forward, not Prev/Next Frame. The exact-frame-step commands they used
@@ -82,17 +88,20 @@ signals:
     void playPauseClicked();
     void fastForwardClicked();
     void fullscreenClicked();
+    // Spec phase 8. Carries the point to pop the menu at, because the button
+    // belongs to this widget and the menu belongs to MainWindow -- passing the
+    // position is what keeps the bar from needing to know the menu exists.
+    void shareClicked(const QPoint& globalPos);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
 
 private:
-    static QIcon loadIcon(const QString& baseName);
-
     TransportButton* rewindBtn_ = nullptr;
     TransportButton* playPauseBtn_ = nullptr;
     TransportButton* fastForwardBtn_ = nullptr;
     TransportButton* fullscreenBtn_ = nullptr;
+    TransportButton* shareBtn_ = nullptr;
     QSlider* slider_ = nullptr;
     QLabel* frameLabel_ = nullptr;
     QLabel* rateLabel_ = nullptr;

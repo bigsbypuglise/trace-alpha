@@ -44,6 +44,16 @@ struct OverlayHooks {
     // the same action.
     std::function<void()> toggleFullscreen;
 
+    // Open the Share menu (spec phase 8), at a point in SURFACE DEVICE PIXELS.
+    // The overlay knows where its button is and nothing about menus; the host
+    // owns the QMenu and knows nothing about the overlay's layout, so the
+    // position crosses the boundary and neither side learns the other's job.
+    //
+    // A menu is also the first thing the overlay opens that holds itself open:
+    // `holdVisible` already answers yes for an active popup, so the panel cannot
+    // fade out from under a menu it opened.
+    std::function<void(int, int)> shareMenu;
+
     // Reads. The overlay draws from these and never caches them.
     std::function<bool()> isPlaying;
     std::function<double()> positionFraction;

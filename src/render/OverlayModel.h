@@ -65,7 +65,7 @@ public:
     // Which control a point is over. Also the identity used for hover and
     // press, so "what is under the pointer" and "what was pressed" cannot
     // disagree.
-    enum class Region { None, PlayPause, Rewind, FastForward, Timeline };
+    enum class Region { None, PlayPause, Rewind, FastForward, Share, Timeline };
 
     OverlayModel();
     ~OverlayModel();
@@ -138,9 +138,9 @@ private:
     QString textCached_;
 
     // Atlas sub-rects, in atlas pixels.
-    QRectF aPanel_, aPlay_, aPause_, aRewind_, aFfwd_, aHandle_, aSolid_, aSolidSample_;
+    QRectF aPanel_, aPlay_, aPause_, aRewind_, aFfwd_, aShare_, aHandle_, aSolid_, aSolidSample_;
     // Destination rects, in surface device pixels.
-    QRectF dPanel_, dPlay_, dRewind_, dFfwd_, dTrack_;
+    QRectF dPanel_, dPlay_, dRewind_, dFfwd_, dShare_, dTrack_;
 
     // Snapped control sizes in device pixels, computed in layout() and reused
     // by rebuildAtlas() so an atlas cell is exactly the size of the rect it is
