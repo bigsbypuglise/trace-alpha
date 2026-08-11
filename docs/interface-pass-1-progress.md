@@ -1875,7 +1875,297 @@ regression quotes.
 
 ---
 
+## Phase 11 — Open Recent, and Trace's first settings home (2026-08-11)
+
+### The settings home is an owner decision, taken before any code
+
+Phase 11 introduces the first persistent state Trace has ever had, so it also
+has to answer a question no phase before it did. It was put to the owner rather
+than inherited from Qt, because the default is wrong here in a way that would
+not have surfaced for months.
+
+`QSettings`' Windows default is `NativeFormat`, which writes
+`HKCU\Software\<org>\<app>`. **Trace ships as a portable ZIP with no installer
+by deliberate choice** (`docs/release-notes-alpha.md`), and an application that
+leaves registry keys behind after its folder is deleted contradicts that
+outright.
+
+**Owner decision, 2026-08-11: portable INI first, then per-user INI.**
+`src/app/Settings.*` resolves it once:
+
+1. a `trace.ini` beside `Trace.exe`, **if it exists and is writable** — its
+   presence is how a user asks for portable mode, and Trace never creates it,
+   because creating it would make every installation portable and the choice
+   would stop being one;
+2. otherwise `trace.ini` under `QStandardPaths::AppConfigLocation`.
+
+The writability test in step 1 is what makes "always writable" a property rather
+than a hope: a copy unzipped into Program Files can carry a `trace.ini` it
+cannot write to, and silently discarding every setting is worse than falling
+back. It announces the fallback on stderr, because a user who created that file
+asked for portable mode and is entitled to know they did not get it.
+
+**All three branches run and produce different answers** — read off the
+application's own stderr with `TRACE_SETTINGS_LOG=1`, rather than off a
+screenshot, because the answer is a path and a path is the thing a 15px capture
+is worst at:
+
+| executable directory | result |
+|---|---|
+| no `trace.ini` | `[settings] appconfig: C:\Users\andre\AppData\Local\Trace Project\Trace\trace.ini` |
+| writable `trace.ini` | `[settings] portable: ...\build\app\Release\trace.ini` |
+| **read-only `trace.ini`** | `Trace: ...trace.ini is not writable; using the per-user settings file instead.` then `[settings] appconfig: ...` |
+
+**One home, one owner, because three other things already want it**: phase 6's
+fullscreen geometry (in memory only today), phase 13's window state, and spec
+§4's `Lock Window to Media Aspect Ratio`, specified as checked by default and
+therefore needing somewhere to remember having been unchecked. Same single-gate
+pattern as `hasSourceTimecode_` and `OverlayModel::enabledByEnvironment()`.
+
+### The list is built so it CANNOT break its own rules
+
+The spec's Open Recent section is mostly refusals: do not probe every path
+during application startup, do not block on disconnected LucidLink/network
+paths, store canonical paths, report a missing file rather than dropping it.
+
+`RecentFiles.cpp` has **no `QFile`, no `QFileInfo` and no `QDir` in it at all**,
+and that is the design rather than an accident of what it needed. A refusal
+enforced by a comment is a refusal a later change removes; a refusal enforced by
+the module having no filesystem call in it is one a later change has to
+deliberately add. `rebuildRecentMenu()` follows the same rule — it takes the
+basename by searching the string for a separator, because `QFileInfo` is exactly
+what must not appear there.
+
+So the menu is drawn from stored strings and **every row is always enabled**.
+Whether a file is still present is discovered by *trying to open it*, which is
+work the user just asked for, at a cost they would have paid through File ▸ Open
+anyway.
+
+**No probe before the open, either.** The tempting shape for a recent entry is
+"check it is there, then open it", and on a disconnected mount that check costs
+exactly what the open costs and then the open pays it again. `openRecentPath`
+hands the path straight to `openPath`, so the recent list never makes Trace
+touch a path the user did not just ask it to. The existence question is asked
+only **after** a failure, when the path has already been reached and answering
+is free — and it is asked at all because "the file is gone" and "the file is
+there but will not decode" need different answers, and only the first may offer
+to remove the entry.
+
+`openPath` returns `bool` for that. It returned void until now; Open Recent is
+the first caller that has to do something different when an open fails, and
+inferring failure from a status-bar string would have been a second answer to a
+question the function already knows.
+
+### The negative control is 21 seconds long
+
+"Nothing was probed" is a claim about something not happening, and a check for
+that cannot fail unless the thing it is looking for would be visible. Measured
+on this box:
+
+```
+\\10.255.255.1\review\shot_0100_v004.mov   exists=False   21,037 ms
+\\10.255.255.2\review\shot_0100_v005.mov   exists=False   21,021 ms
+C:\NotThere\clip_001.mov                   exists=False        0 ms
+```
+
+**Two different unreachable hosts, deliberately**: Windows caches a failed UNC
+lookup for about ten seconds, so reusing one host would have made the second
+stat look cheap and understated the control rather than the result.
+
+So the settings file is seeded with ten entries, two of them those paths, and
+startup is timed from `CreateProcess` to a main window with a real rectangle —
+an interval that contains `MainWindow`'s constructor, which is where the list is
+loaded and the submenu built. `TRACE_SETTINGS_FILE` points the run at a scratch
+INI so the measurement does not edit the machine it runs on.
+
+| seeded list | window up |
+|---|---|
+| empty | 1402 / 1388 / **752** ms |
+| **ten entries, two unreachable UNC** | 708 / 702 / **723** ms |
+
+A single stat of one seeded entry costs ~21,000ms and two are seeded, so the
+budget for a probing implementation is +42s. The delta is **negative**.
+
+**And the check is not vacuous, which is the half that had to be proved
+separately.** If the seeded INI had not matched what `QSettings` reads, the app
+would have loaded zero entries and the "poison" leg would simply have been the
+clean leg again. The HUD says otherwise: **`recent 10/10 appconfig`**. All ten
+strings were read, ten menu actions were built from them, and none was touched.
+
+`recent N/max <home>` is on the storage line beside the Share gate, for the
+reason phase 8 established — neither is answerable from a screenshot of the
+window, and which settings home won is not written anywhere on screen.
+
+### The submenu, and one bug the escape prevented
+
+Captured with the poisoned list seeded and the real clip opened over it:
+
+```
+Open Recent >   1  M&M_TopGun_1080.mp4
+                2  clip_001.mov   ...   9  clip_008.mov
+               10  shot_0100_v004.mov
+               ------------------------
+                Clear Recent Files
+```
+
+Four things are visible in that one capture. The just-opened file is **first**;
+the list is **bound at 10**, so the eleventh entry was evicted; the digits are
+1–9 then **`0`** for the tenth, rather than a second `1` colliding with entry 1;
+and the unreachable UNC entry is **present and enabled**, not greyed, which is
+the refusal itself rendered.
+
+**`M&M_TopGun_1080.mp4` renders its ampersand**, which is a real bug not
+happening: unescaped, Qt would have read it as a mnemonic, drawn
+`MM_TopGun_1080.mp4`, and silently claimed Alt+M. Every asset name in the test
+set is tame except this one, so the file that catches it is in the set by luck
+rather than by design — worth knowing if the set ever changes.
+
+Popping the submenu with that list takes **1,152ms of a gesture whose own sleeps
+are 1,050ms**. The menu is rebuilt when the list *changes*, not on
+`aboutToShow`: the cost is identical today, and the difference is that
+`aboutToShow` is the natural home for a later "just check quickly" and this is
+not.
+
+### The missing-file prompt, and both of its buttons
+
+| | |
+|---|---|
+| prompt | *Trace can't find this file.* / `C:\NotThere\clip_001.mov` |
+| buttons | **&Remove from Recent** · **&Keep** (default) |
+| Remove | list 10 → **9**, `clip_001.mov` gone from the settings file |
+| Keep | list stays at **10**, entry still there |
+
+Keep is the default button because the destructive option should not be what a
+stray Return chooses. **Both branches were run**, not just the one the feature
+is about: an offer that removes the entry whichever button is pressed is not an
+offer, and reading the branch is not the same as executing it.
+
+**And the discrimination was run too.** A file that is *present but will not
+decode* — 4KB of garbage named `.mp4` — produces **no prompt and no recent
+entry**: the open fails, `QFileInfo::exists()` is true, so the entry is not
+offered for removal and a transient decode failure cannot delete a good
+bookmark.
+
+MRU and de-duplication, driven by opening files:
+
+```
+after opening M&M_TopGun_1080.mp4  -> [M&M_TopGun_1080.mp4]
+after opening Splash_1.mp4         -> [Splash_1.mp4 | M&M_TopGun_1080.mp4]
+after opening M&M_TopGun_1080.mp4  -> [M&M_TopGun_1080.mp4 | Splash_1.mp4]
+```
+
+Two entries, not three. Matching is case-insensitive because Windows paths are,
+and the stored string is `MediaShare::canonicalNativePath` — **exported from its
+anonymous namespace rather than written a second time**, because two answers to
+"what is this file's path" would eventually disagree and the recent list is
+exactly where that shows up, as two rows for one file. It costs nothing extra:
+the Share gate canonicalises the path a few lines earlier in the same open.
+
+Clear Recent Files: `size=10` → **0 path rows remain**. `save()` calls
+`remove()` before `beginWriteArray`, because `beginWriteArray` leaves indices
+past the new size in place — without it, clearing the list would have cleared
+nothing at all on disk and reappeared at the next launch.
+
+### Regression
+
+Control binary built from `1207837` in a separate worktree and **verified by
+hash on every swap** (`3DC518E0…` control, `3CD91CF2…` phase 11). **Physical
+panel, 5120x1440 @ 239.999Hz** — the same display as phase 10's regression and
+*not* the 1920x1080 @ 59.999Hz Parsec display phases 5–9 used, so `stalls` is on
+an 8.3ms bar here. `d3d11` default. Cadence in overlay mode; the drag, reverse
+and matrix runs in bar mode with `TRACE_TRANSPORT_BAR=1`, `win 1280x843`,
+`display 640x360 1:1`.
+
+| run | control | phase 11 |
+|---|---|---|
+| 4K H.264 cadence ×4 | 100.0% ×4, 120 frames, `handler>budget 0 of 119` (max 4.2/4.7/4.4/4.6), p50 41.7/41.6/41.6/41.8, max 43.9/43.9/44.0/43.5 | 100.0% ×4, 120 frames, `0 of 119` (max 5.0/4.3/4.3/4.3), p50 41.5/41.8/41.8/41.7, max 43.9/43.8/43.8/43.1 |
+| 4444 cadence ×3 | 99.8% ×3, 261 frames, `0 of 260` (max 40.0/37.1/38.5), max 46.8/44.7/47.7 | 99.8% ×3, 261 frames, `0 of 260` (max 39.0/37.4/37.4), max 44.4/44.5/45.5 |
+| reverse 1× ×8 | 3 of 8 slow | 5 of 8 slow — see below |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, `walk 0f`, full-res planar, `hitch 0`, `stalls 105 of 113`, `ui gap max 67.1ms`, `release 22.4ms` | same landing, `hitch 0`, `stalls 106 of 114`, `ui gap max 63.7ms`, `release 22.6ms` |
+| `scrub -SnapRelease -Reversals` | `hitch 1`, `delta 0`, `rev-hit 98.6%`, `stalls 67 of 417`, `ui gap max 77.3ms` | `hitch 1`, `delta 0`, `rev-hit 98.5%`, `stalls 65 of 410`, `ui gap max 76.1ms` |
+| lifecycle | `-PlayThroughDrag` PASS 40.3%, `-PausedThroughDrag` PASS 0% | PASS 40.3%, PASS 0% |
+| transitions | **25 of 25 PASS** | **25 of 25** — see below |
+| launch to window ×6 | min 710 / med 722 ms | min **701** / med **704** ms |
+
+Cadence buckets identical on both files (`~1x 119`, every other bucket 0 on 4K
+H.264). Landing exact on every run. **`paints` is unchanged** — 151–153 of 121
+on 4K H.264 and 284–287 of 262 on 4444, on both binaries — which is what says
+the phase adds no drawing.
+
+**The launch A/B is the one number this phase actually put at risk**, and it is
+the reason it was measured rather than argued: phase 11 is the first thing to
+run code in `MainWindow`'s constructor that reads a file. It reads fractionally
+*faster* than the control, i.e. the difference is inside the noise.
+
+**Reverse 1× is bimodal on both binaries, again, into the recorded
+populations** — `114 frames / 4.75s` at 100.0%, or `97 / 4.58s` at 88.1–88.2%.
+The first three-run pass read 3 of 3 slow on phase 11 against 1 of 3 on the
+control, which looked like something; five more runs each put it at **3 of 8
+against 5 of 8**, and `handler>budget 0 of 96` (max 3.5–3.6) on the slow runs
+says the decoder is not the cause on either. This is why that gesture has always
+been recorded as "take three" — and this session is the case where three was not
+enough to avoid quoting a difference that is not there.
+
+**One transitions case FAILed once and it was a launch that did not come up.**
+`F -> Space : FAIL - no window after restart` on the first phase 11 pass. Phase
+11 touches startup, so it was chased rather than waved off: three re-runs of the
+forward row read **3 of 3 PASS**, and the launch A/B above then measured startup
+directly on both binaries and found phase 11 the faster of the two. Transient.
+
+### What phase 11 changes about the plan
+
+**Spec §4, Media-driven window size, is scheduled — owner decision, 2026-08-11 —
+and it runs NEXT, before the Movie Inspector.** It had no phase number at all:
+the Implementation phasing list at §3 stops at 14 and §4 was appended after the
+main body. The reason for putting it before phase 12 rather than after 13 is
+that phase 12's Movie Inspector reports *current viewport size*, and §4 changes
+what that is; building the inspector against geometry that is about to move
+would mean revisiting it. It also gets more soak time under the phases that
+follow, which the riskiest remaining chunk should have. **The phase numbers
+after it all shift by one.**
+
+Two things are already known about §4 and both are recorded elsewhere: **§2 item
+7** — `syncScrubPreviewSize()` calls `reclaimDecoder()` and clears the decoder's
+frame cache on *every* resize, so continuous aspect-locked drag-resizing would
+thrash it and needs a resize-settled debounce measured rather than assumed; and
+the carried visual-review item that **the floating transport is 460 logical px
+wide against a 288px picture on 4×5 media**, whose premise §4's media-shaped
+window changes entirely.
+
+**`trace::app::settings()` is the settings home and there must not be a second
+one.** Phase 6's fullscreen geometry, phase 13's window state and §4's aspect
+lock all go through it. `QSettings` still appears once elsewhere — as an include
+in `LucidLinkIntegration.cpp`, reading the registry to discover shell-extension
+CLSIDs — and that is registry *reading*, not a settings home; do not mistake it
+for one.
+
+**`scripts/measure/recentfiles.ps1` is new**, with seven modes, and its
+`calibrate` mode exists so the 21-second control is printed beside the result it
+justifies rather than remembered. **`scripts/measure/swapexe.ps1` is new** and
+does what every phase since 6 has done by hand: stop the app, swap the binary,
+and print the hash of what is actually there.
+
+**Two harness faults, both the familiar shape.** `{RIGHT}` on a highlighted menu
+item moves to the **next top-level menu** rather than opening a submenu, so the
+first capture showed the Edit menu and looked like an Open Recent that had
+failed to open; the mnemonic (`Alt+F`, then `r`) works. And `SendKeys "%r"` to
+the modal prompt **never arrived** — the dialog was still on screen in the
+capture afterwards, and the run reported `FAIL - the entry is still in the
+settings file`, which is the code being accused by the instrument for the fourth
+time in four phases. The button is located from the dialog's own `HWND` and
+clicked now.
+
+**Still nothing hidden rather than disabled.** The Open Recent submenu goes grey
+when the list is empty, which is phase 8's Share rule applied again: a menu whose
+items come and go cannot be learned, and a missing command reads as a broken
+build rather than as an answer.
+
+---
+
 ## Session closeout — 2026-08-11 (phases 8, 9 and 10)
+
+**SUPERSEDED BY THE PHASE 11 CLOSEOUT BELOW for the phase-status table and the
+phase numbering.** Everything else here stands.
 
 **An index, not a second copy.** Every fact below is recorded in full in a phase
 section above or in `docs/next-session-prompt.md`. If this ever disagrees with
@@ -2005,3 +2295,82 @@ Shortcuts window, which is where every binding becomes visible at once.
   59.999Hz**; phase 10's is on **5120x1440 @ 239.999Hz**. `stalls` is
   `2 x refresh`, so its bar moved 33.3ms to 8.3ms and **no stall figure crosses
   that boundary**. `hitch` does.
+
+---
+
+## Session closeout — 2026-08-11 (phase 11)
+
+**An index, not a second copy.** Every fact below is recorded in full in the
+phase 11 section above or in `docs/next-session-prompt.md`. If this ever
+disagrees with the section it points at, the section wins.
+
+### Phase status — THE NUMBERING CHANGED, read this table rather than the one above
+
+| phase | state | commit |
+|---|---|---|
+| 1 audit | done | `7abb6a5` |
+| 2 shared actions and artwork | done | `58bfca6` |
+| 3 stepping and shuttle contracts | done | `4de678e` |
+| 4 forward shuttle | done | `e559d07` |
+| 5 reverse shuttle | done | `90140f9` |
+| 6 fullscreen + overlay auto-hide | done, **owner sign-off** | `bc84431` (CI 90) |
+| 7 Time Display + zero-based frame UI | done | `f15e368` (CI 92) |
+| 8 Share menu + path copying | done | `a6447aa` + `f39eb67` (CI 94) |
+| 9 LucidLink shell integration | done, **owner accepted** | `9b62ab0` (CI 96) |
+| 10 temporary view transforms | done | `d2b4481` (CI 98) |
+| **11 Open Recent + the settings home** | **COMPLETE** | `84be1a1` |
+| **12 Media-driven window size (spec section 4)** | **NEXT — inserted by owner decision** | — |
+| 13 Movie Inspector | pending (was 12) | — |
+| 14 Menus, help, accessibility proxy tree | pending (was 13) | — |
+| 15 Full regression pass | pending (was 14) | — |
+
+**Spec section 4 had no phase number at all** — the Implementation phasing list
+at section 3 stops at 14 and section 4 was appended after the main body. The
+owner scheduled it on 2026-08-11 and put it **before** the Movie Inspector,
+because the inspector reports *current viewport size* and section 4 changes what
+that is. Everything after it shifts by one.
+
+### Owner decisions taken this session
+
+1. **The settings home is a portable `trace.ini` beside the executable when one
+   exists and is writable, otherwise an IniFormat file under
+   `AppConfigLocation`.** Never `NativeFormat` — a portable ZIP with no
+   installer must not leave registry keys behind. One home, one owner
+   (`trace::app::settings()`), because phase 6's fullscreen geometry, phase 14's
+   window state and section 4's aspect lock all want it.
+2. **Spec section 4 runs next, as phase 12.** See the table above.
+
+### What this session established that outlives it
+
+1. **A refusal is best enforced by making it impossible, not by writing it
+   down.** `RecentFiles.cpp` has no `QFile`, `QFileInfo` or `QDir` in it, and
+   `rebuildRecentMenu()` takes a basename by searching the string, because
+   `QFileInfo` is exactly the call that must not be there. A later change that
+   wants to probe has to add the include first.
+2. **A check for something NOT happening needs a control large enough to see.**
+   An unreachable UNC path costs **21,037ms** to stat on this box, so a ten-entry
+   list with two of them gives a probing implementation a 42-second budget to
+   spend. Startup did not move — and the HUD's `recent 10/10` is what says all
+   ten strings were actually loaded, without which the whole measurement would
+   have been the clean leg run twice.
+3. **"The open failed" and "the file is gone" are different conditions.** Only
+   the second may offer to remove a recent entry; a 4KB file of garbage named
+   `.mp4` produces no prompt and no entry. Both buttons of the prompt were
+   pressed, because an offer that removes the entry either way is not an offer.
+4. **A fourth stale instrument accused correct code**, after phase 8's menu-icon
+   luminance, phase 9's un-refreshed HUD and phase 10's HUD refreshed before the
+   paint: `SendKeys "%r"` never reached the modal prompt, so the run reported the
+   entry as un-removed while the dialog sat on screen in its own capture.
+5. **Three runs of the reverse 1x gesture were not enough this time.** The first
+   pass read 3 of 3 in the slow population against the control's 1 of 3, which
+   looked like a regression; five more each settled it at 3 of 8 against 5 of 8,
+   both binaries in both recorded populations.
+
+### Closeout verification
+
+- Control worktree removed, `Trace.head.exe` and the test `trace.ini` deleted
+  from `build\app\Release`, no stash, no worktrees left.
+- Every A/B swap hash-verified: control `3DC518E0`, phase 11 `3CD91CF2`.
+- **`V:\` was never touched this session.**
+- Regression taken on the **physical panel, 5120x1440 @ 239.999Hz**, confirmed
+  with `refresh.ps1` at the start and again before quoting.

@@ -1,4 +1,18 @@
-# The interface pass is open, phase 10 shipped, and phase 11 is next.
+# The interface pass is open, phase 11 shipped, and spec §4 is next as phase 12.
+
+**READ THIS FIRST: THE PHASE NUMBERING CHANGED.** Spec §4, *Media-driven window size*, had no
+phase number — the spec's own phasing list stops at 14 and §4 was appended after the main body.
+The owner scheduled it on 2026-08-11 and put it **before** the Movie Inspector, so the order is
+now **12 = §4 media-driven window size · 13 = Movie Inspector · 14 = menus/help/accessibility ·
+15 = full regression.** Anything below that still says "phase 12 is the Movie Inspector" is the
+old numbering.
+
+**The settings home is decided and built** (owner, 2026-08-11): a portable `trace.ini` beside
+the executable when one exists and is writable, otherwise IniFormat under `AppConfigLocation`.
+`trace::app::settings()` is the one home; §4's `Lock Window to Media Aspect Ratio` uses it
+rather than adding a second. Do not re-raise it.
+
+
 
 Supersedes the previous version. **Spec phase 6 shipped and is signed off by the owner** — the
 floating overlay is the only transport, the docked bar is out of the layout behind
@@ -9,14 +23,16 @@ the Share menu, Copy File Path, Show in File Explorer, and the *gate* on Copy Lu
 **Spec phase 9 shipped** — Copy LucidLink Link works, driven through the installed
 integration's own shell command, and Trace never composes a link. **Spec phase 10 shipped** —
 the five view-transform actions are wired, rotation rotates what the user sees, and
-`TRACE_VIEW_TRANSFORM` is gone. **The next thing to do is spec phase 11, Open Recent.** Paste
-everything below the line into a fresh session in the repo root.
+`TRACE_VIEW_TRANSFORM` is gone. **Spec phase 11 shipped** — Open Recent, and Trace's first
+settings home. **The next thing to do is spec §4, Media-driven window size, as phase 12.**
+Paste everything below the line into a fresh session in the repo root.
 
-**Two owner decisions were taken on 2026-08-11 and are recorded rather than open.**
-Accessibility: **the alpha ships with the overlay invisible to a screen reader, and phase 13
-builds an accessibility proxy tree rather than polishing one** — see the loose-ends section,
-and estimate phase 13 as construction. And the `SNAP gop 2` keyframe-grid loose end is **no
-longer tracked**; it is not to be carried into another session's notes.
+**Four owner decisions are recorded rather than open.** Accessibility: **the alpha ships with
+the overlay invisible to a screen reader, and the menus/help phase (now 14) builds an
+accessibility proxy tree rather than polishing one** — see the loose-ends section, and estimate
+it as construction. The `SNAP gop 2` keyframe-grid loose end is **no longer tracked**. The
+**settings home** is decided and built (above). And **spec §4 is scheduled as phase 12**, ahead
+of the Movie Inspector.
 
 ---
 
@@ -121,54 +137,78 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 - **Phase 10 shipped on 2026-08-11** — the Edit menu's five view transforms, on the plan §31
   contract, with rotation compensated so it turns the picture the way the user sees it. Full
   record in the progress doc.
+- **Phase 11 shipped on 2026-08-11** (`84be1a1`) — Open Recent, bounded at 10, with Clear
+  Recent Files; and `trace::app::settings()`, the settings home the owner chose. Full record in
+  the progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
   run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0`, **run 90 on `bc84431`
   (phase 6)**, **run 92 on `f15e368` (phase 7)**, **run 94 on `1bec8c5` (phase 8)**,
   **run 96 on `69a45c1` (phase 9)** and **run 98 on `b6be899` (phase 10)**, all including the
-  renderer selftest.
+  renderer selftest. **Phase 11's run is `84be1a1` — check it before starting.**
 
-### Start at spec phase 11, and read `docs/interface-pass-1-progress.md` first
+### Start at spec §4 as phase 12, and read `docs/interface-pass-1-progress.md` first
 
-**Phase 11 is Open Recent**, and unlike phases 8–10 it is mostly a set of refusals. The spec's
-rules are the design:
+**Phase 12 is spec §4, Media-driven window size** — the chunk that had no phase number, now
+scheduled by the owner ahead of the Movie Inspector because the inspector reports *current
+viewport size* and §4 changes what that is. Read §4 in full; it is the largest remaining piece
+and it has its own validation matrix. In outline:
 
-- a **bounded** recent-file list, with **Clear Recent Files**;
-- **do not probe every path during application startup** — the list is drawn from stored
-  strings, not from the filesystem;
-- **do not block on disconnected LucidLink/network paths** — this is the one that matters here,
-  because `V:\` is exactly such a path and a cold LucidLink `stat` measured **407ms for a single
-  read** in the storage work. A recent list that stats its entries to grey out the missing ones
-  would hang the File menu on a disconnected mount;
-- a missing file is **reported, with an offer to remove the entry**, rather than silently
-  dropped;
-- store **canonical** paths;
-- do not log sensitive path history unnecessarily.
+- the normal window adopts the media's **exact display aspect ratio** so the viewport has no
+  black bars — computed from encoded size, **sample/pixel aspect**, DAR metadata when
+  authoritative, **rotation metadata**, and the phase 10 view transforms. §4 says outright:
+  *do not assume display ratio is always encoded width divided by encoded height*;
+- on open: natural displayed size when practical, scaled down to fit the monitor's work area
+  with a margin, chrome accounted for, the **video client area** sized to the ratio rather than
+  the outer frame, centred, same monitor, no upscaling of small media;
+- **View ▸ Lock Window to Media Aspect Ratio, checked by default** — which is what needs the
+  settings home phase 11 built;
+- aspect-locked interactive resize: dragged edge authoritative, no oscillation, no resize
+  recursion, minimum usable dimensions respected, re-evaluated after a 90° rotation;
+- **fullscreen / maximized / Snap Layouts are explicit exceptions** — preserve the image, use
+  neutral letterboxing, **never fight Windows by continuously resizing a snapped window**;
+- validation across 16:9, 9:16, 4:3, 1:1, 2.39:1, anamorphic, rotation metadata, very small and
+  very large sources, and 100/125/150/200% DPI.
 
-**Phase 8's `MediaShare` already computes the canonical path** (`canonicalNativePath`), so use
-that rather than a second normalisation. And note the phase 9 shape for anything that must
-touch a mount: probe off the UI thread, cache the answer against the path, and let the menu
-read the cache.
+**Two things are already known about it.** **§2 item 7** — `syncScrubPreviewSize()` calls
+`reclaimDecoder()` and clears the decoder's frame cache on *every* resize, so continuous
+aspect-locked drag-resizing would thrash it; it needs a resize-settled debounce **measured
+rather than assumed**, and that measurement is the first experiment of the phase. And the
+carried visual-review item that **the floating transport is 460 logical px wide against a 288px
+picture on 4×5 media** — §4's media-shaped window changes that premise rather than needing a
+panel fix, so it may close here.
 
-**PHASE 11 INTRODUCES TRACE'S FIRST PERSISTENT STATE, AND WHERE IT LIVES IS A DECISION.**
-There is no settings home today. `QSettings` appears once, as an include in
-`LucidLinkIntegration.cpp` for reading the registry to discover shell-extension CLSIDs — that
-is registry *reading*, not a settings home, so do not mistake it for one. Phase 6's fullscreen
-geometry restore keeps its state in memory only.
+**The 1×1 and 4×5 ProRes assets are the right material**, as they were for phase 10, and the
+9:16 clip is the third shape. Mixed-monitor DPI in §4's matrix is **not executable on this
+box** — `AllScreens` returns one display and Parsec replaces it rather than adding one — so
+that row is deferred with the rest of §20.4 and must be recorded as untested rather than
+skipped quietly.
 
-`QSettings`'s Windows default is `NativeFormat`, which writes to
-`HKCU\Software\<org>\<app>`. **Trace ships as a portable ZIP with no installer by deliberate
-choice** (`docs/release-notes-alpha.md`), and a portable app that leaves registry keys behind
-after its folder is deleted contradicts that. Decide this explicitly rather than inheriting
-the default. `QSettings::IniFormat` under `QStandardPaths::AppConfigLocation` is the
-conventional middle path — always writable, survives, no registry droppings — and preferring a
-`trace.ini` beside the executable when one exists gives true portable mode for a few lines.
+**Priority 1 applies with unusual force here.** §4 changes the video rect, and §22.8 says cache
+depth follows the video rect; phase 6 showed the pair can move in either direction. Quote
+`display` **and** `win WxH` on every figure, and expect the scrub baselines to move for a real
+reason rather than treating a moved number as a regression.
 
-**Establish it once, with a single owner, because three other things already want it**: phase
-6's fullscreen geometry, phase 13's window state, and §4's `Lock Window to Media Aspect Ratio`
-(specified as checked by default). That is the same single-gate pattern as
-`hasSourceTimecode_` and `OverlayModel::enabledByEnvironment()`. Also honour the spec's own
-rule here — *do not log sensitive path history unnecessarily* — which is a reason to keep the
-recent list short and to store nothing else about the files.
+### What phase 11 leaves behind
+
+- **`trace::app::settings()` is the settings home and there must not be a second one.** Phase
+  6's fullscreen geometry, phase 14's window state and §4's aspect lock all go through it.
+  `QSettings` still appears in `LucidLinkIntegration.cpp` — registry *reading* for CLSID
+  discovery, not a settings home.
+- **`RecentFiles.cpp` has no `QFile`, `QFileInfo` or `QDir` in it, on purpose**, and
+  `rebuildRecentMenu()` takes a basename by searching the string for the same reason. That is
+  how the spec's refusals are enforced. A change that adds a filesystem include there is
+  removing a guarantee, not fixing an oversight.
+- **`openPath` returns `bool` now.** A caller that needs to know whether media opened asks it
+  rather than parsing a status-bar string.
+- **`MediaShare::canonicalNativePath` is exported.** Anything that stores or compares a media
+  path uses it; a second normalisation shows up as two rows for one file.
+- **`scripts/measure/recentfiles.ps1` and `scripts/measure/swapexe.ps1` are new.** Run
+  `recentfiles.ps1 -Mode calibrate` beside any startup figure you quote — it prints the
+  21,037ms unreachable-UNC stat that is the only thing making "startup did not move" mean
+  anything. `swapexe.ps1` does the hash-verified control swap by hand no longer.
+- **Launch-to-window is now a number worth keeping**: min 701 / med 704ms on phase 11 against
+  710 / 722 on the control, six reps each. §4 runs code at open too, so it is the natural
+  comparison.
 
 ### What phase 10 leaves behind
 
@@ -248,36 +288,23 @@ own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
 
 ### The rest of the phase list, with what is known about each
 
-11. **Phase 11 is the open phase** — briefed in full above.
-12. **Phase 12's Movie Inspector has most of its data already**, and `VideoMetadata` gained
+**THE NUMBERS BELOW ARE THE POST-2026-08-11 ONES.** Spec §4 was inserted as phase 12 by owner
+decision, so everything after it moved up by one. A note elsewhere that calls the Movie
+Inspector "phase 12" or the Keyboard Shortcuts window "phase 13" predates that.
+
+12. **Phase 12 is spec §4, Media-driven window size** — the open phase, briefed in full above.
+    It was the chunk with no number; the owner scheduled it here on 2026-08-11.
+13. **Phase 13's Movie Inspector has most of its data already**, and `VideoMetadata` gained
     the start timecode at phase 7. Its rule is the one this project keeps proving: display
     Unknown or Untagged honestly, and do not infer missing colour metadata inside the
-    inspector.
-13. **Phase 13 renders the Keyboard Shortcuts window from `ShortcutTable::rows()`.** The table
+    inspector. Note its *current viewport size* field is the reason §4 goes first.
+14. **Phase 14 renders the Keyboard Shortcuts window from `ShortcutTable::rows()`.** The table
     is already complete; action-owned rows point at their `QAction` rather than copying it,
     and phase 7 added `Ctrl+G` / `Ctrl+Shift+G` to it as documentation rows. **It is also now
     the phase that BUILDS the accessibility proxy tree** — see the first loose end. Estimate
     it as construction, not polish.
-14. Full regression pass.
-
-**AND THERE IS A FIFTEENTH CHUNK WITH NO PHASE NUMBER.** `docs/interface-pass-1-spec.md` §4,
-*Media-driven window size*, is part of the same approved spec but is **absent from the
-Implementation phasing list at §3**, which stops at 14. It was appended after the main body and
-never phased. It is not small: the window adopting the media's exact display aspect ratio
-(accounting for sample aspect, DAR metadata, rotation metadata and the phase 10 view
-transforms), `View > Lock Window to Media Aspect Ratio` checked by default, aspect-locked
-interactive resizing without oscillation, an explicit policy for maximized / snapped /
-fullscreen states, and its own validation matrix across seven aspect ratios and five DPI
-settings.
-
-**Raise it with the owner before phase 14, not after** — a "full regression pass" that closes
-the interface pass while a specified chunk of it has never been scheduled would close the pass
-falsely. Two things are already known about it: **§2 item 7** — `syncScrubPreviewSize()` calls
-`reclaimDecoder()` and clears the decoder's frame cache on *every* resize, so continuous
-aspect-locked drag-resizing would thrash it and needs a resize-settled debounce measured rather
-than assumed; and the phase 9/10 note that **the floating transport is 460 logical px wide
-against a 288px picture on 4×5 media**, which §4's media-shaped window would change the premise
-of entirely.
+15. Full regression pass. **It can now honestly close the interface pass**, which it could not
+    while §4 was unscheduled.
 
 ### Priority 1 is the constraint on all of it
 
@@ -293,11 +320,11 @@ build or it will not launch.
 
 ## Loose ends worth knowing about, none of them blocking
 
-- **ACCESSIBILITY: THE OWNER HAS DECIDED, 2026-08-11 — the alpha ships this way and PHASE 13
-  BUILDS IT.** This is a recorded decision now, not a discovery, and it should not be re-raised
-  as a question.
+- **ACCESSIBILITY: THE OWNER HAS DECIDED, 2026-08-11 — the alpha ships this way and the
+  MENUS/HELP PHASE (now 14) BUILDS IT.** This is a recorded decision now, not a discovery, and
+  it should not be re-raised as a question.
 
-  The facts behind it, kept because phase 13 needs them: `grep -rn
+  The facts behind it, kept because that phase needs them: `grep -rn
   "QAccessible\|accessibleName" src/` returns **nothing**. Trace has no accessibility code at
   all, and it never needed any while the transport was `TransportBar`'s `QPushButton`s and
   `QSlider`, because Qt exposes standard widgets to UI Automation automatically. The composited
@@ -417,6 +444,30 @@ while ProRes 4444 delivered 1.00× when asked for 2×.
 **Names lie; read the definition.** `isVideoScrubActive()` means "the media is a video file",
 not "a drag is in progress".
 
+**A refusal enforced by a comment is a refusal a later change removes.** Phase 11's recent list
+must not touch the filesystem, so `RecentFiles.cpp` contains no `QFile`, `QFileInfo` or `QDir`
+and `rebuildRecentMenu()` finds a basename by searching the string. A later change that wants
+to probe has to add the include first, which is a visible act rather than a one-line slip.
+
+**A check for something NOT happening needs a control big enough to see.** "Startup does not
+probe the recent paths" is unfalsifiable against local paths that stat in microseconds; against
+an unreachable UNC host it costs **21,037ms apiece**, so ten seeded entries with two of those
+give a probing build a 42-second budget to spend. **And the seeding itself has to be proved** —
+the HUD's `recent 10/10` is what says the list was actually read, without which the poisoned leg
+would just be the clean leg run twice.
+
+**Three runs of the reverse 1× gesture were not enough, on the phase where it mattered.** The
+first pass read 3 of 3 in the slow population against the control's 1 of 3 and looked like a
+regression; five more runs each settled it at 3 of 8 against 5 of 8, both binaries in both
+recorded populations. "Take three" is the floor, not the answer.
+
+**FOURTH STALE INSTRUMENT IN FOUR PHASES.** Phase 8 read menu-icon luminance, phase 9 read a
+HUD not refreshed after the LucidLink probe, phase 10 read a HUD refreshed before the paint
+that measures the fit, and phase 11's `SendKeys "%r"` never reached a modal prompt — the run
+reported the recent entry as un-removed while the dialog sat on screen in its own capture. In
+all four the code was right. **Before believing a reading, ask when it was taken and whether
+the input it claims to have sent arrived.**
+
 ## `d3d11` is the default renderer, and two obligations follow
 
 `TRACE_RENDERER=cpu` is the control and the escape hatch — **the first thing to try if
@@ -513,7 +564,11 @@ or `+bar`.
   it grabs the window directly because `capture.ps1`'s 300ms is 216 frames at 30×).
 
   *Mode-independent*: `cadence.ps1`, `playhud.ps1`, `refresh.ps1`, `capture.ps1`,
-  `sidebyside.ps1`, `stalls_vs_window.ps1`, `abfilter.ps1`/`croprect.ps1`, and
+  `sidebyside.ps1`, `stalls_vs_window.ps1`, `abfilter.ps1`/`croprect.ps1`,
+  **`recentfiles.ps1`** (spec phase 11; **run `-Mode calibrate` beside any startup figure you
+  quote** — it prints the 21,037ms unreachable-UNC stat that makes "startup did not move" a
+  measurement. It uses `TRACE_SETTINGS_FILE`, so it never writes the real per-user file),
+  **`swapexe.ps1`** (the hash-verified control-binary swap), and
   **`make_timecode_fixtures.ps1`** — which generates the 29.97 drop/non-drop pair the asset
   set does not contain. Read its header before changing the fixture: the start time is chosen
   so a *dropping* minute falls inside the clip, and a start near a ten-minute boundary makes

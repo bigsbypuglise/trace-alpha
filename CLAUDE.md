@@ -583,6 +583,69 @@ neither. `Ctrl+L`/`Ctrl+R` are unclaimed in both and are taken. The menu item is
 not "&Reset", because Rotate Right already owns R there and two items sharing a mnemonic makes
 the key cycle the highlight instead of activating either.
 
+**SPEC PHASE 11 IS DONE (2026-08-11): Open Recent ships, and Trace has a settings home.**
+`File ▸ Open Recent`, bounded at 10, with Clear Recent Files. `src/app/Settings.*` and
+`src/app/RecentFiles.*`.
+
+**THE SETTINGS HOME IS AN OWNER DECISION, NOT QT'S DEFAULT** (owner, 2026-08-11): a
+`trace.ini` **beside `Trace.exe` when one exists and is writable**, otherwise
+`QSettings::IniFormat` under `AppConfigLocation`. Never `NativeFormat` — that writes
+`HKCU\Software\<org>\<app>`, and a portable ZIP with no installer must not leave registry keys
+behind after its folder is deleted. Trace **never creates** the portable file: its presence is
+how a user asks for portable mode, and creating it would make every installation portable.
+A read-only one **falls back and says so on stderr**. All three branches were run and differ
+(`TRACE_SETTINGS_LOG=1`). **`trace::app::settings()` is the one home and must not grow a
+second** — phase 6's fullscreen geometry, phase 14's window state and §4's aspect lock all
+want it. `QSettings` still appears in `LucidLinkIntegration.cpp`, but that is registry
+*reading* for CLSID discovery, not a settings home.
+
+Five things to carry.
+
+- **THE REFUSALS ARE ENFORCED BY MAKING THEM IMPOSSIBLE.** `RecentFiles.cpp` has **no
+  `QFile`, `QFileInfo` or `QDir` in it at all**, and `rebuildRecentMenu()` takes a basename by
+  searching the string, because `QFileInfo` is precisely the call that must not be there. The
+  menu is drawn from stored strings, **every row is always enabled**, and the submenu is
+  rebuilt when the list *changes* rather than on `aboutToShow` — identical cost today, but
+  `aboutToShow` is the natural home for a later "just check quickly".
+- **THE CONTROL IS 21 SECONDS LONG, AND WITHOUT IT THE CHECK COULD NOT FAIL.** An unreachable
+  UNC path costs **21,037ms** to stat on this box (two *different* hosts, because Windows
+  caches a failed lookup for ~10s). Ten seeded entries, two of them such paths: window up in
+  **708ms against 752ms on an empty list**, i.e. a 42-second budget unspent. **And the HUD's
+  `recent 10/10` is what says the seeded list was actually read** — without it the poison leg
+  would have been the clean leg run twice.
+- **NO PROBE BEFORE THE OPEN EITHER.** "Check it is there, then open it" pays the disconnected
+  mount's cost twice. `openRecentPath` hands the path straight to `openPath` (which returns
+  **bool** now), so the recent list never makes Trace touch a path the user did not just ask
+  for; existence is asked only **after** a failure, when it is free. That distinction is load
+  bearing: **"the open failed" and "the file is gone" are different conditions**, and only the
+  second may offer to remove the entry. A 4KB file of garbage named `.mp4` produces no prompt
+  and no recent entry.
+- **Both buttons of the missing-file prompt were pressed.** Remove takes the list 10 → 9 and
+  clears the stored row; **Keep leaves it at 10**. An offer that removes the entry whichever
+  button is pressed is not an offer. Keep is the default so a stray Return is not destructive.
+- **`MediaShare::canonicalNativePath` left its anonymous namespace rather than being written
+  twice**, and it costs nothing extra because the Share gate canonicalises the path a few
+  lines earlier in the same open. **The `&` in `M&M_TopGun_1080.mp4` is escaped** — unescaped,
+  Qt draws `MM_TopGun_1080.mp4` and silently claims Alt+M; that filename is the only one in
+  the asset set that catches it.
+
+Regression against a control built from `1207837`, hash-verified (`3DC518E0` / `3CD91CF2`),
+**physical panel 5120x1440 @ 239.999Hz**, `win 1280x843`, `display 640x360 1:1`: 4K H.264
+cadence ×4 100.0% with identical buckets, 4444 ×3 99.8%, `-SnapRelease` `target 120 shown 120
+delta 0` full-res planar / `hitch 0`, reversal drag `hitch 1` / `delta 0`, both lifecycle legs,
+**25 of 25 transitions**, `paints` unchanged. **Launch to window was A/B'd because this is the
+first phase to read a file in `MainWindow`'s constructor**: min 701 / med 704ms against the
+control's 710 / 722. Reverse 1× went bimodal into the recorded populations on both binaries —
+the first three-run pass read 3 of 3 slow against 1 of 3 and looked like a regression; five
+more each settled it at **3 of 8 against 5 of 8**. One transitions case FAILed once with "no
+window after restart" and re-ran 3 of 3 PASS.
+
+**SPEC §4, MEDIA-DRIVEN WINDOW SIZE, IS SCHEDULED AND RUNS NEXT AS PHASE 12** (owner,
+2026-08-11). It had **no phase number**: the spec's own phasing list stops at 14 and §4 was
+appended after the main body. It goes before the Movie Inspector because the inspector reports
+*current viewport size* and §4 changes what that is. Everything after it shifts by one — Movie
+Inspector 13, menus/help/accessibility 14, full regression 15.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
@@ -1357,6 +1420,11 @@ run at all** — `scrub.ps1`, `revplay.ps1`, `lifecycle.ps1`, `transitions.ps1`,
 and `TRACE_OVERLAY_COMPOSITED=0` select it too, so turning the overlay off asks for the other
 transport rather than for none), `TRACE_OVERLAY=1` (the floating transport — **on by default
 since spec phase 6**; `TRACE_OVERLAY_COMPOSITED=1` is retained because the harness sets it),
+**`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
+home at a scratch INI, and print which home won. The first exists so a measurement of the
+recent list does not edit the machine it runs on and can start from a known list; the second
+because which of the three homes is in force is a *path*, and a path is the thing a 15px HUD
+capture is worst at),
 and ~~`TRACE_VIEW_TRANSFORM`~~ (**gone as of spec phase 10** -- the interim rotate/flip knob; the Edit menu's five actions replaced it and it left with the phase that made it redundant, exactly as `TRACE_SHUTTLE_ENTRY` did at phase 5), **`TRACE_LUCID_LOG=1`** (spec phase 9: one stderr line per LucidLink probe and copy -- the gate is three refusals deep and `disabled` looks identical whichever one fired) and **`TRACE_LUCID_COINIT=1`** (the retained control for the apartment question: `CoInitializeEx` instead of `OleInitialize`, measured identical).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
@@ -1395,6 +1463,17 @@ reads as a filtering difference. `previewshot.ps1` captures with the mouse butto
 still **down**, since the release is what lands a full-resolution frame.
 **Never use Trace as its own reference here** — §20.3 spent a session on a
 CPU-vs-GPU difference where both sides were the same 2x2 tap.
+
+**Open Recent has a harness now**: `scripts/measure/recentfiles.ps1` (spec phase 11), seven
+modes. **Run `-Mode calibrate` beside any startup result you quote** — it prints what a stat on
+the seeded unreachable paths actually costs (21,037ms), which is the only thing that makes
+"startup did not move" a measurement rather than an assertion. `-Mode startup` seeds ten
+entries including two unreachable UNC hosts and times launch-to-window against an empty list;
+`-Mode missing` (with `-Keep` as its negative control) drives the missing-file prompt;
+`-Mode behaviour` covers MRU, de-duplication and the present-but-undecodable case;
+`-Mode home` runs all three settings-home branches. It uses `TRACE_SETTINGS_FILE`, so it never
+writes the real per-user file. **`scripts/measure/swapexe.ps1`** does the control-binary swap
+every phase since 6 has done by hand and prints the hash of what is actually live.
 
 **Lifecycle gestures have a harness now**: `scripts/measure/lifecycle.ps1`
 covers step +/-5 determinism after a release, play-after-release, opening
