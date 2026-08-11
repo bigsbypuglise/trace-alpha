@@ -32,6 +32,20 @@ public:
         return false;
     }
 
+    // The source's SMPTE start timecode, when it carries one.
+    //
+    // Returns false when there is none, and that is a real answer rather than a
+    // gap to be filled: the spec forbids generating SMPTE from zero when the
+    // source states none, and forbids labelling an elapsed-time conversion as
+    // source timecode. An image sequence has no container timecode at all, so
+    // the default here is the honest answer for it and it takes no override --
+    // the same shape as fpsRational, and for the same reason.
+    virtual bool sourceTimecode(QString& start, bool& dropFrame) const {
+        start.clear();
+        dropFrame = false;
+        return false;
+    }
+
     virtual long long currentFrame() const = 0;
     virtual void setCurrentFrame(long long frame) = 0;
     virtual long long maxFrame() const = 0;

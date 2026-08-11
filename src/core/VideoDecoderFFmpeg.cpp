@@ -20,6 +20,8 @@ extern "C" {
 #include <QFile>
 #include <QDir>
 
+#include "core/TimeFormat.h"
+
 namespace trace::core {
 
 #ifdef TRACE_WITH_FFMPEG
@@ -998,6 +1000,47 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     impl_->streamTimeBase = stream->time_base;
     impl_->streamStartTs = (stream->start_time != AV_NOPTS_VALUE) ? stream->start_time : 0;
 
+    // SOURCE TIMECODE, READ AND NEVER SYNTHESISED (spec phase 7).
+    //
+    // Three places are checked, in the order a real file is most likely to
+    // carry it. FFmpeg's mov demuxer publishes a tmcd track's value on the
+    // FORMAT dictionary; MXF and some MOVs put it on the video stream; and a
+    // few containers leave it only on the data stream that carries it. Checking
+    // all three is a handful of dictionary lookups at open time and is the
+    // difference between "this file has no timecode" and "we looked in one
+    // place".
+    //
+    // The value is then PARSED AND RE-FORMATTED rather than stored raw, so
+    // anything unreadable becomes "no timecode" here instead of reaching a
+    // readout that would print it verbatim and call it SMPTE.
+    {
+        const AVDictionaryEntry* tcEntry =
+            av_dict_get(stream->metadata, "timecode", nullptr, 0);
+        if (!tcEntry) tcEntry = av_dict_get(impl_->fmt->metadata, "timecode", nullptr, 0);
+        if (!tcEntry) {
+            for (unsigned i = 0; i < impl_->fmt->nb_streams && !tcEntry; ++i) {
+                tcEntry = av_dict_get(impl_->fmt->streams[i]->metadata, "timecode", nullptr, 0);
+            }
+        }
+        if (tcEntry && tcEntry->value) {
+            TimeFormat::Timecode parsed;
+            if (TimeFormat::parseTimecode(QString::fromUtf8(tcEntry->value), parsed)) {
+                // A drop-frame flag at a rate that has no drop-frame is
+                // dropped rather than honoured: the file is malformed, and
+                // carrying the claim forward would make Go to Timecode do
+                // arithmetic the rate cannot support.
+                parsed.dropFrame = parsed.dropFrame
+                                && TimeFormat::dropFrameApplies(metadata_.fpsNum, metadata_.fpsDen);
+                // Frames must be a number this rate can actually produce.
+                if (parsed.frames < TimeFormat::nominalRate(metadata_.fpsNum, metadata_.fpsDen)) {
+                    metadata_.startTimecode = TimeFormat::formatTimecode(parsed);
+                    metadata_.startTimecodeDropFrame = parsed.dropFrame;
+                    metadata_.hasStartTimecode = true;
+                }
+            }
+        }
+    }
+
     if (stream->nb_frames > 0) metadata_.frameCount = static_cast<long long>(stream->nb_frames);
     else if (impl_->fmt->duration > 0) metadata_.frameCount = static_cast<long long>(std::floor((impl_->fmt->duration / static_cast<double>(AV_TIME_BASE)) * metadata_.fps));
 
@@ -1040,7 +1083,7 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             "\tprobeReads=%11\tprobeBytes=%12\tprobeSeeks=%13"
             "\tstreams=%14\tvideoIdx=%15\taudioIdx=%16\tcodec=%17"
             "\tw=%18\th=%19\tpixfmt=%20\tfps=%21\tfpsQ=%22/%23\ttb=%24/%25"
-            "\tdur=%26\tframes=%27\tcolorspace=%28\trange=%29")
+            "\tdur=%26\tframes=%27\tcolorspace=%28\trange=%29\ttimecode=%30")
             .arg(QFileInfo(path).fileName())
             .arg(si.remote ? "remote" : "local")
             .arg(perfStats_.probeSizeLimit)
@@ -1067,7 +1110,12 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             .arg(QString::number(metadata_.durationSeconds, 'f', 4))
             .arg(metadata_.frameCount)
             .arg(static_cast<int>(par->color_space))
-            .arg(static_cast<int>(par->color_range)));
+            .arg(static_cast<int>(par->color_range))
+            // "none" rather than an empty field: the whole point of this
+            // extraction is that absence is a real answer, and a blank column
+            // in a tab-separated log reads as a bug in the logger.
+            .arg(metadata_.hasStartTimecode ? metadata_.startTimecode
+                                            : QStringLiteral("none")));
     }
 
     error.clear();

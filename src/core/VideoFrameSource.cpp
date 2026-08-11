@@ -35,6 +35,20 @@ bool VideoFrameSource::fpsRational(int& num, int& den) const {
     return true;
 }
 
+bool VideoFrameSource::sourceTimecode(QString& start, bool& dropFrame) const {
+    start.clear();
+    dropFrame = false;
+    if (!decoder_) return false;
+    const auto& md = decoder_->metadata();
+    // metadata() is the one field read live while a scrub lease is out, and
+    // that stays safe here for the reason it does there: only open() writes it,
+    // and open() cannot run while a lease is out.
+    if (!md.hasStartTimecode) return false;
+    start = md.startTimecode;
+    dropFrame = md.startTimecodeDropFrame;
+    return true;
+}
+
 long long VideoFrameSource::maxFrame() const {
     if (!decoder_) return -1;
     return decoder_->metadata().frameCount > 0 ? decoder_->metadata().frameCount - 1 : -1;

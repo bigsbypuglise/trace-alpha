@@ -75,6 +75,28 @@ private:
     // the window manager actually did.
     void toggleFullscreen();
     void setHudVisible(bool visible);
+    // The one place the time readout changes. Refuses SMPTE when the source
+    // carries no timecode and says why, rather than accepting a mode that would
+    // then have to print something else -- a key that changes nothing on screen
+    // is the `showInfo` failure phase 2 deleted.
+    void setReadoutMode(trace::core::PrimaryReadoutMode mode);
+    // Ticks the checked readout and enables/disables everything SMPTE from the
+    // one `hasSourceTimecode_` gate, so the menu cannot disagree with the HUD.
+    void syncTimeDisplayActions();
+    // Re-reads the source's start timecode and parses it ONCE per media open.
+    // Also resets the readout out of SMPTE if the new media has none.
+    void refreshSourceTimecode();
+    // The source timecode at a frame index: start + index, in the source's own
+    // drop-frame convention. Only meaningful when hasSourceTimecode_.
+    QString sourceTimecodeAt(long long frame) const;
+    // Frame index for a source timecode, or -1 if it does not parse, is not
+    // this source's convention, or falls outside the media.
+    long long frameForSourceTimecode(const QString& text) const;
+    void promptGoToFrame();
+    void promptGoToTimecode();
+    // One validated, exact jump, shared by both prompts. Uses the existing Step
+    // path, so neither prompt needed any decoder work.
+    void goToFrame(long long frame, const char* action);
     // The spec's temporary shuttle-rate indicator, driven from startShuttle --
     // the one place a shuttle rate is ever chosen -- and delivered to both the
     // docked bar's label and the floating overlay's text from one string.
@@ -360,6 +382,26 @@ private:
     // once for the transport button -- with no action at all, which is the one
     // place the spec's "menus, buttons, tooltips, shortcuts and checked states
     // stay synchronized" requirement was not already met.
+    // The source's start timecode, parsed once at open rather than per HUD
+    // refresh. `hasSourceTimecode_` is the single gate on everything SMPTE:
+    // the readout mode, the menu item and Go to Timecode all ask it, so
+    // "the source has none" cannot be true in one place and false in another.
+    bool hasSourceTimecode_ = false;
+    bool sourceTimecodeDropFrame_ = false;
+    long long sourceTimecodeStartFrames_ = 0;
+    // The rate the timecode arithmetic runs at, exact. Timecode counts whole
+    // frames per second, so 30000/1001 needs the rational and not the double --
+    // this is the same reason fpsNum/fpsDen exist for the scheduler.
+    int timecodeFpsNum_ = 24;
+    int timecodeFpsDen_ = 1;
+
+    QAction* timeDisplayFrameAction_ = nullptr;
+    QAction* timeDisplaySecondsAction_ = nullptr;
+    QAction* timeDisplayElapsedAction_ = nullptr;
+    QAction* timeDisplayTimecodeAction_ = nullptr;
+    QAction* goToFrameAction_ = nullptr;
+    QAction* goToTimecodeAction_ = nullptr;
+
     QAction* fullscreenAction_ = nullptr;
     // Escape, as a second surface onto fullscreenAction_. Its ENABLED state is
     // the "only while fullscreen" rule: a disabled QAction does not consume its

@@ -3,8 +3,12 @@
 #include <QScreen>
 
 #include <QAction>
+#include <QActionGroup>
 #include <QApplication>
 #include <QDragEnterEvent>
+#include <QInputDialog>
+#include <QLineEdit>
+#include <QMenu>
 #include <QDropEvent>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -23,6 +27,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <limits>
 
 #include "ui/OverlaySpike.h"
 #include "ui/ViewerWidget.h"
@@ -905,6 +910,43 @@ void MainWindow::setupSharedActions() {
     connect(exitFullscreenAction_, &QAction::triggered, this, &MainWindow::toggleFullscreen);
     addAction(exitFullscreenAction_);
 
+    // Time Display (spec phase 7). Four mutually exclusive readouts in one
+    // QActionGroup, so "which readout is showing" has one owner and the menu
+    // cannot show two ticks. Every one of them goes through setReadoutMode --
+    // the group decides which is checked, setReadoutMode decides whether the
+    // mode is allowed at all.
+    auto* readoutGroup = new QActionGroup(this);
+    readoutGroup->setExclusive(true);
+
+    const auto addReadout = [&](QAction*& slot, const QString& text,
+                                trace::core::PrimaryReadoutMode mode) {
+        slot = new QAction(text, this);
+        slot->setCheckable(true);
+        readoutGroup->addAction(slot);
+        connect(slot, &QAction::triggered, this, [this, mode]() { setReadoutMode(mode); });
+        addAction(slot);
+    };
+    addReadout(timeDisplayFrameAction_, tr("Frame &Count"), PrimaryReadoutMode::Frame);
+    addReadout(timeDisplaySecondsAction_, tr("&Seconds"), PrimaryReadoutMode::Seconds);
+    addReadout(timeDisplayElapsedAction_, tr("&Elapsed Time"), PrimaryReadoutMode::Elapsed);
+    addReadout(timeDisplayTimecodeAction_, tr("SMPTE &Timecode"), PrimaryReadoutMode::Timecode);
+
+    goToFrameAction_ = new QAction(tr("&Go to Frame..."), this);
+    goToFrameAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_G));
+    connect(goToFrameAction_, &QAction::triggered, this, &MainWindow::promptGoToFrame);
+    addAction(goToFrameAction_);
+
+    goToTimecodeAction_ = new QAction(tr("Go to &Timecode..."), this);
+    goToTimecodeAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
+    connect(goToTimecodeAction_, &QAction::triggered, this, &MainWindow::promptGoToTimecode);
+    addAction(goToTimecodeAction_);
+
+    // Both jumps carry a MODIFIER, which puts them on the QAction half of the
+    // keyboard contract by the rule phase 3 set: a modifier'd shortcut goes on
+    // an action, because QAction is what resolves modifier ambiguity properly
+    // and ShortcutTable's own dispatcher deliberately ignores modifiers.
+    syncTimeDisplayActions();
+
     // The dev diagnostics HUD. Owner request, 2026-08-10: a quick way to put the
     // instrument away while judging feel, and back for measuring.
     //
@@ -950,6 +992,12 @@ void MainWindow::setupShortcuts() {
     shortcuts_.addAction(ShortcutGroup::View, fullscreenAction_);
     shortcuts_.addAction(ShortcutGroup::View, exitFullscreenAction_);
     shortcuts_.addAction(ShortcutGroup::View, toggleHudAction_);
+    // Both carry a modifier, so Qt dispatches them and these rows are
+    // documentation -- which is what makes the table the complete keyboard
+    // contract phase 13 has to render, rather than only the part this window
+    // happens to dispatch itself.
+    shortcuts_.addAction(ShortcutGroup::View, goToFrameAction_);
+    shortcuts_.addAction(ShortcutGroup::View, goToTimecodeAction_);
 
     shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_Space, tr("Play / Pause"),
                       [this]() { togglePlayPause(); refreshHud("Space"); });
@@ -1002,18 +1050,18 @@ void MainWindow::setupShortcuts() {
         refreshHud("L");
     });
 
-    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_F, tr("Readout: frames"), [this]() {
-        viewState_.readoutMode = PrimaryReadoutMode::Frame;
-        refreshHud("Readout: Frame");
-    });
-    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_S, tr("Readout: seconds"), [this]() {
-        viewState_.readoutMode = PrimaryReadoutMode::Seconds;
-        refreshHud("Readout: Seconds");
-    });
-    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_T, tr("Readout: timecode"), [this]() {
-        viewState_.readoutMode = PrimaryReadoutMode::Timecode;
-        refreshHud("Readout: Timecode");
-    });
+    // All four go through setReadoutMode, which is where SMPTE is refused when
+    // the source has none. Writing viewState_.readoutMode from a key would be a
+    // second way in, and the gate would then hold in the menu and not on the
+    // keyboard.
+    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_F, tr("Readout: frame count"),
+                      [this]() { setReadoutMode(PrimaryReadoutMode::Frame); });
+    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_S, tr("Readout: seconds"),
+                      [this]() { setReadoutMode(PrimaryReadoutMode::Seconds); });
+    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_E, tr("Readout: elapsed time"),
+                      [this]() { setReadoutMode(PrimaryReadoutMode::Elapsed); });
+    shortcuts_.addKey(ShortcutGroup::View, Qt::Key_T, tr("Readout: source timecode"),
+                      [this]() { setReadoutMode(PrimaryReadoutMode::Timecode); });
 }
 
 // Single-key shortcuts and text entry: there is NO text-entry control anywhere
@@ -1101,6 +1149,215 @@ void MainWindow::setHudVisible(bool visible) {
     refreshHud(visible ? "HUD On" : "HUD Off");
 }
 
+// The one place the time readout changes, and the one place SMPTE is refused.
+//
+// A mode the source cannot support is DECLINED WITH A REASON rather than
+// accepted and quietly rendered as something else. Accepting it would put the
+// app back in the state phase 7 exists to leave: a readout labelled `Timecode:`
+// showing a value the source never stated.
+void MainWindow::setReadoutMode(trace::core::PrimaryReadoutMode mode) {
+    if (mode == PrimaryReadoutMode::Timecode && !hasSourceTimecode_) {
+        refreshHud("Timecode: source carries none");
+        syncTimeDisplayActions();
+        return;
+    }
+    viewState_.readoutMode = mode;
+    syncTimeDisplayActions();
+    switch (mode) {
+        case PrimaryReadoutMode::Frame:    refreshHud("Readout: Frame"); break;
+        case PrimaryReadoutMode::Seconds:  refreshHud("Readout: Seconds"); break;
+        case PrimaryReadoutMode::Elapsed:  refreshHud("Readout: Elapsed"); break;
+        case PrimaryReadoutMode::Timecode: refreshHud("Readout: Timecode"); break;
+    }
+}
+
+void MainWindow::syncTimeDisplayActions() {
+    const auto m = viewState_.readoutMode;
+    if (timeDisplayFrameAction_) timeDisplayFrameAction_->setChecked(m == PrimaryReadoutMode::Frame);
+    if (timeDisplaySecondsAction_) timeDisplaySecondsAction_->setChecked(m == PrimaryReadoutMode::Seconds);
+    if (timeDisplayElapsedAction_) timeDisplayElapsedAction_->setChecked(m == PrimaryReadoutMode::Elapsed);
+    if (timeDisplayTimecodeAction_) {
+        timeDisplayTimecodeAction_->setChecked(m == PrimaryReadoutMode::Timecode);
+        // "Enable only when valid timecode exists in the source." Disabled, the
+        // item is visibly unavailable rather than absent, which is the honest
+        // report: this file has no timecode, not this build has no feature.
+        timeDisplayTimecodeAction_->setEnabled(hasSourceTimecode_);
+    }
+    if (goToTimecodeAction_) goToTimecodeAction_->setEnabled(hasSourceTimecode_);
+    if (goToFrameAction_) goToFrameAction_->setEnabled(frameSource_ && frameSource_->maxFrame() >= 0);
+}
+
+// Parsed ONCE per media open, not per HUD refresh. The HUD rebuilds several
+// times a second during a drag and re-parsing a timecode string there would be
+// per-frame work for a value that cannot change while the file is open.
+void MainWindow::refreshSourceTimecode() {
+    hasSourceTimecode_ = false;
+    sourceTimecodeDropFrame_ = false;
+    sourceTimecodeStartFrames_ = 0;
+    timecodeFpsNum_ = 24;
+    timecodeFpsDen_ = 1;
+
+    if (frameSource_) {
+        int num = 0, den = 0;
+        if (frameSource_->fpsRational(num, den) && num > 0 && den > 0) {
+            timecodeFpsNum_ = num;
+            timecodeFpsDen_ = den;
+        } else {
+            // No container rational. Fall back to the double, which is what
+            // every other consumer uses -- but keep it as a ratio so the
+            // timecode arithmetic has one code path rather than two.
+            timecodeFpsNum_ = static_cast<int>(std::lround(frameSource_->fps() * 1000.0));
+            timecodeFpsDen_ = 1000;
+            if (timecodeFpsNum_ <= 0) { timecodeFpsNum_ = 24; timecodeFpsDen_ = 1; }
+        }
+
+        QString start;
+        bool drop = false;
+        if (frameSource_->sourceTimecode(start, drop)) {
+            trace::core::TimeFormat::Timecode parsed;
+            if (trace::core::TimeFormat::parseTimecode(start, parsed)) {
+                parsed.dropFrame = drop;
+                sourceTimecodeStartFrames_ =
+                    trace::core::TimeFormat::timecodeToFrames(parsed, timecodeFpsNum_, timecodeFpsDen_);
+                sourceTimecodeDropFrame_ = drop;
+                hasSourceTimecode_ = true;
+            }
+        }
+    }
+
+    // New media with no timecode must not leave the readout claiming one. This
+    // is the case the mode gate cannot catch, because nothing was selected --
+    // the mode was already set when the file changed underneath it.
+    if (!hasSourceTimecode_ && viewState_.readoutMode == PrimaryReadoutMode::Timecode) {
+        viewState_.readoutMode = PrimaryReadoutMode::Elapsed;
+    }
+    syncTimeDisplayActions();
+}
+
+QString MainWindow::sourceTimecodeAt(long long frame) const {
+    const auto tc = trace::core::TimeFormat::framesToTimecode(
+        sourceTimecodeStartFrames_ + std::max(0LL, frame),
+        timecodeFpsNum_, timecodeFpsDen_, sourceTimecodeDropFrame_);
+    return trace::core::TimeFormat::formatTimecode(tc);
+}
+
+long long MainWindow::frameForSourceTimecode(const QString& text) const {
+    if (!hasSourceTimecode_ || !frameSource_) return -1;
+    trace::core::TimeFormat::Timecode parsed;
+    if (!trace::core::TimeFormat::parseTimecode(text, parsed)) return -1;
+    // The typed value is read in the SOURCE's convention, not in whatever
+    // separator the user happened to type: a file is drop-frame or it is not,
+    // and letting a semicolon change the arithmetic would make the same string
+    // mean two different frames.
+    parsed.dropFrame = sourceTimecodeDropFrame_;
+    if (parsed.frames >= trace::core::TimeFormat::nominalRate(timecodeFpsNum_, timecodeFpsDen_)) return -1;
+
+    const long long abs =
+        trace::core::TimeFormat::timecodeToFrames(parsed, timecodeFpsNum_, timecodeFpsDen_);
+    const long long index = abs - sourceTimecodeStartFrames_;
+    if (index < 0 || index > frameSource_->maxFrame()) return -1;
+    return index;
+}
+
+// THE FIRST TEXT-ENTRY CONTROLS IN TRACE, and that is the interesting part of
+// them rather than the dialogs themselves.
+//
+// Every single-key command in ShortcutTable is dispatched from
+// MainWindow::keyPressEvent, which matches on the key and ignores modifiers --
+// so H, J, K, L, E, F, S, T and M are all candidates to be eaten while someone
+// is typing. Qt's mechanism is what stops it: QLineEdit accepts
+// QEvent::ShortcutOverride for printable keys, which suppresses the shortcut and
+// delivers the keystroke to the widget, and a modal QInputDialog is a separate
+// window whose key events never reach this one at all. Both were untestable
+// until this commit because there was nothing to type into; they are tested now
+// (see the phase 7 record).
+//
+// QInputDialog rather than a hand-built dialog: it is modal, it owns its own
+// Escape and Return, and it is what QApplication::activeModalWidget() reports --
+// which is how the overlay's holdVisible hook knows not to fade the transport
+// out from under an open prompt. A hand-rolled non-modal panel would have had to
+// reimplement all four of those.
+void MainWindow::promptGoToFrame() {
+    if (!frameSource_) return;
+    const long long maxFrame = frameSource_->maxFrame();
+    if (maxFrame < 0) return;
+
+    bool ok = false;
+    // Zero-based, and the range is stated in the prompt rather than left to be
+    // discovered by being rejected. `maxFrame` is the last valid INDEX, which is
+    // what the transport bar has always printed.
+    const int value = QInputDialog::getInt(
+        this, tr("Go to Frame"),
+        tr("Frame (0 - %1):").arg(maxFrame),
+        static_cast<int>(playback_.state().currentFrame),
+        0, static_cast<int>(std::min<long long>(maxFrame, std::numeric_limits<int>::max())),
+        1, &ok);
+    if (!ok) return;
+    goToFrame(value, "Go to Frame");
+}
+
+void MainWindow::promptGoToTimecode() {
+    // Guarded here as well as by the action's enabled state. The action can only
+    // be disabled if something remembered to disable it; this cannot be reached
+    // wrongly at all.
+    if (!hasSourceTimecode_ || !frameSource_) return;
+
+    bool ok = false;
+    const QString text = QInputDialog::getText(
+        this, tr("Go to Timecode"),
+        tr("Timecode (%1 - %2):")
+            .arg(sourceTimecodeAt(0))
+            .arg(sourceTimecodeAt(std::max(0LL, frameSource_->maxFrame()))),
+        QLineEdit::Normal, sourceTimecodeAt(playback_.state().currentFrame), &ok);
+    if (!ok) return;
+
+    const long long frame = frameForSourceTimecode(text);
+    if (frame < 0) {
+        // Validated BEFORE seeking, and refused rather than clamped. Clamping a
+        // mistyped timecode would move the playhead somewhere the user did not
+        // ask for and look like it had worked.
+        statusBar()->showMessage(
+            tr("Not a timecode in this media: %1").arg(text.trimmed()), 4000);
+        refreshHud("Go to Timecode: rejected");
+        return;
+    }
+    goToFrame(frame, "Go to Timecode");
+}
+
+// One exact seek, shared by both prompts. Goes through the same Step path a
+// slider release uses, which is the spec's "use the existing exact-frame seek
+// path" -- and is why neither prompt needed any decoder work at all.
+void MainWindow::goToFrame(long long frame, const char* action) {
+    if (!frameSource_) return;
+    const long long maxFrame = frameSource_->maxFrame();
+    if (maxFrame < 0 || frame < 0 || frame > maxFrame) return;
+
+    // A run in progress owns the decoder lease and the playhead; end it before
+    // moving, and land exactly, because this IS a stop.
+    endShuttleRun(/*landExactly=*/true);
+    if (playTimer_.isActive()) {
+        playTimer_.stop();
+        stopAudio();
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+    }
+    playback_.pause();
+    // A jump is not playback, so the intent a scrub release would restore is
+    // cleared -- the same rule stepping and J/K/L follow.
+    userPlayIntent_ = false;
+    playback_.setCurrentFrame(frame);
+    supersedeInFlightRequests();
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 0, true);
+
+    QString error;
+    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
+        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+    }
+    syncTransportBar();
+    if (viewer_) viewer_->revealOverlay();
+    refreshHud(action);
+}
+
 void MainWindow::setupMenus() {
     auto* fileMenu = menuBar()->addMenu("&File");
 
@@ -1115,6 +1372,20 @@ void MainWindow::setupMenus() {
 
     fileMenu->addAction(fullscreenAction_);
     fileMenu->addAction(toggleHudAction_);
+
+    // Time Display, as the spec's View menu names it. A menu ADDS actions and
+    // never defines them -- all six were created in setupSharedActions, which is
+    // the rule phase 2 established when fullscreen stopped being four duplicated
+    // lines. The full View/Window/Help structure is phase 13; this is the group
+    // phase 7 owns, put where it belongs rather than left unreachable until then.
+    auto* timeMenu = fileMenu->addMenu(tr("&Time Display"));
+    timeMenu->addAction(timeDisplayFrameAction_);
+    timeMenu->addAction(timeDisplaySecondsAction_);
+    timeMenu->addAction(timeDisplayElapsedAction_);
+    timeMenu->addAction(timeDisplayTimecodeAction_);
+    timeMenu->addSeparator();
+    timeMenu->addAction(goToFrameAction_);
+    timeMenu->addAction(goToTimecodeAction_);
 
     fileMenu->addSeparator();
     auto* quitAction = new QAction("&Quit", this);
@@ -1568,6 +1839,13 @@ void MainWindow::openPath(const QString& path) {
     currentMedia_ = item;
     frameCache_.clear();
     frameCache_.setWindowCenter(playback_.state().currentFrame);
+
+    // After frameSource_ exists and before the first HUD refresh. Parsing the
+    // start timecode here rather than per refresh is the difference between one
+    // parse per file and several per second during a drag; resetting the readout
+    // here is what stops a file WITH timecode handing its mode to a file
+    // WITHOUT one.
+    refreshSourceTimecode();
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
     // Before the first frame: the decoder sizes scrub previews from this, and a
@@ -3296,11 +3574,30 @@ void MainWindow::refreshHud(const QString& action) {
 
     const double fps = frameSource_ ? frameSource_->fps() : 24.0;
     const double sec = trace::core::TimeFormat::frameToSeconds(st.currentFrame, fps);
-    const QString tc = trace::core::TimeFormat::frameToTimecode(st.currentFrame, fps);
+    const QString elapsed = trace::core::TimeFormat::frameToElapsed(st.currentFrame, fps);
 
-    if (viewState_.readoutMode == PrimaryReadoutMode::Frame) primaryReadout = QString("Frame: %1").arg(st.currentFrame);
-    else if (viewState_.readoutMode == PrimaryReadoutMode::Seconds) primaryReadout = QString("Seconds: %1").arg(trace::core::TimeFormat::formatSeconds(sec));
-    else primaryReadout = QString("Timecode: %1").arg(tc);
+    switch (viewState_.readoutMode) {
+        case PrimaryReadoutMode::Frame:
+            primaryReadout = QString("Frame: %1").arg(st.currentFrame);
+            break;
+        case PrimaryReadoutMode::Seconds:
+            primaryReadout = QString("Seconds: %1")
+                                 .arg(trace::core::TimeFormat::formatSeconds(sec));
+            break;
+        case PrimaryReadoutMode::Elapsed:
+            primaryReadout = QString("Elapsed: %1").arg(elapsed);
+            break;
+        case PrimaryReadoutMode::Timecode:
+            // Reachable only when the source carries a timecode --
+            // setReadoutMode refuses the mode otherwise and openPath resets it
+            // when new media has none. The fallback is still written out rather
+            // than asserted, because a readout that silently prints the wrong
+            // kind of value is exactly what this phase exists to remove.
+            primaryReadout = hasSourceTimecode_
+                ? QString("Timecode: %1").arg(sourceTimecodeAt(st.currentFrame))
+                : QString("Elapsed: %1").arg(elapsed);
+            break;
+    }
 
     if (currentMedia_.has_value()) {
         if (currentMedia_->kind == MediaKind::VideoFile) {
@@ -3903,25 +4200,31 @@ void MainWindow::refreshHud(const QString& action) {
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
-            line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Timecode: %8")
+            // ZERO-BASED, and against the last valid INDEX rather than the
+            // count -- which is what the video line has always printed and what
+            // these two did not (spec §2 item 8). `Elapsed:` rather than
+            // `Timecode:` because an image sequence has no container timecode
+            // at all, so calling this one was the clearest instance of the thing
+            // the spec forbids.
+            line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Elapsed: %8")
                 .arg(QString::fromStdString(seq.pattern))
                 .arg(currentImage_.has_value() ? currentImage_->width : 0)
                 .arg(currentImage_.has_value() ? currentImage_->height : 0)
                 .arg(currentImage_.has_value() ? currentImage_->channels : 0)
-                .arg(st.currentFrame + 1)
-                .arg(seq.frames.size())
+                .arg(st.currentFrame)
+                .arg(seq.frames.empty() ? 0 : seq.frames.size() - 1)
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
-                .arg(tc);
+                .arg(elapsed);
         } else if (currentImage_.has_value()) {
             const auto& im = *currentImage_;
-            line = QString("Still | %1 | %2x%3 ch:%4 | Frame: %5/1 | Seconds: %6 | Timecode: %7")
+            line = QString("Still | %1 | %2x%3 ch:%4 | Frame: %5/0 | Seconds: %6 | Elapsed: %7")
                 .arg(im.fileName)
                 .arg(im.width)
                 .arg(im.height)
                 .arg(im.channels)
-                .arg(st.currentFrame + 1)
+                .arg(st.currentFrame)
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
-                .arg(tc);
+                .arg(elapsed);
         }
     }
 

@@ -356,9 +356,62 @@ absorbed them at `handler>budget 0 of 260`**. Cross-backend `08-mid-drag` still 
 delta 1**. The `ui gap max` asymmetry reproduced (9.6/7.3 vs 76.0/72.9ms) and is **still
 unattributed — not an overlay win**.
 
-**What is open is the owner's, not the code's**: the 165ms fade, the 2s inactivity delay, and
-whether the panel reads as a transport rather than a HUD. All measured, none looked at, and
-**not judgeable over Parsec**.
+**PHASE 6 IS SIGNED OFF (owner, 2026-08-11) and nothing about the floating transport's feel is
+open.** The panel clearly reads as the transport, the 2s inactivity delay feels right, the
+165ms fade feels natural, and **no tuning is wanted** — so `kFadeMs`, `kAutoHideMs` and the
+460×84 panel with its 44×34 controls are **settled numbers rather than defaults**, and
+changing one reopens an owner decision. Read it at its stated width: what was accepted is the
+**auto-hide's feel and the panel's identity as a transport**, not the Time Display readouts
+(phase 7 rewrites them), not the menus (phase 13), and **not the overlay as finished** — plan
+§31.5 item 4 stands, and it is not final until a screen reader has driven one.
+
+**SPEC PHASE 7 IS DONE (2026-08-11): the time readout is honest and Trace has its first text
+field.** `Timecode:` used to print an elapsed-time conversion of the frame index for every
+file — ignoring the real start timecode on files that carry one and inventing `00:00:00:00`
+for files that carry none, both of which the spec forbids. `frameToTimecode` is renamed
+**`frameToElapsed`**, which is what it always computed, and the readout is four modes:
+`F` Frame Count, `S` Seconds, `E` Elapsed, `T` **source** SMPTE. Also: `Ctrl+G` Go to Frame
+and `Ctrl+Shift+G` Go to Timecode, a Time Display menu, and the image-sequence and still HUD
+lines finally zero-based (they printed `currentFrame + 1` against a *count*).
+
+Four things to carry.
+
+- **`hasSourceTimecode_` is the single gate**, asked by the readout mode, the menu item and
+  Go to Timecode alike, so "this file has no timecode" cannot be true in one place and false
+  in another. `setReadoutMode` **declines** SMPTE with a reason rather than accepting it and
+  rendering something else — `T` on an MP4 reads `Timecode: source carries none`. Opening
+  media without a timecode while SMPTE is selected resets to Elapsed, which is the case the
+  gate cannot catch because nothing was selected: the file changed under a mode already set.
+- **Extraction reads three dictionaries and never synthesises**, and the value is parsed and
+  re-formatted rather than stored raw, so anything unreadable becomes "no timecode" inside the
+  decoder rather than reaching a readout that would print it verbatim and call it SMPTE.
+  `TRACE_OPEN_LOG` gained a `timecode=` column that prints **`none`**, not a blank.
+- **DROP-FRAME HAD NO TEST MATERIAL, SO THE MATERIAL WAS MADE**
+  (`scripts/measure/make_timecode_fixtures.ps1`). The asset set is 24/23.976/60fps throughout
+  and every timecode in it is non-drop, so shipping DF arithmetic would have been §29.2 again.
+  **The first fixture pair could not have failed**: starting at `00:59:50` crosses minute 60,
+  a multiple of ten, where drop-frame skips nothing and both conventions print identical
+  digits. Starting at `00:00:50` puts a dropping minute inside the clip, and at the same frame
+  index the two now read **`00:01:00;02` against `00:01:00:00`** — that difference is the
+  proof the DF path runs rather than compiles. On real media, ProRes 4444 with a start of
+  `00:00:01:12` reads it at frame 0 and `00:00:02:00` twelve steps later.
+- **The shortcut guard finally had something to guard, and it holds.** Five phase records said
+  `ShortcutTable`'s key-only matching made a text field dangerous and that it was untestable
+  because there was nothing to type into. Measured: with Go to Timecode open, typing
+  `hjkltefsm` — every bound single-key command — puts **`hjkltefsm` in the field** and changes
+  nothing behind it. Two Qt mechanisms do it (`QEvent::ShortcutOverride` on `QLineEdit`, and a
+  modal dialog being a separate window), neither of which needed writing and neither of which
+  had ever executed. **A new single-key shortcut still has to be checked against this** — the
+  guard is Qt's, not Trace's, and covers *printable* keys only.
+
+Both Go To prompts **validate before seeking and refuse rather than clamp** — a clamped
+mistype would move the playhead somewhere the user did not ask for and look like it worked —
+and both land through one shared exact `Step` seek, so neither needed decoder work.
+
+Regression against a control built from `19f9383`, hash-verified, same display: 4K H.264
+cadence ×3 99.1–99.2% with identical buckets, 4444 99.8% ×2, reverse 1× 100.0% ×3,
+`-SnapRelease` `delta 0` / `hitch 0`, both lifecycle legs, **25 of 25 transitions** on both
+binaries.
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across

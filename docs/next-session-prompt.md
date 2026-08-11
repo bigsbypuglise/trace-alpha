@@ -1,13 +1,12 @@
-# The interface pass is open, the floating transport ships, and phase 7 is next.
+# The interface pass is open, phases 6 and 7 shipped, and phase 8 is next.
 
-Supersedes the previous version. **Spec phase 6 shipped** — the floating overlay is now the
-only transport, the docked bar is out of the layout behind `TRACE_TRANSPORT_BAR=1`, and
-fullscreen is consolidated (Escape, geometry restore, maximize kept distinct, double-click).
-**The next thing to do is spec phase 7, Time Display and zero-based frame UI** — which creates
-the first text-entry control in the app. **But read the owner-feedback item first**: phase 6
-was handed to the owner for a feel judgement that had never been taken, and his answer changes
-what phase 7 should start with. Paste everything below the line into a fresh session in the
-repo root.
+Supersedes the previous version. **Spec phase 6 shipped and is signed off by the owner** — the
+floating overlay is the only transport, the docked bar is out of the layout behind
+`TRACE_TRANSPORT_BAR=1`, and fullscreen is consolidated. **Spec phase 7 shipped** — the time
+readout is honest (source SMPTE, or elapsed, never one labelled as the other), Trace has its
+first text-entry controls, and zero-based numbering is finished. **The next thing to do is
+spec phase 8, the Share menu and ordinary path copying.** Paste everything below the line into
+a fresh session in the repo root.
 
 ---
 
@@ -61,18 +60,18 @@ A later summary that says "the transport is done" has widened it.
 - **EXR / image sequences and OCIO.** `TRACE_WITH_OIIO` is undefined in vcpkg and CI, so EXR
   does not open today. Largest untouched area, and a feature rather than a fix.
 
-## FIRST: there is an owner question outstanding from phase 6
+## PHASE 6 IS SIGNED OFF — owner, 2026-08-11. Do not re-open it.
 
-The floating transport was handed over on 2026-08-11 with three things nobody has ever
-looked at — **the 165ms fade, the 2s inactivity delay, and whether the panel reads as a
-transport rather than a HUD.** All three are measured and none is judged. Per the project's
-own rule that judgement is the owner's and must be taken **at the machine, not over Parsec**.
+The floating transport **passed its visual sign-off**: it clearly reads as the transport, the
+**2s inactivity delay feels right**, the **165ms fade feels natural**, and **no tuning is
+wanted**. So `kFadeMs`, `kAutoHideMs` and the 460×84 panel with its 44×34 controls at the top
+of `src/render/OverlayModel.cpp` are **settled numbers, not defaults** — changing one is
+reopening an owner decision.
 
-**If he has answered, act on the answer before starting phase 7.** The fade duration
-(`kFadeMs`), the idle delay (`kAutoHideMs`) and the panel geometry are all constants at the
-top of `src/render/OverlayModel.cpp`; the control geometry is the approved package's 44×34,
-so a change there is a change to the approved spec rather than a tweak. **If he has not
-answered, ask once and start phase 7 anyway** — nothing in phase 7 depends on it.
+Read it at its stated width. What was accepted is **the feel of the auto-hide and the panel's
+identity as a transport**. It is not a sign-off on the Time Display readouts (phase 7 changes
+them), on the menus (phase 13), or on the overlay being finished: **plan §31.5 item 4 stands
+— the overlay is not final until a screen reader has driven one.**
 
 ## THE OPEN PHASE — interface pass 1, now at phase 7
 
@@ -98,35 +97,43 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
   COMPLETE and the spec's validation list for it reads straight down. Full record in the
   progress doc.
 - **Phase 6 shipped on 2026-08-11** — the floating transport replaces the docked bar,
-  auto-hide is finished to the spec's list, and fullscreen is consolidated. Full record in the
-  progress doc.
+  auto-hide is finished to the spec's list, and fullscreen is consolidated. **Owner sign-off
+  passed.** Full record in the progress doc.
+- **Phase 7 shipped on 2026-08-11** — real source SMPTE timecode with drop-frame, the readout
+  relabelled honestly, Go to Frame / Go to Timecode, and zero-based image-kind HUD lines.
+  Full record in the progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
   run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0` and **run 90 on `bc84431`
   (phase 6)**, all including the renderer selftest.
 
-### Start at spec phase 7, and read `docs/interface-pass-1-progress.md` first
+### Start at spec phase 8, and read `docs/interface-pass-1-progress.md` first
 
-**Phase 7 creates the first text-entry control in the app**, which is when the spec's "must
-not fire while focus is inside a text-entry control" finally has something to guard — and
-`ShortcutTable`'s key-only matching makes that check **more** important, not less. Qt's own
-mechanism covers it (`QLineEdit` accepts `QEvent::ShortcutOverride` for printable keys), but
-that has never executed here because it has never been reachable. **Verify that `H` does not
-eat a digit, and that the digits reach Go to Frame.**
+**Phase 8 is the Share menu and ordinary path copying** — Copy File Path, Show in File
+Explorer, and the *gate* on Copy LucidLink Link. **Do the ordinary half first and keep it in
+its own commit**: the spec says outright not to combine uncertain LucidLink shell work with
+otherwise safe visual changes, and phase 9 is where the shell-integration prototype lives.
 
-Phase 7 also has a decision, not just work: **the `Timecode:` readout is already synthesised
-from the frame index**, which is the thing the spec forbids. Relabel it as elapsed, or disable
-it, when no source timecode exists.
+**§2 item 5 is the thing to carry in.** `MediaIoSource.cpp:244-257` classifies volumes by
+querying them and is keyed on petabyte-scale capacity with `free == total`. **Reuse it; do not
+write a second one.** But it answers a *storage-class* question, not a vendor question —
+"virtual mount with free == total" is true of any such mount. It is a good **necessary**
+condition for LucidLink and a bad **sufficient** one, and the authoritative gate has to be the
+installed integration. Using the classifier alone would reintroduce, one level up, exactly the
+"assume all `V:\` paths are LucidLink" mistake the requirement exists to prevent.
 
-**Two things phase 6 added that phase 7 inherits**:
+**`V:\` is live client production storage and is strictly read-only.** Any shell-extension
+prototyping is read-only, against files Anj nominates, and never by writing a probe file.
 
-- **`OverlayHooks::holdVisible` already carries the child-focus clause.** It cannot fire today
-  because every transport widget is `Qt::NoFocus`; the moment Go to Frame exists it can, and
-  the overlay must not fade out from under an open dialog. That is written and untested for
-  exactly the reason it could not be tested.
-- **The rate readout is a transient now**, shared by the bar's label and the overlay's text
-  through `MainWindow::rateFlashText_`. If phase 7 adds a second readout to the panel, it goes
-  through one source the same way — the overlay used to read `playback_.state().speed`
-  directly and was therefore permanently non-empty, which is a HUD, not a transport.
+**Three things phase 7 leaves for whatever adds UI next**:
+
+- **The shortcut guard is Qt's, not Trace's, and it covers printable keys only.** It is now
+  exercised rather than predicted — typing `hjkltefsm` into Go to Timecode puts
+  `hjkltefsm` in the field and changes nothing behind it — but a new single-key shortcut still
+  has to be checked against it.
+- **`hasSourceTimecode_` is the single gate on everything SMPTE.** A new surface that mentions
+  timecode asks it; it must not grow a second answer.
+- **`OverlayHooks::holdVisible` covers popups, tooltips, modal dialogs and child focus.** The
+  modal branch is live now (both Go To prompts). A new panel that takes focus inherits it.
 
 **Run the harness the way phases 4, 5 and 6 learned to.** The clip is part of the measurement:
 `transitions.ps1` needs a **16:9 clip of roughly 250+ frames** (`M&M_TopGun_1080.mp4`), because
@@ -163,14 +170,20 @@ own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
 
 ### The rest of the phase list, with what is known about each
 
-8. **Phase 8 is the Share menu and ordinary path copying**, and it is where §2 item 5's
-   distinction bites: `MediaIoSource`'s volume classifier answers a *storage-class* question,
-   which is a good necessary condition for LucidLink and a bad sufficient one. The
-   authoritative gate is the installed integration.
+9. **Phase 9 is the LucidLink shell-integration prototype**, and the spec's implementation
+   order for it is explicit and worth following literally: a supported API first, then the
+   registered shell verb, invoked through shell interfaces and never by simulating clicks in
+   File Explorer. **Never construct a `lucid://` link by parsing a mounted path.**
 10. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
-    reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob.
+    reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob, and it leaves with the
+    phase, the way `TRACE_SHUTTLE_ENTRY` did at phase 5.
+12. **Phase 12's Movie Inspector has most of its data already**, and `VideoMetadata` gained
+    the start timecode at phase 7. Its rule is the one this project keeps proving: display
+    Unknown or Untagged honestly, and do not infer missing colour metadata inside the
+    inspector.
 13. **Phase 13 renders the Keyboard Shortcuts window from `ShortcutTable::rows()`.** The table
-    is already complete; action-owned rows point at their `QAction` rather than copying it.
+    is already complete; action-owned rows point at their `QAction` rather than copying it,
+    and phase 7 added `Ctrl+G` / `Ctrl+Shift+G` to it as documentation rows.
 
 ### Priority 1 is the constraint on all of it
 
@@ -216,6 +229,13 @@ build or it will not launch.
 
 ## The rules this project keeps re-learning
 
+**A validated PREDICTION is not a validated MECHANISM.** Five phase records in a row stated
+that `ShortcutTable`'s key-only matching made a text field dangerous, that Qt's
+`ShortcutOverride` would cover it, and that it was untestable because there was nothing to
+type into. All of that was right, and none of it had executed until phase 7 typed
+`hjkltefsm` into a real field. Write the prediction down, but do not let it accumulate the
+authority of a measurement.
+
 **A deferred item's premise expires. Re-derive it before building it.** Seven instances now —
 §26.2, §27, §28, §29.1, the BGRA cache-pricing term that had been wrong since GATE C, §15.3's
 decline of directional prefetch, and phase 4's `landPreviousExactly`, whose recorded
@@ -259,6 +279,14 @@ four cases on the phase 4 binary and passes all 25 on its own, and without that 
 re-derivation would have proved nothing. Phase 6 did the same for the double-click fault —
 `overlay_ladder.ps1` reads ±30× on the fix and **±10× on a binary with the one-line fix
 reverted**, which is what says the check tests the change at all.
+
+**Phase 7's first drop-frame fixture could not have failed either, and it is the cleanest
+example of the pattern.** A 29.97 clip starting at `00:59:50` and running past the hour crosses
+minute 60 — a multiple of ten, where drop-frame skips nothing — so the drop and non-drop
+fixtures printed **identical digits** and differed only in the separator. Moving the start to
+`00:00:50` puts a *dropping* minute inside the clip and the same frame index then reads
+`00:01:00;02` against `00:01:00:00`. **The fixture is part of the measurement**, exactly as the
+clip is for `transitions.ps1`.
 
 **Phase 6's ladder leg could not pass twice before it could fail once, for two unrelated
 reasons, and both were arithmetic.** `restart.ps1` leaves the playhead at frame 0, so the
@@ -364,7 +392,11 @@ or `+bar`.
   it grabs the window directly because `capture.ps1`'s 300ms is 216 frames at 30×).
 
   *Mode-independent*: `cadence.ps1`, `playhud.ps1`, `refresh.ps1`, `capture.ps1`,
-  `sidebyside.ps1`, `stalls_vs_window.ps1`, `abfilter.ps1`/`croprect.ps1`.
+  `sidebyside.ps1`, `stalls_vs_window.ps1`, `abfilter.ps1`/`croprect.ps1`, and
+  **`make_timecode_fixtures.ps1`** — which generates the 29.97 drop/non-drop pair the asset
+  set does not contain. Read its header before changing the fixture: the start time is chosen
+  so a *dropping* minute falls inside the clip, and a start near a ten-minute boundary makes
+  the two conventions print identical digits.
 
   **Cadence controls need `TRACE_NO_AUDIO=1`**; shuttle runs do not, because they are silent.
 - The HUD is unreadable in a downsampled screenshot on the 5120x1440 panel. Capture the

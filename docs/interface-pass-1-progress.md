@@ -985,10 +985,186 @@ one, and `holdVisible` already carries the child-focus clause it will need — i
 cannot fire today because every transport widget is `Qt::NoFocus`, and it is
 written now so the omission would be deliberate rather than invisible.
 
-**Open, and for the owner rather than for the code**: the fade duration (165ms),
-the 2s inactivity delay, and whether the panel reads as a transport rather than a
-HUD. All three have been measured and none has been looked at. **At the machine,
-not over Parsec.**
+### Owner sign-off — PASSED, 2026-08-11
+
+**The visual sign-off passed and no tuning is wanted.** The floating panel
+**clearly reads as the transport**, the **2s inactivity delay feels right**, and
+the **165ms fade feels natural**. Verdict: proceed to phase 7.
+
+Read that at its stated width, as with every sign-off in this project. What was
+accepted is the **feel of the auto-hide and the panel's identity as a transport**
+— the fade duration, the idle delay, and the read. It is not a sign-off on the
+Time Display readouts (phase 7 changes them), on the menus (phase 13), or on the
+overlay being finished: §31.5 item 4 still stands, and the overlay **must not be
+called final until a screen reader has driven one**.
+
+So `kFadeMs` (165), `kAutoHideMs` (2000) and the 460×84 panel with its 44×34
+controls are now **settled numbers, not defaults**. Changing any of them is
+reopening an owner decision rather than tuning a constant.
+
+**Nothing about the floating transport's behaviour or feel is open.**
+
+---
+
+## Phase 7 — Time Display and zero-based frame UI (2026-08-11)
+
+### What shipped
+
+**The `Timecode:` readout was non-conforming and now is not.** It printed
+`TimeFormat::frameToTimecode(currentFrame, fps)` — an elapsed-time conversion of
+the frame index — under the label `Timecode:`, for every file: ignoring the real
+start timecode on files that carry one, and inventing `00:00:00:00` for files
+that carry none. The spec forbids both halves (*"do not generate SMPTE from zero
+when none exists"*, *"do not label an elapsed-time conversion as source
+timecode"*). §2 item 9 called this "worse than not extracted" and it was right.
+
+So the readout is four modes now, and **Elapsed and Timecode are separate
+things**: `frameToTimecode` is renamed **`frameToElapsed`**, which is the honest
+name for what it always computed, and `Timecode` means the source's.
+
+| key | mode | shows |
+|---|---|---|
+| `F` | Frame Count | zero-based index |
+| `S` | Seconds | Trace's existing readout, kept because `S` is an existing binding |
+| `E` | Elapsed Time | `HH:MM:SS:FF` counted from zero |
+| `T` | SMPTE Timecode | the source's, and **only when the source has one** |
+
+**`hasSourceTimecode_` is the single gate**, and the readout mode, the menu item
+and Go to Timecode all ask it — so "this file has no timecode" cannot be true in
+one place and false in another. `setReadoutMode` **declines** SMPTE with a
+reason rather than accepting it and rendering something else; opening media
+without a timecode while SMPTE is selected resets the mode to Elapsed, which is
+the case the gate alone cannot catch because nothing was selected — the file
+changed underneath a mode already set.
+
+**Extraction reads three dictionaries and never synthesises.** FFmpeg's mov
+demuxer publishes a tmcd track's value on the *format* dictionary, MXF and some
+MOVs put it on the video stream, and a few containers leave it only on the data
+stream that carries it; all three are checked. The value is **parsed and
+re-formatted** rather than stored raw, so anything unreadable becomes "no
+timecode" inside the decoder instead of reaching a readout that would print it
+verbatim and call it SMPTE. A drop-frame claim at a rate with no drop-frame is
+discarded, and a frame number the rate cannot produce rejects the whole value.
+
+**Drop-frame arithmetic is real**, against the exact rational rather than the
+double — `nominalRate`, `dropFrameApplies`, `timecodeToFrames` and
+`framesToTimecode`, which round-trip. Timecode counts whole frames per second,
+so 30000/1001 material runs 30 timecode frames per timecode second; that is what
+drop-frame exists to reconcile and it cannot be done from a rounded rate.
+
+**Go to Frame and Go to Timecode are the first text-entry controls in Trace.**
+Both are `QInputDialog` — modal, owning their own Escape and Return, and
+reported by `QApplication::activeModalWidget()`, which is what the overlay's
+phase 6 `holdVisible` hook already asks. Both validate **before** seeking and
+**refuse rather than clamp**: a mistyped timecode that got clamped would move the
+playhead somewhere the user did not ask for and look like it had worked. Both
+land through `goToFrame()`, one shared exact `Step` seek, so neither needed any
+decoder work.
+
+**Zero-based numbering is finished.** The image-sequence and still HUD lines
+printed `currentFrame + 1` against a frame *count*; they print the index against
+the last valid index now, which is what the video line has always done (§2 item
+8). They also stopped saying `Timecode:` — an image sequence has no container
+timecode at all, so that was the clearest instance of the thing the spec forbids.
+
+### The shortcut guard finally had something to guard, and it holds
+
+Since phase 3 the record has said, five times, that `ShortcutTable` matches on
+the key and ignores modifiers, that this makes a text field dangerous, and that
+it was **untestable because it was untestable** — there was nothing to type into.
+
+Measured: with Go to Timecode open, typing `hjkltefsm` — every bound single-key
+command in the app — puts **`hjkltefsm` in the field** and changes nothing behind
+it. `H` did not hide the HUD, `J`/`K`/`L` did not shuttle, `T`/`E`/`F`/`S` did not
+change the readout, `M` did not mute. The transport line still read
+`Paused | frame 0 | speed 0.00x | Open file | Frame: 0`.
+
+Two mechanisms do it and neither needed writing: `QLineEdit` accepts
+`QEvent::ShortcutOverride` for printable keys, and a modal dialog is a separate
+window whose key events never reach `MainWindow::keyPressEvent` at all. **Both
+were predicted at phase 2 and neither had ever executed.**
+
+`Ctrl+G` and `Ctrl+Shift+G` carry modifiers, so they go on `QAction`s by the rule
+phase 3 set, and appear in the table as documentation rows.
+
+### Drop-frame had no test material, so the material was made
+
+`Trace_Testing_Assets` is 24, 23.976 and 60fps throughout; the three files that
+carry a timecode carry `00:00:01:12`, `00:00:00:00` and `00:00:00:00`, all
+non-drop. Shipping drop-frame arithmetic that had never executed is §29.2
+exactly, so `scripts/measure/make_timecode_fixtures.ps1` generates a matched
+29.97 drop / non-drop pair.
+
+**The first pair could not have failed.** Starting at `00:59:50` and running past
+the hour crosses minute 60 — a multiple of ten, where drop-frame skips nothing —
+so both conventions printed identical digits and differed only in the separator.
+Starting at `00:00:50` puts minute 1, a dropping minute, inside the clip:
+
+| at the same frame index | drop-frame fixture | non-drop fixture |
+|---|---|---|
+| frame 0 | `00:00:50;00` | `00:00:50:00` |
+| frame 300 (`Ctrl+G`) | **`00:01:00;02`** | **`00:01:00:00`** |
+
+The `;02` is the two frame numbers minute 1 skips. That difference is the proof
+the drop-frame path runs rather than compiles.
+
+**On real production media**, ProRes 4444 with a start timecode of `00:00:01:12`:
+frame 0 reads `Timecode: 00:00:01:12` and twelve Right steps read
+`Timecode: 00:00:02:00` — a non-zero start honoured, and exactly one second on at
+24fps.
+
+**And the refusals were run, not argued.** On a no-timecode MP4, `T` reads
+`Timecode: source carries none` and the readout stays on `Frame:`; `E` reads
+`Readout: Elapsed | Elapsed: 00:00:00:00`. On the drop-frame fixture with the
+playhead at frame 25, a malformed `09:99:99;99` and a well-formed but
+out-of-range `00:05:00;00` both read `Go to Timecode: rejected | Frame: 25` —
+unmoved in both cases.
+
+### Regression
+
+Control binary built from `19f9383` in a worktree, **hash-verified on every
+swap**; same 1920x1080 @ 59.999Hz display as phases 5 and 6. Cadence in overlay
+mode (the shipping configuration); the drag, reverse and matrix runs in bar mode
+with `TRACE_TRANSPORT_BAR=1`, `win 1280x843`, `display 640x360 filtered x3`.
+
+| run | control | phase 7 |
+|---|---|---|
+| 4K H.264 cadence ×3 | 99.2 / 99.1 / 99.1%, 120 frames, `handler>budget 0 of 120` (max 3.9 / 4.1 / 4.1), max 82.4 / 81.7 / 82.5 | 99.1 / 99.2 / 99.1%, 120 frames, `0 of 120` (max 4.0 / 4.1 / 4.0), max 81.7 / 82.8 / 82.9 |
+| 4444 cadence ×2 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 37.5 / 36.7), max 44.9 / 45.4 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 36.1 / 36.2), max 44.7 / 45.0 |
+| reverse 1× ×3 | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 3.1 / 3.3 / 3.9), `hitch 0` | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 3.5 / 3.0 / 3.6), `hitch 0` |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, `walk 0f`, `hitch 0`, `ui gap max 18.4ms` | same landing, `hitch 0`, `ui gap max 17.8ms` |
+| lifecycle | `-PlayThroughDrag` PASS 40.3%, `-PausedThroughDrag` PASS 0% | PASS 39.1%, PASS 0% |
+| transitions | **25 of 25 PASS** | **25 of 25 PASS** |
+
+Cadence buckets identical on both files. Landing exact on every run. **No run of
+the six reverse gestures reported `SNAP gop 2`** — six more clean runs on the
+wrong display, which still is not evidence.
+
+### What phase 7 changes about the plan
+
+**§2 item 9 is closed and the decision it left open was taken: relabel, not
+disable.** Disabling the readout would have left `T` doing nothing on most files,
+which is the `showInfo` failure phase 2 deleted. `T` now either shows the
+source's timecode or says the source has none, and `E` is the honest elapsed
+readout that mode used to be.
+
+**§2 item 8 is closed.** Video was already zero-based including the right
+endpoint; the two image-kind display strings are now too. It stayed two strings
+and did not become a conversion layer.
+
+**The spec's "must not fire while focus is inside a text-entry control" is
+answered and needs no code.** Qt's mechanism covers it, and it is now exercised
+rather than predicted. **A new single-key shortcut still has to be checked against
+this** — the guard is Qt's, not Trace's, and it only covers *printable* keys.
+
+**`TRACE_OPEN_LOG` gained a `timecode=` column**, printing `none` rather than an
+empty field, because absence is the answer this extraction most often gives and a
+blank column in a tab-separated log reads as a broken logger.
+
+**Phase 8 is next** — the Share menu and ordinary path copying — and §2 item 5's
+distinction is the thing to carry into it: `MediaIoSource`'s classifier answers a
+*storage-class* question, which is a good necessary condition for LucidLink and a
+bad sufficient one. The authoritative gate is the installed integration.
 
 ---
 
@@ -1009,8 +1185,9 @@ section it points at wins.
 | 3 stepping and shuttle contracts | done | `4de678e` |
 | **4 forward shuttle** | **COMPLETE** | `e559d07` |
 | **5 reverse shuttle** | **COMPLETE** | `90140f9` |
-| **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE** | `bc84431` (CI run 90 green) |
-| **7 Time Display + zero-based frame UI** | **NEXT** | — |
+| **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE, owner sign-off** | `bc84431` (CI run 90 green) |
+| **7 Time Display + zero-based frame UI** | **COMPLETE** | see the phase 7 section above |
+| **8 Share menu + ordinary path copying** | **NEXT** | — |
 
 Phases 4 and 5 together complete the **transport redesign**; phase 6 makes the
 floating overlay the only transport and consolidates fullscreen. Phase 7 is the

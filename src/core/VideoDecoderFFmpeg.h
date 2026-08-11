@@ -32,6 +32,22 @@ struct VideoMetadata {
     // a seek land on the target, or does it land before it and walk?", which
     // decides whether a scrub preview may skip frames.
     bool intraOnly = false;
+
+    // The source's SMPTE start timecode, exactly as the container states it,
+    // and EMPTY when the container states none. Nothing here is ever
+    // synthesised: the spec's rule is *"do not generate SMPTE from zero when
+    // none exists"*, and an absent timecode has to stay absent all the way to
+    // the readout rather than becoming 00:00:00:00 somewhere in the middle.
+    //
+    // Stored as the parsed-and-revalidated string rather than the raw
+    // dictionary value, so anything unreadable has already become "no timecode"
+    // by the time it leaves the decoder. A wrong timecode is worse than none in
+    // a review tool.
+    QString startTimecode;
+    // A property of the TIMECODE rather than of the rate -- 29.97 material
+    // legitimately carries either, and the container's separator says which.
+    bool startTimecodeDropFrame = false;
+    bool hasStartTimecode = false;
 };
 
 struct VideoPerfStats {
