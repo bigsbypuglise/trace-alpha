@@ -1,4 +1,28 @@
-# The interface pass is open, PHASE 12 IS COMPLETE, and phase 13 (Movie Inspector) is next.
+# The interface pass is open, PHASE 12 IS SIGNED OFF, and PHASE 13 IS UNDER WAY.
+
+**PHASE 13 STARTED: the Movie Inspector's metadata layer is built and verified** (`9ec7ec3`);
+**the dialog itself is not written.** Pick it up there.
+
+**The rule that shaped it, because it is the phase's real content.** The spec requires the
+inspector to *display Unknown or Untagged honestly, not infer missing colour metadata, and
+distinguish encoded metadata from playback inference* — and Trace could satisfy none of the
+three, because the only colour information it kept was **the matrix playback used**.
+`swsCoefficientsFor` applies the "HD and up is 709" heuristic to an untagged file and sets
+`colorMatrixInferred`: correct for decoding, and **an answer Trace invented**. The container's
+tags are now read verbatim *including their absence*, and range is **tri-state, not a bool**,
+because "limited" is both a real tag and the fallback assumption.
+
+**The asset set is a real negative control and splits 2–2.** `Splash_1.mp4` and
+`M&M_TopGun_1080.mp4` state **no primaries, transfer, matrix or range at all**; both ProRes
+files state `bt709/bt709/bt709/limited`. **The two untagged files are exactly the ones whose HUD
+reads `bt709*`** — so an inspector built on `VideoPerfStats` would tell the user they are tagged
+BT.709, which in a review tool is a bug report about the media rather than about Trace.
+
+**Two rules for the dialog.** `RenderStats::lastDrawSize` — the *current viewport size* field
+§4 was scheduled ahead of this phase for — is **device pixels** and is measured *by* the paint,
+so a refresh scheduled before one reports the previous size (phase 10's trap). And *"do not
+continuously poll expensive decoder state"*: everything the inspector needs is read once at
+open or already maintained, so **the dialog reads, it does not ask**.
 
 **READ THIS BLOCK FIRST — it supersedes the phase-12 brief further down, which is retained as
 the record of what was asked for rather than as open work.**

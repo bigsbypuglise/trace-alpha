@@ -2973,3 +2973,62 @@ visibly smaller windows for the same media. A geometry judgement is therefore
 display-dependent in a way a colour judgement is not. The session did not record
 which display the owner was on; if the shaped window is ever questioned,
 establish that first.
+
+## Phase 13 — the Movie Inspector (2026-08-11, in progress)
+
+### The metadata layer, and the rule that shaped it
+
+The inspector's hardest requirement is not a layout one. The spec's rules for it
+are *"display Unknown or Untagged honestly; do not infer missing colour metadata
+inside the inspector; distinguish encoded metadata from playback inference"*, and
+**Trace could not satisfy any of the three**, because the only colour information
+it kept was the matrix *playback used*: `swsCoefficientsFor` applies the standard
+"HD and up is 709" heuristic to an untagged file and sets `colorMatrixInferred`.
+That is correct for decoding and it is **an answer Trace invented**.
+
+So the tags are read from the container verbatim, **including their absence** —
+`av_color_*_name()` returns `nullptr` for `UNSPECIFIED` and the field stays
+empty. Range is **tri-state rather than a bool**, because "limited" is both a
+real tag and the fallback assumption and a bool cannot distinguish them.
+
+**THE ASSET SET SUPPLIES A REAL NEGATIVE CONTROL, AND IT SPLITS 2–2:**
+
+| file | tagged pri / trc / matrix / range | what playback uses |
+|---|---|---|
+| **Splash_1.mp4** (4K H.264) | **untagged / untagged / untagged / untagged** | `bt709*` (inferred) |
+| **M&M_TopGun_1080.mp4** | **untagged** x4 | `bt709*` (inferred) |
+| ProRes 4444 | bt709 / bt709 / bt709 / limited | `bt709` |
+| 4x5 ProRes | bt709 / bt709 / bt709 / limited | `bt709` |
+
+**The two untagged files are precisely the ones whose HUD reads `bt709*`**, so an
+inspector built on `VideoPerfStats` would have told the user they are tagged
+BT.709 when they state nothing at all — a bug report about the media rather than
+about Trace. Same shape as phase 12's `sarStated`: a real control in the shipping
+assets rather than a simulated one.
+
+Also read: container, codec profile (Main / High / 4444 / HQ all correct), stream
+bitrate distinct from the file's overall data rate, container track id (not
+FFmpeg's array index), and the audio stream **chosen the way the audio path
+chooses it**, so the inspector reports the track that would actually play —
+`aac/48000Hz/stereo`, `aac/44100Hz/stereo`, `pcm_s16le/48000Hz/stereo` and
+`none` across the four.
+
+### What remains for the window itself
+
+The data is now in `VideoMetadata`; the dialog is not built. Its fields map as:
+
+- **General** — filename, source path (`MediaShare::canonicalNativePath`),
+  resolution, file size and overall data rate (`VideoPerfStats::sourceBytes` /
+  `sourceBitrateMbps`), **current viewport size** (`RenderStats::lastDrawSize` —
+  the field spec section 4 was scheduled ahead of this phase for), container,
+  video format, audio format.
+- **Video details** — the fps rational and its decimal, stream bitrate, **pixel
+  aspect and display aspect (phase 12)**, current scale, pixel format, bit depth,
+  **the four tagged colour fields above**, codec/profile, track id.
+- **Audio details** — codec, sample rate, bitrate, channel layout, track id.
+
+Two rules to carry into it. **`lastDrawSize` is device pixels** and is measured
+*by* the paint, so a viewport-size field refreshed before one reports the
+previous size (phase 10). And **"do not continuously poll expensive decoder
+state"** — everything above is either read once at open or already maintained,
+so the dialog must read, not ask.
