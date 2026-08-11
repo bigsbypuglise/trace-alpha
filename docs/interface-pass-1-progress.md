@@ -1168,116 +1168,6 @@ bad sufficient one. The authoritative gate is the installed integration.
 
 ---
 
-## Session closeout — 2026-08-11
-
-**An index, not a second copy.** Every fact below is recorded in full somewhere
-above or in `docs/next-session-prompt.md`; this section exists so a reader can
-confirm the phase status and the settled decisions without reconstructing them
-from three documents. If it ever disagrees with the section it points at, the
-section it points at wins.
-
-### Phase status
-
-| phase | state | commit |
-|---|---|---|
-| 1 audit | done | `7abb6a5` (`docs/interface-pass-1-audit.md`) |
-| 2 shared actions and artwork | done | `58bfca6` |
-| 3 stepping and shuttle contracts | done | `4de678e` |
-| **4 forward shuttle** | **COMPLETE** | `e559d07` |
-| **5 reverse shuttle** | **COMPLETE** | `90140f9` |
-| **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE, owner sign-off** | `bc84431` (CI run 90 green) |
-| **7 Time Display + zero-based frame UI** | **COMPLETE** | `f15e368` (CI run 92 green) |
-| **8 Share menu + ordinary path copying** | **COMPLETE** | `a6447aa` + `f39eb67` (CI run 94 green) |
-| **9 LucidLink shell-integration prototype** | **COMPLETE** | `9b62ab0` (CI run 96 green) |
-| **10 Temporary view transforms** | **COMPLETE** | `d2b4481` |
-| **11 Open Recent** | **NEXT** | — |
-
-Phases 4 and 5 together complete the **transport redesign**; phase 6 makes the
-floating overlay the only transport and consolidates fullscreen; phase 7 makes
-the time readout honest and adds the first text-entry controls; phase 8 adds the
-Share menu and the LucidLink gate. **Phase 9 is the next starting point**, and it
-is one function body plus the clipboard rules. Full brief in
-`docs/next-session-prompt.md`.
-
-**Two owner decisions were taken on 2026-08-11 and are settled, not open.**
-**Accessibility**: the alpha ships with the composited overlay invisible to a
-screen reader, and **phase 13 builds an accessibility proxy tree rather than
-polishing one** — estimate it as construction. **`SNAP gop 2`**: no longer
-tracked. It was one run of six on a binary predating phase 4, reverse 1× is
-bimodal on that gesture anyway, and the eighteen clean runs phases 5–7 recorded
-were all on the wrong display and were therefore never evidence. Re-open only if
-reverse playback is actually reported slow, and take three runs **at the panel**.
-
-**Everything below this line was written at the close of the phase 5 session and
-is left as it stood.** Where phase 6 changed something it says so in its own
-section, which wins — most notably: **the video rect did NOT move**, and the
-phase-6 brief's prediction that it would is corrected there.
-
-### What is settled, and where the evidence is
-
-1. **Fast-forward begins at 2× and advances +2× → +5× → +10× → +30×**, capping at
-   30×. Phase 4 section; ladder re-confirmed from the button at phase 5.
-2. **The Right arrow is the only next-frame surface.** `nextFrameAction_` itself
-   is untouched — the spec removes the button, not the command. Phase 4 section.
-3. **Previous-frame remained visible through phase 4 and left at phase 5.**
-   Stated as it happened rather than as it was planned: for exactly one commit
-   `OverlayHooks` read `stepBack` beside `fastForward` and one scan glyph sat
-   beside one frame-step glyph, which is the artwork-follows-behaviour rule
-   working. At phase 5 the button became Rewind, `prev-frame` left the asset tree
-   and the `.qrc`, and the Left arrow became the only previous-frame surface.
-   Phase 4 and phase 5 sections.
-4. **`landPreviousExactly` was removed after measurement showed it bought no
-   anchoring.** The landing is a reverse-cache hit by construction, and a cache
-   hit sets `currentFrame_` but never `lastDecodedFrame`, so it does not move the
-   decoder at all — 4K H.264 `land 0.8ms`, 1080p `0.3ms`, ProRes 4444 `25.2ms`,
-   with the following forward run identical in every case. Both halves of the
-   recorded justification had also expired. Stops still land. Phase 4 section.
-5. **The transition and overlay harnesses exercise real interactions now.**
-   `transitions.ps1` replaced `revtransitions.ps1` on a run-boundary axis at
-   phase 4 and was re-derived again at phase 5 (25 cases); `overlay.ps1` had been
-   aiming 1.2px outside every control and is located by difference now. Phase 4
-   and phase 5 sections.
-6. **The phase 2 overlay interaction evidence was invalid, and the corrected live
-   test passes.** With nothing registering, all twelve captures were the same
-   paused frame, so the recorded `312 px (0.619%)` was the video band's own
-   backend difference rather than overlay agreement. With the legs live,
-   `08-mid-drag` reads **0 px, max delta 1**, and the re-pointed hooks are
-   confirmed *executed* — `overlay.ps1` state 07 reads `speed -2.00x |
-   Reverse Play` on `d3d11` and on `cpu`. Phase 4 and phase 5 sections.
-
-### Carried loose end — CLOSED BY OWNER DECISION, 2026-08-11
-
-**`SNAP gop 2` is no longer tracked.** It was observed once on the **phase 4
-control binary** — i.e. it predates phase 4 and was never a regression of any
-phase — as `SNAP gop 2`, `sched tick 81ms`, 72.5% of real time on one reverse-1×
-run of six, where the control produced the worst run.
-
-Phases 5, 6 and 7 then produced **eighteen clean runs between them and not one of
-them was evidence**, because all three sessions ran on the 1920x1080 @ 59.999Hz
-Parsec display rather than the physical panel it was seen on. Phase 8 ran on that
-display too. Carrying it was costing a paragraph a session and buying nothing, so
-the owner closed it: **re-open only if reverse playback is actually reported
-slow**, and if it is, take three runs **at the panel**.
-
-The general lesson outlives the item and is the reason it is written up rather
-than deleted: **a single run of the `revplay` gesture cannot support a claim in
-either direction** (it is bimodal — `frames 114 / elapsed 4.75s` at 100%, or
-`frames 97 / 4.59s` at 88.1%), and **a clean run on the wrong display is not a
-clean run**.
-
-### Closeout verification
-
-- `main` at `883d216`, level with `origin/main`, **0 unpushed commits**.
-- **Working tree clean** (`git status --porcelain` empty); stash empty, so the
-  control-binary A/B stranded nothing.
-- **CI run 88 green on `883d216`**, including the `--renderer-selftest=d3d11`
-  assertion. Runs 86 (`e559d07`) and 87 (`90140f9`) green before it.
-- **No prerelease published and no tag created.** Tags were not pushed.
-- No `Trace.exe`, build, harness or polling process left running.
-- Regression for each phase is in that phase's own section. Phase 5's was taken
-  on a **1920x1080 @ 59.999Hz display, not the panel**, against a control rebuilt
-  and measured on the same display — so it is valid as an A/B and **not**
-  comparable to the phase 2–4 tables.
 
 ---
 
@@ -1982,3 +1872,136 @@ before the first paint of the new file. It became visible here only because the
 previous file's transform-affected fit is what lingers. Not fixed, because
 changing the open path's paint behaviour would move the `open ...ms` figures the
 regression quotes.
+
+---
+
+## Session closeout — 2026-08-11 (phases 8, 9 and 10)
+
+**An index, not a second copy.** Every fact below is recorded in full in a phase
+section above or in `docs/next-session-prompt.md`. If this ever disagrees with
+the section it points at, the section wins.
+
+**This section moved.** It used to sit between phase 7 and phase 8, where it read
+as if the document ended there. A closeout belongs at the end.
+
+### Phase status
+
+| phase | state | commit |
+|---|---|---|
+| 1 audit | done | `7abb6a5` (`docs/interface-pass-1-audit.md`) |
+| 2 shared actions and artwork | done | `58bfca6` |
+| 3 stepping and shuttle contracts | done | `4de678e` |
+| 4 forward shuttle | done | `e559d07` |
+| 5 reverse shuttle | done | `90140f9` |
+| 6 fullscreen consolidation + overlay auto-hide | done, **owner sign-off** | `bc84431` (CI 90) |
+| 7 Time Display + zero-based frame UI | done | `f15e368` (CI 92) |
+| **8 Share menu + ordinary path copying** | **COMPLETE** | `a6447aa` + `f39eb67` (CI 94) |
+| **9 LucidLink shell-integration prototype** | **COMPLETE, owner accepted** | `9b62ab0` (CI 96) |
+| **10 Temporary view transforms** | **COMPLETE** | `d2b4481` (CI 98) |
+| **11 Open Recent** | **NEXT** | — |
+
+Phases 4–5 complete the transport redesign; 6 makes the floating overlay the only
+transport; 7 makes the time readout honest; 8 adds the Share menu and the
+LucidLink *gate*; 9 makes the LucidLink link real; 10 wires the view transforms.
+**Phase 11 is the next starting point.** Full brief in
+`docs/next-session-prompt.md`.
+
+### Owner decisions taken this session, all settled
+
+1. **Accessibility** — the alpha ships with the composited overlay invisible to a
+   screen reader, and **phase 13 BUILDS an accessibility proxy tree rather than
+   polishing one**. Estimate it as construction. Do not re-raise it as a
+   question.
+2. **`SNAP gop 2`** — no longer tracked. One run of six on a binary predating
+   phase 4; re-open only on a real complaint, and take three runs **at the panel**.
+3. **Phase 9 accepted**, with the LucidLink display-string dependency and the
+   fail-closed behaviour to be preserved. Not to be redesigned during later
+   phases.
+4. **The Share glyph is not to change** without a further decision.
+
+### Two owner visual-review items are carried, neither blocking
+
+- **The Share glyph is a `>>` double-chevron** (the approved package's
+  `share_menu`) beside Fast-forward's filled `>>`. Similar in silhouette.
+- **The floating transport is wider than the picture on 1x1 and 4x5 media** — 460
+  logical px against a 288px video rect on the 4x5, so it overhangs the image and
+  covers its lower part. **Carried to the media-shaped window work by owner
+  instruction**; the approved package's section 8 would change the premise rather
+  than needing a panel fix.
+
+### One thing the owner may want to rule on at phase 13
+
+**`Ctrl+0` is claimed by two documents.** The approved package assigns it to
+Reset View Transform; the interface spec assigns it to Actual Size. Phase 10
+claimed neither and left Reset shortcut-less, because the spec governs and its
+conflict rule is to preserve the existing binding. Phase 13 renders the Keyboard
+Shortcuts window, which is where every binding becomes visible at once.
+
+### What this session established that outlives it
+
+1. **A gate's authority has to come from the thing being gated.** The storage
+   classifier is a *necessary* condition for LucidLink and can only ever move the
+   verdict from Unavailable to Disabled; what makes it Available is the installed
+   integration's own answer for the specific file. Phase 8 and 9 sections.
+2. **The vendor owns its URL format.** LucidLink's REST API is authoritative for
+   identifiers and returns no link, so Trace asks the extension to produce one
+   rather than assembling `lucid://.../file/...?reveal=true` itself. Phase 9.
+3. **Rotation must rotate what the user SEES.** A mirror reverses the sense of a
+   rotation applied after it, so with one flip in force Rotate Right must
+   decrement the quarter turns. `ViewTransform::rotatedOnScreen()`. Phase 10.
+4. **THREE STALE-INSTRUMENT FINDINGS IN THREE PHASES, and in all three the code
+   was right and the instrument accused it.** Phase 8 tried to read a disabled
+   menu item's greyness from icon luminance; phase 9 read a HUD that had not been
+   refreshed after the LucidLink probe and nearly recorded `OleInitialize` as a
+   fix that a control then refuted; phase 10 read a HUD refreshed before the
+   paint that measures the fit. **Before believing a reading, ask when it was
+   taken.**
+5. **A harness leg that cannot pass is worse than one that cannot fail, and its
+   control can hide it.** `lifecycle.ps1` relied on `SetForegroundWindow`, which
+   Windows refuses to a background process; the keystroke that starts playback
+   went elsewhere and `-PlayThroughDrag` reported a frozen picture on two
+   binaries that were both fine. Its control, `-PausedThroughDrag`, expects no
+   motion and passed regardless. Fixed, and it now exits `FOCUS FAIL` rather than
+   accusing the app.
+
+### Settled earlier in the pass, indexed here so this stays a whole-pass closeout
+
+1. **Fast-forward begins at 2x and advances +2x -> +5x -> +10x -> +30x**, capping
+   at 30x. Phase 4 section; ladder re-confirmed from the button at phase 5.
+2. **The Right arrow is the only next-frame surface.** `nextFrameAction_` itself
+   is untouched -- the spec removes the button, not the command. Phase 4.
+3. **Previous-frame remained visible through phase 4 and left at phase 5**, which
+   is the artwork-follows-behaviour rule working rather than an oversight: for
+   exactly one commit `OverlayHooks` read `stepBack` beside `fastForward`.
+   Phases 4 and 5.
+4. **`landPreviousExactly` was removed after measurement showed it bought no
+   anchoring** -- the landing is a reverse-cache hit by construction, and a cache
+   hit sets `currentFrame_` but never `lastDecodedFrame`. Stops still land.
+   Phase 4.
+5. **The transition and overlay harnesses exercise real interactions now.**
+   `transitions.ps1` replaced `revtransitions.ps1` on a run-boundary axis and was
+   re-derived again at phase 5 (25 cases); `overlay.ps1` had been aiming 1.2px
+   outside every control. Phases 4 and 5.
+6. **The phase 2 overlay interaction evidence was invalid and the corrected test
+   passes** -- `08-mid-drag` reads 0 px, max delta 1, and state 07 reads
+   `speed -2.00x | Reverse Play` on both backends. Phases 4 and 5.
+
+### Closeout verification
+
+- `main` at `9116ab9`, level with `origin/main`, **0 unpushed commits**.
+- **Working tree clean**; stash empty and no worktrees left, so none of the four
+  control-binary A/Bs stranded anything.
+- **CI runs 94, 96 and 98 green** on the phase 8, 9 and 10 commits, each with
+  `Verify package is launchable` and `Verify the renderer initializes` checked
+  individually rather than by the overall conclusion.
+- **No prerelease published and no tag created.**
+- No `Trace.exe`, build, harness or polling process left running; the Explorer
+  window opened by the phase 8 Show-in-Explorer test was closed.
+- **`V:\` was never written to.** Phase 9 used only the nominated file and
+  invoked only the copy-link command; `Pin`, the item beside it, was never
+  reached because identification is an exact text match.
+- **The display changed part-way through this session** — Parsec disconnected and
+  the physical panel took over. Phase 8 and 9 regressions are on **1920x1080 @
+  59.999Hz**; phase 10's is on **5120x1440 @ 239.999Hz**. `stalls` is
+  `2 x refresh`, so its bar moved 33.3ms to 8.3ms and **no stall figure crosses
+  that boundary**. `hitch` does.
