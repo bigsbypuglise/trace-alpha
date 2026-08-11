@@ -1188,8 +1188,9 @@ section it points at wins.
 | **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE, owner sign-off** | `bc84431` (CI run 90 green) |
 | **7 Time Display + zero-based frame UI** | **COMPLETE** | `f15e368` (CI run 92 green) |
 | **8 Share menu + ordinary path copying** | **COMPLETE** | `a6447aa` + `f39eb67` (CI run 94 green) |
-| **9 LucidLink shell-integration prototype** | **COMPLETE** | `9b62ab0` |
-| **10 Temporary view transforms** | **NEXT** | — |
+| **9 LucidLink shell-integration prototype** | **COMPLETE** | `9b62ab0` (CI run 96 green) |
+| **10 Temporary view transforms** | **COMPLETE** | `d2b4481` |
+| **11 Open Recent** | **NEXT** | — |
 
 Phases 4 and 5 together complete the **transport redesign**; phase 6 makes the
 floating overlay the only transport and consolidates fullscreen; phase 7 makes
@@ -1747,3 +1748,237 @@ is a `>>` double-chevron beside Fast-forward's `>>`-with-triangles, and **the
 floating transport is wider than the picture on 1x1 and 4x5 media** (460 logical
 px against a 288px video rect on the 4x5). Both are recorded in
 `docs/next-session-prompt.md`.
+
+---
+
+## Phase 10 — temporary view transforms (2026-08-11)
+
+### What shipped
+
+Five shared `QAction`s — Rotate Left, Rotate Right, Flip Horizontal, Flip
+Vertical, Reset View Transform — in a real **Edit** menu, which is where the spec
+puts them. A top-level menu rather than another File submenu: unlike phase 7's
+Time Display group, this one *is* a whole menu in the spec, and the only other
+thing the spec puts in Edit is Copy Current Frame, which is later and
+conditional.
+
+**Wiring only, as briefed.** The renderer-neutral contract was built and measured
+at plan §31 (`4b7174f`); neither backend needed a line, and `TRACE_VIEW_TRANSFORM`
+left with the phase that made it redundant — the way `TRACE_SHUTTLE_ENTRY` left
+with phase 5.
+
+`applyViewTransform()` is the one place the transform changes, so what is on
+screen and what the menu says come from a single write followed by a single
+read-back. It asks the *viewer* for the resulting transform rather than assuming
+the requested one took.
+
+### Rotation rotates what the user sees, and that is the determinism requirement
+
+The composition is `screen = flip(rotate(source))`, so the **flip** buttons
+already act on what is visible. Rotation does not come for free, and this is the
+whole of the combined-rotate-and-flip question:
+
+**A mirror reverses the sense of a rotation applied after it** — for a mirror
+`M`, `R(t) . M == M . R(-t)`. So with exactly one mirror in force, Rotate Right
+must **decrement** `quarterTurns` or the picture visibly turns **left**. With both
+mirrors it must not, because H then V is a 180° rotation and rotations commute
+with each other.
+
+`ViewTransform::rotatedOnScreen()` owns that, so both backends and every caller
+inherit one answer. Flips need no compensation and are plain toggles: being
+screen-space already makes each its own inverse.
+
+**Verified by an independent landmark rather than by trusting the arithmetic.**
+The 4×5 slate has a black bar in one corner:
+
+| state | black bar | HUD |
+|---|---|---|
+| identity | bottom-right | `display 288x360` |
+| Flip Horizontal | bottom-left | `display 288x360 view flipH` |
+| then Rotate Right | **top-left** | `display 450x360 view rot270 flipH` |
+
+Top-left is where a **clockwise** turn puts a bottom-left mark. The naive
+implementation would have recorded `rot90 flipH` and turned the picture the other
+way.
+
+### The fit and the reduction taps come from the post-transform fit
+
+Measured across the full rotation cycle on 4K H.264, which is the case plan §31
+predicted numbers for:
+
+| presses | HUD |
+|---|---|
+| identity | `display 640x360 filtered x3` |
+| ×1 | `display 202x360 filtered x4 view rot90` |
+| ×2 | `display 640x360 filtered x3 view rot180` |
+| ×3 | `display 202x360 filtered x4 view rot270` |
+| ×4 | `display 640x360 filtered x3` — identity, `view` gone |
+
+`202x360` and `x3 → x4` are §31's predicted values to the digit. A quarter turn
+re-letterboxes and the taps follow the post-transform fit; 180° changes neither,
+which is the check that the taps track the *fit* and not the rotation.
+
+On the 4×5 the fit goes `288x360 → 450x360` at 90°, and on the 1×1 it stays
+`360x360` — a square is invariant under rotation, which is the degenerate case
+worth having in the set.
+
+### repaint(), not update() — the HUD was reporting the previous transform
+
+The fit and the taps are measured **by** the paint and reported afterwards, so
+refreshing the HUD after a merely-scheduled repaint prints the previous
+transform's `display`. On a paused file nothing refreshes it again, so it stays
+wrong.
+
+**Measured before the fix**: the 4×5 rotated 90° drew visibly landscape while
+`display` still read `288x360`. The picture was right and the instrument was
+wrong. Same reason the scrub walk calls `repaint()`.
+
+**Third stale-instrument finding in three phases** — phase 8 read menu-icon
+luminance, phase 9 read a HUD that had not been refreshed after the LucidLink
+probe, and here the HUD had not been refreshed after the paint. In all three the
+code was correct and the instrument accused it.
+
+### CPU and D3D11 agree on orientation, fit and framing
+
+The plan warned these could differ by a mirror, because QPainter post-multiplies
+and the CPU path names `scale` before `rotate` deliberately. They do not.
+
+`display` and `win` are identical on both backends at every state:
+
+| state | d3d11 | cpu |
+|---|---|---|
+| rot90 | `display 450x360 view rot90`, `win 1280x843` | identical |
+| rot90 + flipH | `display 450x360 view rot90 flipH` | identical |
+| flipV | `display 288x360 view flipV` | identical |
+
+Pixel difference over the video band, docked bar so the overlay's fade state is
+not in the comparison (`scripts/measure/banddiff.ps1`):
+
+| state | differing px | max channel delta |
+|---|---|---|
+| identity | 3524 of 446600 (0.79%) | 141 |
+| rot90 | 4661 (1.04%) | 154 |
+| rot90 + flipH | **4661 (1.04%)** | **154** |
+| flipV | 3475 (0.78%) | 141 |
+
+**rot90 and rot90+flipH agreeing to the pixel is evidence, not coincidence.**
+Flipping both captures maps the difference map onto its mirror, which preserves
+the count and the maximum exactly — so an identical pair is what an *exact*
+mirror on both backends predicts. A mirror disagreement would instead have shown
+the picture in two places and a difference near 50%.
+
+The residual is edge resampling on a high-contrast slate, and it is *lower* at
+identity than at rot90 because the rotated fit covers more area. **The first
+attempt at this measurement read 9.1%** and was the floating overlay's fade
+state landing inside the band — the panel is composited over the video, so a
+cross-backend diff has to be taken in bar mode.
+
+### The transform is viewing state and survives the transport
+
+Applied `Rotate Right`, then drove everything, capturing after each. `view rot90`
+is present in all nine states, and the frame index advances normally underneath
+it:
+
+`01-rot` · `02-playing` · `03-paused` · `04-stepped` · `05-shuttle` ·
+`06-stopped` · `07-scrubbed` · `08-fullscreen` · `09-windowed`
+
+`display 450x360 view rot90 | win 1280x843` reads identically in every windowed
+state; fullscreen reads `display 1196x957 filtered x1 view rot90 | win 5120x1440`
+and windowing back returns to `450x360`. No decoder request is made — the frame
+on screen is the frame that was already there, drawn through a different
+coordinate transform.
+
+**Frame numbering and source timecode are untouched.** Frame index reads 0 → 60 →
+157 across those states, matching `Frame:` exactly. With `rot90` applied to the
+1×1, `Timecode:` reads `00:59:53:00` at frame 0 and `00:59:54:00` at frame 24 —
+the same values the untransformed file gives. The share gate is unchanged.
+
+**Reset works both ways.** `Rese&t View Transform` returns the 4×5 to
+`display 288x360` with the `view` field gone; opening a different file through
+File ▸ Open with `rot90 + flipH` in force opens it upright with no `view` field.
+
+Two notes on the menu. **Reset has no shortcut on purpose**: the approved package
+puts it on `Ctrl+0` and the interface spec gives `Ctrl+0` to Actual Size. The
+spec governs, its rule on conflict is to preserve the existing binding, and
+Actual Size does not exist yet — so this phase claims neither and leaves the key
+for whoever adds it. `Ctrl+L` / `Ctrl+R` are unclaimed in both documents and are
+taken. And it is **"Rese&t"**, not "&Reset", because Rotate Right already owns R
+in that menu and two items sharing a mnemonic makes the key cycle the highlight
+instead of activating either.
+
+### Regression
+
+**THIS SESSION'S DISPLAY CHANGED PART-WAY THROUGH, and the regression is on the new one.**
+Parsec disconnected and the **physical panel took over — 5120x1440 @ 239.999Hz** — where
+phases 5–9 all ran on Parsec's 1920x1080 @ 59.999Hz. Both legs below were run on the panel, so
+the A/B is valid; but `stalls` is `2 × refresh` and its bar is **8.3ms here against 33.3ms in
+phases 5–9**, so **no stall figure below is comparable with those tables**. `hitch` is a fixed
+33ms bar and still is. The visual and geometry results earlier in this section are windowed
+measurements of the client area and are unaffected.
+
+Control binary built from `485cdab` in a separate worktree and **verified by hash on every
+swap** (`07179488…` → rebuilt here, `536FFA67…` phase 10). `d3d11` default. Cadence in overlay
+mode; drag, reverse and matrix runs in bar mode with `TRACE_TRANSPORT_BAR=1`.
+
+| run | control | phase 10 |
+|---|---|---|
+| 4K H.264 cadence ×3 | 100.0 / 100.0 / 99.9%, 120 frames, `handler>budget 0 of 119` (max 4.4 / 4.5 / 4.6), p50 41.8 / 41.7 / 41.8, max 44.2 / 43.2 / 43.7 | 100.0 / 100.0 / 99.9%, 120 frames, `0 of 119` (max 4.3 / 4.3 / 4.5), p50 41.8 / 41.9 / 41.9, max 44.1 / 43.5 / 44.1 |
+| 4444 cadence ×2 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 40.0 / 38.9), max 45.0 / 44.2 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 38.4 / 37.1), max 44.9 / 48.2 |
+| reverse 1× ×3 | 100.0 / 84.6 / 88.2% | 100.0 / 88.1 / 100.0% |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, `walk 0f`, full-res planar, `stalls 104 of 114 (>8.3ms)`, `hitch 0`, `ui gap max 65.7ms`, `release 24.8ms` | same landing, `stalls 103 of 114`, `hitch 0`, `ui gap max 66.4ms`, `release 22.4ms` |
+| lifecycle | `-PlayThroughDrag` PASS 40.1%, `-PausedThroughDrag` PASS 0% | PASS 39.1%, PASS 0% |
+| transitions | **25 of 25 PASS** | **25 of 25 PASS** |
+
+Cadence buckets identical on 4K H.264 (`~1x 119`, every other bucket 0) on both binaries.
+Landing exact on every run. **`paints` is unchanged** — 151–152 of 121 on both — which is what
+says the phase adds no drawing: at identity the transform is not applied at all, and when it is
+applied it changes a coordinate rather than adding a pass.
+
+**Reverse 1× is bimodal on both binaries again**, into the recorded populations —
+`114 frames / 4.75s` at 100.0% or `97 / 4.58s` at 88.1–88.2%, plus one control run at
+`99 / 4.88s` and 84.6%. Control was 2 of 3 slow and phase 10 1 of 3; three runs cannot
+distinguish those, which is why that gesture has always been recorded as "take three". Phase 10
+reading *better* on this sample means nothing.
+
+**`lifecycle.ps1`'s phase 9 focus fix held.** Both `-PlayThroughDrag` legs passed first time on
+both binaries, where before the fix the same gesture reported 3 of 3 FAIL on two binaries that
+were both fine.
+
+**No void first repeat this time.** Phase 9's legs each produced a `frames 0` rep 1 after a
+binary swap; on the panel all five cadence runs per leg are valid. The advice stands — give
+cadence an extra repeat — but the cause looks like machine speed rather than anything
+structural.
+
+
+### What phase 10 changes about the plan
+
+**Phase 11 is Open Recent**, and it is mostly a set of refusals — no startup
+probing, no blocking on disconnected LucidLink paths, canonical stored paths, a
+missing entry reported rather than silently dropped. `MediaShare`'s
+`canonicalNativePath` already exists; do not write a second normalisation.
+
+**`ViewTransform::rotatedOnScreen()` is the one place the rotate-versus-mirror
+rule lives.** Any new way to rotate calls it rather than touching
+`quarterTurns`. **`applyViewTransform()` is the one place the transform changes**,
+and it calls `repaint()` before `refreshHud()` on purpose — a caller that uses
+`update()` will silently report the previous transform's `display`.
+
+**`scripts/measure/banddiff.ps1` and `scripts/measure/viewtransform.ps1` are new.**
+The first is a LockBits pixel diff over a band of rows, which runs in seconds
+where a `GetPixel` loop over the same band took minutes and would simply have
+stopped being run. The second drives the five actions and captures. **Take
+cross-backend diffs in bar mode** — the floating overlay is composited over the
+video and its fade state read 9.1% of the band on the first attempt here.
+
+**`Ctrl+0` is unclaimed and spoken for by two documents.** The approved package
+wants it for Reset View Transform, the interface spec for Actual Size. Whoever
+adds Actual Size should take it; Reset stays shortcut-less unless the owner rules
+otherwise. Worth raising with the owner at phase 13, when the Keyboard Shortcuts
+window makes every binding visible at once.
+
+**The `display` field is one paint stale immediately after opening media**, and
+that is pre-existing rather than phase 10's: `openPath` ends with `refreshHud`
+before the first paint of the new file. It became visible here only because the
+previous file's transform-affected fit is what lingers. Not fixed, because
+changing the open path's paint behaviour would move the `open ...ms` figures the
+regression quotes.

@@ -1,4 +1,4 @@
-# The interface pass is open, phase 9 shipped, and phase 10 is next.
+# The interface pass is open, phase 10 shipped, and phase 11 is next.
 
 Supersedes the previous version. **Spec phase 6 shipped and is signed off by the owner** — the
 floating overlay is the only transport, the docked bar is out of the layout behind
@@ -7,9 +7,10 @@ readout is honest (source SMPTE, or elapsed, never one labelled as the other), T
 first text-entry controls, and zero-based numbering is finished. **Spec phase 8 shipped** —
 the Share menu, Copy File Path, Show in File Explorer, and the *gate* on Copy LucidLink Link.
 **Spec phase 9 shipped** — Copy LucidLink Link works, driven through the installed
-integration's own shell command, and Trace never composes a link. **The next thing to do is
-spec phase 10, the temporary view transforms, which is wiring only.** Paste everything below
-the line into a fresh session in the repo root.
+integration's own shell command, and Trace never composes a link. **Spec phase 10 shipped** —
+the five view-transform actions are wired, rotation rotates what the user sees, and
+`TRACE_VIEW_TRANSFORM` is gone. **The next thing to do is spec phase 11, Open Recent.** Paste
+everything below the line into a fresh session in the repo root.
 
 **Two owner decisions were taken on 2026-08-11 and are recorded rather than open.**
 Accessibility: **the alpha ships with the overlay invisible to a screen reader, and phase 13
@@ -82,7 +83,7 @@ identity as a transport**. It is not a sign-off on the Time Display readouts (ph
 them), on the menus (phase 13), or on the overlay being finished: **plan §31.5 item 4 stands
 — the overlay is not final until a screen reader has driven one.**
 
-## THE OPEN PHASE — interface pass 1, now at phase 10
+## THE OPEN PHASE — interface pass 1, now at phase 11
 
 The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 `docs/interface-pass-1-spec.md`; the phase record is `docs/interface-pass-1-progress.md`.
@@ -117,69 +118,62 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 - **Phase 9 shipped on 2026-08-11** — the LucidLink integration is real. The link is produced
   by the installed shell extension, invoked through `IShellExtInit`/`IContextMenu` on the one
   discovered CLSID, and validated before it is accepted. Full record in the progress doc.
+- **Phase 10 shipped on 2026-08-11** — the Edit menu's five view transforms, on the plan §31
+  contract, with rotation compensated so it turns the picture the way the user sees it. Full
+  record in the progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
   run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0`, **run 90 on `bc84431`
   (phase 6)**, **run 92 on `f15e368` (phase 7)**, **run 94 on `1bec8c5` (phase 8)** and
   **run 96 on `69a45c1` (phase 9)**, all including the renderer selftest.
 
-### Start at spec phase 10, and read `docs/interface-pass-1-progress.md` first
+### Start at spec phase 11, and read `docs/interface-pass-1-progress.md` first
 
-**Phase 10 is the temporary view transforms, and it is wiring only.** Rotate Left, Rotate
-Right, Flip Horizontal, Flip Vertical, Reset View Transform — five `QAction`s onto
-`viewer_->setViewTransform()`, plus a reset when new media opens. The renderer-neutral
-contract was built and measured back at plan §31 (`4b7174f`); `TRACE_VIEW_TRANSFORM=90|180h|v`
-is the interim knob and **it leaves with this phase**, the way `TRACE_SHUTTLE_ENTRY` left with
-phase 5.
+**Phase 11 is Open Recent**, and unlike phases 8–10 it is mostly a set of refusals. The spec's
+rules are the design:
 
-**Two traps are already recorded and both fail silently.** A quarter turn **re-letterboxes** —
-`display 640x360` becomes `202x360`, identical on both backends — and the **reduction taps must
-be recomputed from the post-transform fit** with the footprint axes exchanged, or the box
-average filters the wrong axis (`filtered x3` → `x4` at rot90). The CPU path names `scale`
-before `rotate` deliberately, because QPainter post-multiplies and the other order turns
-`rot90 + flipH` into `rot90 + flipV` — the two backends would then differ by a mirror while
-every number agreed.
+- a **bounded** recent-file list, with **Clear Recent Files**;
+- **do not probe every path during application startup** — the list is drawn from stored
+  strings, not from the filesystem;
+- **do not block on disconnected LucidLink/network paths** — this is the one that matters here,
+  because `V:\` is exactly such a path and a cold LucidLink `stat` measured **407ms for a single
+  read** in the storage work. A recent list that stats its entries to grey out the missing ones
+  would hang the File menu on a disconnected mount;
+- a missing file is **reported, with an offer to remove the entry**, rather than silently
+  dropped;
+- store **canonical** paths;
+- do not log sensitive path history unnecessarily.
 
-**The spec's rules for it**: viewing transforms only, never modify source media, never write
-metadata, never remux; reset on new media; keep the transform through seek, scrub and play; do
-not change authoritative frame identity. Menu home is **Edit** per the spec, and phase 7's
-precedent applies — put the group where it belongs now and let phase 13 restructure.
+**Phase 8's `MediaShare` already computes the canonical path** (`canonicalNativePath`), so use
+that rather than a second normalisation. And note the phase 9 shape for anything that must
+touch a mount: probe off the UI thread, cache the answer against the path, and let the menu
+read the cache.
 
-**The 1×1 and 4×5 ProRes assets are the right material for it** (`9_1x1_ProRes`,
-`10_4x5_ProRes`): a square clip makes a 90° rotation's letterboxing arithmetic visible in a way
-16:9 does not, and the 4×5 is the case where a quarter turn changes which axis binds.
+**`QSettings` is not yet used anywhere in Trace** — check before assuming a settings home
+exists. Phase 6's fullscreen geometry restore keeps its state in memory only.
 
-### What phase 9 leaves behind
+### What phase 10 leaves behind
 
-- **`src/app/LucidLinkIntegration.*` is the whole vendor surface.** If LucidLink ever needs
-  re-visiting, the two entry points are `probeLucidSupport()` (does the integration offer a
-  link for this file) and `copyLucidLinkViaShell()` (run it and validate what comes back).
-- **`TRACE_LUCID_LOG=1`** prints one stderr line per probe and copy. Reach for it first: the
-  gate is three refusals deep and `lucid disabled` looks identical whether the handler was not
-  found, the extension declined the file, or the menu had no matching item.
-- **`TRACE_LUCID_COINIT=1`** is the retained control for a closed question — `CoInitializeEx`
-  instead of `OleInitialize`, measured identical.
-- **The display-string dependency is the one real fragility.** The extension exposes no
-  canonical verb, so the item is matched on the text `Copy link` as rendered by
-  **LucidShellExt 1.0.15**. A LucidLink update that renames it, or a localized Windows, turns
-  the command unavailable — which is the safe direction, because the neighbouring item is
-  `Pin` and pinning writes to the mount. **If a user ever reports Copy LucidLink Link greyed
-  out on a real LucidLink file, check that string first.**
-- **A `V:\` file must be nominated for any future LucidLink testing.** The mount is live client
-  production storage and is strictly read-only; phase 9 used only the nominated file and
-  invoked only the copy-link command.
+- **`ViewTransform::rotatedOnScreen()` is the one place the rotate-versus-mirror rule lives.**
+  Anything that adds another way to rotate — a toolbar button, a gesture, a shortcut — calls it
+  rather than touching `quarterTurns`.
+- **`applyViewTransform()` is the one place the transform changes**, and it calls `repaint()`
+  before `refreshHud()` on purpose. A new caller that uses `update()` will silently report the
+  previous transform's `display`.
+- **`scripts/measure/banddiff.ps1`** is the new cross-backend pixel diff (LockBits, so it runs
+  in seconds rather than minutes). **Take backend diffs in bar mode**: the floating overlay is
+  composited over the video, so its fade state lands inside the band and read 9.1% on the first
+  attempt here.
+- **`Ctrl+0` is still unclaimed and is spoken for.** The approved package wants it for Reset
+  View Transform, the interface spec wants it for Actual Size. Whoever adds Actual Size should
+  take it, and Reset stays shortcut-less unless the owner rules otherwise.
 
-### Carried owner visual-review items
+### Carried owner visual-review items — unchanged, still not blocking
 
-- **The Share glyph is a `»` double-chevron** (the approved package's `share_menu`) sitting
-  beside Fast-forward's `▶▶`. Shipped as delivered — artwork follows behaviour and the package
-  is the approved source — but the two are similar in silhouette. Unchanged by instruction
-  during phase 9.
-- **The floating transport is wider than the picture on 1×1 and 4×5 media.** Measured on the
-  4×5 at the default window size: a **460 logical px panel against a 288px video rect**, so it
-  overhangs the image on both sides and covers its lower part. The transport still reveals,
-  hides and responds normally. Fixing it is aspect-ratio and window-sizing work, and the
-  approved package's §8 **media-shaped window** would change the premise entirely by making the
-  window adopt the source display aspect ratio.
+- **The Share glyph is a `>>` double-chevron** beside Fast-forward's filled `>>`. Shipped as
+  delivered; not to be changed without an owner decision.
+- **The floating transport is wider than the picture on 1x1 and 4x5 media** — 460 logical px
+  against a 288px video rect on the 4x5. Carried to the media-shaped window work
+  (approved package section 8), which would change the premise rather than needing a panel fix.
 
 **Three things phase 7 leaves for whatever adds UI next**:
 
@@ -235,7 +229,7 @@ own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
 
 ### The rest of the phase list, with what is known about each
 
-10. **Phase 10 is the open phase** — briefed in full above.
+11. **Phase 11 is the open phase** — briefed in full above.
 12. **Phase 12's Movie Inspector has most of its data already**, and `VideoMetadata` gained
     the start timecode at phase 7. Its rule is the one this project keeps proving: display
     Unknown or Untagged honestly, and do not infer missing colour metadata inside the
@@ -393,6 +387,14 @@ tagged with a renderer. They remain valid as records; they are **not** valid as 
 against a run taken today. Re-tag as you re-measure.
 
 ## Parsec — ask which display a session is on before comparing any number
+
+**IT CHANGED MID-SESSION ON 2026-08-11 AND THAT IS THE SECOND TIME.** Parsec
+disconnected part-way through the phase 10 session and the physical panel took
+over, so the phase 10 regression is on **5120x1440 @ 239.999Hz** while phases
+5–9 are all on **1920x1080 @ 59.999Hz**. `stalls` is `2 × refresh`, so its bar
+moved 33.3ms → 8.3ms and **no stall figure crosses that boundary**. `hitch` does.
+Run `scripts/measure/refresh.ps1` at the START of a session and again before
+quoting anything, rather than once.
 
 Mid-session display mode changes are Anj logging in over Parsec. Remote sessions present a
 virtual display at **1920x1200 @ 60Hz**; the physical panel is **5120x1440 @ 239.999Hz**.

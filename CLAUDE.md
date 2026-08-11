@@ -528,6 +528,61 @@ panel is 1.6× wider than the picture and covers much more of a 1×1 or 4×5 ima
 16:9 one. Owner visual-review item; the approved package's §8 media-shaped window would change
 the premise entirely.
 
+**SPEC PHASE 10 IS DONE (2026-08-11): the view transforms are wired, and rotation rotates what
+the user SEES.** Five shared `QAction`s in a real **Edit** menu. Wiring only — the
+renderer-neutral contract was built and measured at plan §31 and neither backend needed a
+line. `TRACE_VIEW_TRANSFORM` **left with the phase**, the way `TRACE_SHUTTLE_ENTRY` did at
+phase 5.
+
+Five things to carry.
+
+- **ROTATION GOES THROUGH `rotatedOnScreen()`, NOT `quarterTurns + 1`, and that is the whole
+  combined-rotate-and-flip determinism question.** The composition is
+  `screen = flip(rotate(source))`, so the *flip* buttons already act on what is visible — but
+  **a mirror reverses the sense of a rotation applied after it** (`R(t)·M == M·R(-t)`). With
+  exactly one mirror in force, Rotate Right must **decrement** `quarterTurns` or the picture
+  visibly turns **left**; with both it must not, because H then V is a 180° rotation and
+  rotations commute. It lives on `ViewTransform` so both backends inherit one answer. Flips
+  need no compensation and are plain toggles.
+- **Verified by a landmark, not by the arithmetic.** The 4×5 slate's black bar is bottom-right
+  at identity, bottom-left after Flip Horizontal, and **top-left** after Rotate Right — where a
+  clockwise turn puts it. State reads `view rot270 flipH`; the naive version reads `rot90 flipH`.
+- **The fit and the reduction taps come from the POST-TRANSFORM fit**, measured across the full
+  cycle on 4K H.264: identity `640x360 filtered x3`, rot90 `202x360 filtered x4`, rot180
+  `640x360 filtered x3`, rot270 `202x360 filtered x4`, and four presses return to identity with
+  the `view` field gone. Those are §31's predicted values **to the digit**. 180° changing
+  neither is the check that the taps track the *fit* rather than the rotation. The 1×1 stays
+  `360x360` under rotation, which is the degenerate case worth having.
+- **`repaint()`, NOT `update()`, when a transform is applied — the HUD was reporting the
+  PREVIOUS transform.** The fit and the taps are measured *by* the paint and reported after it,
+  so refreshing after a merely-scheduled repaint prints the old `display`, and a paused file
+  never refreshes again. Measured: the 4×5 rotated 90° drew visibly landscape while `display`
+  still read `288x360`. **Third stale-instrument finding in three phases** — phase 8's
+  menu-icon luminance, phase 9's un-refreshed HUD after the LucidLink probe, and this. In all
+  three the code was right and the instrument accused it.
+- **CPU and D3D11 agree on orientation, fit and framing**, which the plan warned might not hold
+  because QPainter post-multiplies. `display` and `win` are identical on both at rot90,
+  rot90+flipH and flipV. Band diff (docked bar, `scripts/measure/banddiff.ps1`): identity 0.79%
+  / max 141, rot90 1.04% / 154, **rot90+flipH 1.04% / 154 — identical to rot90 to the pixel**,
+  which is what an *exact* mirror on both backends predicts, since flipping both captures maps
+  the difference map onto its mirror. A mirror *disagreement* would have read near 50%. **The
+  first attempt read 9.1% and was the floating overlay's fade state landing inside the band —
+  a cross-backend diff has to be taken in bar mode.**
+
+**The transform is viewing state and survives the transport**: `view rot90` is present through
+playing, paused, stepped, shuttle, stopped, scrubbed, fullscreen and back, with the frame index
+advancing normally underneath it (0 → 60 → 157) and no decoder request made. **Frame numbering,
+source timecode and the share gate are untouched** — with `rot90` on the 1×1, `Timecode:` reads
+`00:59:53:00` at frame 0 and `00:59:54:00` at frame 24, the same as untransformed. **Reset
+works both ways**: the action returns to identity, and opening a different file resets it.
+
+**Reset View Transform has NO shortcut on purpose.** The approved package puts it on `Ctrl+0`
+and the interface spec gives `Ctrl+0` to Actual Size; the spec governs, its conflict rule is to
+preserve the existing binding, and Actual Size does not exist yet — so this phase claims
+neither. `Ctrl+L`/`Ctrl+R` are unclaimed in both and are taken. The menu item is **"Rese&t"**,
+not "&Reset", because Rotate Right already owns R there and two items sharing a mnemonic makes
+the key cycle the highlight instead of activating either.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
@@ -560,8 +615,9 @@ passing. Read plan §31 before touching either.
   (`filtered x3` → `x4` at rot90, recomputed from the post-transform fit with the footprint
   axes exchanged). The CPU path names `scale` before `rotate` deliberately — QPainter
   post-multiplies, so the other order turns `rot90 + flipH` into `rot90 + flipV` and the two
-  backends would differ by a mirror while every number agreed. `TRACE_VIEW_TRANSFORM=90|180h|v`
-  is the knob until phase 10 wires actions; the HUD reads `view rot90 flipH`.
+  backends would differ by a mirror while every number agreed. **Spec phase 10 wired the Edit
+  menu's five actions to this and both predictions above were confirmed to the digit**;
+  `TRACE_VIEW_TRANSFORM` left with it. The HUD reads `view rot90 flipH`.
 
 Owner context: Anj is a VFX/motion-design lead, not a programmer. Explain things plainly; he tests builds on a Windows RTX 4090 box; development happens on macOS. Don't ask him to debug code — give exact copy-paste terminal commands when he needs to run anything.
 
@@ -1301,8 +1357,7 @@ run at all** — `scrub.ps1`, `revplay.ps1`, `lifecycle.ps1`, `transitions.ps1`,
 and `TRACE_OVERLAY_COMPOSITED=0` select it too, so turning the overlay off asks for the other
 transport rather than for none), `TRACE_OVERLAY=1` (the floating transport — **on by default
 since spec phase 6**; `TRACE_OVERLAY_COMPOSITED=1` is retained because the harness sets it),
-and `TRACE_VIEW_TRANSFORM=90|180|270|h|v`
-(rotate/flip, a test knob until spec phase 10 wires the real actions), **`TRACE_LUCID_LOG=1`** (spec phase 9: one stderr line per LucidLink probe and copy -- the gate is three refusals deep and `disabled` looks identical whichever one fired) and **`TRACE_LUCID_COINIT=1`** (the retained control for the apartment question: `CoInitializeEx` instead of `OleInitialize`, measured identical).
+and ~~`TRACE_VIEW_TRANSFORM`~~ (**gone as of spec phase 10** -- the interim rotate/flip knob; the Edit menu's five actions replaced it and it left with the phase that made it redundant, exactly as `TRACE_SHUTTLE_ENTRY` did at phase 5), **`TRACE_LUCID_LOG=1`** (spec phase 9: one stderr line per LucidLink probe and copy -- the gate is three refusals deep and `disabled` looks identical whichever one fired) and **`TRACE_LUCID_COINIT=1`** (the retained control for the apartment question: `CoInitializeEx` instead of `OleInitialize`, measured identical).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
 a default launch reports `renderer d3d11 +overlay` (`renderer cpu` before 2026-08-10; **the
