@@ -149,8 +149,26 @@ that rather than a second normalisation. And note the phase 9 shape for anything
 touch a mount: probe off the UI thread, cache the answer against the path, and let the menu
 read the cache.
 
-**`QSettings` is not yet used anywhere in Trace** — check before assuming a settings home
-exists. Phase 6's fullscreen geometry restore keeps its state in memory only.
+**PHASE 11 INTRODUCES TRACE'S FIRST PERSISTENT STATE, AND WHERE IT LIVES IS A DECISION.**
+There is no settings home today. `QSettings` appears once, as an include in
+`LucidLinkIntegration.cpp` for reading the registry to discover shell-extension CLSIDs — that
+is registry *reading*, not a settings home, so do not mistake it for one. Phase 6's fullscreen
+geometry restore keeps its state in memory only.
+
+`QSettings`'s Windows default is `NativeFormat`, which writes to
+`HKCU\Software\<org>\<app>`. **Trace ships as a portable ZIP with no installer by deliberate
+choice** (`docs/release-notes-alpha.md`), and a portable app that leaves registry keys behind
+after its folder is deleted contradicts that. Decide this explicitly rather than inheriting
+the default. `QSettings::IniFormat` under `QStandardPaths::AppConfigLocation` is the
+conventional middle path — always writable, survives, no registry droppings — and preferring a
+`trace.ini` beside the executable when one exists gives true portable mode for a few lines.
+
+**Establish it once, with a single owner, because three other things already want it**: phase
+6's fullscreen geometry, phase 13's window state, and §4's `Lock Window to Media Aspect Ratio`
+(specified as checked by default). That is the same single-gate pattern as
+`hasSourceTimecode_` and `OverlayModel::enabledByEnvironment()`. Also honour the spec's own
+rule here — *do not log sensitive path history unnecessarily* — which is a reason to keep the
+recent list short and to store nothing else about the files.
 
 ### What phase 10 leaves behind
 
@@ -237,7 +255,29 @@ own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
     inspector.
 13. **Phase 13 renders the Keyboard Shortcuts window from `ShortcutTable::rows()`.** The table
     is already complete; action-owned rows point at their `QAction` rather than copying it,
-    and phase 7 added `Ctrl+G` / `Ctrl+Shift+G` to it as documentation rows.
+    and phase 7 added `Ctrl+G` / `Ctrl+Shift+G` to it as documentation rows. **It is also now
+    the phase that BUILDS the accessibility proxy tree** — see the first loose end. Estimate
+    it as construction, not polish.
+14. Full regression pass.
+
+**AND THERE IS A FIFTEENTH CHUNK WITH NO PHASE NUMBER.** `docs/interface-pass-1-spec.md` §4,
+*Media-driven window size*, is part of the same approved spec but is **absent from the
+Implementation phasing list at §3**, which stops at 14. It was appended after the main body and
+never phased. It is not small: the window adopting the media's exact display aspect ratio
+(accounting for sample aspect, DAR metadata, rotation metadata and the phase 10 view
+transforms), `View > Lock Window to Media Aspect Ratio` checked by default, aspect-locked
+interactive resizing without oscillation, an explicit policy for maximized / snapped /
+fullscreen states, and its own validation matrix across seven aspect ratios and five DPI
+settings.
+
+**Raise it with the owner before phase 14, not after** — a "full regression pass" that closes
+the interface pass while a specified chunk of it has never been scheduled would close the pass
+falsely. Two things are already known about it: **§2 item 7** — `syncScrubPreviewSize()` calls
+`reclaimDecoder()` and clears the decoder's frame cache on *every* resize, so continuous
+aspect-locked drag-resizing would thrash it and needs a resize-settled debounce measured rather
+than assumed; and the phase 9/10 note that **the floating transport is 460 logical px wide
+against a 288px picture on 4×5 media**, which §4's media-shaped window would change the premise
+of entirely.
 
 ### Priority 1 is the constraint on all of it
 
