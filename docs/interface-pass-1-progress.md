@@ -2319,7 +2319,7 @@ disagrees with the section it points at, the section wins.
 | 9 LucidLink shell integration | done, **owner accepted** | `9b62ab0` (CI 96) |
 | 10 temporary view transforms | done | `d2b4481` (CI 98) |
 | **11 Open Recent + the settings home** | **COMPLETE** | `84be1a1` (CI 101 on `700446e`) |
-| **12 Media-driven window size (spec section 4)** | **NEXT — inserted by owner decision** | — |
+| **12 Media-driven window size (spec section 4)** | **COMPLETE**, with the opening size capped by owner decision | `9b17f08` + `458a5ec` |
 | 13 Movie Inspector | pending (was 12) | — |
 | 14 Menus, help, accessibility proxy tree | pending (was 13) | — |
 | 15 Full regression pass | pending (was 14) | — |
@@ -2870,3 +2870,56 @@ than read. Widen the window by hand before capturing, or measure on 16:9 materia
 where the phase under test allows it. Sixth stale/unreadable-instrument note in
 five phases, and the first where the instrument is clipped rather than out of
 date.
+
+## Session closeout — 2026-08-11 (phase 12)
+
+**An index, not a second copy.** Every fact below is recorded in full in the
+phase 12 section above. If this disagrees with the section it points at, the
+section wins.
+
+### Owner decisions taken this session
+
+1. **The opening window is capped.** Media determines the opening window's
+   *aspect ratio*, not an unlimited source-pixel-sized window — a
+   1280x720-equivalent logical-pixel **area**, reshaped to the media's aspect,
+   inside 80% of the work area, above a 460px transport floor, by **one**
+   proportional scale. This **amends** section 4's "natural displayed size when
+   practical" rather than implementing it literally, and it was taken on a
+   measurement rather than a preference.
+2. **DPI is validated by injected DPR and the hardware case is recorded as
+   untested.** Synthetic DPR must never be quoted as mixed-monitor validation.
+
+### What this session established that outlives it
+
+1. **The first experiment refuted the item that commissioned it.** Section 2
+   item 7's cache thrash is not real, and item 7 had *already been re-derived
+   once* — the 2026-08-10 pass corrected its mechanism and kept its conclusion,
+   and the conclusion was the wrong half. **A re-derivation is not a
+   re-measurement.**
+2. **Count the quantity, not the events that touch it.** A resize drag clears
+   the cache ~122 times and discards one cache's worth of entries. A count of
+   clears reads as a 122x thrash; only the entry count is the cost.
+3. **A fifth stale instrument, in shipping code this time.** `refreshHud()` is
+   not called on `resizeEvent`, so `win` and `display` — the two figures every
+   measurement here must quote — are stale after any resize of a paused window.
+   The hit-test probe is the cheap way to separate "the gesture missed" from
+   "the reading is old", and they are indistinguishable from the counters alone.
+4. **A self-test can assert the wrong invariant and accuse correct code.** The
+   DPI check first asserted a dpr-invariant logical size and failed seven rows;
+   natural displayed size is a *physical* statement, so which quantity is
+   invariant depends on which rule bound the result. That is why `ShapeBound` is
+   returned rather than inferred.
+5. **A third PowerShell alias trap**: a helper named `R` is `Invoke-History`,
+   after `Diff` and `Move`.
+6. **A media-shaped window clips the dev HUD on narrow media**, which is a new
+   measurement hazard for every later phase.
+
+### Closeout verification
+
+- No worktrees, no stash, no control binary or scratch INI left in
+  `build\app\Release`.
+- Regression taken on the **physical panel, 5120x1440 @ 239.999Hz**, confirmed
+  with `refresh.ps1` at the start and again before quoting.
+- **`V:\` was never touched this session.**
+- The window-shape self-test is a CI step, so the DPI matrix runs on every push
+  rather than having been run once.

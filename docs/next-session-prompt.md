@@ -1,13 +1,16 @@
-# The interface pass is open, phase 12 (spec §4) is BUILT and MEASURED, and phase 13 is next.
+# The interface pass is open, PHASE 12 IS COMPLETE, and phase 13 (Movie Inspector) is next.
 
 **READ THIS BLOCK FIRST — it supersedes the phase-12 brief further down, which is retained as
 the record of what was asked for rather than as open work.**
 
-**Spec §4 is built, measured against its own controls, and committed** (`0ad4183`, `93215d9`,
-`41d8b76`, `9b17f08`, `42e4889`). The window is the shape of the media, the picture honours
-sample aspect and rotation metadata, `View ▸ Lock Window to Media Aspect Ratio` ships checked
-by default, and the interactive resize is constrained in `WM_SIZING`. Full record in
-`docs/interface-pass-1-progress.md` under "Phase 12".
+**Spec §4 is built, measured against its own controls, capped by owner decision, and closed**
+(`0ad4183`, `93215d9`, `41d8b76`, `9b17f08`, `42e4889`, `458a5ec`). The window is the shape of
+the media, the picture honours sample aspect and rotation metadata,
+`View ▸ Lock Window to Media Aspect Ratio` ships checked by default, the interactive resize is
+constrained in `WM_SIZING`, and the opening size is capped to a 1280x720-equivalent area.
+**Phase 13, the Movie Inspector, is next** — and note its *current viewport size* field is the
+reason §4 went first, so it now reports a number this phase decides.
+Full record in `docs/interface-pass-1-progress.md` under "Phase 12".
 
 **THE FIRST EXPERIMENT REFUTED THE THING IT WAS SENT TO MEASURE.** §2 item 7's predicted cache
 thrash is not real: a drag discards **one cache's worth of entries however many times it
@@ -209,7 +212,11 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
   **run 96 on `69a45c1` (phase 9)** and **run 98 on `b6be899` (phase 10)**, all including the
   renderer selftest, and **run 101 on `700446e` (phase 11)**, with `Verify package is
   launchable` and `Verify the renderer initializes` both checked individually rather than by
-  the overall conclusion.
+  the overall conclusion. **Phase 12: run 103 on the `45d1f36` checkpoint and run 105 green on
+  final HEAD `2122d6e`** — the first runs to carry the third check, `Verify the window-shape
+  geometry across DPI`, whose log was read rather than its conclusion trusted: it printed
+  `trace-shape: OK - 11 shapes x 4 scale factors` on the runner. (Run 104 was **cancelled**, not
+  failed — a docs push superseded it.)
 
 ### Start at spec §4 as phase 12, and read `docs/interface-pass-1-progress.md` first
 
