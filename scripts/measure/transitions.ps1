@@ -19,17 +19,42 @@
 # where a fault is invisible rather than loud -- the phase 3 bug neither hung
 # nor froze, and was only reachable by the command that ends a run AFTERWARDS.
 #
+# RE-DERIVED AGAIN AT SPEC PHASE 5, for the same reason and in three places. The
+# backward button stopped stepping and became Rewind, so:
+#
+#   - `R -> prevBtn` and `F -> prevBtn` KEPT THEIR NAMES AND CHANGED THEIR
+#     MEANING. They were "step out of a run" and expected the picture STILL;
+#     they are `R -> rewBtn` and `F -> rewBtn` now -- a rung change and a
+#     direction change -- and both expect it MOVING. Leaving the old names in
+#     place with the old expectations would have asserted that pressing Rewind
+#     stops playback, which the app would rightly have failed.
+#   - the backward STEP still has to be covered from inside a run, and after
+#     this phase the arrow key is the only surface that reaches it. `R -> Left`
+#     and `F -> Left` are where the coverage the prevBtn cases used to provide
+#     actually went. This is not an added case: it is the same case, relocated
+#     to the control that still performs it.
+#   - `-Delayed` loses its subject and gains the only one left. Its gesture was
+#     "step with a BUTTON during a run, then press K", and there is no such
+#     button. What made it worth running was never the button -- it was that a
+#     step leaves run state behind that ONLY the next run-ending command
+#     exposes. The arrow key inherits that shape exactly, so the leg is
+#     re-pointed rather than deleted. Note the phase 3 fault was specifically in
+#     the button path and the keyboard path was already correct, so these two
+#     cases are expected to pass on every build; they are here because the
+#     shape, not the surface, is what held the bug.
+#
 # States: R reverse run (J), F forward run (the Fast-forward button at 2x),
 #         P paused, N playing normally at 1x.
 #
 # Commands not on this list are not boundaries and are covered elsewhere:
 # fullscreen, the HUD toggle, the readout keys, mute.
 #
-#   -FromReverse   R x { Space K Right prevBtn ffBtn L J scrub quit }
-#   -FromForward   F x { Space K Right prevBtn ffBtn J scrub quit }
-#   -Entries       P and N x { ffBtn }, plus the ladder P -> ff x5
-#   -Delayed       the phase 3 gesture and its untested forward mirror: step
-#                  with the BUTTON during a run, then press K
+#   -FromReverse   R x { Space K Right Left rewBtn ffBtn L J scrub quit }
+#   -FromForward   F x { Space K Right Left rewBtn ffBtn J scrub quit }
+#   -Entries       P and N x { ffBtn rewBtn }
+#   -Delayed       step with the ARROW KEY during a run, then press K, in both
+#                  directions
+#   -LadderOut     both ladders, captured: ff x6 and rew x6
 #   -All           all of the above
 #
 # Each case reports whether the picture is moving or still when it should be,
@@ -181,7 +206,9 @@ function Geometry($h) {
         y      = $r.T + $grooveY
         a      = $r.L + $x0 + 6
         b      = $r.L + $x1 - 6
-        prev   = $r.L + $clusters[0]
+        # Named for what the control does, which as of spec phase 5 is Rewind.
+        # It was `prev` for exactly as long as it stepped a frame.
+        rew    = $r.L + $clusters[0]
         play   = $r.L + $clusters[1]
         ffwd   = $r.L + $clusters[2]
         found  = $clusters.Count
@@ -193,6 +220,23 @@ function Click($x, $y) {
     Start-Sleep -Milliseconds 120
     [TR]::mouse_event([TR]::DOWN, 0, 0, 0, [IntPtr]::Zero)
     Start-Sleep -Milliseconds 90
+    [TR]::mouse_event([TR]::UP, 0, 0, 0, [IntPtr]::Zero)
+}
+
+# The same press with the dwell taken out, for the ladder cap leg ONLY.
+#
+# Click costs ~210ms of its own before the caller's spacing is added, so six of
+# them span ~1.6s -- and at 30x a 412-frame 24fps clip is traversed in 0.57s.
+# The cap leg was therefore capturing a run that had already reached the end,
+# and the press after that reads the FIRST rung from paused: measured at spec
+# phase 5, six rapid forward presses reported `speed 2.00x` at `frame 406` of
+# 412, which is correct behaviour that looks exactly like a ladder that wrapped.
+# The leg could not pass on this clip however the app behaved.
+function FastClick($x, $y) {
+    [TR]::SetCursorPos($x, $y) | Out-Null
+    Start-Sleep -Milliseconds 25
+    [TR]::mouse_event([TR]::DOWN, 0, 0, 0, [IntPtr]::Zero)
+    Start-Sleep -Milliseconds 20
     [TR]::mouse_event([TR]::UP, 0, 0, 0, [IntPtr]::Zero)
 }
 
@@ -265,9 +309,10 @@ $enterNone    = { param($h,$g) }
 $cSpace   = { param($h,$g) [System.Windows.Forms.SendKeys]::SendWait(" ") }
 $cK       = { param($h,$g) [System.Windows.Forms.SendKeys]::SendWait("k") }
 $cRight   = { param($h,$g) [System.Windows.Forms.SendKeys]::SendWait("{RIGHT}") }
+$cLeft    = { param($h,$g) [System.Windows.Forms.SendKeys]::SendWait("{LEFT}") }
 $cJ       = { param($h,$g) [System.Windows.Forms.SendKeys]::SendWait("j") }
 $cL       = { param($h,$g) [System.Windows.Forms.SendKeys]::SendWait("l") }
-$cPrevBtn = { param($h,$g) Click $g.prev $g.y; [TR]::SetForegroundWindow($h) | Out-Null }
+$cRewBtn  = { param($h,$g) Click $g.rew $g.y;  [TR]::SetForegroundWindow($h) | Out-Null }
 $cFfBtn   = { param($h,$g) Click $g.ffwd $g.y; [TR]::SetForegroundWindow($h) | Out-Null }
 $cScrub   = {
     param($h,$g)
@@ -295,7 +340,13 @@ if ($FromReverse) {
     RunCase "R -> Space"   $enterReverse $cSpace   "still"  0.85
     RunCase "R -> K"       $enterReverse $cK       "still"  0.85
     RunCase "R -> Right"   $enterReverse $cRight   "still"  0.85
-    RunCase "R -> prevBtn" $enterReverse $cPrevBtn "still"  0.85
+    # Where the old `R -> prevBtn` coverage went at phase 5: a backward step out
+    # of a reverse run, on the only control that still performs one.
+    RunCase "R -> Left"    $enterReverse $cLeft    "still"  0.85
+    # NOT the old `R -> prevBtn`. That button steps nothing now; it is Rewind,
+    # so this is a same-direction rung change (-1x from J, then -2x from the
+    # button's AtTwoX entry) and the picture must keep MOVING.
+    RunCase "R -> rewBtn"  $enterReverse $cRewBtn  "moving" 0.85
     # The two that end reverse by starting a FORWARD run start mid-clip: they
     # need room in both directions.
     RunCase "R -> ffBtn"   $enterReverse $cFfBtn   "moving" 0.45
@@ -312,7 +363,10 @@ if ($FromForward) {
     RunCase "F -> Space"   $enterForward $cSpace   "still"  0.15
     RunCase "F -> K"       $enterForward $cK       "still"  0.15
     RunCase "F -> Right"   $enterForward $cRight   "still"  0.15
-    RunCase "F -> prevBtn" $enterForward $cPrevBtn "still"  0.15
+    RunCase "F -> Left"    $enterForward $cLeft    "still"  0.15
+    # The mirror of `R -> ffBtn`: a direction change, entering the new
+    # direction's ladder at -2x. Needs room in both directions, so mid-clip.
+    RunCase "F -> rewBtn"  $enterForward $cRewBtn  "moving" 0.45
     RunCase "F -> ffBtn"   $enterForward $cFfBtn   "moving" 0.15
     RunCase "F -> J"       $enterForward $cJ       "moving" 0.45
     RunCase "F -> scrub"   $enterForward $cScrub   "still"  0.15
@@ -320,79 +374,113 @@ if ($FromForward) {
 }
 
 if ($Entries) {
-    RunCase "P -> ffBtn"   $enterNone   $cFfBtn "moving" 0.15
-    RunCase "N -> ffBtn"   $enterNormal $cFfBtn "moving" 0.15
+    RunCase "P -> ffBtn"   $enterNone   $cFfBtn  "moving" 0.15
+    RunCase "N -> ffBtn"   $enterNormal $cFfBtn  "moving" 0.15
+    # The reverse entries, new at phase 5. They start HIGH for the mirror of the
+    # reason the forward ones start low: a reverse run needs clip behind it, and
+    # `N` spends its 900ms enter window playing forward, so 0.75 rather than
+    # 0.85 leaves headroom in both directions.
+    RunCase "P -> rewBtn"  $enterNone   $cRewBtn "moving" 0.85
+    RunCase "N -> rewBtn"  $enterNormal $cRewBtn "moving" 0.75
 }
 
 if ($Delayed) {
-    # The gesture that found the phase 3 bug, and the mirror of it that has
-    # never been run. Stepping with a BUTTON during a run left the run's own
-    # frame in shuttleLastPresented_, and the fault only appeared on the NEXT
-    # command that ends a run and takes its landing branch. Reverse then click
-    # then arrow-key passes on a broken build; it takes the K.
-    RunCase "R -> prevBtn -> K" $enterReverse {
-        param($h,$g) Click $g.prev $g.y; [TR]::SetForegroundWindow($h) | Out-Null
+    # Re-pointed at phase 5, not deleted. The gesture that found the phase 3 bug
+    # was "step with a BUTTON during a run, then press K", and there is no
+    # frame-step button any more -- but the button was never the point. The
+    # point is that a step leaves run state behind (shuttleRunActive_ true,
+    # shuttleLastPresented_ holding the SHUTTLE's frame) which nothing exposes
+    # until the next command that ends a run takes its landing branch. Reverse
+    # then step then arrow-key passed on the broken build; it took the K.
+    #
+    # The arrow key is the only surface with that shape now. It was already
+    # correct at phase 3 -- the fault was in the button copy -- so these are
+    # expected to pass everywhere; they are here because the shape held a real
+    # bug once and nothing else in this matrix has it.
+    RunCase "R -> Left -> K" $enterReverse {
+        param($h,$g) [System.Windows.Forms.SendKeys]::SendWait("{LEFT}")
         Start-Sleep -Milliseconds 700
         [System.Windows.Forms.SendKeys]::SendWait("k")
     } "still" 0.85
-    RunCase "F -> prevBtn -> K" $enterForward {
-        param($h,$g) Click $g.prev $g.y; [TR]::SetForegroundWindow($h) | Out-Null
+    RunCase "F -> Left -> K" $enterForward {
+        param($h,$g) [System.Windows.Forms.SendKeys]::SendWait("{LEFT}")
         Start-Sleep -Milliseconds 700
         [System.Windows.Forms.SendKeys]::SendWait("k")
     } "still" 0.15
 }
 
-if ($LadderOut) {
-    # The rung a press reaches is not visible in the picture, so this leg
-    # captures rather than asserts: five clicks from paused should read
-    # +2, +5, +10, +30, +30 on the HUD's `speed` and `shuttle stride`.
+# One ladder, captured. $which is "ff" or "rew" -- the control to press -- and
+# $from is where on the groove to start, which is the head for a forward ladder
+# and the tail for a reverse one, so the run has somewhere to go.
+#
+# The rung a press reaches is not visible in the PICTURE, so this captures
+# rather than asserts: six clicks from paused should read +2, +5, +10, +30, +30,
+# +30 on the HUD's `speed` and `shuttle stride`, and -2 ... -30 for rewind.
+function LadderLeg([string]$which, [double]$from, [string]$outDir) {
     & $restart -Clip $Clip | Out-Null
     $p = Handle
+    if ($null -eq $p) { Write-Output "ladder $which : FAIL - no window"; return }
     $h = $p.MainWindowHandle
     [TR]::SetForegroundWindow($h) | Out-Null
     Start-Sleep -Milliseconds 300
     $geo = Geometry $h
-    if ($null -eq $geo) { Write-Output "ladder : FAIL - controls not located" }
-    else {
-        Click ([int]($geo.a + ($geo.b - $geo.a) * 0.02)) $geo.y
-        Start-Sleep -Milliseconds 700
-        New-Item -ItemType Directory -Force $LadderOut | Out-Null
-        # Six presses, close together, from the head. The settle has to be short
-        # or the run outlives the ladder: at 30x a 412-frame clip is traversed in
-        # 0.57s, so a half-second pause between presses ends the run before the
-        # rung above it is ever pressed. Six because the spec's "further presses
-        # at +30x remain at +30x" needs a second press at the top.
-        for ($i = 1; $i -le 6; $i++) {
-            Click $geo.ffwd $geo.y
-            Start-Sleep -Milliseconds 180
-            $s = Shot $h
-            $s.bmp.Save((Join-Path $LadderOut "ff$i.png"), [System.Drawing.Imaging.ImageFormat]::Png)
-            $s.bmp.Dispose()
-        }
-        Write-Output "ladder : captured 6 presses to $LadderOut"
+    if ($null -eq $geo) { Write-Output "ladder $which : FAIL - controls not located"; return }
 
-        # The cap needs its own leg, because capturing between presses is what
-        # makes the ladder too slow to reach it: at 30x the run traverses the
-        # whole clip in 0.57s, so by the fifth press the run has ended and the
-        # press reads +2x from PAUSED -- which is correct behaviour that looks
-        # exactly like a ladder that wrapped. Press without capturing, then
-        # capture once: six presses must read 30x, not 2x.
-        & $restart -Clip $Clip | Out-Null
-        $p2 = Handle
-        if ($null -ne $p2) {
-            $h2 = $p2.MainWindowHandle
-            [TR]::SetForegroundWindow($h2) | Out-Null
-            Start-Sleep -Milliseconds 300
-            $geo2 = Geometry $h2
-            if ($null -ne $geo2) {
-                Click ([int]($geo2.a + ($geo2.b - $geo2.a) * 0.02)) $geo2.y
-                Start-Sleep -Milliseconds 700
-                for ($i = 1; $i -le 6; $i++) { Click $geo2.ffwd $geo2.y; Start-Sleep -Milliseconds 60 }
-                $s = Shot $h2
-                $s.bmp.Save((Join-Path $LadderOut "cap.png"), [System.Drawing.Imaging.ImageFormat]::Png)
-                $s.bmp.Dispose()
-                Write-Output "ladder : cap leg captured (6 rapid presses) to $LadderOut\cap.png"
-            }
-        }
+    $btn = if ($which -eq "rew") { $geo.rew } else { $geo.ffwd }
+    Click ([int]($geo.a + ($geo.b - $geo.a) * $from)) $geo.y
+    Start-Sleep -Milliseconds 700
+    New-Item -ItemType Directory -Force $outDir | Out-Null
+
+    # Six presses, close together. The settle has to be short or the run
+    # outlives the ladder: at 30x a 412-frame clip is traversed in 0.57s, so a
+    # half-second pause between presses ends the run before the rung above it is
+    # ever pressed. Six because the spec's "further presses at 30x remain at 30x"
+    # needs a second press at the top.
+    for ($i = 1; $i -le 6; $i++) {
+        Click $btn $geo.y
+        Start-Sleep -Milliseconds 180
+        $s = Shot $h
+        $s.bmp.Save((Join-Path $outDir "$which$i.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+        $s.bmp.Dispose()
     }
+    Write-Output "ladder $which : captured 6 presses to $outDir"
+
+    # The cap needs its own leg, because capturing between presses is what makes
+    # the ladder too slow to reach it: at 30x the run traverses the whole clip in
+    # 0.57s, so by the fifth press the run has ended and the press reads 2x from
+    # PAUSED -- which is correct behaviour that looks exactly like a ladder that
+    # wrapped. Press without capturing, then capture once: six presses must read
+    # 30x, not 2x.
+    #
+    # FastClick and no settle after the sixth press, both load-bearing and both
+    # added at phase 5 after this leg was found unable to pass. The whole budget
+    # is 412 frames / 24fps / 30x = 0.57s of wall time at the top rung, and
+    # Click's own dwell alone spent three times that. With the dwell out, the
+    # six presses cover roughly 150 frames of a 412-frame clip and the capture
+    # lands while the run is still going.
+    & $restart -Clip $Clip | Out-Null
+    $p2 = Handle
+    if ($null -eq $p2) { return }
+    $h2 = $p2.MainWindowHandle
+    [TR]::SetForegroundWindow($h2) | Out-Null
+    Start-Sleep -Milliseconds 300
+    $geo2 = Geometry $h2
+    if ($null -eq $geo2) { return }
+    $btn2 = if ($which -eq "rew") { $geo2.rew } else { $geo2.ffwd }
+    Click ([int]($geo2.a + ($geo2.b - $geo2.a) * $from)) $geo2.y
+    Start-Sleep -Milliseconds 700
+    for ($i = 1; $i -le 6; $i++) { FastClick $btn2 $geo2.y }
+    $s = Shot $h2
+    $s.bmp.Save((Join-Path $outDir "$which-cap.png"), [System.Drawing.Imaging.ImageFormat]::Png)
+    $s.bmp.Dispose()
+    Write-Output "ladder $which : cap leg captured (6 rapid presses) to $outDir\$which-cap.png"
+}
+
+if ($LadderOut) {
+    LadderLeg "ff"  0.02 $LadderOut
+    # The reverse ladder, new at spec phase 5. It starts at the TAIL for the
+    # mirror of the reason the forward one starts at the head: a run that has
+    # nowhere to go ends immediately, and an ended run makes the next press read
+    # the first rung again, which looks exactly like a ladder that wrapped.
+    LadderLeg "rew" 0.98 $LadderOut
 }

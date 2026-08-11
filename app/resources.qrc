@@ -8,11 +8,11 @@
     ONE icon source. Before spec phase 2 there were three packages in the tree:
     assets/icons/ (app icon), assets/Interface/ (first-pass player icons) and
     the 260807 package, which supersedes both and says so in its own
-    CONTENTS.txt. Both of the others are gone. Note the first-pass set was
-    never actually needed as a separate directory, because the approved package
+    CONTENTS.txt. Both of the others are gone. The first-pass set was never
+    actually needed as a separate directory, because the approved package
     carries a byte-identical copy of it as player-icons/, labelled SUPERSEDED
-    and kept for reference. That is where the two frame-step glyphs below come
-    from now.
+    and kept for reference; it supplied the two frame-step glyphs, and as of
+    spec phase 5 neither of those is embedded any more.
   -->
   <qresource prefix="/icons">
     <file alias="trace-16.png">../assets/branding/app-icon/png/windows/trace-16.png</file>
@@ -28,26 +28,24 @@
     assets/interface/common/ is an empty directory rather than a populated one.
 
     The approved set ships 24px @1x and 48px @2x. It has no @3x, so a 3x display
-    scales the 48px master rather than picking a dedicated file; the previous
-    first-pass set did have one, which is why the two frame-step glyphs below
-    are the only ones with a -72. SVG masters sit beside each PNG in
-    assets/interface/ if that ever matters, but using them needs Qt6::Svg, which
-    Trace does not link.
+    scales the 48px master rather than picking a dedicated file. Nothing here
+    has a -72 any more: the only two glyphs that did were the frame-step pair
+    from the superseded first-pass set, and both are gone. SVG masters sit
+    beside each PNG in assets/interface/ if that ever matters, but using them
+    needs Qt6::Svg, which Trace does not link.
 
     ARTWORK FOLLOWS BEHAVIOUR, ONE CONTROL AT A TIME. The approved package
     contains no frame-step icon by design ("Left/Right Arrow handle single
     frames"); its transport_scan_* pair is the artwork for the redesigned Rewind
     and Fast-forward. Shipping scan artwork over stepping behaviour would put a
     lie on a visible control in a player whose third pillar is that it can be
-    trusted, so each glyph moves in the commit that changes what its button
+    trusted, so each glyph moved in the commit that changed what its button
     does, neither before it nor after it.
 
-    Spec phase 4 did the forward half: the old Next Frame button is Fast-forward
-    now, so fast-forward is in use and next-frame LEFT THE TREE with it. Phase 5
-    does the backward half, and prev-frame goes then; it is still here because
-    the left control still steps a frame. That is why exactly one of the two
-    frame-step glyphs remains, and why only it still has a -72 (the superseded
-    first-pass set had one; the approved set ships 24 and 48 only).
+    Spec phase 4 did the forward half: the old Next Frame button became
+    Fast-forward, so next-frame left the tree with it. Phase 5 did the backward
+    half and took prev-frame. Frame stepping is the arrow keys and has no
+    button, so this list is now exactly the controls that exist.
 
     rewind/fast-forward ARE transport_scan_reverse/transport_scan_forward,
     renamed to what they do.
@@ -70,12 +68,9 @@
     <file alias="fast-forward-24.png">../assets/interface/transport/fast-forward-24.png</file>
     <file alias="fast-forward-48.png">../assets/interface/transport/fast-forward-48.png</file>
 
-    <!-- Unused until spec phase 5 re-points the backward control. -->
+    <!-- In use from spec phase 5: the backward transport control and the
+         composited overlay's left region. -->
     <file alias="rewind-24.png">../assets/interface/transport/rewind-24.png</file>
     <file alias="rewind-48.png">../assets/interface/transport/rewind-48.png</file>
-
-    <file alias="prev-frame-24.png">../assets/interface/transport/prev-frame-24.png</file>
-    <file alias="prev-frame-48.png">../assets/interface/transport/prev-frame-48.png</file>
-    <file alias="prev-frame-72.png">../assets/interface/transport/prev-frame-72.png</file>
   </qresource>
 </RCC>

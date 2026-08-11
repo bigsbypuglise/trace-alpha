@@ -10,7 +10,7 @@ assets/
 │   └── app-icon/       trace.ico, trace.icns, the png/{windows,macos} sets
 │                       and the two svg masters
 ├── interface/
-│   ├── transport/      play, pause, rewind, fast-forward, prev-frame
+│   ├── transport/      play, pause, rewind, fast-forward
 │   ├── window/         fullscreen-enter, fullscreen-exit
 │   └── common/         empty — volume, share, inspector, zoom, rotate and loop
 │                       arrive here when those features are real
@@ -47,26 +47,27 @@ Two consequences worth stating, because both have bitten before:
   vector icons is a reasonable change but it is a real decision with a
   deployment consequence; it must not happen as a side effect of a folder move.
 - **The package ships 24px @1x and 48px @2x and has no @3x.** A 3x display
-  scales the 48px master. The two frame-step glyphs are the exception and do
-  have a 72px rendition — see below.
+  scales the 48px master. Every glyph here is now from the approved package, so
+  there is no 72px rendition anywhere — see below.
 
-## The one remaining frame-step glyph
+## The frame-step glyphs, and why they are gone
 
-`prev-frame` comes from the **superseded first-pass set**, which the approved
-package keeps as `player-icons/` and labels "SUPERSEDED — kept for reference".
-Using it is deliberate. The approved `base-ui-icons/` set has no frame-step
-glyph by design, and its `transport_scan_*` pair is the artwork for the
-*redesigned* Rewind and Fast-forward — but the backward button still performs
-single-frame stepping until spec phase 5. Shipping scan artwork over stepping
-behaviour would put a lie on a visible control, so the artwork moves when the
-behaviour does.
+`prev-frame` and `next-frame` came from the **superseded first-pass set**, which
+the approved package keeps as `player-icons/` and labels "SUPERSEDED — kept for
+reference". Using them was deliberate for as long as it lasted. The approved
+`base-ui-icons/` set has no frame-step glyph by design, and its
+`transport_scan_*` pair is the artwork for the *redesigned* Rewind and
+Fast-forward — but each of those buttons performed single-frame stepping until
+its own spec phase re-pointed it. Shipping scan artwork over stepping behaviour
+would put a lie on a visible control, so the artwork moved when the behaviour
+did: **`next-frame` at spec phase 4, `prev-frame` at phase 5.** They arrived
+together and left separately because their buttons changed separately, and the
+gap between the two commits — one scan glyph beside one step glyph — was the
+rule working rather than an oversight.
 
-**`next-frame` has already left, at spec phase 4**, because that is the commit
-in which the forward button stopped stepping and became Fast-forward. That is
-the rule working rather than an exception to it: the two glyphs arrived
-together and leave separately because their buttons change separately.
-`prev-frame` is also the only glyph here with a 72px rendition, which is a
-property of the first-pass set rather than of the control.
+They were also the only two glyphs here with a 72px rendition, which was a
+property of the first-pass set rather than of the controls. `interface/` is now
+exactly the approved package's glyphs and nothing else.
 
 ## Adding a glyph
 

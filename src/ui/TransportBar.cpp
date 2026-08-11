@@ -214,11 +214,13 @@ void TransportButton::paintEvent(QPaintEvent* event) {
     p.drawPixmap(markRect, pm);
 }
 
-// The approved base UI set ships 24px and 48px only; the superseded first-pass
-// set that still supplies the two frame-step glyphs also ships 72px. Adding a
-// resource that is not there is not an error in Qt, it is silently nothing --
-// which would make "is the 3x file being used" unanswerable by reading. Asking
-// is one line and makes the answer visible.
+// The approved base UI set ships 24px and 48px only. The superseded first-pass
+// set did ship 72px, and until spec phase 5 two frame-step glyphs from it were
+// still embedded; nothing in the tree has a -72 now, so this branch is dead
+// weight in the resources it can see and live insurance against the next
+// package that does. Adding a resource that is not there is not an error in Qt,
+// it is silently nothing -- which would make "is the 3x file being used"
+// unanswerable by reading. Asking is one line and makes the answer visible.
 QIcon TransportBar::loadIcon(const QString& baseName) {
     QIcon icon;
     icon.addFile(QStringLiteral(":/ui/%1-24.png").arg(baseName), QSize(24, 24));
@@ -238,9 +240,13 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     fullscreenIcon_ = loadIcon(QStringLiteral("fullscreen"));
     exitFullscreenIcon_ = loadIcon(QStringLiteral("exit-fullscreen"));
 
-    prevFrameBtn_ = new TransportButton(this);
-    prevFrameBtn_->setIcon(loadIcon(QStringLiteral("prev-frame")));
-    prevFrameBtn_->setToolTip(tr("Previous frame (Left arrow)"));
+    // Spec phase 5, the mirror of phase 4 below. This control used to step one
+    // frame backward; it is Rewind now, and the artwork moved in the same change
+    // because artwork follows behaviour. Frame stepping is the Left arrow -- the
+    // command is untouched, only the button that used to reach it is gone.
+    rewindBtn_ = new TransportButton(this);
+    rewindBtn_->setIcon(loadIcon(QStringLiteral("rewind")));
+    rewindBtn_->setToolTip(tr("Rewind — 2x, 5x, 10x, 30x (J)"));
 
     playPauseBtn_ = new TransportButton(this);
     playPauseBtn_->setCenterControl(true);
@@ -315,7 +321,7 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     auto* row = new QHBoxLayout(this);
     row->setContentsMargins(16, 8, 16, 8);
     row->setSpacing(8);
-    row->addWidget(prevFrameBtn_);
+    row->addWidget(rewindBtn_);
     row->addWidget(playPauseBtn_);
     row->addWidget(fastForwardBtn_);
     row->addSpacing(8);
@@ -325,7 +331,7 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     row->addWidget(frameLabel_);
     row->addWidget(fullscreenBtn_);
 
-    connect(prevFrameBtn_, &TransportButton::clicked, this, &TransportBar::prevFrameClicked);
+    connect(rewindBtn_, &TransportButton::clicked, this, &TransportBar::rewindClicked);
     connect(playPauseBtn_, &TransportButton::clicked, this, &TransportBar::playPauseClicked);
     connect(fastForwardBtn_, &TransportButton::clicked, this, &TransportBar::fastForwardClicked);
     connect(fullscreenBtn_, &TransportButton::clicked, this, &TransportBar::fullscreenClicked);
@@ -367,7 +373,7 @@ void TransportBar::setFrameText(const QString& text) {
 }
 
 void TransportBar::setControlsEnabled(bool enabled) {
-    prevFrameBtn_->setEnabledControl(enabled);
+    rewindBtn_->setEnabledControl(enabled);
     playPauseBtn_->setEnabledControl(enabled);
     fastForwardBtn_->setEnabledControl(enabled);
     slider_->setEnabled(enabled);

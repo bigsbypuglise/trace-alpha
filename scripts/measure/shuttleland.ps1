@@ -30,7 +30,7 @@ param(
     # Rungs of J before the direction change. 1 = -1x, 2 = -2x.
     [ValidateRange(1, 5)][int]$ReversePresses = 1,
     # Rungs of L after it. 1 = ordinary 1x playback (NOT a shuttle run),
-    # 2 = +2x, which is what the Fast-forward button will do on its first click.
+    # 2 = +2x, which is what the Fast-forward button does on its first click.
     [ValidateRange(1, 5)][int]$ForwardPresses = 2,
     [double]$ReverseHold = 2.5,
     [double]$ForwardHold = 2.5,
@@ -38,8 +38,12 @@ param(
     # mid-clip; a high reverse rung needs to start nearer the tail or the run
     # reaches the head and the transition being measured never happens.
     [double]$StartFraction = 0.55,
-    # NAME=VALUE, passed through to restart.ps1. TRACE_SHUTTLE_LAND=0 is the
-    # control; TRACE_SHUTTLE_ENTRY=2x drives the button convention.
+    # NAME=VALUE, passed through to restart.ps1. Both knobs this line used to
+    # name are gone: TRACE_SHUTTLE_LAND was the A/B for a parameter spec phase 4
+    # measured and removed, and TRACE_SHUTTLE_ENTRY was how the buttons' 2x entry
+    # was driven through J/L before those buttons existed -- phase 5 gave the
+    # second button to AtTwoX, so the knob left with it. Drive the button
+    # convention with the buttons; drive the keyboard's 1x entry with J and L.
     [string[]]$Env = @(),
     [string]$Out
 )

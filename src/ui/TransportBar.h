@@ -71,11 +71,11 @@ public:
     void flashRate(const QString& text);
 
 signals:
-    void prevFrameClicked();
+    // Spec phases 4 and 5: the two visible side controls are Rewind and
+    // Fast-forward, not Prev/Next Frame. The exact-frame-step commands they used
+    // to emit are unchanged and are reached by the Left and Right arrows.
+    void rewindClicked();
     void playPauseClicked();
-    // Spec phase 4: the visible forward control is Fast-forward, not Next
-    // Frame. The exact-frame-step command it used to emit is unchanged and is
-    // reached by the Right arrow.
     void fastForwardClicked();
     void fullscreenClicked();
 
@@ -85,7 +85,7 @@ protected:
 private:
     static QIcon loadIcon(const QString& baseName);
 
-    TransportButton* prevFrameBtn_ = nullptr;
+    TransportButton* rewindBtn_ = nullptr;
     TransportButton* playPauseBtn_ = nullptr;
     TransportButton* fastForwardBtn_ = nullptr;
     TransportButton* fullscreenBtn_ = nullptr;

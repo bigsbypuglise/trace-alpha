@@ -1,9 +1,11 @@
-# The interface pass is open, phase 4 has shipped, and phase 5 is next.
+# The interface pass is open, the transport redesign is complete, and phase 6 is next.
 
-Supersedes the previous version. **Spec phase 4 shipped** — the forward shuttle interface,
-the `landPreviousExactly` decision, and a re-derived transition harness. **The next thing to
-do is spec phase 5, the reverse shuttle interface**, which is now a narrow mirror of phase 4.
-Paste everything below the line into a fresh session in the repo root.
+Supersedes the previous version. **Spec phase 5 shipped** — the reverse shuttle interface,
+which completes the transport redesign: both side controls are shuttles, frame stepping is the
+arrow keys alone, and `TRACE_SHUTTLE_ENTRY` is retired. **The next thing to do is spec phase 6,
+fullscreen consolidation and overlay auto-hide** — which is the phase most likely to cost
+performance, because it removes `transportBar_` from the layout in favour of the floating
+overlay. Paste everything below the line into a fresh session in the repo root.
 
 ---
 
@@ -57,7 +59,7 @@ A later summary that says "the transport is done" has widened it.
 - **EXR / image sequences and OCIO.** `TRACE_WITH_OIIO` is undefined in vcpkg and CI, so EXR
   does not open today. Largest untouched area, and a feature rather than a fix.
 
-## THE OPEN PHASE — interface pass 1, now at phase 5
+## THE OPEN PHASE — interface pass 1, now at phase 6
 
 The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 `docs/interface-pass-1-spec.md`; the phase record is `docs/interface-pass-1-progress.md`.
@@ -75,57 +77,66 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 - **The asset tree is reorganised and every reference re-pointed** (`cbf6d98`).
 - **Phase 3 shipped at `4de678e`** — the shortcut table, the extracted `startShuttle()`
   sequence, `ShuttleEntry::AtOneX`/`AtTwoX`, and a real bug in the frame-step button.
-- **Phase 4 shipped** — the forward shuttle interface. Full record in the progress doc.
+- **Phase 4 shipped at `e559d07`** — the forward shuttle interface, the settled
+  `landPreviousExactly` decision, and `transitions.ps1`. Full record in the progress doc.
+- **Phase 5 shipped** — the reverse shuttle interface. The transport redesign is now
+  COMPLETE and the spec's validation list for it reads straight down. Full record in the
+  progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, all including the
   renderer selftest.
 
-### Start at spec phase 5, and read `docs/interface-pass-1-progress.md` first
+### Start at spec phase 6, and read `docs/interface-pass-1-progress.md` first
 
-**Phase 5 is a narrow mirror of phase 4 and the shape is already proven.** Every piece of it
-has a counterpart that shipped and was measured:
+**Phase 6 is the one most likely to cost performance, and priority 1 is the binding
+constraint.** It removes `transportBar_` from the `QVBoxLayout` in favour of the floating
+composited overlay, which changes the **video rect** — and the video rect is what cache depth
+and every stall figure follow (§22.8, and the phase 2 measurement of `H` where `win` did not
+move and `display` went 640x360 → 1280x720 with `stalls` 70 of 370 → 127 of 450). **Measure it
+when it lands, not at phase 14, and quote `display` as well as `win WxH`.**
 
-- `prevFrameBtn_` → `rewindBtn_`, the `rewind` glyph (which is `transport_scan_reverse`,
-  already embedded and unused), a `rewindAction_` calling
-  `startShuttle(-1, ShuttleEntry::AtTwoX)`, and `TransportBar::prevFrameClicked` →
-  `rewindClicked`.
-- `OverlayHooks::stepBack` → `rewind`, and `OverlayModel`'s left region takes the `rewind`
-  glyph. The asymmetry `stepBack` / `fastForward` that phase 4 left behind is what disappears.
-- `prev-frame-{24,48,72}.png` and `prev-frame.svg` leave `assets/interface/transport/` and the
-  `.qrc`, in the same commit that stops the button stepping. Then `interface/transport/` is
-  exactly the approved package's glyphs and nothing else.
-- `prevFrameAction_` **survives**, reached only by the Left arrow. Do not delete it; the spec
-  removes the button, not the command.
-- `TRACE_SHUTTLE_ENTRY=2x` leaves with this phase — after it, both buttons carry the 2×
-  convention as arguments and nothing needs the knob.
+Three things are known about it going in:
 
-**Two things phase 4 settled that phase 5 must not re-open:**
+- **After phase 6 the ONLY Rewind and Fast-forward controls that exist are the overlay's.**
+  Both were re-pointed at the shuttle (phases 4 and 5) and both hooks have now been executed
+  on both backends — state 07 of `overlay.ps1` reads `speed -2.00x | Reverse Play` on `d3d11`
+  and on `cpu`. That is twice. Treat the overlay's input path as **new coverage rather than
+  established**: it had been aiming 1.2px outside every control from phase 2 until phase 4
+  found it, and none of its interaction legs had ever registered.
+- **The open question is plan §31.5 item 2** — whether the overlay's timeline *press* lands
+  exactly the way a groove click does. Test with the playhead deliberately far from the press
+  point, because a press that is already near the target cannot tell the two apart.
+- **`TRACE_RENDERER=cpu` must keep its transport.** §2 item 1 of the spec: the escape hatch has
+  no compositor of its own, so the overlay's renderer-neutral home is what stops phase 6 from
+  taking the transport away from the documented fallback. `OverlayModel` already owns layout,
+  art, fade and hit-testing and emits quads that both backends draw, so this is a property to
+  verify rather than work to do — verify it.
 
-- **`landPreviousExactly` is gone and no shuttle press lands.** The Rewind button passes
-  nothing, because `startShuttle` takes no such parameter. Measured, both halves of the old
-  justification refuted — see the phase 4 record. The HUD's `land N` field stays and **reads 0
-  through any press**; if a phase-5 change makes it non-zero on a press, that is a regression.
-- **`transitions.ps1` replaced `revtransitions.ps1` and its axis is a run boundary.** Phase 5
-  changes what two of its cases *mean*: `R -> prevBtn` and `F -> prevBtn` stop being
-  "step out of a run" and become "start a reverse run", so re-derive them rather than leaving
-  them in place with the same names. Add `P -> rewBtn` and `N -> rewBtn` to `-Entries`, and add
-  the reverse ladder to the `-LadderOut` leg (−2×/−5×/−10×/−30×). The `-Delayed` cases lose
-  their subject entirely: there will be no frame-step button to click during a run.
+Phase 6 also owns what phase 2 deliberately deferred: **Escape-exits, geometry save/restore,
+the monitor rule, and the approved package's control geometry** (34×34 utility targets, 44×44
+play/pause in a rounded panel). Phase 2 declined to re-lay-out a bar that phase 6 deletes.
 
-**Run the harness the way phase 4 learned to.** The clip is part of the measurement:
+**Run the harness the way phases 4 and 5 learned to.** The clip is part of the measurement:
 `transitions.ps1` needs a **16:9 clip of roughly 250+ frames** (`M&M_TopGun_1080.mp4`), because
 a 9:16 clip pillarboxes four fifths of the picture signature onto black and a 121-frame clip
 lets a run reach the tail inside the observation window. Both faults produce PASSes that mean
-nothing.
+nothing. Its `-LadderOut` leg needs the **412-frame** clip and uses `FastClick`, because at 30×
+that clip lasts 0.57s of wall time and `Click`'s own dwell alone spent three times the budget.
+
+**Three things phases 4 and 5 settled that phase 6 must not re-open:**
+
+- **`landPreviousExactly` is gone and no shuttle press lands the previous run.** K, Space and
+  running off the end still land. The HUD's `land N` field stays and **reads 0 through any
+  press**; if a change makes it non-zero on a press, that is a regression.
+- **The buttons enter both ladders at 2× and the keyboard enters at 1×.** The difference is an
+  argument to `PlaybackController` (`ShuttleEntry::AtOneX`/`AtTwoX`) applied at the first rung
+  only, never a call site writing `speed`. The overlay's controls trigger the same two QActions
+  the bar's do, so phase 6 inherits this by construction — do not let it become a third path.
+- **Artwork follows behaviour, one control at a time.** Both frame-step glyphs have left the
+  tree, `interface/transport/` is exactly the approved package's glyphs, and nothing has a
+  `-72` rendition. `loadIcon`'s `-72` branch is deliberately kept.
 
 ### The rest of the phase list, with what is known about each
 
-6. **Phase 6 is the one most likely to cost performance**: removing `transportBar_` from the
-   layout in favour of the floating overlay. Measure it when it lands, not at phase 14. Its
-   open question is plan §31.5 item 2 — whether the overlay's timeline *press* lands exactly
-   the way a groove click does. Test with the playhead deliberately far from the press point.
-   Note phase 4 found the overlay harness had been aiming below its targets since phase 2; the
-   aim is derived from the picture now, but **the overlay's input path has only been exercised
-   properly once**, so treat its coverage as new rather than as established.
 7. **Phase 7 has a decision, not just work**: the `Timecode:` readout is already synthesised
    from the frame index, which is the thing the spec forbids. Relabel it as elapsed, or
    disable it, when no source timecode exists. Phase 7 also creates **the first text-entry
@@ -151,11 +162,17 @@ baselines are recorded. Quote `hitch`, `win WxH` **and** `display`.
   other runs of the same gesture on the same binary. **Reverse 1× on that gesture is bimodal**
   — `frames 114 / elapsed 4.75s` at 100%, or `frames 97 / elapsed 4.59s` at 88.1% — so a
   single run cannot support a regression claim in either direction. Take three.
+  **Phase 5 saw neither the slow mode nor `SNAP gop 2` in six runs** — but on a 1920x1080 @
+  59.999Hz display rather than the panel it was seen on, so that is not evidence it is fixed.
+  Still open, still unattributed.
 - **30× is only honestly measurable on the 412-frame 1080p clip**, and even there a *held* 30×
-  run traverses the whole clip in 0.57s. Phase 4's ladder leg had to press without capturing
-  between presses to reach the top rung at all; capturing between them ends the run and the
-  next press reads +2× **from paused**, which is correct behaviour that looks exactly like a
-  ladder that wrapped.
+  run traverses the whole clip in **0.57s of wall time**. That budget is smaller than the
+  harness's own mouse timing: `Click` spends ~210ms of dwell per press, so six presses spanned
+  ~1.6s and the ladder cap leg was capturing an **ended run**, reporting `speed 2.00x` at
+  `frame 406` — which is exactly what a wrapped ladder would look like. Phase 5 added
+  `FastClick` (45ms) and dropped the settle before the capture; both legs then read ±30×.
+  **A leg that cannot pass is as bad as one that cannot fail, and is harder to spot, because it
+  accuses the app instead of excusing it.**
 - **`outside` — per-present time that is not the handler — is 3.7–15ms and unattributed**
   (`docs/reverse-shuttle-plan.md` §10 item 3). It no longer binds anything.
 - **`TRACE_SCRUB_FILL_MS` ships at 60, not the 240 that §15.2's decision records.** A/B'd and
@@ -189,9 +206,15 @@ did not find it**: reverse → click → arrow-key passed on a broken build. It 
 click → **K**. Phase 4 then found the axis itself was wrong: once a button becomes a shuttle
 *entry*, "exits" no longer enumerates anything.
 
-**A harness that cannot fail is not a check.** Two in phase 4 alone, both silent: a 9:16 clip
-puts four fifths of the picture signature on black, and an overlay aim 1.2px outside every
-control still prints a plausible number for all twelve states.
+**A harness that cannot fail is not a check — and one that cannot PASS is worse.** Two in
+phase 4 alone, both silent: a 9:16 clip puts four fifths of the picture signature on black, and
+an overlay aim 1.2px outside every control still prints a plausible number for all twelve
+states. Phase 5 found the other kind: the ladder cap leg spent ~1.6s of mouse dwell inside a
+0.57s budget, so it captured an ended run and reported a rung that looked like a wrapped
+ladder. **That one accuses the app instead of excusing it**, which is why it survived a phase.
+The paired discipline is the **negative control**: phase 5's re-derived matrix FAILs exactly
+four cases on the phase 4 binary and passes all 25 on its own, and without that run the
+re-derivation would have proved nothing.
 
 **Reproduce on the reported case AND on a healthy one before theorising.** The fast-forward
 fault was reported as affecting every format. It did — but 4K H.264 still reached 3.97× of 4×
@@ -262,11 +285,13 @@ window, and `H` changes one without the other: `win 1280x843` with the HUD shown
 - **XML comments cannot contain `--`.** `app/resources.qrc` is XML; `rcc` fails at configure
   time with a parse error that names a line and not the reason.
 - Harness: `revplay.ps1` (both directions — `-Forward` drives L), `transitions.ps1` (every
-  shuttle run boundary; **16:9, 250+ frames**), `shuttleland.ps1` (the reverse-to-forward
+  shuttle run boundary, **25 cases**; **16:9, 250+ frames**, and the **412-frame** clip for
+  `-LadderOut`), `shuttleland.ps1` (the reverse-to-forward
   direction change), `scrub.ps1` (`-SnapRelease` for anything about the landing; `-Reversals`
   does not guarantee one), `lifecycle.ps1` (**run both `-PlayThroughDrag` and
   `-PausedThroughDrag`**), `cadence.ps1`, `overlay.ps1` (`-Renderer cpu|d3d11`; diff only the
-  states whose frame is deterministic), `playhud.ps1`, `refresh.ps1`, `capture.ps1`,
+  states whose frame is deterministic — and **states 06/07 are shuttle presses now**, which is
+  the only place the overlay's re-pointed hooks are actually executed), `playhud.ps1`, `refresh.ps1`, `capture.ps1`,
   `sidebyside.ps1`, `stalls_vs_window.ps1`, `abfilter.ps1`/`croprect.ps1`/`previewshot.ps1`.
   **Cadence controls need `TRACE_NO_AUDIO=1`**; shuttle runs do not, because they are silent.
 - The HUD is unreadable in a downsampled screenshot on the 5120x1440 panel. Capture the

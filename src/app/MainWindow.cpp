@@ -209,25 +209,6 @@ int scrubRearmMs() {
     return ms;
 }
 
-// Which rung J and L enter the shuttle ladder on.
-//
-// The two conventions are both approved and they differ: the keyboard enters at
-// 1x, and the Rewind / Fast-forward BUTTONS enter at 2x when spec phases 4 and 5
-// add them. TRACE_SHUTTLE_ENTRY=2x drives the button convention through the
-// keyboard, which is the only way to exercise it before those buttons exist --
-// and shipping an entry point that has never been executed is the failure plan
-// section 29.2 records at length. It is an interim knob, like
-// TRACE_VIEW_TRANSFORM is for phase 10, and it leaves with the phase that makes
-// it redundant.
-trace::core::ShuttleEntry shuttleEntryConvention() {
-    static const trace::core::ShuttleEntry entry = [] {
-        return qgetenv("TRACE_SHUTTLE_ENTRY").toLower() == "2x"
-                   ? trace::core::ShuttleEntry::AtTwoX
-                   : trace::core::ShuttleEntry::AtOneX;
-    }();
-    return entry;
-}
-
 } // namespace
 
 MainWindow::~MainWindow() {
@@ -781,7 +762,7 @@ void MainWindow::installOverlayHooks() {
 
     trace::render::OverlayHooks hooks;
     hooks.playPause = [this]() { if (playPauseAction_) playPauseAction_->trigger(); };
-    hooks.stepBack = [this]() { if (prevFrameAction_) prevFrameAction_->trigger(); };
+    hooks.rewind = [this]() { if (rewindAction_) rewindAction_->trigger(); };
     hooks.fastForward = [this]() { if (fastForwardAction_) fastForwardAction_->trigger(); };
 
     hooks.setScrubbing = [this](bool down) {
@@ -899,23 +880,28 @@ void MainWindow::setupShortcuts() {
         refreshHud(audio_.isMuted() ? "Mute" : "Unmute");
     });
 
-    // Frame stepping is keyboard-only in the forward direction from spec phase
-    // 4: the Right arrow is the only surface that reaches nextFrameAction_ now,
-    // because the button that used to is Fast-forward. Left still has the
-    // backward button beside it until phase 5.
+    // Frame stepping is KEYBOARD-ONLY as of spec phase 5, which is what the spec
+    // asks for: the arrows are the only surface that reaches these two actions
+    // now, because both buttons that used to are shuttle controls.
     //
-    // The command itself is untouched by either phase, which is what the spec's
-    // "do not delete the underlying exact-frame-step commands" requires, and it
-    // is untouched precisely because phase 3 made the button and the key trigger
-    // ONE action rather than two near-copies.
+    // The commands themselves are untouched by either phase, which is what the
+    // spec's "do not delete the underlying exact-frame-step commands" requires,
+    // and they are untouched precisely because phase 3 made the button and the
+    // key trigger ONE action rather than two near-copies.
     shortcuts_.addKey(ShortcutGroup::Stepping, Qt::Key_Left, tr("Step one frame back"),
                       [this]() { prevFrameAction_->trigger(); });
     shortcuts_.addKey(ShortcutGroup::Stepping, Qt::Key_Right, tr("Step one frame forward"),
                       [this]() { nextFrameAction_->trigger(); });
 
+    // AtOneX is the KEYBOARD convention and is now written here literally. Until
+    // spec phase 5 it came through a shuttleEntryConvention() helper that
+    // TRACE_SHUTTLE_ENTRY=2x could flip, because that was the only way to run
+    // the buttons' 2x entry before the buttons existed. Both buttons exist now
+    // and pass AtTwoX as an argument, so the knob is redundant and left with the
+    // phase that made it so.
     shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_J,
                       tr("Rewind — 1x, 2x, 5x, 10x, 30x"), [this]() {
-        startShuttle(-1, shuttleEntryConvention());
+        startShuttle(-1, trace::core::ShuttleEntry::AtOneX);
         refreshHud("J");
     });
     shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_K, tr("Stop"), [this]() {
@@ -934,7 +920,7 @@ void MainWindow::setupShortcuts() {
     });
     shortcuts_.addKey(ShortcutGroup::Shuttle, Qt::Key_L,
                       tr("Fast-forward — 1x, 2x, 5x, 10x, 30x"), [this]() {
-        startShuttle(1, shuttleEntryConvention());
+        startShuttle(1, trace::core::ShuttleEntry::AtOneX);
         refreshHud("L");
     });
 
@@ -1036,27 +1022,35 @@ void MainWindow::setupTransportControls() {
     connect(nextFrameAction_, &QAction::triggered, this,
             [this]() { stepOneFrame(1, "Next Frame"); });
 
-    // Spec phase 4. The visible forward control is Fast-forward now, and it is
-    // the THIRD caller of startShuttle -- which is why phase 3 extracted that
-    // sequence before this button existed rather than after.
+    // Spec phases 4 and 5. The two visible side controls are Fast-forward and
+    // Rewind now, and they are the third and fourth callers of startShuttle --
+    // which is why phase 3 extracted that sequence before either button existed
+    // rather than after.
     //
     // AtTwoX, not the keyboard's AtOneX. The spec states it directly ("If
-    // paused, the first press begins forward playback at +2x") and the owner
-    // confirmed both readings on 2026-08-10: the keyboard ladder and the button
-    // ladder differ at the first rung and agree everywhere above it. The
-    // difference is an ARGUMENT to the one rate machine, never a call site
-    // reaching past the controller to write `speed`.
+    // paused, the first press begins forward playback at +2x", and the same
+    // sentence for Rewind at -2x) and the owner confirmed both readings on
+    // 2026-08-10: the keyboard ladder and the button ladder differ at the first
+    // rung and agree everywhere above it. The difference is an ARGUMENT to the
+    // one rate machine, never a call site reaching past the controller to write
+    // `speed`.
     fastForwardAction_ = new QAction("Fast-forward", this);
     connect(fastForwardAction_, &QAction::triggered, this, [this]() {
         startShuttle(1, trace::core::ShuttleEntry::AtTwoX);
         refreshHud("FF");
     });
 
+    rewindAction_ = new QAction("Rewind", this);
+    connect(rewindAction_, &QAction::triggered, this, [this]() {
+        startShuttle(-1, trace::core::ShuttleEntry::AtTwoX);
+        refreshHud("REW");
+    });
+
     // The transport bar owns the slider widget; MainWindow keeps driving it,
     // so every scrub/seek path below is unchanged.
     transportBar_->setFrameText(QStringLiteral("--"));
-    connect(transportBar_, &trace::ui::TransportBar::prevFrameClicked,
-            prevFrameAction_, &QAction::trigger);
+    connect(transportBar_, &trace::ui::TransportBar::rewindClicked,
+            rewindAction_, &QAction::trigger);
     connect(transportBar_, &trace::ui::TransportBar::playPauseClicked,
             playPauseAction_, &QAction::trigger);
     connect(transportBar_, &trace::ui::TransportBar::fastForwardClicked,
@@ -1234,8 +1228,10 @@ void MainWindow::syncTransportBar() {
     timelineSlider_->setEnabled(hasAnyMedia);
     prevFrameAction_->setEnabled(hasAnyMedia);
     nextFrameAction_->setEnabled(hasAnyMedia);
-    // Fast-forward needs somewhere to run, which a single still frame is not.
+    // Both shuttle controls need somewhere to run, which a single still frame
+    // is not.
     if (fastForwardAction_) fastForwardAction_->setEnabled(hasPlayableRange);
+    if (rewindAction_) rewindAction_->setEnabled(hasPlayableRange);
     playPauseAction_->setEnabled(hasPlayableRange);
     playPauseAction_->setText(playing ? "Pause" : "Play");
 
@@ -1865,10 +1861,11 @@ void MainWindow::startShuttle(int direction, trace::core::ShuttleEntry entry) {
     }
 }
 
-// The single exact-frame-step command. Left/Right and both transport buttons
-// reach it through prevFrameAction_ / nextFrameAction_, so there is one
-// definition of what stepping a frame means rather than the two near-copies that
-// were here before spec phase 3.
+// The single exact-frame-step command. Left/Right reach it through
+// prevFrameAction_ / nextFrameAction_, so there is one definition of what
+// stepping a frame means rather than the two near-copies that were here before
+// spec phase 3. Both transport buttons reached it too until phases 4 and 5 made
+// them shuttle controls; the actions are unchanged, only their surfaces are.
 //
 // The copies had diverged, and one difference was a real bug: the BUTTON path
 // never called endShuttleRun(), so clicking a frame-step button during a reverse

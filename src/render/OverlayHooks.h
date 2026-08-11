@@ -21,17 +21,15 @@ namespace trace::render {
 struct OverlayHooks {
     // Run the centralized Play/Pause action. Not "start playback".
     std::function<void()> playPause;
-    // The two side controls, each named for what it does. They are ASYMMETRIC
-    // at the moment and that is deliberate rather than an oversight: spec phase
-    // 4 re-pointed the forward one at the shuttle and gave it the continuous
-    // scan artwork, and phase 5 does the same for the backward one. Until then
-    // the left control still steps a frame and still carries the frame-step
-    // glyph, because artwork follows behaviour -- putting scan artwork over
-    // stepping is exactly what phase 2 refused to do.
+    // The two side controls, each named for what it does. Spec phase 4 made the
+    // forward one the shuttle and phase 5 the backward one, so the asymmetry
+    // that stood between those two commits -- `stepBack` beside `fastForward` --
+    // is gone and both carry the continuous-scan artwork. Frame stepping is the
+    // arrow keys and has no surface here at all.
     //
     // `isVideoScrubActive()` is the standing reminder of what a name that
     // describes an intention rather than a behaviour costs.
-    std::function<void()> stepBack;
+    std::function<void()> rewind;
     std::function<void()> fastForward;
 
     // Timeline drag, mapped onto the slider's own press/move/release.

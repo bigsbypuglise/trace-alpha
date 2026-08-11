@@ -174,8 +174,9 @@ that gets sound, and the case that does *not* become a shuttle run — visible f
 default `L` reads `shuttle idle` while the same press under the 2× convention reads
 `shuttle RUN FWD stride 2`. `PlaybackController` gains **`ShuttleEntry::AtOneX`/`AtTwoX`**,
 applied at the first rung only, so the buttons' 2× entry is an argument rather than a call site
-writing `speed`. `TRACE_SHUTTLE_ENTRY=2x` drives it through J/L, which is the only way to
-execute it before those buttons exist.
+writing `speed`. `TRACE_SHUTTLE_ENTRY=2x` drove it through J/L, which was the only way to
+execute it before those buttons existed; **it left with spec phase 5**, which gave both buttons
+to `AtTwoX` as an argument and made J and L name `AtOneX` literally.
 
 **SPEC PHASE 4 IS DONE (2026-08-10).** The visible forward control is **Fast-forward**, entering
 the ladder at **2×** through `ShuttleEntry::AtTwoX`, with `transport_scan_forward` artwork on
@@ -183,11 +184,41 @@ both the transport bar and the composited overlay's right region. `nextFrameActi
 untouched with the Right arrow as its only surface — the spec removes the *button*, not the
 command — and it survived without care being taken because phase 3 had already collapsed the
 two step paths into one action. `next-frame` left the asset tree in the same commit;
-`prev-frame` stays until phase 5, so `OverlayHooks` reads `stepBack` beside `fastForward` and
-**that asymmetry is the rule working**, not an oversight. Measured on the button: **+2× → +5×
-→ +10× → +30×**, six rapid presses ending on `stride 30`. The spec's temporary rate indicator
-is a fixed-width label driven from `startShuttle`, gated on the same `ordinaryForwardPlay`
-predicate that decides whether there is a run.
+`prev-frame` stayed until phase 5, so for one commit `OverlayHooks` read `stepBack` beside
+`fastForward` and **that asymmetry was the rule working**, not an oversight. Measured on the
+button: **+2× → +5× → +10× → +30×**, six rapid presses ending on `stride 30`. The spec's
+temporary rate indicator is a fixed-width label driven from `startShuttle`, gated on the same
+`ordinaryForwardPlay` predicate that decides whether there is a run.
+
+**SPEC PHASE 5 IS DONE (2026-08-10) and the transport redesign is complete.** The visible
+backward control is **Rewind**, entering at **−2×** through `ShuttleEntry::AtTwoX`, with
+`transport_scan_reverse` on the transport bar and the composited overlay's left region;
+`OverlayHooks::stepBack` is `rewind`, `prev-frame` left the tree, and **`TRACE_SHUTTLE_ENTRY`
+left with it** — both buttons pass `AtTwoX` as an argument now and J/L name `AtOneX` literally.
+`prevFrameAction_` survives with the Left arrow as its only surface, so "frame stepping becomes
+keyboard-only" is literally true rather than half true. Both ladders confirmed from the button:
+**+2/+5/+10/+30 and −2/−5/−10/−30, six rapid presses capping at ±30×.**
+
+Three things to carry. **The transition axis was re-derived a third time and the negative
+control is the point**: `R -> prevBtn`/`F -> prevBtn` became `R -> rewBtn`/`F -> rewBtn` with
+their expectation flipped from `still` to `moving` (left as they were they would have asserted
+that pressing Rewind stops playback); `R -> Left`/`F -> Left` are where the old coverage went,
+not new cases; and `-Delayed` was re-pointed at the arrow key rather than deleted, because the
+button was never the point — a step leaves run state that only the *next* run-ending command
+exposes. **25 of 25 PASS on phase 5, and exactly the four `rewBtn` cases FAIL on a control
+built from `e559d07`** with all 21 others identical. **The ladder cap leg could not pass on any
+build**: `Click` spends ~210ms of dwell per press, six presses spanned ~1.6s, and at 30× a
+412-frame 24fps clip is traversed in **0.57s** — so it captured an ended run and read
+`speed 2.00x` at `frame 406`, which looks exactly like a ladder that wrapped. `FastClick` plus
+no settle fixed it. And **the overlay's re-pointed left hook was executed, not just wired**:
+state 07 reads `speed -2.00x | Reverse Play` on **both** backends, with `08-mid-drag` still
+**0 px, max delta 1** across them.
+
+**That session ran on a 1920x1080 @ 59.999Hz display, not the panel**, so its figures are not
+comparable to the phase 2–4 tables; the control was rebuilt and measured on the same display.
+Regression flat: cadence 100.0% both with identical buckets, 4444 99.8% both, `-SnapRelease`
+`delta 0` and `hitch 1` both, reverse 1× 100.0% on all six runs, forward 2× identical,
+lifecycle both legs passing. `land` reads **0 through every press**.
 
 **`landPreviousExactly` IS SETTLED AND GONE: no shuttle press lands the previous run.** K,
 Space and running off the end still land, because fidelity is owed to the frame you *stop* on.
@@ -220,6 +251,23 @@ window and report `moved 0%`. **The clip is part of the measurement.** Button po
 found by scanning for icon pixels and asserting exactly three clusters — arithmetic off the
 groove was wrong by ten pixels, because QSlider insets its groove by the handle radius, and a
 formula cannot notice it has drifted.
+
+**Phase 5 re-derived it a THIRD time, and this is now the standing pattern rather than an
+incident.** The backward button stopped stepping, so `R → prevBtn`/`F → prevBtn` **kept their
+names and changed their meaning** — they are `R → rewBtn`/`F → rewBtn` now and expect `moving`,
+where before they expected `still`; left alone they would have asserted that pressing Rewind
+stops playback. `R → Left`/`F → Left` are **where the old coverage went**, not added cases, and
+`-Delayed` was **re-pointed at the arrow key rather than deleted** because the button was never
+the point: a step leaves run state that only the next run-ending command exposes. 25 cases, all
+PASS — and **exactly the four `rewBtn` cases FAIL on the phase 4 control**, with the other 21
+identical, which is the check that the matrix tests the change at all.
+
+**A harness can also be unable to PASS, and that is harder to see than one that cannot fail.**
+The ladder cap leg presses six times and captures once, to show the sixth press reads 30× and
+not the first rung. `Click` costs ~210ms of dwell per press, so six span ~1.6s — while at 30× a
+412-frame 24fps clip is traversed in **0.57s**. It was capturing an ended run and reporting
+`speed 2.00x` at `frame 406`, which is exactly what a wrapped ladder would look like. `FastClick`
+(45ms) with no settle before the capture brought it inside budget; both legs then read ±30×.
 
 **`overlay.ps1` WAS AIMING 16px LOW AND HAD BEEN FOR A PHASE** (found at phase 4). It predicted
 the panel from `0.485 × window height` — the bottom of the video surface, which moves whenever
@@ -1004,12 +1052,10 @@ and its accumulator gate — the negative control for any cadence measurement),
 reverse — its own knob rather than sharing `TRACE_ASYNC_SCRUB`, so a reverse A/B
 does not also change how dragging behaves), `TRACE_LONGGOP_SLICE_THREADS=1`
 (slice-only threading for long-GOP codecs — **measured and refuted**, retained as
-the control for that closed question), `TRACE_SHUTTLE_ENTRY=2x` (J and L enter the
-shuttle ladder at 2x, the **button** convention, instead of the keyboard's 1x —
-an interim knob added at spec phase 3 so the entry point the Rewind/Fast-forward
-buttons will use is executable before those buttons exist; the Fast-forward
-button is real as of phase 4, so this now only matters for J and it leaves with
-phase 5), **`H` (not an env knob — the keyboard
+the control for that closed question), ~~`TRACE_SHUTTLE_ENTRY=2x`~~ (**gone as of
+spec phase 5** — an interim knob added at phase 3 so the Rewind/Fast-forward
+buttons' 2× entry was executable before those buttons existed; both buttons are
+real now and pass `AtTwoX` as an argument, so nothing needs it), **`H` (not an env knob — the keyboard
 toggle for the dev HUD, added at spec phase 2; `Return`/`Enter` still work, and
 hiding it also stops the HUD line being *built*, so it is the state to judge feel
 in and the wrong state to quote a bare `stalls` from)**, `TRACE_OVERLAY=1` (the floating transport,

@@ -178,7 +178,13 @@ Shot "04-pressed"
 [O]::mouse_event([O]::UP,0,0,0,[IntPtr]::Zero); Start-Sleep -Milliseconds 700
 Shot "05-after-play-click"
 
-# 5. pause again, then step forward twice via the overlay
+# 5. pause again, then drive the two side controls. BOTH ARE SHUTTLE PRESSES
+# NOW -- the right one since spec phase 4 and the left one since phase 5 -- so
+# 06 is a forward run at 5x (two rungs) and 07 is a REVERSE run at 2x, not a
+# frame stepped back. That is what makes these three states non-deterministic
+# across backends, and it is also the only place the re-pointed hooks are
+# actually executed: read `speed` and `shuttle` off the HUD in 06 and 07 rather
+# than trusting that the wiring is right because it compiles.
 Tap $playX $iconY
 Tap $ffX $iconY
 Tap $ffX $iconY

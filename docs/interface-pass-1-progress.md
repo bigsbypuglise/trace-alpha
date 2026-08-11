@@ -566,3 +566,183 @@ cover it.
 **Still no text-entry control anywhere in the app**, so the spec's "must not fire
 while focus is inside a text-entry control" still has nothing to guard. Phase 7
 creates the first one.
+
+---
+
+## Phase 5 — the reverse shuttle interface (2026-08-10)
+
+### What shipped
+
+**The visible backward control is Rewind, and the transport now has no frame-step
+button at all.** `prevFrameBtn_` is `rewindBtn_`, carrying `transport_scan_reverse`
+and a new `rewindClicked()` signal, and it triggers a new `rewindAction_` calling
+`startShuttle(-1, ShuttleEntry::AtTwoX)`. The composited overlay's left region
+moved with it: same action, same glyph. `OverlayHooks::stepBack` is `rewind`, so
+the asymmetry phase 4 deliberately left behind — `stepBack` beside `fastForward` —
+disappears in the commit that earned the right to remove it.
+
+**`prevFrameAction_` survives untouched**, with the Left arrow as its only surface,
+exactly as `nextFrameAction_` did at phase 4. The spec's "frame stepping becomes
+keyboard-only" is now literally true rather than half true.
+
+**`TRACE_SHUTTLE_ENTRY` is gone.** It existed for one reason — running the buttons'
+2× entry before the buttons existed, because shipping an entry point nothing has
+ever executed is §29.2 — and both buttons now pass `AtTwoX` as an argument. J and L
+name `ShuttleEntry::AtOneX` literally at their call sites. The knob leaves with the
+phase that made it redundant, as `TRACE_VIEW_TRANSFORM` will at phase 10.
+
+**`prev-frame-{24,48,72}.png` and `prev-frame.svg` left `assets/interface/transport/`
+and the `.qrc` in the same commit that stopped the button stepping.** That directory
+is now exactly the approved package's glyphs and nothing else, and nothing in the
+tree has a `-72` rendition any more — the two frame-step glyphs were the only ones
+that did, which was a property of the superseded first-pass set rather than of the
+controls. `loadIcon`'s `-72` branch is kept as insurance rather than removed; it is
+one line and it is what makes "is the 3x file being used" answerable by reading.
+
+Both ladders, driven from the button and read off the HUD:
+
+| control | press 1 | 2 | 3 | 4 | 6 rapid |
+|---|---|---|---|---|---|
+| Fast-forward | +2× | +5× | +10× | +30× | **+30×** |
+| Rewind | −2× | −5× | −10× | −30× | **−30×** |
+
+### The transition axis is re-derived for the third time, and the negative control is the point
+
+`transitions.ps1`'s phase 4 axis was a run boundary from each state a run can be
+in. Phase 5 did not add rows to it; it changed what two of them **mean**, and the
+distinction matters because the old names would have kept passing:
+
+- **`R -> prevBtn` and `F -> prevBtn` became `R -> rewBtn` and `F -> rewBtn`, and
+  their expectation flipped from `still` to `moving`.** They were "step out of a
+  run"; they are a same-direction rung change and a direction change now. Left in
+  place, they would have asserted that pressing Rewind stops playback.
+- **`R -> Left` and `F -> Left` are where the old coverage went**, not new cases.
+  A backward step out of a run still has to be exercised, and after this phase the
+  arrow key is the only control that performs one.
+- **`-Delayed` was re-pointed rather than deleted.** Its gesture was "step with a
+  BUTTON during a run, then press K" and there is no such button — but the button
+  was never the point. The point is that a step leaves run state behind which only
+  the *next* run-ending command exposes, and the arrow key inherits that shape
+  exactly. `R -> Left -> K` and `F -> Left -> K` are expected to pass on every
+  build, because the phase 3 fault was in the button copy; they are kept because
+  nothing else in the matrix has that shape.
+
+**25 of 25 PASS on phase 5.** Moving cases read 46.8–49.7%, still cases 0%, and
+every step moved between 1.5% and 29.4%.
+
+**The control run is what makes the re-derivation mean anything.** Run against a
+binary built from `e559d07`, the matrix reports **exactly four FAILs and they are
+exactly the four `rewBtn` cases** (`FAIL (frozen, expected moving) - moved 0%`),
+with all 21 other cases reading the same as on phase 5. A harness that passes on
+both builds is not testing the change.
+
+### The ladder cap leg could not pass on any build, and had been reporting a wrapped ladder
+
+Found while adding the reverse ladder. The cap leg presses six times without
+capturing and then captures once, to prove the sixth press reads 30× rather than
+the first rung. It read **`speed 2.00x` at `frame 406` of 412** — which is the
+exact appearance of a ladder that wrapped, and is instead the run having ended.
+
+The arithmetic was never survivable. At 30× a 412-frame 24fps clip is traversed in
+**0.57s of wall time**, and `Click` spends ~210ms of dwell *per press* before the
+loop's own spacing, so six presses spanned ~1.6s. The leg spent three times its
+whole budget on mouse timing. `FastClick` (45ms) and no settle before the capture
+bring the six presses to roughly 150 frames of the 412, and both legs then read
+what they exist to assert: **`speed 30.00x`** forward and **`speed -30.00x`**
+reverse, both still running.
+
+Third instance in two phases of a harness that could not have failed — after the
+9:16 signature and the overlay aim — and the first where the fault made a correct
+build look broken rather than a broken one look fine.
+
+### The overlay's left hook is executed, not merely wired
+
+Phase 4's lesson applied directly: `overlay.ps1`'s state 07 was "step one frame
+back" and is a **reverse shuttle press** now. Read off the HUD at that state:
+
+- **d3d11 07**: `Play <` · `frame 96` · **`speed -2.00x`** · `Reverse Play`
+- **cpu 07**: `Play <` · `frame 92` · **`speed -2.00x`** · `Reverse Play`
+- d3d11 06 (two forward rungs): `Paused` · `frame 118` · `speed 0.00x` · `FF`
+
+`-2.00x` is the button's `AtTwoX` entry arriving through the overlay, on the path
+that ships and on the escape hatch alike. 06 reads paused because two forward rungs
+from frame 40 reach the tail of a 121-frame clip — the run ended, and the `FF`
+label is what says the hook fired.
+
+Cross-backend agreement is unchanged and reproduces phase 4 to the pixel:
+
+| state | cpu vs d3d11 |
+|---|---|
+| 01–04, paused | 312–317 px (0.619–0.629%), max delta 24 |
+| **08-mid-drag** | **0 px (0%), max delta 1** |
+| 09–12 | 35–37 px (0.069–0.073%), max delta 7–8 |
+
+One reading moved: `03-hover-play` kept its 314 px but its max delta read 246
+rather than 24. Same pixel count, one outlier — the hover fill is animation-timed
+and the two captures are not guaranteed to be at the same point in it. Recorded
+rather than chased.
+
+### Regression
+
+**This session ran on a 1920x1080 @ 59.999Hz display, NOT the physical panel**
+(`refresh.ps1`; the panel is 5120x1440 @ 239.999Hz). So none of the figures below
+are comparable to the phase 2–4 tables, and the control was rebuilt and measured
+here rather than compared across displays. `stalls` and `hitch` coincide at this
+refresh, because the stall bar is `2 × refresh` = 33.3ms. **No subjective judgement
+was taken and none is valid from this display.**
+
+Control binary built from `e559d07`; `d3d11` default; `win 1280x843`,
+`display 640x360`.
+
+| run | control | phase 5 |
+|---|---|---|
+| 4K H.264 cadence ×3 | 100.0% all three, 120 frames, `handler>budget 0 of 119` (max 3.8/3.6/4.0), max 44.2/44.0/43.9 | 100.0% all three, 120 frames, `0 of 119` (max 3.6/3.8/3.6), max 43.6/43.6/43.3 |
+| 4444 cadence | 99.8%, 247 frames, `0 of 246` (max 35.9), p50 41.6 max 44.4 | 99.8%, 247 frames, `0 of 246` (max 32.9), p50 41.7 max 44.0 |
+| `scrub -SnapRelease` | `target 2 shown 2 delta 0`, `walk 0f`, `rev-hit 98.4%`, `hitch 1`, `stalls 1 of 441`, `ui gap max 73.6ms` | same landing, `rev-hit 98.4%`, `hitch 1`, `stalls 1 of 443`, `ui gap max 73.9ms` |
+| reverse 1× ×3 | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 5.5/6.4/5.8) | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 5.7/4.9/4.7) |
+| forward 2× | 100.2%, 55 frames, `0 of 54` (max 2.3), `hitch 0`, `land 1 (1.0ms)` | 100.2%, 55 frames, `0 of 54` (max 2.0), `hitch 0`, `land 1 (1.0ms)` |
+| lifecycle | `-PlayThroughDrag` PASS 40.3%, `-PausedThroughDrag` PASS 0% | PASS 39.1%, PASS 0% |
+| transitions | **4 FAIL — the four `rewBtn` cases — 21 PASS** | **25 of 25 PASS** |
+
+Cadence buckets identical on both files (`~1x 119`, every other bucket 0 on 4K
+H.264). Landing exact on every run. `land` reads **0 through every shuttle press**
+and 1 only where a run ended by reaching the tail, which is a stop — the phase 4
+decision is intact and still visible.
+
+**One outlier, not reproduced, recorded because the first run is the one that would
+have been quoted.** The very first phase 5 cadence run — the first after a binary
+swap — read `max 74.1ms`, `jitter max 32.39`, and one frame each in the `<0.9x` and
+`>2.5x` buckets. Three subsequent runs of the same file on the same binary read
+`~1x 119` with every other bucket 0, and `handler>budget 0 (max 3.5)` on the
+outlier itself says the decoder was never the cause. Same discipline the bimodal
+reverse gesture forced at phase 4: one run cannot support a claim in either
+direction.
+
+**Reverse 1× did not go bimodal at all this session.** All six runs — three per
+binary — read 100.0% at `frames 114 / elapsed 4.75s`, and none reported
+`SNAP gop 2`. That is not evidence the loose end is fixed; it is a different
+display from the one it was seen on, and it stays open and unattributed.
+
+### What phase 5 changes about the plan
+
+**The transport redesign is complete, and the spec's validation list for it reads
+straight down**: first frame is 0, Right and Left step exactly one frame, no
+on-screen frame-step buttons remain, both ladders run 2→5→10→30 and cap there, an
+opposite-direction press starts at 2× in the new direction, Play restores 1×, Pause
+clears the rate, and the rate indicator shows each rung.
+
+**Phase 6 is the one most likely to cost performance** — removing `transportBar_`
+from the layout in favour of the floating overlay — and it now has one more thing
+riding on it: after it, the *only* Rewind and Fast-forward controls that exist are
+the overlay's. Its open question is plan §31.5 item 2, whether the overlay's
+timeline press lands exactly the way a groove click does. The overlay's input path
+has now been exercised properly twice, which is still new rather than established.
+
+**One weakness left in `transitions.ps1`, stated rather than fixed.** The
+post-transition step is asserted only as `$stepped -lt 0` — an unresponsive app —
+so a step that moves the picture by **0%** passes. One control case (`F -> J`) did
+exactly that, where phase 5 read 2.1% on the same case. Raising it to a floor needs
+the floor established across all 25 cases first, and guessing one would make the
+matrix flaky in exchange for catching something no build has yet done.
+
+**Still no text-entry control anywhere in the app.** Phase 7 creates the first one.

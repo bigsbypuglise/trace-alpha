@@ -204,8 +204,8 @@ private:
     // justification that did not survive it.
     void startShuttle(int direction, trace::core::ShuttleEntry entry);
 
-    // The single exact-frame-step command, reached by Left/Right and by the two
-    // transport buttons. `delta` is -1 or +1.
+    // The single exact-frame-step command, reached by Left/Right alone from spec
+    // phase 5 on. `delta` is -1 or +1.
     void stepOneFrame(int delta, const char* hudLabel);
 
     void startShuttleRun(int direction, int stride);
@@ -321,18 +321,20 @@ private:
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
     trace::ui::TransportBar* transportBar_ = nullptr;
+    // Both exact-frame-step commands still exist and are still shared -- they
+    // are reached by the Left and Right arrows alone from spec phases 5 and 4
+    // respectively. The spec's "frame stepping becomes keyboard-only" removes
+    // the BUTTONS, not the commands: "do not delete the underlying
+    // exact-frame-step commands".
     QAction* prevFrameAction_ = nullptr;
     QAction* playPauseAction_ = nullptr;
-    // The exact-frame-step command still exists and is still shared -- it is
-    // reached by the Right arrow only from spec phase 4 on. The spec's
-    // "frame stepping becomes keyboard-only" removes the BUTTON, not the
-    // command: "do not delete the underlying exact-frame-step commands".
     QAction* nextFrameAction_ = nullptr;
-    // What the old Next Frame button became at spec phase 4. A separate action
-    // from nextFrameAction_ rather than a re-pointed one, because both survive:
-    // one is a control on screen, the other is a keyboard command, and they now
-    // do entirely different things.
+    // What the old Next Frame and Prev Frame buttons became, at spec phases 4
+    // and 5. Separate actions from the stepping pair rather than re-pointed
+    // ones, because all four survive: two are controls on screen, two are
+    // keyboard commands, and they now do entirely different things.
     QAction* fastForwardAction_ = nullptr;
+    QAction* rewindAction_ = nullptr;
     // Both created in setupSharedActions(), which runs BEFORE setupMenus():
     // the menu adds the action, it does not define it. Before spec phase 2 the
     // fullscreen toggle was four lines written twice -- once for the menu and

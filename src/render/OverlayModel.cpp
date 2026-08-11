@@ -207,11 +207,11 @@ void OverlayModel::rebuildAtlas() {
     double x = 4;
     aPlay_ = QRectF(x, row, icon, icon);   paintIcon(p, aPlay_, "play");        x += icon + 4;
     aPause_ = QRectF(x, row, icon, icon);  paintIcon(p, aPause_, "pause");      x += icon + 4;
-    // Artwork follows behaviour, one control at a time. The right region is
-    // Fast-forward from spec phase 4 and takes the continuous-scan glyph; the
-    // left one still steps a frame until phase 5 and keeps the frame-step glyph
-    // until then.
-    aRewind_ = QRectF(x, row, icon, icon); paintIcon(p, aRewind_, "prev-frame");   x += icon + 4;
+    // Artwork follows behaviour, one control at a time -- and as of spec phase 5
+    // both of them have moved. The right region became Fast-forward at phase 4
+    // and the left became Rewind here, so both carry the continuous-scan glyphs
+    // and neither frame-step glyph is in the tree any more.
+    aRewind_ = QRectF(x, row, icon, icon); paintIcon(p, aRewind_, "rewind");       x += icon + 4;
     aFfwd_ = QRectF(x, row, icon, icon);   paintIcon(p, aFfwd_, "fast-forward");   x += icon + 4;
 
     aHandle_ = QRectF(x, row, handle, handle);
@@ -407,13 +407,13 @@ bool OverlayModel::onMouseUp(int x, int y) {
     if (was != Region::None && was == r) {
         switch (r) {
             case Region::PlayPause:   if (hooks_.playPause) hooks_.playPause(); break;
-            // Still the single-frame step actions, and as of spec phase 2 the
-            // artwork in these two regions says so. The approved spec re-points
-            // them at the shuttle and swaps in transport_scan_*, but that is
-            // phases 4 and 5 and both halves move together -- renaming the hook
-            // here without changing what it calls would put a lie in the
-            // contract, which is the specific trap `isVideoScrubActive()` set.
-            case Region::Rewind:      if (hooks_.stepBack) hooks_.stepBack(); break;
+            // Both side regions are shuttle controls now, and the artwork says
+            // so. The names, the glyphs and the actions moved together in the
+            // commit that changed each one -- phase 4 forward, phase 5 backward
+            // -- because renaming a hook without changing what it calls would
+            // put a lie in the contract, which is the specific trap
+            // `isVideoScrubActive()` set.
+            case Region::Rewind:      if (hooks_.rewind) hooks_.rewind(); break;
             case Region::FastForward: if (hooks_.fastForward) hooks_.fastForward(); break;
             default: break;
         }
