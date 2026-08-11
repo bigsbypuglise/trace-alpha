@@ -130,6 +130,8 @@ add_executable(Trace
   ../src/app/Settings.cpp
   ../src/app/RecentFiles.h
   ../src/app/RecentFiles.cpp
+  ../src/app/WindowShape.h
+  ../src/app/WindowShape.cpp
   ../src/app/LucidLinkIntegration.h
   ../src/app/LucidLinkIntegration.cpp
   ../src/ui/ViewerWidget.h

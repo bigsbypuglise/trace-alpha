@@ -52,6 +52,7 @@
 #include "ui/TransportBar.h"
 #include "app/LucidLinkIntegration.h"
 #include "app/Settings.h"
+#include "app/WindowShape.h"
 #include "core/MediaIoSource.h"
 #include "core/SequenceParser.h"
 #include "core/TimeFormat.h"
@@ -2179,8 +2180,6 @@ bool MainWindow::applyMediaWindowShapePass(double aspect, int pass) {
     // The user's transform can turn it on its side; the media's own rotation is
     // already inside naturalDisplaySize().
     if (viewer_->viewTransform().swapsAxes()) natural.transpose();
-    double targetW = natural.width() / dpr;
-    double targetH = natural.height() / dpr;
 
     // Everything that is not video, in both directions: the client chrome (menu
     // bar, status bar, the HUD's own height, the docked transport bar when it is
@@ -2192,33 +2191,27 @@ bool MainWindow::applyMediaWindowShapePass(double aspect, int pass) {
     const QRect clientNow0 = geometry();
     const int frameW = frameNow.width() - clientNow0.width();
     const int frameH = frameNow.height() - clientNow0.height();
-    const int availW = work.width() - chrome.width() - frameW - 2 * kWorkAreaMarginPx;
-    const int availH = work.height() - chrome.height() - frameH - 2 * kWorkAreaMarginPx;
-    if (availW <= 0 || availH <= 0) return false;
 
-    // SCALE DOWN ONLY. "Do not upscale small media beyond its natural displayed
-    // size by default" -- so a 320x240 clip opens small rather than filling the
-    // monitor, which for a review tool is the honest presentation: the window
-    // says how big the media is.
-    const double fit = std::min({1.0, availW / targetW, availH / targetH});
-    targetW *= fit;
-    targetH *= fit;
-
-    // The RATIO is what must be exact, so recompute the second axis from the
-    // first after clamping rather than trusting two independently rounded
-    // numbers to still divide correctly.
-    int viewerW = std::max(1, static_cast<int>(std::lround(targetW)));
-    int viewerH = std::max(1, static_cast<int>(std::lround(viewerW / aspect)));
-    if (viewerH > availH) {
-        viewerH = availH;
-        viewerW = std::max(1, static_cast<int>(std::lround(viewerH * aspect)));
-    }
-    // The viewer's own minimum wins over the fit -- a floor that can be
-    // overridden is not a floor -- and it is aspect-correct by construction now,
-    // so honouring it does not break the ratio.
-    const QSize floorSize = viewer_->minimumSize();
-    viewerW = std::max(viewerW, floorSize.width());
-    viewerH = std::max(viewerH, floorSize.height());
+    // EVERY DECISION ABOUT THE SIZE IS MADE IN computeViewerSize, and none of it
+    // is made here. That split is not tidiness: this function needs a window, a
+    // screen and a layout, so it can only ever run at whatever scale factor the
+    // machine is set to -- 100% on this box, where every dpr term is the
+    // identity. The pure function takes dpr as an argument and is driven across
+    // 1.00/1.25/1.50/2.00 by `Trace.exe --window-shape-selftest`, so the
+    // shipping path and the tested path are the same code rather than two
+    // implementations that agree today.
+    trace::app::ShapeInputs in;
+    in.naturalPixels = natural;
+    in.aspect = aspect;
+    in.dpr = dpr;
+    in.chromeLogical = chrome;
+    in.frameLogical = QSize(frameW, frameH);
+    in.workAreaLogical = work.size();
+    in.viewerMinimumLogical = viewer_->minimumSize();
+    const trace::app::ShapeResult shape = trace::app::computeViewerSize(in);
+    if (!shape.valid) return false;
+    const int viewerW = shape.viewerLogical.width();
+    const int viewerH = shape.viewerLogical.height();
 
     const QSize client(viewerW + chrome.width(), viewerH + chrome.height());
 
@@ -2263,13 +2256,14 @@ bool MainWindow::applyMediaWindowShapePass(double aspect, int pass) {
     if (!qgetenv("TRACE_SHAPE_LOG").isEmpty()) {
         const QString msg =
             QString("[shape] aspect %1 natural %2x%3 dpr %4 | chrome %5x%6 frame %7x%8 "
-                       "avail %9x%10 | want viewer %11x%12 client %13x%14 | got viewer %15x%16 (%17)")
+                       "scale %9 bound %10 | want viewer %11x%12 client %13x%14 | got viewer %15x%16 (%17)")
                    .arg(QString::number(aspect, 'f', 4))
                    .arg(natural.width()).arg(natural.height())
                    .arg(QString::number(dpr, 'f', 2))
                    .arg(chrome.width()).arg(chrome.height())
                    .arg(frameW).arg(frameH)
-                   .arg(availW).arg(availH)
+                   .arg(QString::number(shape.scale, 'f', 4))
+                   .arg(QString::fromLatin1(trace::app::shapeBoundName(shape.bound)))
                    .arg(viewerW).arg(viewerH)
                    .arg(client.width()).arg(client.height())
                    .arg(viewer_->width()).arg(viewer_->height())

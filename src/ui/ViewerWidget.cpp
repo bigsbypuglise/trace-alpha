@@ -167,8 +167,21 @@ void ViewerWidget::applySourceShape() {
 void ViewerWidget::applyMinimumForAspect() {
     const double a = minimumAspect_;
     if (!(a > 0.0)) { setMinimumSize(640, 360); return; }
-    if (a >= 1.0) setMinimumSize(qMax(1, static_cast<int>(std::lround(360.0 * a))), 360);
-    else setMinimumSize(360, qMax(1, static_cast<int>(std::lround(360.0 / a))));
+    int w = 0;
+    int h = 0;
+    if (a >= 1.0) { w = static_cast<int>(std::lround(360.0 * a)); h = 360; }
+    else { w = 360; h = static_cast<int>(std::lround(360.0 / a)); }
+    // AND THE TRANSPORT HAS TO FIT (owner, 2026-08-11). The floating panel is a
+    // settled 460 logical px (spec phase 6 signed that number off), so a window
+    // narrower than it has a transport hanging off both sides. On a tall clip
+    // this is the binding constraint rather than the 360px short axis -- a 9:16
+    // floor of 360 wide becomes 460 -- and the height is recomputed from it so
+    // widening the floor does not make the floor the wrong shape.
+    if (w < kMinTransportWidth) {
+        w = kMinTransportWidth;
+        h = qMax(1, static_cast<int>(std::lround(w / a)));
+    }
+    setMinimumSize(qMax(1, w), qMax(1, h));
 }
 
 void ViewerWidget::setMinimumAspect(double aspect) {

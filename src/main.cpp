@@ -3,7 +3,10 @@
 #include <QIcon>
 #include <QStringList>
 #include <QTextStream>
+#include <cmath>
+
 #include "app/MainWindow.h"
+#include "app/WindowShape.h"
 #include "ui/ViewerWidget.h"
 
 namespace {
@@ -71,6 +74,179 @@ int runRendererSelfTest(const QString& expected) {
     return 0;
 }
 
+// `Trace.exe --window-shape-selftest`: drive spec section 4's opening-geometry
+// calculation across the aspect matrix at DPR 1.00, 1.25, 1.50 and 2.00, print
+// every row, and fail on anything that does not hold.
+//
+// IT EXISTS BECAUSE THIS MACHINE CANNOT TEST DPI. Every devicePixelRatioF() term
+// in the sizing arithmetic is the identity at 100%, which is the only scale
+// factor available here, so three quarters of section 4's DPI matrix could never
+// execute. computeViewerSize() takes dpr as an argument precisely so it can.
+//
+// IT IS NOT MIXED-MONITOR VALIDATION AND MUST NEVER BE QUOTED AS SUCH. It proves
+// the arithmetic. It says nothing about a real WM_DPICHANGED arriving, the
+// swapchain resizing, or a window dragged between two differently-scaled
+// monitors -- all of which remain untested for want of a second display
+// (plan section 20.4).
+//
+// The assertions are properties rather than golden numbers, because a golden
+// table would have to be regenerated whenever a policy constant moves and would
+// then be asserting whatever the code last did:
+//
+//   - the returned size matches the requested aspect to within a pixel of
+//     rounding -- the one failure that would silently distort the picture;
+//   - it never exceeds the area cap, allowing for rounding;
+//   - the outer window never exceeds the work area;
+//   - it is never narrower than the 460px transport needs;
+//   - AND THE DPR ROWS RELATE CORRECTLY, WHICH IS THE CHECK THAT ACTUALLY TESTS
+//     DPI. The invariant is NOT "the same logical size at every scale factor",
+//     and the first version of this asserted exactly that and failed seven rows
+//     on correct code. Which quantity is invariant depends on which rule bound
+//     the result, and that is why ShapeBound is reported rather than inferred:
+//
+//       bound == Natural -- the media is small enough to open 1:1, and "natural
+//         displayed size" is a PHYSICAL statement: a 1920-wide source occupies
+//         1920 panel pixels, which is 960 logical at 200%. So `logical x dpr`
+//         is invariant and equals the source's own pixel size.
+//       bound == Cap / WorkArea / Minimum -- all three are expressed in logical
+//         pixels (a 1280x720-equivalent area, a fraction of the work area, a
+//         460px panel), so the LOGICAL size is invariant.
+//
+//     A build that multiplies by dpr where it should divide fails both halves:
+//     the natural-bound rows come out at dpr^2 of the source size, and the rows
+//     that should be capped stop being capped at all.
+int runWindowShapeSelfTest() {
+    QTextStream out(stdout);
+    QTextStream err(stderr);
+
+    struct Media { const char* name; QSize pixels; double aspect; };
+    // The full matrix from section 4's validation list, plus the two anamorphic
+    // shapes and the rotated one, expressed the way the calculation sees them:
+    // a natural displayed size and an on-screen aspect.
+    const Media media[] = {
+        {"16:9 4K",      QSize(3840, 2160), 16.0 / 9.0},
+        {"16:9 1080p",   QSize(1920, 1080), 16.0 / 9.0},
+        {"9:16",         QSize(1080, 1920), 9.0 / 16.0},
+        {"4:3",          QSize(1440, 1080), 4.0 / 3.0},
+        {"1:1",          QSize(1080, 1080), 1.0},
+        {"2.39:1",       QSize(2304, 816),  2304.0 / 816.0},
+        {"4:5",          QSize(1080, 1350), 0.8},
+        {"anamorphic",   QSize(1920, 1080), 16.0 / 9.0},
+        {"rot90 of 16:9",QSize(1080, 1920), 9.0 / 16.0},
+        {"very small",   QSize(320, 240),   4.0 / 3.0},
+        {"8K",           QSize(7680, 4320), 16.0 / 9.0},
+    };
+    const double dprs[] = {1.00, 1.25, 1.50, 2.00};
+
+    int failures = 0;
+    for (const Media& m : media) {
+        QSize atDpr1;
+        for (double dpr : dprs) {
+            trace::app::ShapeInputs in;
+            in.naturalPixels = m.pixels;
+            in.aspect = m.aspect;
+            in.dpr = dpr;
+            // Representative, and fixed across the matrix so the rows are
+            // comparable: measured chrome on this box is 0x407 with the HUD
+            // shown, and the frame 0x31.
+            in.chromeLogical = QSize(0, 407);
+            in.frameLogical = QSize(0, 31);
+            in.workAreaLogical = QSize(2560, 1400);
+            // The aspect-correct floor MainWindow hands it.
+            in.viewerMinimumLogical =
+                m.aspect >= 1.0 ? QSize(static_cast<int>(std::lround(360.0 * m.aspect)), 360)
+                                : QSize(360, static_cast<int>(std::lround(360.0 / m.aspect)));
+
+            const trace::app::ShapeResult r = trace::app::computeViewerSize(in);
+            if (!r.valid) {
+                err << "trace-shape: FAIL - " << m.name << " @ dpr " << dpr
+                    << " produced no result" << Qt::endl;
+                ++failures;
+                continue;
+            }
+
+            const double gotAspect =
+                static_cast<double>(r.viewerLogical.width()) / r.viewerLogical.height();
+            out << QString("  %1  dpr %2  ->  %3x%4  aspect %5  scale %6  bound %7")
+                       .arg(QString::fromLatin1(m.name), -16)
+                       .arg(dpr, 0, 'f', 2)
+                       .arg(r.viewerLogical.width(), 5)
+                       .arg(r.viewerLogical.height(), -5)
+                       .arg(gotAspect, 0, 'f', 4)
+                       .arg(r.scale, 0, 'f', 4)
+                       .arg(QString::fromLatin1(trace::app::shapeBoundName(r.bound)))
+                << Qt::endl;
+
+            // Aspect preserved. One pixel of tolerance on the height, which is
+            // all the rounding of a single lround can introduce.
+            const int wantH = static_cast<int>(std::lround(r.viewerLogical.width() / m.aspect));
+            if (std::abs(r.viewerLogical.height() - wantH) > 1) {
+                err << "trace-shape: FAIL - " << m.name << " @ dpr " << dpr
+                    << " distorted the ratio: got " << r.viewerLogical.height()
+                    << " want " << wantH << Qt::endl;
+                ++failures;
+            }
+            // The area cap, unless the minimum had to push past it.
+            const double area = static_cast<double>(r.viewerLogical.width()) * r.viewerLogical.height();
+            if (r.bound != trace::app::ShapeBound::Minimum && area > in.capAreaLogical * 1.01) {
+                err << "trace-shape: FAIL - " << m.name << " @ dpr " << dpr
+                    << " exceeded the area cap: " << area << Qt::endl;
+                ++failures;
+            }
+            // Never off the monitor.
+            if (r.viewerLogical.width() + in.chromeLogical.width() + in.frameLogical.width()
+                    > in.workAreaLogical.width()
+                || r.viewerLogical.height() + in.chromeLogical.height() + in.frameLogical.height()
+                    > in.workAreaLogical.height()) {
+                err << "trace-shape: FAIL - " << m.name << " @ dpr " << dpr
+                    << " exceeded the work area" << Qt::endl;
+                ++failures;
+            }
+            // The settled 460px transport fits.
+            if (r.viewerLogical.width() < in.minTransportWidthLogical) {
+                err << "trace-shape: FAIL - " << m.name << " @ dpr " << dpr
+                    << " is narrower than the 460px transport: "
+                    << r.viewerLogical.width() << Qt::endl;
+                ++failures;
+            }
+
+            // THE DPI CHECK, in the two forms the header explains.
+            if (r.bound == trace::app::ShapeBound::Natural) {
+                // Physical size is the source's own, whatever the scale factor.
+                const int physW = static_cast<int>(std::lround(r.viewerLogical.width() * dpr));
+                if (std::abs(physW - m.pixels.width()) > 2) {
+                    err << "trace-shape: FAIL - " << m.name << " @ dpr " << dpr
+                        << " opened at natural size but occupies " << physW
+                        << " device px, not the source's " << m.pixels.width()
+                        << "; natural size is a physical statement." << Qt::endl;
+                    ++failures;
+                }
+            } else if (!atDpr1.isEmpty() && r.viewerLogical != atDpr1) {
+                // Cap, work area and the transport minimum are all logical, so
+                // the logical result must not move with the scale factor.
+                err << "trace-shape: FAIL - " << m.name << " @ dpr " << dpr
+                    << " is " << trace::app::shapeBoundName(r.bound) << "-bound and gave "
+                    << r.viewerLogical.width() << "x" << r.viewerLogical.height()
+                    << " but dpr 1.00 gave " << atDpr1.width() << "x" << atDpr1.height()
+                    << "; a logical constraint must not depend on the scale factor."
+                    << Qt::endl;
+                ++failures;
+            }
+            if (dpr == 1.00 && r.bound != trace::app::ShapeBound::Natural) atDpr1 = r.viewerLogical;
+        }
+    }
+
+    if (failures > 0) {
+        err << "trace-shape: " << failures << " failure(s)" << Qt::endl;
+        return 5;
+    }
+    out << "trace-shape: OK - " << (sizeof(media) / sizeof(media[0])) << " shapes x "
+        << (sizeof(dprs) / sizeof(dprs[0])) << " scale factors" << Qt::endl;
+    out << "trace-shape: NOTE - synthetic DPR only. Real mixed-monitor DPI is "
+           "UNTESTED (plan 20.4, no second display)." << Qt::endl;
+    return 0;
+}
+
 } // namespace
 
 int main(int argc, char* argv[]) {
@@ -85,6 +261,13 @@ int main(int argc, char* argv[]) {
         if (!arg.startsWith(QStringLiteral("--renderer-selftest"))) continue;
         const qsizetype eq = arg.indexOf(QLatin1Char('='));
         return runRendererSelfTest(eq < 0 ? QString() : arg.mid(eq + 1));
+    }
+
+    // Pure arithmetic: no widget, no renderer, no window. It runs anywhere the
+    // binary does, which is what lets CI check the DPI matrix this machine
+    // cannot.
+    for (const QString& arg : app.arguments()) {
+        if (arg == QStringLiteral("--window-shape-selftest")) return runWindowShapeSelfTest();
     }
 
     QIcon appIcon;

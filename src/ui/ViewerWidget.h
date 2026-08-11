@@ -151,6 +151,12 @@ private:
     // backend.
     void applySourceShape();
     double minimumAspect_ = 16.0 / 9.0;
+    // The settled floating-transport width (spec phase 6). Named here rather
+    // than reached for from OverlayModel because this is a FLOOR expressed in
+    // the same units, not a second definition of the panel: if the panel width
+    // is ever reopened as an owner decision, both move together and a grep for
+    // 460 finds them.
+    static constexpr int kMinTransportWidth = 460;
     void applyMinimumForAspect();
     std::unique_ptr<trace::render::VideoRenderer> renderer_;
     // Mirrors the active renderer's usesNativeSurface(), so the widget-level
