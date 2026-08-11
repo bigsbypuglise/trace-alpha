@@ -746,3 +746,90 @@ the floor established across all 25 cases first, and guessing one would make the
 matrix flaky in exchange for catching something no build has yet done.
 
 **Still no text-entry control anywhere in the app.** Phase 7 creates the first one.
+
+---
+
+## Session closeout — 2026-08-11
+
+**An index, not a second copy.** Every fact below is recorded in full somewhere
+above or in `docs/next-session-prompt.md`; this section exists so a reader can
+confirm the phase status and the settled decisions without reconstructing them
+from three documents. If it ever disagrees with the section it points at, the
+section it points at wins.
+
+### Phase status
+
+| phase | state | commit |
+|---|---|---|
+| 1 audit | done | `7abb6a5` (`docs/interface-pass-1-audit.md`) |
+| 2 shared actions and artwork | done | `58bfca6` |
+| 3 stepping and shuttle contracts | done | `4de678e` |
+| **4 forward shuttle** | **COMPLETE** | `e559d07` |
+| **5 reverse shuttle** | **COMPLETE** | `90140f9` |
+| **6 fullscreen consolidation + overlay auto-hide** | **NEXT** | — |
+
+Phases 4 and 5 together complete the **transport redesign**. Phase 6 is the next
+starting point and is the phase most likely to cost performance, because it
+removes `transportBar_` from the layout in favour of the floating overlay and
+therefore moves the video rect. Full brief in `docs/next-session-prompt.md`.
+
+### What is settled, and where the evidence is
+
+1. **Fast-forward begins at 2× and advances +2× → +5× → +10× → +30×**, capping at
+   30×. Phase 4 section; ladder re-confirmed from the button at phase 5.
+2. **The Right arrow is the only next-frame surface.** `nextFrameAction_` itself
+   is untouched — the spec removes the button, not the command. Phase 4 section.
+3. **Previous-frame remained visible through phase 4 and left at phase 5.**
+   Stated as it happened rather than as it was planned: for exactly one commit
+   `OverlayHooks` read `stepBack` beside `fastForward` and one scan glyph sat
+   beside one frame-step glyph, which is the artwork-follows-behaviour rule
+   working. At phase 5 the button became Rewind, `prev-frame` left the asset tree
+   and the `.qrc`, and the Left arrow became the only previous-frame surface.
+   Phase 4 and phase 5 sections.
+4. **`landPreviousExactly` was removed after measurement showed it bought no
+   anchoring.** The landing is a reverse-cache hit by construction, and a cache
+   hit sets `currentFrame_` but never `lastDecodedFrame`, so it does not move the
+   decoder at all — 4K H.264 `land 0.8ms`, 1080p `0.3ms`, ProRes 4444 `25.2ms`,
+   with the following forward run identical in every case. Both halves of the
+   recorded justification had also expired. Stops still land. Phase 4 section.
+5. **The transition and overlay harnesses exercise real interactions now.**
+   `transitions.ps1` replaced `revtransitions.ps1` on a run-boundary axis at
+   phase 4 and was re-derived again at phase 5 (25 cases); `overlay.ps1` had been
+   aiming 1.2px outside every control and is located by difference now. Phase 4
+   and phase 5 sections.
+6. **The phase 2 overlay interaction evidence was invalid, and the corrected live
+   test passes.** With nothing registering, all twelve captures were the same
+   paused frame, so the recorded `312 px (0.619%)` was the video band's own
+   backend difference rather than overlay agreement. With the legs live,
+   `08-mid-drag` reads **0 px, max delta 1**, and the re-pointed hooks are
+   confirmed *executed* — `overlay.ps1` state 07 reads `speed -2.00x |
+   Reverse Play` on `d3d11` and on `cpu`. Phase 4 and phase 5 sections.
+
+### Carried loose end — NOT a phase 4 or phase 5 regression
+
+**Reverse 1× is bimodal on the `revplay` gesture, and the keyframe grid can be
+learned as 2 so that snapping engages at stride 1** (`SNAP gop 2`, `sched tick
+81ms`, 72.5% of real time). It was observed on the **phase 4 control binary**,
+i.e. it **predates phase 4**, and the control produced the worst run of the six.
+It is named here as a pre-existing loose end and is explicitly **not classified
+as a regression of either phase**; it was not investigated during closeout.
+
+Two things to keep with it. A **single run of that gesture cannot support a claim
+in either direction** — take three. And phase 5 saw neither the slow mode nor
+`SNAP gop 2` in six runs, **which is not evidence it is fixed**: those runs were
+on a 1920x1080 @ 59.999Hz display, not the panel it was seen on. Still open,
+still unattributed.
+
+### Closeout verification
+
+- `main` at `883d216`, level with `origin/main`, **0 unpushed commits**.
+- **Working tree clean** (`git status --porcelain` empty); stash empty, so the
+  control-binary A/B stranded nothing.
+- **CI run 88 green on `883d216`**, including the `--renderer-selftest=d3d11`
+  assertion. Runs 86 (`e559d07`) and 87 (`90140f9`) green before it.
+- **No prerelease published and no tag created.** Tags were not pushed.
+- No `Trace.exe`, build, harness or polling process left running.
+- Regression for each phase is in that phase's own section. Phase 5's was taken
+  on a **1920x1080 @ 59.999Hz display, not the panel**, against a control rebuilt
+  and measured on the same display — so it is valid as an A/B and **not**
+  comparable to the phase 2–4 tables.

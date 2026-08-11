@@ -157,7 +157,8 @@ baselines are recorded. Quote `hitch`, `win WxH` **and** `display`.
 ## Loose ends worth knowing about, none of them blocking
 
 - **The keyframe grid can be learned as 2, and snapping then engages at stride 1.** Seen on the
-  phase 4 control binary (i.e. it predates phase 4): one reverse-1× run of six read
+  phase 4 control binary, so it **predates phase 4 and is a regression of neither phase 4 nor
+  phase 5** — named and carried deliberately, not left unclassified. One reverse-1× run of six read
   `SNAP gop 2`, `sched tick 81ms`, **72.5% of real time**, against 100.0% and 88.1% on the two
   other runs of the same gesture on the same binary. **Reverse 1× on that gesture is bimodal**
   — `frames 114 / elapsed 4.75s` at 100%, or `frames 97 / elapsed 4.59s` at 88.1% — so a
