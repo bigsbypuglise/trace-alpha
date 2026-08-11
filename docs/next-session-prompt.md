@@ -103,8 +103,8 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
   relabelled honestly, Go to Frame / Go to Timecode, and zero-based image-kind HUD lines.
   Full record in the progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
-  run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0` and **run 90 on `bc84431`
-  (phase 6)**, all including the renderer selftest.
+  run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0`, **run 90 on `bc84431`
+  (phase 6)** and **run 92 on `f15e368` (phase 7)**, all including the renderer selftest.
 
 ### Start at spec phase 8, and read `docs/interface-pass-1-progress.md` first
 
