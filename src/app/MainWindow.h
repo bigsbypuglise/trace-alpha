@@ -21,6 +21,7 @@
 #include "core/AudioOutput.h"
 #include "app/ShortcutTable.h"
 #include "app/MediaShare.h"
+#include "app/RecentFiles.h"
 #include "render/ViewTransform.h"
 
 QT_BEGIN_NAMESPACE
@@ -138,7 +139,24 @@ private:
     // Wires the renderer-composited overlay spike to the existing actions.
     void installOverlayHooks();
     void openFileDialog();
-    void openPath(const QString& path);
+    // Returns whether media is now open and showing a frame.
+    //
+    // It returned void until spec phase 11. Open Recent is the first caller that
+    // has to DO something different when an open fails -- the spec asks for a
+    // missing recent file to be reported with an offer to remove the entry --
+    // and inferring failure from a status-bar string would be a second answer to
+    // a question this function already knows.
+    bool openPath(const QString& path);
+
+    // Spec phase 11. Rebuilds the File > Open Recent submenu from the stored
+    // strings. Called when the list CHANGES, not when the menu is shown: the
+    // spec forbids probing recent paths at startup and blocking on disconnected
+    // ones, and a rebuild that runs on aboutToShow is the natural place for a
+    // later change to add a stat() and stall the menu on a dead mount.
+    void rebuildRecentMenu();
+    // Opens a path chosen from the recent list. Deliberately does NOT probe
+    // first -- see the comment on the definition.
+    void openRecentPath(const QString& path);
     bool loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpeg::RequestMode mode = trace::core::VideoDecoderFFmpeg::RequestMode::Playback);
     QString sequenceFramePath(long long frameIndex) const;
     void prefetchNeighbors();
@@ -470,6 +488,13 @@ private:
     QAction* exitFullscreenAction_ = nullptr;
     QAction* toggleHudAction_ = nullptr;
     QAction* openAction_ = nullptr;
+
+    // Open Recent (spec phase 11). The list is the model and the submenu is
+    // rebuilt from it; the actions inside are owned by the submenu and replaced
+    // wholesale, so nothing here can hold a stale path.
+    trace::app::RecentFiles recentFiles_;
+    QMenu* recentMenu_ = nullptr;
+    QAction* clearRecentAction_ = nullptr;
 
     // Trace's complete keyboard contract, and the dispatcher for the half of it
     // keyPressEvent still owns. Spec phase 13 renders the Keyboard Shortcuts

@@ -25,6 +25,22 @@ namespace trace::app {
 // reads as a broken build rather than as an answer about the file.
 enum class ShareAvailability { Available, Disabled, Unavailable };
 
+// The one place a path becomes the string Trace stores and shows.
+//
+// Resolves symlinks and junctions -- which is what "canonical" means in both
+// the Share requirements and spec phase 11's "store canonical paths" -- and
+// falls back to the absolute path when the file does not exist, because
+// QFileInfo::canonicalFilePath() returns EMPTY for a missing file and a recent
+// entry for a file that has been deleted still has to be a usable string.
+//
+// Exported at spec phase 11 so the recent list uses this rather than a second
+// normalisation. Two answers to "what is this file's path" would eventually
+// disagree, and the recent list is precisely where that disagreement would show
+// up as a duplicate row.
+//
+// It touches the filesystem, so it belongs on an open, never on a menu popup.
+QString canonicalNativePath(const QString& path);
+
 // For the diagnostics HUD. The three states have to be distinguishable in a
 // capture, because "is that menu item greyed out" is not answerable from a
 // screenshot at 15px -- the first attempt to verify this gate measured icon

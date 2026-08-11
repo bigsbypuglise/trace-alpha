@@ -21,9 +21,8 @@
 
 namespace trace::app {
 
-namespace {
-
-// One place that turns a path into the string every share command uses.
+// One place that turns a path into the string every share command uses, and
+// since spec phase 11 the string the recent list stores as well.
 //
 // canonicalFilePath() resolves symlinks and junctions, which is what "canonical"
 // in the spec means -- but it returns EMPTY for a path that does not exist, so a
@@ -37,8 +36,6 @@ QString canonicalNativePath(const QString& path) {
     if (resolved.isEmpty()) return {};
     return QDir::toNativeSeparators(resolved);
 }
-
-} // namespace
 
 const char* shareAvailabilityName(ShareAvailability state) {
     switch (state) {

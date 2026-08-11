@@ -14,7 +14,9 @@
 #include <QFileInfo>
 #include <QKeyEvent>
 #include <QMenuBar>
+#include <QMessageBox>
 #include <QPointer>
+#include <QPushButton>
 #include <QThreadPool>
 #include <QMimeData>
 #include <QResizeEvent>
@@ -37,6 +39,7 @@
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
 #include "app/LucidLinkIntegration.h"
+#include "app/Settings.h"
 #include "core/MediaIoSource.h"
 #include "core/SequenceParser.h"
 #include "core/TimeFormat.h"
@@ -245,6 +248,15 @@ MainWindow::MainWindow() {
     setupTransportControls();
     // Last: every action it lists has to exist before it can point at one.
     setupShortcuts();
+
+    // Open Recent (spec phase 11). Reads stored strings and builds the submenu
+    // from them; NOTHING here touches the filesystem, so a list full of
+    // disconnected LucidLink or UNC paths costs a launch exactly nothing. That
+    // is the spec's "do not probe every path during application startup", and
+    // it is a property of load() and rebuildRecentMenu() having no filesystem
+    // call in them rather than a rule someone has to remember.
+    recentFiles_.load();
+    rebuildRecentMenu();
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
         // GATE E: the timer is re-armed per wake against an absolute deadline,
@@ -926,6 +938,22 @@ void MainWindow::setupSharedActions() {
     exitFullscreenAction_->setEnabled(false);
     connect(exitFullscreenAction_, &QAction::triggered, this, &MainWindow::toggleFullscreen);
     addAction(exitFullscreenAction_);
+
+    // Clear Recent Files (spec phase 11). Created here rather than inside
+    // rebuildRecentMenu() because that function replaces the submenu's contents
+    // wholesale, and an action rebuilt on every list change would be a new
+    // object each time -- fine for the entries, which ARE the list, and wrong
+    // for a command that is always the same command.
+    //
+    // No confirmation prompt. The list is a convenience with no content of its
+    // own, clearing it destroys nothing, and a confirmation would be the third
+    // dialog in a menu whose entire job is to save a trip through a file picker.
+    clearRecentAction_ = new QAction(tr("&Clear Recent Files"), this);
+    connect(clearRecentAction_, &QAction::triggered, this, [this]() {
+        recentFiles_.clear();
+        rebuildRecentMenu();
+        statusBar()->showMessage(tr("Recent files cleared."), 2000);
+    });
 
     // Time Display (spec phase 7). Four mutually exclusive readouts in one
     // QActionGroup, so "which readout is showing" has one owner and the menu
@@ -1724,6 +1752,13 @@ void MainWindow::setupMenus() {
     connect(openAction_, &QAction::triggered, this, &MainWindow::openFileDialog);
     fileMenu->addAction(openAction_);
 
+    // Open Recent (spec phase 11), immediately under Open as the spec's File
+    // menu lists it. Its contents are filled by rebuildRecentMenu(), which the
+    // constructor calls once after loading the stored strings -- NOT on
+    // aboutToShow. See rebuildRecentMenu for why that distinction is the whole
+    // performance requirement.
+    recentMenu_ = fileMenu->addMenu(tr("Open &Recent"));
+
     fileMenu->addAction(fullscreenAction_);
     fileMenu->addAction(toggleHudAction_);
 
@@ -2035,6 +2070,112 @@ void MainWindow::openFileDialog() {
     if (!path.isEmpty()) openPath(path);
 }
 
+// Spec phase 11. Built from the stored strings and NOTHING ELSE.
+//
+// There is no QFileInfo here, and that is the requirement rather than an
+// omission. The spec says not to probe every path during application startup
+// and not to block on disconnected LucidLink or network paths, and this
+// function is where both would happen: the obvious "grey out the ones that are
+// gone" costs a stat per entry, which is 407ms apiece on a cold LucidLink mount
+// and a multi-second SMB timeout on an unreachable UNC host. Ten entries of
+// that in front of a menu the user has just clicked reads as the application
+// hanging.
+//
+// Called when the list CHANGES -- once at startup, and on open/forget/clear --
+// rather than on aboutToShow. Same cost either way today; the difference is
+// that aboutToShow is the natural home for a later "just check quickly", and
+// this is not.
+void MainWindow::rebuildRecentMenu() {
+    if (!recentMenu_) return;
+    recentMenu_->clear();
+
+    const QStringList& paths = recentFiles_.paths();
+    for (int i = 0; i < paths.size(); ++i) {
+        const QString& path = paths.at(i);
+        // The name only -- a full path is unreadable in a menu and the whole
+        // path is on the status tip. QFileInfo would be the obvious way to take
+        // the basename and it is exactly what must not appear in this function,
+        // so the separator search is done on the string.
+        const int slash = std::max(path.lastIndexOf('\\'), path.lastIndexOf('/'));
+        QString name = (slash >= 0) ? path.mid(slash + 1) : path;
+        // A filename containing '&' would otherwise render as a mnemonic and
+        // lose the character -- "R&D_v3.mov" would show as "RD_v3.mov" and
+        // silently claim Alt+D.
+        name.replace(QStringLiteral("&"), QStringLiteral("&&"));
+
+        // The conventional numbering: 1-9 take a digit mnemonic, and the tenth
+        // takes '0' rather than a second '1' that would collide with entry 1.
+        const QString text = (i < 9) ? tr("&%1  %2").arg(i + 1).arg(name)
+                                     : tr("1&0  %1").arg(name);
+        QAction* entry = recentMenu_->addAction(text);
+        // The full path where it can be read without being clicked. Both, so a
+        // hover in either surface answers "which of the three v2s is this".
+        entry->setStatusTip(path);
+        entry->setToolTip(path);
+        connect(entry, &QAction::triggered, this, [this, path]() { openRecentPath(path); });
+    }
+
+    recentMenu_->addSeparator();
+    recentMenu_->addAction(clearRecentAction_);
+
+    // Disabled rather than hidden when empty, which is the same rule phase 8
+    // applied to the Share rows: a menu whose items come and go cannot be
+    // learned, and a missing command reads as a broken build rather than as an
+    // answer. Clear Recent Files goes grey with it, since there is nothing to
+    // clear.
+    const bool any = !recentFiles_.isEmpty();
+    recentMenu_->setEnabled(any);
+    clearRecentAction_->setEnabled(any);
+}
+
+// Spec phase 11. Opening an entry, and the missing-file case.
+//
+// NO PROBE BEFORE THE OPEN, deliberately. The tempting shape is "check it is
+// there, then open it", and on a disconnected mount that check costs exactly
+// what the open costs and then the open pays it again. Handing the path
+// straight to openPath() means the recent list never makes Trace touch a path
+// the user did not just ask it to, and an entry chosen here costs precisely
+// what the same file chosen through File > Open costs.
+//
+// The existence question is asked only AFTER a failure, when the path has
+// already been reached and answering is free -- and it is asked at all because
+// "the file is gone" and "the file is there but will not decode" need different
+// answers: only the first may offer to remove the entry.
+void MainWindow::openRecentPath(const QString& path) {
+    if (openPath(path)) return;
+
+    if (QFileInfo::exists(path)) {
+        // openPath already reported the real reason on the status bar. Removing
+        // an entry whose file is present would throw away a perfectly good
+        // bookmark because of a transient decode failure.
+        return;
+    }
+
+    // Reported, with an offer to remove -- the spec's wording, and not a silent
+    // drop. Keep is the default button: the destructive option should not be
+    // what a stray Return chooses.
+    QMessageBox box(this);
+    box.setIcon(QMessageBox::Warning);
+    box.setWindowTitle(tr("Trace"));
+    box.setText(tr("Trace can't find this file."));
+    box.setInformativeText(path);
+    // Mnemonics on both, which is the Windows convention for a message box and
+    // is also what makes the choice reachable without a mouse -- the alpha's
+    // accessibility story is keyboard-plus-menus (owner decision, 2026-08-11),
+    // so a dialog whose only route to the non-default answer is a click would
+    // be a hole in it.
+    QPushButton* remove = box.addButton(tr("&Remove from Recent"), QMessageBox::DestructiveRole);
+    QPushButton* keep = box.addButton(tr("&Keep"), QMessageBox::RejectRole);
+    box.setDefaultButton(keep);
+    box.exec();
+
+    if (box.clickedButton() == remove) {
+        recentFiles_.forget(path);
+        rebuildRecentMenu();
+        statusBar()->showMessage(tr("Removed from Recent Files."), 2500);
+    }
+}
+
 long long MainWindow::supersedeInFlightRequests() {
     ++requestGeneration_;
     // A read already under way is never abandoned -- the destination buffer
@@ -2092,13 +2233,17 @@ void MainWindow::captureDecoderTelemetry() {
     }
 }
 
-void MainWindow::openPath(const QString& path) {
+bool MainWindow::openPath(const QString& path) {
     // Opening another file while storage is slow: supersede the outstanding
     // read so nothing from the previous media is presented afterwards. The
     // guard below then refuses to re-enter until that decode has unwound.
+    //
+    // Returns false, and Open Recent must not read that as "the file is gone" --
+    // which is why it asks QFileInfo::exists() before offering to remove an
+    // entry rather than treating any failure as a missing file.
     if (storageBusy_) {
         supersedeInFlightRequests();
-        return;
+        return false;
     }
     // Before anything else touches the decoder. Bumps the generation, so a
     // frame the worker is producing for the OUTGOING media can never be
@@ -2256,7 +2401,7 @@ void MainWindow::openPath(const QString& path) {
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
         refreshHud("Open failed");
-        return;
+        return false;
     }
 
     if (currentMedia_->kind == MediaKind::ImageSequence) prefetchNeighbors();
@@ -2307,8 +2452,22 @@ void MainWindow::openPath(const QString& path) {
     // tick meaningful at all.
     playTimer_.setTimerType(Qt::PreciseTimer);
 
+    // Open Recent (spec phase 11). ONLY on success, and only for a file-backed
+    // item -- a list of things that failed to open is not a recent-files list.
+    //
+    // The path comes from the Share gate, which canonicalised it a few lines
+    // above as part of work this open was doing anyway. That is the reason
+    // `canonicalNativePath` was exported rather than reimplemented: two answers
+    // to "what is this file's path" would eventually disagree, and the recent
+    // list is exactly where that shows up, as two rows for one file.
+    if (shareState_.fileBacked && !shareState_.canonicalPath.isEmpty()) {
+        recentFiles_.remember(shareState_.canonicalPath);
+        rebuildRecentMenu();
+    }
+
     statusBar()->showMessage("Opened", 1200);
     refreshHud("Open file");
+    return true;
 }
 
 QString MainWindow::sequenceFramePath(long long frameIndex) const {
@@ -4318,7 +4477,17 @@ void MainWindow::refreshHud(const QString& action) {
               + QString(" | share path %1 explorer %2 lucid %3")
                 .arg(shareAvailabilityName(shareState_.copyPath))
                 .arg(shareAvailabilityName(shareState_.showInExplorer))
-                .arg(shareAvailabilityName(shareState_.lucidLink));
+                .arg(shareAvailabilityName(shareState_.lucidLink))
+              // Open Recent (spec phase 11), on the same line for the same
+              // reason the Share gate is: neither is answerable from a
+              // screenshot of the window. How many entries are held, and WHICH
+              // settings home they are held in -- portable trace.ini beside the
+              // executable, or the per-user file -- where nothing on screen
+              // says which one won.
+              + QString(" | recent %1/%2 %3")
+                .arg(recentFiles_.paths().size())
+                .arg(trace::app::RecentFiles::kMaxEntries)
+                .arg(trace::app::settingsModeName());
 
             const QString lprobe = QString("probe | limit %1 KB / %2 ms | rd %3 | %4 KB | seek %5 | streams %6 | fps %7 | dur %8s | frames %9")
                 .arg(perf.probeSizeLimit / 1024)
