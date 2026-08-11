@@ -99,6 +99,58 @@ struct VideoMetadata {
         if (a <= 0.0) return 0.0;
         return (rotationDegrees == 90 || rotationDegrees == 270) ? 1.0 / a : a;
     }
+    // WHAT THE FILE STATES, FOR THE MOVIE INSPECTOR (spec phase 13).
+    //
+    // Everything in this block is read from the container and stored VERBATIM,
+    // including its absence. The spec's rule for the inspector is "display
+    // Unknown or Untagged honestly; do not infer missing colour metadata inside
+    // the inspector; distinguish encoded metadata from playback inference", and
+    // that last clause is why these exist at all rather than the inspector
+    // reading VideoPerfStats.
+    //
+    // `VideoPerfStats::colorMatrix` is the matrix PLAYBACK USED. When a file
+    // states none, swsCoefficientsFor applies the standard "HD and up is 709"
+    // heuristic and sets colorMatrixInferred -- which is correct for decoding
+    // and is an *answer Trace invented*. An inspector that printed it would be
+    // telling the user their file is tagged BT.709 when it is tagged nothing,
+    // and in a review tool that is a bug report about the media rather than
+    // about Trace. So the two are kept apart at the source: these say what the
+    // file says, that says what was done about it, and the inspector can show
+    // both.
+    //
+    // Empty means the container stated nothing. Never a default, never a guess.
+    QString taggedColorPrimaries;
+    QString taggedColorTransfer;
+    QString taggedColorMatrix;
+    // Tri-state deliberately, because "limited" is both a real tag and the
+    // fallback assumption: false/false is untagged, and a bool could not say so.
+    bool taggedRangeIsFull = false;
+    bool hasTaggedRange = false;
+
+    // Container, codec profile and track identity -- all "Unknown" as an empty
+    // string rather than as an invented value.
+    QString containerName;
+    QString containerLongName;
+    QString codecProfile;
+    // The container's own track id, which is what an editorial tool means by
+    // "track ID", not FFmpeg's array position. Both are kept: the index is what
+    // every log line here already prints.
+    int videoStreamIndex = -1;
+    int videoTrackId = -1;
+    // Stream bitrate, distinct from the file's overall data rate. -1 when the
+    // container does not state one, which is common in MOV.
+    long long videoBitrateBps = -1;
+
+    bool hasAudio = false;
+    QString audioCodecName;
+    QString audioProfile;
+    QString audioChannelLayout;
+    int audioSampleRate = 0;
+    int audioChannels = 0;
+    long long audioBitrateBps = -1;
+    int audioStreamIndex = -1;
+    int audioTrackId = -1;
+
     // The size the source is meant to be shown at with square pixels and no
     // scaling -- section 4's "natural displayed size", which is what the window
     // is sized from on open. Rotation is applied; the view transform is not,

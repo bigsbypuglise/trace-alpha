@@ -1015,6 +1015,69 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     impl_->streamTimeBase = stream->time_base;
     impl_->streamStartTs = (stream->start_time != AV_NOPTS_VALUE) ? stream->start_time : 0;
 
+    // WHAT THE FILE STATES, READ VERBATIM INCLUDING ITS ABSENCE (spec phase 13).
+    //
+    // FFmpeg's av_color_*_name() return nullptr for UNSPECIFIED, and that is
+    // exactly the answer wanted: the field stays empty, the inspector prints
+    // "Untagged", and nothing anywhere substitutes a plausible value. The
+    // matrix here is the TAGGED one and may differ from the one playback used --
+    // see the header for why they are kept apart.
+    {
+        const AVCodecParameters* p = stream->codecpar;
+        if (p->color_primaries != AVCOL_PRI_UNSPECIFIED) {
+            if (const char* n = av_color_primaries_name(p->color_primaries))
+                metadata_.taggedColorPrimaries = QString::fromLatin1(n);
+        }
+        if (p->color_trc != AVCOL_TRC_UNSPECIFIED) {
+            if (const char* n = av_color_transfer_name(p->color_trc))
+                metadata_.taggedColorTransfer = QString::fromLatin1(n);
+        }
+        if (p->color_space != AVCOL_SPC_UNSPECIFIED) {
+            if (const char* n = av_color_space_name(p->color_space))
+                metadata_.taggedColorMatrix = QString::fromLatin1(n);
+        }
+        if (p->color_range != AVCOL_RANGE_UNSPECIFIED) {
+            metadata_.hasTaggedRange = true;
+            metadata_.taggedRangeIsFull = (p->color_range == AVCOL_RANGE_JPEG);
+        }
+
+        if (impl_->fmt->iformat) {
+            if (impl_->fmt->iformat->name)
+                metadata_.containerName = QString::fromUtf8(impl_->fmt->iformat->name);
+            if (impl_->fmt->iformat->long_name)
+                metadata_.containerLongName = QString::fromUtf8(impl_->fmt->iformat->long_name);
+        }
+        if (const char* prof = av_get_profile_name(impl_->codecDef, p->profile))
+            metadata_.codecProfile = QString::fromLatin1(prof);
+        metadata_.videoStreamIndex = stream->index;
+        metadata_.videoTrackId = stream->id;
+        metadata_.videoBitrateBps = p->bit_rate > 0 ? p->bit_rate : -1;
+
+        // The audio stream is chosen the same way the audio path chooses it, so
+        // the inspector reports the track that would actually play rather than
+        // the first one in the file.
+        const int aIdx = av_find_best_stream(impl_->fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0);
+        if (aIdx >= 0) {
+            const AVStream* as = impl_->fmt->streams[aIdx];
+            const AVCodecParameters* ap = as->codecpar;
+            metadata_.hasAudio = true;
+            if (const AVCodecDescriptor* d = avcodec_descriptor_get(ap->codec_id))
+                metadata_.audioCodecName = QString::fromUtf8(d->name);
+            if (const AVCodec* ac = avcodec_find_decoder(ap->codec_id)) {
+                if (const char* prof = av_get_profile_name(ac, ap->profile))
+                    metadata_.audioProfile = QString::fromLatin1(prof);
+            }
+            metadata_.audioSampleRate = ap->sample_rate;
+            metadata_.audioChannels = ap->ch_layout.nb_channels;
+            char layout[64] = {0};
+            if (av_channel_layout_describe(&ap->ch_layout, layout, sizeof(layout)) > 0)
+                metadata_.audioChannelLayout = QString::fromLatin1(layout);
+            metadata_.audioBitrateBps = ap->bit_rate > 0 ? ap->bit_rate : -1;
+            metadata_.audioStreamIndex = as->index;
+            metadata_.audioTrackId = as->id;
+        }
+    }
+
     // SAMPLE ASPECT AND ROTATION, READ AND NEVER ASSUMED (spec phase 12).
     //
     // Both are read here, beside the timecode, because they are the same kind of
@@ -1167,7 +1230,13 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             // leaving 1/1 to mean two different things, and `dar` is the
             // composed answer so a fixture can be checked against one number
             // instead of being recomputed by whoever reads the log.
-            "\tsar=%31/%32%33\trot=%34%35\tdar=%36\tnatural=%37x%38")
+            "\tsar=%31/%32%33\trot=%34%35\tdar=%36\tnatural=%37x%38"
+            // Spec phase 13. `tag*` is what the FILE states, which is not what
+            // `colorspace=`/`range=` above report -- those are the enums the
+            // decoder then applies a heuristic to. An empty field here would be
+            // ambiguous in a tab-separated log, so absence prints as the word.
+            "\ttagpri=%39\ttagtrc=%40\ttagmtx=%41\ttagrange=%42"
+            "\tcontainer=%43\tprofile=%44\tvtrack=%45\taudio=%46")
             .arg(QFileInfo(path).fileName())
             .arg(si.remote ? "remote" : "local")
             .arg(perfStats_.probeSizeLimit)
@@ -1206,7 +1275,26 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             .arg(metadata_.rotationSnapped ? QStringLiteral("(snapped)") : QString())
             .arg(QString::number(metadata_.displayAspect(), 'f', 6))
             .arg(metadata_.naturalDisplaySize().width())
-            .arg(metadata_.naturalDisplaySize().height()));
+            .arg(metadata_.naturalDisplaySize().height())
+            .arg(metadata_.taggedColorPrimaries.isEmpty() ? QStringLiteral("untagged")
+                                                          : metadata_.taggedColorPrimaries)
+            .arg(metadata_.taggedColorTransfer.isEmpty() ? QStringLiteral("untagged")
+                                                         : metadata_.taggedColorTransfer)
+            .arg(metadata_.taggedColorMatrix.isEmpty() ? QStringLiteral("untagged")
+                                                       : metadata_.taggedColorMatrix)
+            .arg(!metadata_.hasTaggedRange ? QStringLiteral("untagged")
+                 : (metadata_.taggedRangeIsFull ? QStringLiteral("full")
+                                                : QStringLiteral("limited")))
+            .arg(metadata_.containerName.isEmpty() ? QStringLiteral("?") : metadata_.containerName)
+            .arg(metadata_.codecProfile.isEmpty() ? QStringLiteral("none") : metadata_.codecProfile)
+            .arg(metadata_.videoTrackId)
+            .arg(metadata_.hasAudio
+                     ? QStringLiteral("%1/%2Hz/%3/%4")
+                           .arg(metadata_.audioCodecName)
+                           .arg(metadata_.audioSampleRate)
+                           .arg(metadata_.audioChannelLayout)
+                           .arg(metadata_.audioTrackId)
+                     : QStringLiteral("none")));
     }
 
     error.clear();
