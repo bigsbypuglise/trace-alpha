@@ -101,7 +101,8 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
   auto-hide is finished to the spec's list, and fullscreen is consolidated. Full record in the
   progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
-  run 87 on `90140f9` and run 88 on `883d216`, all including the renderer selftest.
+  run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0` and **run 90 on `bc84431`
+  (phase 6)**, all including the renderer selftest.
 
 ### Start at spec phase 7, and read `docs/interface-pass-1-progress.md` first
 

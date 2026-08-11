@@ -1009,7 +1009,7 @@ section it points at wins.
 | 3 stepping and shuttle contracts | done | `4de678e` |
 | **4 forward shuttle** | **COMPLETE** | `e559d07` |
 | **5 reverse shuttle** | **COMPLETE** | `90140f9` |
-| **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE** | see the phase 6 section above |
+| **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE** | `bc84431` (CI run 90 green) |
 | **7 Time Display + zero-based frame UI** | **NEXT** | — |
 
 Phases 4 and 5 together complete the **transport redesign**; phase 6 makes the
