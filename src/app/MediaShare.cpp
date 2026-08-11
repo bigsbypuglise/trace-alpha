@@ -49,12 +49,8 @@ const char* shareAvailabilityName(ShareAvailability state) {
     return "?";
 }
 
-bool lucidLinkIntegrationAvailable(QString& reason) {
-    reason = QObject::tr("LucidLink integration is not available in this build.");
-    return false;
-}
-
-ShareState evaluateShare(const QString& path, bool fileBacked) {
+ShareState evaluateShare(const QString& path, bool fileBacked,
+                         const LucidIntegrationState& lucid) {
     ShareState state;
     state.fileBacked = fileBacked && !path.isEmpty();
 
@@ -112,24 +108,41 @@ ShareState evaluateShare(const QString& path, bool fileBacked) {
     // reintroduce, one level up, exactly the "assume every V:\ path is
     // LucidLink" mistake the requirement exists to prevent -- so it can only
     // ever move this gate from Unavailable to Disabled, never to Available.
-    // What makes the answer authoritative is the installed integration, and
-    // that is the third condition.
-    QString integrationReason;
-    const bool integration = lucidLinkIntegrationAvailable(integrationReason);
-
+    //
+    // WHAT MAKES IT AVAILABLE IS THE INTEGRATION'S OWN ANSWER, and phase 9
+    // supplies it: `LucidIntegrationState::Supported` means the installed
+    // extension was asked about THIS FILE and offered a link for it. Nothing
+    // below infers support from the path, the drive letter or the volume shape.
     if (!state.onVirtualMount) {
         // Section 9's own example of Unavailable: a LucidLink link for a local
-        // file. Nothing about this media will ever make it possible.
+        // file. Nothing about this media will ever make it possible, and the
+        // integration is not even consulted -- which is also what keeps COM and
+        // a third-party DLL out of the common case entirely.
         state.lucidLink = ShareAvailability::Unavailable;
         state.lucidLinkReason =
             QObject::tr("This file is on a local volume, not a LucidLink filespace.");
-    } else if (!integration) {
-        // Disabled rather than Unavailable: the media might well support it, and
-        // the thing that is missing is on this machine rather than in the file.
-        state.lucidLink = ShareAvailability::Disabled;
-        state.lucidLinkReason = integrationReason;
-    } else {
-        state.lucidLink = ShareAvailability::Available;
+        return state;
+    }
+
+    // Past here the volume is a virtual mount, so the file is ELIGIBLE and the
+    // only question left is the integration. Every remaining branch is Disabled
+    // rather than Unavailable, because what is missing is on this machine rather
+    // than in the file -- except Supported.
+    switch (lucid.status) {
+        case LucidIntegrationState::Status::Supported:
+            state.lucidLink = ShareAvailability::Available;
+            break;
+        case LucidIntegrationState::Status::Checking:
+            state.lucidLink = ShareAvailability::Disabled;
+            state.lucidLinkReason = QObject::tr("Checking the LucidLink integration...");
+            break;
+        case LucidIntegrationState::Status::NotInstalled:
+        case LucidIntegrationState::Status::Unsupported:
+            state.lucidLink = ShareAvailability::Disabled;
+            state.lucidLinkReason = lucid.reason.isEmpty()
+                ? QObject::tr("The LucidLink integration is not available.")
+                : lucid.reason;
+            break;
     }
 
     return state;

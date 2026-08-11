@@ -14,6 +14,8 @@
 #include <QFileInfo>
 #include <QKeyEvent>
 #include <QMenuBar>
+#include <QPointer>
+#include <QThreadPool>
 #include <QMimeData>
 #include <QResizeEvent>
 #include <QStatusBar>
@@ -34,6 +36,8 @@
 #include "render/OverlayModel.h"
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
+#include "app/LucidLinkIntegration.h"
+#include "core/MediaIoSource.h"
 #include "core/SequenceParser.h"
 #include "core/TimeFormat.h"
 #include "core/VideoFrameSource.h"
@@ -976,11 +980,12 @@ void MainWindow::setupSharedActions() {
     copyLucidLinkAction_ = new QAction(tr("Copy &LucidLink Link"), this);
     copyLucidLinkAction_->setIcon(
         trace::ui::TransportBar::loadIcon(QStringLiteral("copy-lucidlink")));
-    // NOT CONNECTED, and that is the phase boundary rather than an omission.
-    // Producing the link is spec phase 9 and needs the installed integration;
-    // this phase builds the GATE, which currently always says no. An action with
-    // a handler that cannot work would be the `showInfo` failure phase 2 deleted
-    // -- a command that appears to exist and changes nothing.
+    // Connected as of spec phase 9. Phase 8 deliberately left it without a
+    // handler, because a command that appears to exist and changes nothing is
+    // the `showInfo` failure phase 2 deleted; the gate said no and the action
+    // did nothing, consistently. It now runs the installed integration's own
+    // copy-link command.
+    connect(copyLucidLinkAction_, &QAction::triggered, this, &MainWindow::copyLucidLinkForMedia);
     addAction(copyLucidLinkAction_);
 
     showInExplorerAction_ = new QAction(tr("Show in File &Explorer"), this);
@@ -1310,8 +1315,57 @@ void MainWindow::refreshShareState() {
         // path commands by construction instead of by being remembered.
         fileBacked = !path.isEmpty();
     }
-    shareState_ = trace::app::evaluateShare(path, fileBacked);
+    // The integration answer is per-file and expensive, so it is cached against
+    // the path it was obtained for. A path change invalidates it and starts a
+    // new probe; re-entering with the same path (which is what opening the Share
+    // menu does) reuses it and costs nothing.
+    if (path != lucidProbePath_) {
+        lucidProbePath_ = path;
+        lucidState_ = trace::app::LucidIntegrationState{};
+        const auto storage = trace::core::MediaIoSource::classifyStorage(path);
+        if (fileBacked && storage.remote) {
+            lucidState_.status = trace::app::LucidIntegrationState::Status::Checking;
+            startLucidProbe(path);
+        }
+    }
+
+    shareState_ = trace::app::evaluateShare(path, fileBacked, lucidState_);
     syncShareActions();
+}
+
+// The probe runs on a pool thread that owns its own STA, because the handler
+// registers ThreadingModel=Apartment and because loading a third-party shell
+// extension is exactly the "blocking shell call" the spec keeps off the UI
+// thread. Measured at 50-120ms on the nominated file, which is invisible here
+// and would not have been on the tick.
+void MainWindow::startLucidProbe(const QString& path) {
+    const QPointer<MainWindow> guard(this);
+    QThreadPool::globalInstance()->start([guard, path]() {
+        const auto support = trace::app::probeLucidSupport(path);
+        if (guard.isNull()) return;
+        QMetaObject::invokeMethod(guard, [guard, path, support]() {
+            if (guard.isNull()) return;
+            // Discard a result for media that is no longer open. Without this a
+            // slow probe on a LucidLink file could enable Copy Link for a local
+            // file opened after it.
+            if (guard->lucidProbePath_ != path) return;
+            auto& st = guard->lucidState_;
+            using Status = trace::app::LucidIntegrationState::Status;
+            st.status = support.supported ? Status::Supported
+                      : support.installed ? Status::Unsupported
+                                          : Status::NotInstalled;
+            st.reason = support.reason;
+            guard->shareState_ = trace::app::evaluateShare(
+                path, true, st);
+            guard->syncShareActions();
+            // The HUD is built on refresh, and a paused file does not refresh --
+            // so without this the gate field keeps showing `lucid disabled` long
+            // after the probe has said otherwise. That is a stale INSTRUMENT
+            // rather than a stale gate, which is the more misleading of the two:
+            // the menu was already correct while the HUD still accused it.
+            guard->refreshHud("Lucid probe");
+        }, Qt::QueuedConnection);
+    });
 }
 
 void MainWindow::syncShareActions() {
@@ -1371,6 +1425,52 @@ void MainWindow::showMediaInFileExplorer() {
     refreshShareState();
     trace::app::revealInFileExplorer(shareState_, this, [this](const QString& message) {
         statusBar()->showMessage(message, 3000);
+    });
+}
+
+// Spec phase 9. The integration produces the link; Trace runs its command,
+// validates the form of what came back, and reports. It never composes one.
+void MainWindow::copyLucidLinkForMedia() {
+    refreshShareState();
+    if (qgetenv("TRACE_LUCID_LOG") == "1") {
+        fprintf(stderr, "[lucid] action triggered; gate=%s\n",
+                trace::app::shareAvailabilityName(shareState_.lucidLink));
+        fflush(stderr);
+    }
+    if (shareState_.lucidLink != trace::app::ShareAvailability::Available) {
+        QString why = shareState_.lucidLinkReason;
+        if (why.isEmpty()) why = tr("A LucidLink link is not available for this file.");
+        statusBar()->showMessage(why, 4000);
+        return;
+    }
+    // One at a time. The command reaches the LucidLink daemon and can take a
+    // moment, and a second press would race two clipboard observers against each
+    // other -- both watching the same sequence number, either able to attribute
+    // the other's result to itself.
+    if (lucidCopyInFlight_) {
+        statusBar()->showMessage(tr("Still asking LucidLink for the link..."), 2000);
+        return;
+    }
+    lucidCopyInFlight_ = true;
+    statusBar()->showMessage(tr("Asking LucidLink for the link..."), 4000);
+
+    const QString path = shareState_.canonicalPath;
+    const QPointer<MainWindow> guard(this);
+    QThreadPool::globalInstance()->start([guard, path]() {
+        const auto result = trace::app::copyLucidLinkViaShell(path);
+        if (guard.isNull()) return;
+        QMetaObject::invokeMethod(guard, [guard, result]() {
+            if (guard.isNull()) return;
+            guard->lucidCopyInFlight_ = false;
+            if (result.ok) {
+                guard->statusBar()->showMessage(tr("LucidLink link copied."), 2000);
+            } else {
+                // Failure is reported and the clipboard is whatever
+                // copyLucidLinkViaShell left it as -- which is either untouched
+                // or restored. Trace never writes a guessed value.
+                guard->statusBar()->showMessage(result.error, 5000);
+            }
+        }, Qt::QueuedConnection);
     });
 }
 

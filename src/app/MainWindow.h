@@ -110,6 +110,15 @@ private:
     void showShareMenu(const QPoint& globalPos);
     void copyMediaFilePath();
     void showMediaInFileExplorer();
+    // Spec phase 9. Runs the installed LucidLink integration's own copy-link
+    // command on a worker and reports what it produced. Trace never composes a
+    // link; see LucidLinkIntegration.h for why the daemon's REST API is not the
+    // mechanism even though it is authoritative.
+    void copyLucidLinkForMedia();
+    // Asks the integration, off the UI thread, whether it offers a link for the
+    // current file. Started only when the volume is a virtual mount, so a local
+    // file never loads a third-party shell DLL into this process.
+    void startLucidProbe(const QString& path);
     // One validated, exact jump, shared by both prompts. Uses the existing Step
     // path, so neither prompt needed any decoder work.
     void goToFrame(long long frame, const char* action);
@@ -421,6 +430,13 @@ private:
     // Share (spec phase 8). The gate is computed at open and read from here by
     // every surface, so "can this file be shared, and how" has one answer.
     trace::app::ShareState shareState_;
+    // The integration's answer for the media currently open, and the path it was
+    // asked about. The path is kept so a result that lands after the user has
+    // opened something else is discarded rather than applied to the wrong file --
+    // the same rule `requestGeneration_` enforces for frames.
+    trace::app::LucidIntegrationState lucidState_;
+    QString lucidProbePath_;
+    bool lucidCopyInFlight_ = false;
     QAction* copyFilePathAction_ = nullptr;
     QAction* showInExplorerAction_ = nullptr;
     // Present, visible and unavailable until spec phase 9 builds the

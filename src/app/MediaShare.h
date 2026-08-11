@@ -61,25 +61,35 @@ struct ShareState {
     QString lucidLinkReason;
 };
 
-// Whether the installed LucidLink integration can be driven right now.
+// What the installed LucidLink integration says about the current file.
 //
-// SPEC PHASE 9 IMPLEMENTS THIS AND PHASE 8 DOES NOT. It returns false today,
-// with a reason that says only what has actually been established -- that this
-// build has no integration -- rather than the design package's "LucidLink is not
-// running", which asserts a cause nothing here has checked. Phase 9 replaces the
-// body and the string together.
+// SPEC PHASE 9 SUPPLIES THIS AND PHASE 8 DID NOT. Phase 8 had a
+// `lucidLinkIntegrationAvailable()` that always returned false; the real answer
+// costs COM and a third-party DLL load, so it cannot be computed inside
+// `evaluateShare` -- it is produced on a worker (see LucidLinkIntegration.h) and
+// handed in here.
 //
-// It is a named function rather than a `false` at the call site so the gate
-// below reads as three conditions now and still reads as three conditions when
-// one of them starts returning true.
-bool lucidLinkIntegrationAvailable(QString& reason);
+// `Checking` is a real state rather than a transient nobody sees: the probe runs
+// when media opens, and a user quick enough to open the Share menu first must be
+// told the truth, which is that Trace does not know yet.
+struct LucidIntegrationState {
+    enum class Status {
+        NotInstalled,   // no LucidLink handler registered on this machine
+        Checking,       // the probe is in flight
+        Unsupported,    // the integration was asked about this file and declined
+        Supported,      // the integration offers a link for this file
+    };
+    Status status = Status::NotInstalled;
+    QString reason;
+};
 
 // The whole gate, in one place, for one media item.
 //
 // `fileBacked` is the caller's answer to "is this media a file on disk", which
 // is a question about MediaItem rather than about the filesystem, so it is
 // passed in rather than inferred from the path.
-ShareState evaluateShare(const QString& path, bool fileBacked);
+ShareState evaluateShare(const QString& path, bool fileBacked,
+                         const LucidIntegrationState& lucid);
 
 // Puts the canonical path on the clipboard. Returns false and fills `error`
 // when the state says it must not run, so a caller cannot copy a path the gate

@@ -126,6 +126,8 @@ add_executable(Trace
   ../src/app/ShortcutTable.cpp
   ../src/app/MediaShare.h
   ../src/app/MediaShare.cpp
+  ../src/app/LucidLinkIntegration.h
+  ../src/app/LucidLinkIntegration.cpp
   ../src/ui/ViewerWidget.h
   ../src/ui/ViewerWidget.cpp
   ../src/ui/OverlaySpike.h
