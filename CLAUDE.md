@@ -780,8 +780,26 @@ for cap/work/minimum rows. A build that multiplies where it should divide fails 
 second display (§20.4). The selftest prints that caveat on its own last line so the limit
 travels with the result.
 
-**Still open:** image sequences and stills go through the same path and only video has been
-measured, and **owner visual sign-off has not been taken**.
+**PHASE 12 IS SIGNED OFF (owner, 2026-08-11) and nothing about the media-shaped window is
+open.** Media-shaped windows look correct across landscape, square, portrait and narrow media;
+the 4K opening size feels appropriate *on the capped policy*; aspect-locked resizing is stable
+and unlocked resizing works; maximized, snapped and fullscreen are correct; rotation updates
+the fitted orientation; and **stills and image sequences use the same correct sizing path** —
+which closes the phase's one remaining measurement gap by observation, because that path was
+built to be the same path.
+
+**TWO CARRIED ITEMS CLOSE WITH IT.** The **narrow-media transport-width item is CLOSED** — the
+460px panel on 1×1, 4×5 and 9×16 media is *tight but usable and visually acceptable*. It had
+been carried since phase 9, when the panel was 460px against a **288px** picture, and §4's
+media-shaped window changed the premise rather than needing a panel fix, exactly as predicted.
+And **the clipped dev HUD on narrow windows is a DIAGNOSTIC LIMITATION, not a product defect**
+(owner) — it stays a measurement hazard to check for, and it is not work.
+
+Read it at its stated width: **real mixed-monitor DPI is untested and unaffected**, and a
+**geometry** sign-off is display-dependent in a way a colour one is not — the work area is an
+input to the opening size, so Parsec's 1920x1200 would bind the 80% rule much harder and give
+visibly smaller windows for the same media. The machine reported the physical panel when this
+was written; establish the display first if the shaped window is ever questioned.
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across

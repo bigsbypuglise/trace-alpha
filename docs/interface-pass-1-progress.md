@@ -2923,3 +2923,53 @@ section wins.
 - **`V:\` was never touched this session.**
 - The window-shape self-test is a CI step, so the DPI matrix runs on every push
   rather than having been run once.
+
+## PHASE 12 IS SIGNED OFF — owner, 2026-08-11. Do not re-open it.
+
+The media-shaped window **passed its visual review**. Read it at its stated
+width, as with every sign-off in this project:
+
+- **media-shaped windows look correct across landscape, square, portrait and
+  narrow media**;
+- **the 4K opening size feels appropriate** — which is the owner's own capped
+  policy judged on the build that implements it, not on the uncapped one it
+  replaced;
+- **aspect-locked resizing is stable, and unlocked resizing works**;
+- **maximized, snapped and fullscreen behaviour is correct**;
+- **rotation updates the fitted orientation correctly**;
+- **stills and image sequences use the same correct sizing path** — which closes
+  the one remaining measurement gap in the phase, and closes it by observation
+  rather than by a number, because that path was built to be the same path.
+
+### Two carried items are closed by this sign-off
+
+**THE NARROW-MEDIA TRANSPORT-WIDTH ITEM IS CLOSED.** The 460px floating
+transport on 1x1, 4x5 and 9x16 media is **tight but usable and visually
+acceptable**. It has been carried since phase 9, where the panel was 460px
+against a **288px** picture; section 4's media-shaped window changed the premise
+rather than requiring a panel fix, which is exactly how it was predicted to
+close. `kPanelWidth` stays a settled number and changing it remains an owner
+decision.
+
+**The clipped development HUD on narrow windows is a DIAGNOSTIC LIMITATION, not
+a product-interface defect** (owner). It stays recorded as a measurement hazard —
+a figure quoted from a 9:16, 1x1 or 4x5 capture must still be checked for having
+been cut off rather than read — but it is not work, and it must not be raised as
+a defect.
+
+### What the sign-off does NOT cover
+
+**Real mixed-monitor DPI is still untested** and is unaffected by this: it needs
+hardware that does not exist here (plan section 20.4). The synthetic DPR matrix
+proves the arithmetic and nothing about a real `WM_DPICHANGED` or a
+monitor-to-monitor move.
+
+**One thing worth knowing about the display, recorded rather than assumed.** The
+machine reports the **physical panel, 5120x1440 @ 239.999Hz**, at the time this
+was written. That matters more for a window-geometry sign-off than for most:
+Parsec presents a 1920x1200 virtual display, and the **work area is an input to
+the opening size** -- the 80% rule would bind much harder there and produce
+visibly smaller windows for the same media. A geometry judgement is therefore
+display-dependent in a way a colour judgement is not. The session did not record
+which display the owner was on; if the shaped window is ever questioned,
+establish that first.

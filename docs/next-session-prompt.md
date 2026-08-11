@@ -43,12 +43,19 @@ included. Any figure quoted from a 9:16, 1×1 or 4×5 capture must be checked fo
 **cut off** rather than read. Widen the window before capturing, or measure on 16:9 where the
 phase allows.
 
-**TWO THINGS ARE STILL OPEN.**
+**PHASE 12 IS SIGNED OFF (owner, 2026-08-11). Nothing about the media-shaped window is open,
+and two carried items closed with it.** Media-shaped windows correct across landscape, square,
+portrait and narrow media; the 4K opening size appropriate on the capped policy; aspect-locked
+and unlocked resizing both good; maximized/snapped/fullscreen correct; rotation updates the
+fitted orientation; **stills and image sequences confirmed on the same sizing path**. The
+**narrow-media transport-width item is CLOSED** — 460px on 1×1/4×5/9×16 is tight but usable and
+acceptable. **The clipped dev HUD is a diagnostic limitation, not a product defect** — still a
+measurement hazard to check for, not work.
 
-1. **Image sequences and stills** go through the same path (`currentImage_`) and only video has
-   been measured.
-2. **Owner visual sign-off has not been taken** — including whether the carried
-   transport-width item on 1×1 and 4×5 media is now closed.
+Read at its stated width: **real mixed-monitor DPI is untested and unaffected**, and a
+*geometry* sign-off is display-dependent in a way a colour one is not, because the work area is
+an input to the opening size — Parsec's 1920x1200 would bind the 80% rule much harder. The
+machine reported the physical panel when this was written.
 
 **One carried item may have closed and needs an eye, not a measurement:** the floating
 transport is 460 logical px wide, and the 4×5 window is now **725 px** wide where the picture
