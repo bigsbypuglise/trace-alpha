@@ -1,12 +1,20 @@
-# The interface pass is open, phases 6 and 7 shipped, and phase 8 is next.
+# The interface pass is open, phase 8 shipped, and phase 9 is next.
 
 Supersedes the previous version. **Spec phase 6 shipped and is signed off by the owner** — the
 floating overlay is the only transport, the docked bar is out of the layout behind
 `TRACE_TRANSPORT_BAR=1`, and fullscreen is consolidated. **Spec phase 7 shipped** — the time
 readout is honest (source SMPTE, or elapsed, never one labelled as the other), Trace has its
-first text-entry controls, and zero-based numbering is finished. **The next thing to do is
-spec phase 8, the Share menu and ordinary path copying.** Paste everything below the line into
-a fresh session in the repo root.
+first text-entry controls, and zero-based numbering is finished. **Spec phase 8 shipped** —
+the Share menu, Copy File Path, Show in File Explorer, and the *gate* on Copy LucidLink Link,
+which today always says no. **The next thing to do is spec phase 9, the LucidLink
+shell-integration prototype.** Paste everything below the line into a fresh session in the
+repo root.
+
+**Two owner decisions were taken on 2026-08-11 and are recorded rather than open.**
+Accessibility: **the alpha ships with the overlay invisible to a screen reader, and phase 13
+builds an accessibility proxy tree rather than polishing one** — see the loose-ends section,
+and estimate phase 13 as construction. And the `SNAP gop 2` keyframe-grid loose end is **no
+longer tracked**; it is not to be carried into another session's notes.
 
 ---
 
@@ -102,27 +110,60 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 - **Phase 7 shipped on 2026-08-11** — real source SMPTE timecode with drop-frame, the readout
   relabelled honestly, Go to Frame / Go to Timecode, and zero-based image-kind HUD lines.
   Full record in the progress doc.
+- **Phase 8 shipped on 2026-08-11** — the Share menu on three surfaces from one `QAction` set
+  and one `QMenu`, Copy File Path, Show in File Explorer, and the LucidLink gate. Full record
+  in the progress doc.
 - CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
   run 87 on `90140f9`, run 88 on `883d216`, run 89 on `fec93f0`, **run 90 on `bc84431`
   (phase 6)** and **run 92 on `f15e368` (phase 7)**, all including the renderer selftest.
 
-### Start at spec phase 8, and read `docs/interface-pass-1-progress.md` first
+### Start at spec phase 9, and read `docs/interface-pass-1-progress.md` first
 
-**Phase 8 is the Share menu and ordinary path copying** — Copy File Path, Show in File
-Explorer, and the *gate* on Copy LucidLink Link. **Do the ordinary half first and keep it in
-its own commit**: the spec says outright not to combine uncertain LucidLink shell work with
-otherwise safe visual changes, and phase 9 is where the shell-integration prototype lives.
+**Phase 9 is the LucidLink shell-integration prototype**, and phase 8 has already built
+everything around it. What is missing is one function body.
 
-**§2 item 5 is the thing to carry in.** `MediaIoSource.cpp:244-257` classifies volumes by
-querying them and is keyed on petabyte-scale capacity with `free == total`. **Reuse it; do not
-write a second one.** But it answers a *storage-class* question, not a vendor question —
-"virtual mount with free == total" is true of any such mount. It is a good **necessary**
-condition for LucidLink and a bad **sufficient** one, and the authoritative gate has to be the
-installed integration. Using the classifier alone would reintroduce, one level up, exactly the
-"assume all `V:\` paths are LucidLink" mistake the requirement exists to prevent.
+**`trace::app::lucidLinkIntegrationAvailable(QString& reason)` in `src/app/MediaShare.cpp` is
+the whole seam.** It returns false today with the reason *"LucidLink integration is not
+available in this build."* — deliberately a statement about the build rather than the design
+package's *"LucidLink is not running"*, which asserts a cause nothing has checked. Phase 9
+replaces the body **and** the string together, and adds the command itself; the gate, the
+three states, the menu, the three surfaces and the artwork are all already there and
+measured.
+
+**The gate is already correct and you must not loosen it.** `evaluateShare` treats
+`MediaIoSource::classifyStorage` as a **necessary** condition only — it can move the verdict
+from Unavailable to Disabled, never to Available — because "virtual mount with
+`free == total`" is true of any such mount. Making it sufficient would reintroduce, one level
+up, exactly the "assume all `V:\` paths are LucidLink" mistake the requirement exists to
+prevent. **The installed integration is the authoritative answer**, and that is what this
+phase supplies.
+
+**The spec's implementation order is explicit and worth following literally**: a supported
+LucidLink API or local command first; otherwise the registered Explorer shell extension for
+the selected file; invoked through **shell interfaces**, never by simulating clicks in File
+Explorer; never depending on the command's menu position or on "More options"; a stable
+canonical verb if one is exposed. **Never construct a `lucid://` or HTTPS link by parsing a
+mounted path**, and never hard-code filespace IDs, inode IDs, domains or URL formats.
+
+**The clipboard rules are phase 9's, not phase 8's**, and they are the fiddly part: preserve
+the previous clipboard contents until invocation succeeds, observe clipboard changes with a
+short **non-blocking** timeout, validate that the result is a supported LucidLink direct-link
+form, never freeze the UI while waiting, and **never overwrite the clipboard with an invalid
+or guessed value**. Phase 8 never writes a link at all, so it satisfies the last rule
+trivially and gives you a clean starting point.
 
 **`V:\` is live client production storage and is strictly read-only.** Any shell-extension
-prototyping is read-only, against files Anj nominates, and never by writing a probe file.
+prototyping is read-only, against **files Anj nominates**, and never by writing a probe file.
+**Phase 8 could not test a real LucidLink path for that reason** — the virtual-mount branch
+was exercised through `TRACE_REMOTE_IO=1` instead, which is a genuine negative control for the
+*gate* but says nothing about the *integration*. **Ask Anj to nominate a file before starting.**
+
+**Verify the gate from the HUD, not from a screenshot.** The storage line reads
+`share path <state> explorer <state> lucid <state>`. Phase 8 spent real time discovering that
+menu-item luminance cannot distinguish a disabled row from a shorter label — it read a correct
+build as a broken one. Expect `lucid disabled` on a virtual mount today; a working phase 9
+turns that into `lucid ok` on a real LucidLink path and leaves it `disabled` when the client
+is not running.
 
 **Three things phase 7 leaves for whatever adds UI next**:
 
@@ -151,7 +192,15 @@ which looks like an app that did nothing rather than a harness that ran nothing.
 own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
 `overlay_press.ps1` (the press landing) and `overlay_ladder.ps1` (the rung ladder).
 
-**Four things phases 4–6 settled that phase 7 must not re-open:**
+**Six things phases 4–8 settled that later phases must not re-open:**
+
+- **The Share gate's classifier is a NECESSARY condition, not a sufficient one**, and
+  `lucidLinkIntegrationAvailable()` is the seam that decides Available. See the phase 9 brief
+  above.
+- **`assets/interface/transport/` is the approved package's glyphs plus `share`**, and
+  `interface/common/` now holds exactly the three Share menu-item glyphs. `copy-lucidlink` is a
+  **neutral chain glyph, not a LucidLink brand mark**; replace it only with a licensed official
+  asset.
 
 - **`landPreviousExactly` is gone and no shuttle press lands the previous run.** K, Space and
   running off the end still land. The HUD's `land N` field stays and **reads 0 through any
@@ -170,10 +219,8 @@ own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
 
 ### The rest of the phase list, with what is known about each
 
-9. **Phase 9 is the LucidLink shell-integration prototype**, and the spec's implementation
-   order for it is explicit and worth following literally: a supported API first, then the
-   registered shell verb, invoked through shell interfaces and never by simulating clicks in
-   File Explorer. **Never construct a `lucid://` link by parsing a mounted path.**
+9. **Phase 9 is the LucidLink shell-integration prototype** — the open phase, briefed in full
+   above.
 10. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
     reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob, and it leaves with the
     phase, the way `TRACE_SHUTTLE_ENTRY` did at phase 5.
@@ -199,18 +246,37 @@ build or it will not launch.
 
 ## Loose ends worth knowing about, none of them blocking
 
-- **The keyframe grid can be learned as 2, and snapping then engages at stride 1.** Seen on the
-  phase 4 control binary, so it **predates phase 4 and is a regression of neither phase 4 nor
-  phase 5** — named and carried deliberately, not left unclassified. One reverse-1× run of six read
-  `SNAP gop 2`, `sched tick 81ms`, **72.5% of real time**, against 100.0% and 88.1% on the two
-  other runs of the same gesture on the same binary. **Reverse 1× on that gesture is bimodal**
-  — `frames 114 / elapsed 4.75s` at 100%, or `frames 97 / elapsed 4.59s` at 88.1% — so a
-  single run cannot support a regression claim in either direction. Take three.
-  **Phase 5 saw neither the slow mode nor `SNAP gop 2` in six runs, and phase 6 saw neither in
-  six more** — but both sessions ran on a 1920x1080 @ 59.999Hz display rather than the panel it
-  was seen on, so twelve clean runs are still not evidence it is fixed. Still open, still
-  unattributed. **It has now gone unreproduced on the wrong display twice; the next attempt to
-  settle it has to be at the panel or it will produce a thirteenth clean run and mean nothing.**
+- **ACCESSIBILITY: THE OWNER HAS DECIDED, 2026-08-11 — the alpha ships this way and PHASE 13
+  BUILDS IT.** This is a recorded decision now, not a discovery, and it should not be re-raised
+  as a question.
+
+  The facts behind it, kept because phase 13 needs them: `grep -rn
+  "QAccessible\|accessibleName" src/` returns **nothing**. Trace has no accessibility code at
+  all, and it never needed any while the transport was `TransportBar`'s `QPushButton`s and
+  `QSlider`, because Qt exposes standard widgets to UI Automation automatically. The composited
+  overlay has **no widget tree**, so it exposes nothing — and phase 6 made it the default and
+  took the bar out of the layout, so the shipping build's transport went from automatically
+  accessible to invisible to a screen reader.
+
+  It is not total, which is what made the decision reasonable: every command has a keyboard
+  shortcut and `ShortcutTable::rows()` enumerates them, the menus are real `QMenu`s, and
+  `TRACE_TRANSPORT_BAR=1` restores real widgets. Phase 8 leaned on that deliberately — the
+  Share menu's only keyboard-reachable surface is the menu bar's, and it is a real `QMenu`.
+
+  **So phase 13 is no longer "menus, help and accessibility polish". It is the phase that
+  builds an accessibility proxy tree over the overlay** (plan §19.7), and it should be
+  estimated as construction rather than polish. §31.5 item 4 still stands: the overlay must
+  not be called final until a screen reader has driven one.
+
+- ~~**The keyframe grid can be learned as 2.**~~ **NO LONGER TRACKED — owner decision,
+  2026-08-11.** It was one run of six on a binary that **predates phase 4**, reverse 1× is
+  bimodal on that gesture anyway, and phases 5, 6 and 7 produced eighteen clean runs between
+  them — all on the 1920x1080 @ 59.999Hz Parsec display rather than the panel it was seen on,
+  so none of them were evidence either way. Carrying it was costing a paragraph a session and
+  buying nothing. **Re-open only if reverse playback is actually reported slow**, and if it is,
+  take three runs **at the panel**. (The general lesson survives the item: a single run of the
+  `revplay` gesture cannot support a claim in either direction, and a clean run on the wrong
+  display is not a clean run.)
 - **30× is only honestly measurable on the 412-frame 1080p clip**, and even there a *held* 30×
   run traverses the whole clip in **0.57s of wall time**. That budget is smaller than the
   harness's own mouse timing: `Click` spends ~210ms of dwell per press, so six presses spanned

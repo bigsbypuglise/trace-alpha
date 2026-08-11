@@ -3893,3 +3893,20 @@ d3d11 figures to the digit (99.8%, 0 doubled, 0 over budget, handler 25.22ms, wo
    icon-source reconciliation.
 4. The accessibility proxy tree (§19.7) is still a plan, not a prototype, and the overlay must
    not be called final until a screen reader has driven one.
+
+   **OWNER DECISION, 2026-08-11: the alpha ships this way, and spec phase 13 BUILDS this
+   rather than polishing it.** The item as written above reads as a deferral, and it is more
+   than that — `grep -rn "QAccessible\|accessibleName" src/` returns **nothing**. Trace has no
+   accessibility code at all and never needed any while the transport was `TransportBar`'s
+   `QPushButton`s and `QSlider`, because Qt exposes standard widgets to UI Automation
+   automatically. The composited overlay has no widget tree, so it exposes nothing, and spec
+   phase 6 made it the default *and* took the bar out of the layout — so the shipping build's
+   transport went from automatically accessible to invisible to a screen reader.
+
+   Not total, which is what made the decision reasonable: every command has a keyboard
+   shortcut and `ShortcutTable::rows()` enumerates them, the menus are real `QMenu`s, and
+   `TRACE_TRANSPORT_BAR=1` restores real widgets. Spec phase 8 leaned on that deliberately —
+   the Share menu's only keyboard-reachable surface is a real `QMenu` in the menu bar.
+
+   So this item stays open, but **estimate phase 13 as construction, not polish**, and do not
+   re-raise the ship/do-not-ship question — it has been answered.

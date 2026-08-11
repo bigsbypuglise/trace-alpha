@@ -413,6 +413,55 @@ cadence ×3 99.1–99.2% with identical buckets, 4444 99.8% ×2, reverse 1× 100
 `-SnapRelease` `delta 0` / `hitch 0`, both lifecycle legs, **25 of 25 transitions** on both
 binaries.
 
+**SPEC PHASE 8 IS DONE (2026-08-11): the Share menu ships, and its third command is present,
+visible and unable to run.** Copy File Path and Show in File Explorer work; **Copy LucidLink
+Link is the *gate* only** — the link itself is phase 9, and the spec forbids combining
+uncertain LucidLink shell work with otherwise safe visual changes. Three `QAction`s and
+**one** `QMenu`, reached from the menu bar (File ▸ Share), the docked bar's Share button and
+the composited overlay's new Share region. Gate and shell calls live in `src/app/MediaShare.*`.
+
+Five things to carry.
+
+- **The classifier is a NECESSARY condition and can only ever say no.**
+  `MediaIoSource::classifyStorage` is reused rather than rewritten, but it answers a
+  *storage-class* question — "virtual mount, petabyte capacity, `free == total`" — which is
+  true of any such mount. So in `evaluateShare` it can only move the verdict from
+  **Unavailable** to **Disabled**, never to Available; the third condition, the installed
+  integration, is the only thing that could. `lucidLinkIntegrationAvailable()` returns false
+  with a reason saying only what has been established — *this build has no integration* —
+  rather than the design package's "LucidLink is not running", which asserts a cause nothing
+  has checked. Phase 9 replaces the body and the string together.
+- **Disabled and Unavailable are kept distinct and neither row is ever hidden**, per the
+  design package §9. A local file reads Unavailable; a virtual mount with no integration reads
+  Disabled. `copyLucidLinkAction_` has **no handler connected at all** — an action that appears
+  to exist and changes nothing is the `showInfo` failure phase 2 deleted.
+- **VERIFYING A GREYED MENU ITEM FROM A SCREENSHOT DOES NOT WORK, and it accused a correct
+  build.** Peak label luminance read **230 on all three rows**; menu-icon luminance read
+  227/202/247, which cannot separate a disabled row from a shorter label with a different
+  glyph. The gate went into the HUD instead, on the storage line beside the classification it
+  is built from: **`share path ok explorer ok lucid unavailable`** on a local file, and
+  **`lucid disabled`** under `TRACE_REMOTE_IO=1`. **That second reading is the negative
+  control** — both branches are live, they differ, and *neither says `ok`*.
+- **The Share button fits INSIDE the settled 460×84 panel**, because the three centred controls
+  only reach 78 logical px either side of centre and the approved package puts share at the
+  right of that row anyway. Phase 6's numbers are untouched. One thing had to move and it was a
+  real overlap: the **rate-flash chip is top-LEFT now** — at 84px of panel height a top-right
+  chip spans y 10–31 against a 34px control's 13–47. (The package actually specifies the chip
+  *centred above* the transport, §6; still unimplemented, not this phase's to change.)
+- **"File removed while open" took two attempts and the first accused the code.** Windows
+  refuses to delete a video file Trace has open, so the obvious test cannot run. A **directory
+  junction** was tried next and Qt still resolved the path after the junction was deleted, so
+  the HUD read `explorer ok` and it looked like a gate bug. It is not: a **still image** is the
+  case where Trace does not hold the handle, and deleting one while displayed greys Show in
+  File Explorer exactly as intended.
+
+Show in File Explorer goes through `SHOpenFolderAndSelectItems` on a `QThreadPool` task, not
+`explorer.exe /select,<path>` on the UI thread: there is no process-argument quoting of that
+command line that works for every path, and the spec forbids blocking shell calls on the UI
+thread. **A real `V:\` LucidLink path was NOT tested** — it is live client storage and no file
+was nominated — so the virtual-mount branch was exercised through `TRACE_REMOTE_IO`. Phase 9
+needs a nominated file.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals

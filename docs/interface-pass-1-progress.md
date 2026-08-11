@@ -1187,12 +1187,24 @@ section it points at wins.
 | **5 reverse shuttle** | **COMPLETE** | `90140f9` |
 | **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE, owner sign-off** | `bc84431` (CI run 90 green) |
 | **7 Time Display + zero-based frame UI** | **COMPLETE** | `f15e368` (CI run 92 green) |
-| **8 Share menu + ordinary path copying** | **NEXT** | — |
+| **8 Share menu + ordinary path copying** | **COMPLETE** | `a6447aa` + `f39eb67` |
+| **9 LucidLink shell-integration prototype** | **NEXT** | — |
 
 Phases 4 and 5 together complete the **transport redesign**; phase 6 makes the
-floating overlay the only transport and consolidates fullscreen. Phase 7 is the
-next starting point and creates the first text-entry control in the app. Full
-brief in `docs/next-session-prompt.md`.
+floating overlay the only transport and consolidates fullscreen; phase 7 makes
+the time readout honest and adds the first text-entry controls; phase 8 adds the
+Share menu and the LucidLink gate. **Phase 9 is the next starting point**, and it
+is one function body plus the clipboard rules. Full brief in
+`docs/next-session-prompt.md`.
+
+**Two owner decisions were taken on 2026-08-11 and are settled, not open.**
+**Accessibility**: the alpha ships with the composited overlay invisible to a
+screen reader, and **phase 13 builds an accessibility proxy tree rather than
+polishing one** — estimate it as construction. **`SNAP gop 2`**: no longer
+tracked. It was one run of six on a binary predating phase 4, reverse 1× is
+bimodal on that gesture anyway, and the eighteen clean runs phases 5–7 recorded
+were all on the wrong display and were therefore never evidence. Re-open only if
+reverse playback is actually reported slow, and take three runs **at the panel**.
 
 **Everything below this line was written at the close of the phase 5 session and
 is left as it stood.** Where phase 6 changed something it says so in its own
@@ -1231,20 +1243,25 @@ phase-6 brief's prediction that it would is corrected there.
    confirmed *executed* — `overlay.ps1` state 07 reads `speed -2.00x |
    Reverse Play` on `d3d11` and on `cpu`. Phase 4 and phase 5 sections.
 
-### Carried loose end — NOT a phase 4 or phase 5 regression
+### Carried loose end — CLOSED BY OWNER DECISION, 2026-08-11
 
-**Reverse 1× is bimodal on the `revplay` gesture, and the keyframe grid can be
-learned as 2 so that snapping engages at stride 1** (`SNAP gop 2`, `sched tick
-81ms`, 72.5% of real time). It was observed on the **phase 4 control binary**,
-i.e. it **predates phase 4**, and the control produced the worst run of the six.
-It is named here as a pre-existing loose end and is explicitly **not classified
-as a regression of either phase**; it was not investigated during closeout.
+**`SNAP gop 2` is no longer tracked.** It was observed once on the **phase 4
+control binary** — i.e. it predates phase 4 and was never a regression of any
+phase — as `SNAP gop 2`, `sched tick 81ms`, 72.5% of real time on one reverse-1×
+run of six, where the control produced the worst run.
 
-Two things to keep with it. A **single run of that gesture cannot support a claim
-in either direction** — take three. And phase 5 saw neither the slow mode nor
-`SNAP gop 2` in six runs, **which is not evidence it is fixed**: those runs were
-on a 1920x1080 @ 59.999Hz display, not the panel it was seen on. Still open,
-still unattributed.
+Phases 5, 6 and 7 then produced **eighteen clean runs between them and not one of
+them was evidence**, because all three sessions ran on the 1920x1080 @ 59.999Hz
+Parsec display rather than the physical panel it was seen on. Phase 8 ran on that
+display too. Carrying it was costing a paragraph a session and buying nothing, so
+the owner closed it: **re-open only if reverse playback is actually reported
+slow**, and if it is, take three runs **at the panel**.
+
+The general lesson outlives the item and is the reason it is written up rather
+than deleted: **a single run of the `revplay` gesture cannot support a claim in
+either direction** (it is bimodal — `frames 114 / elapsed 4.75s` at 100%, or
+`frames 97 / 4.59s` at 88.1%), and **a clean run on the wrong display is not a
+clean run**.
 
 ### Closeout verification
 
@@ -1259,3 +1276,195 @@ still unattributed.
   on a **1920x1080 @ 59.999Hz display, not the panel**, against a control rebuilt
   and measured on the same display — so it is valid as an A/B and **not**
   comparable to the phase 2–4 tables.
+
+---
+
+## Phase 8 — the Share menu and ordinary path copying (2026-08-11)
+
+### What shipped
+
+**Three commands, three surfaces, one QAction each.** `copyFilePathAction_`,
+`copyLucidLinkAction_` and `showInExplorerAction_` are created in
+`setupSharedActions()` and reached from the menu bar (File ▸ Share), the docked
+transport bar's Share button, and the composited overlay's Share region. There is
+also exactly **one `QMenu` instance**, popped by both transport surfaces and
+reused as the menu bar's submenu — two menus built from the same actions would
+still be two things to keep in step.
+
+**The gate is `src/app/MediaShare.*`**, a small module rather than more
+`MainWindow`, because phase 9 extends exactly one function in it and because the
+reasoning below is the whole content of the phase.
+
+**Copy File Path** copies the canonical, native-separator Windows path and
+confirms in the status bar — the mechanism every other confirmation in Trace
+already uses, so it needed no new one. **Show in File Explorer** opens the
+containing folder with the file selected.
+
+**Copy LucidLink Link is present, visible, and cannot run.** That is the design
+package's *Unavailable* state (§9) and it is deliberately not a hidden row: a
+command that comes and goes reads as a broken build rather than as an answer
+about the file. The action is **not connected to a handler at all**, which is the
+phase boundary rather than an omission — an action that appears to exist and
+changes nothing is the `showInfo` failure phase 2 deleted.
+
+### The gate, and why the classifier can only ever say no
+
+The spec's three conditions are file-backed, on a LucidLink filespace, and
+integration available. `MediaIoSource::classifyStorage` supplies the second and is
+**reused rather than rewritten** — it queries the volume, never writes a probe
+file, and is cached per volume, so asking it costs one lookup per media open.
+
+**But it answers a storage-class question, not a vendor one.** "Virtual mount
+advertising petabyte capacity with `free == total`" is true of any such mount. It
+is a good **necessary** condition for LucidLink and a bad **sufficient** one, so
+in `evaluateShare` it can only move the verdict from Unavailable to **Disabled**,
+never to Available. Treating it as sufficient would reintroduce, one level up,
+exactly the "assume every `V:\` path is LucidLink" mistake the requirement exists
+to prevent.
+
+`lucidLinkIntegrationAvailable()` returns false today, with a reason that says
+only what has been established — that this build has no integration — rather than
+the design package's "LucidLink is not running", which asserts a cause nothing
+here has checked. Phase 9 replaces the body and the string together. It is a
+named function rather than a `false` at the call site so the gate reads as three
+conditions now and still reads as three when one of them starts returning true.
+
+### The Share button fits inside the settled panel
+
+`kPanelWidthLogical`, `kPanelHeightLogical` and the 44/34 control sizes became
+**owner-signed-off numbers at phase 6**, so changing one reopens a decision
+rather than tuning a constant. It did not need changing: the three centred
+controls only reach 78 logical px either side of centre, so the right end of the
+row was already empty — and that is where the approved package puts share
+("rewind · play/pause · forward | fullscreen · share").
+
+**One thing did have to move, and it was a real collision rather than a
+preference.** The rate-flash chip sat at the panel's **top-right**. At 84px of
+panel height the chip spans y 10–31 and a 34px control centred on the row spans
+13–47, so they overlap outright. The chip is **top-left** now — the smallest
+change that resolves it, with the panel, the controls, the fade and the auto-hide
+all untouched. Worth recording that the approved package actually specifies the
+rate chip **centred above the transport** rather than inside it (§6, with its own
+padding, radius and 900ms/200ms timing); that remains unimplemented and was not
+this phase's to change.
+
+**`share_menu` is a `»` double-chevron in the approved package** — an
+overflow-style glyph, not a share mark — and it sits beside Fast-forward's `▶▶`.
+Shipped as delivered, because artwork follows behaviour and the package is the
+approved source, but the two are similar in silhouette and that is an owner
+observation rather than a defect.
+
+### Verifying a greyed menu item from a screenshot does not work
+
+The first attempt to confirm the gate measured pixels: peak label luminance read
+**230 for all three rows**, and menu-icon luminance read 227/202/247 for
+copy-path / copy-lucidlink / show-in-explorer — which cannot separate a disabled
+row from a shorter label with a different glyph. It read a **correct build as a
+broken one**, which is the failure mode phase 5's ladder leg recorded as the worse
+kind.
+
+So the gate went into the HUD instead, on the storage line beside the
+classification it is built from:
+
+| media | HUD reads |
+|---|---|
+| local NTFS file | `src local (fixed local volume)` · **`share path ok explorer ok lucid unavailable`** |
+| same file, `TRACE_REMOTE_IO=1` | `src REMOTE (forced by TRACE_REMOTE_IO) [override]` · **`share path ok explorer ok lucid disabled`** |
+
+**That second row is the negative control, and it is the point.** Both branches
+of the gate are live and produce different answers, and **neither says `ok`** —
+because the third condition holds it. A gate with one reachable branch would have
+looked identical in every screenshot taken of the first row.
+
+### What was measured, and one thing that could not be
+
+| case | result |
+|---|---|
+| Copy File Path, from the overlay button | clipboard reads the full native path; status bar `File path copied.` |
+| Show in File Explorer | Explorer opened on the containing folder with `M&M_TopGun_1080` **selected** (read back through `Shell.Application`, not from a screenshot) |
+| local file | `lucid unavailable` |
+| forced virtual mount | `lucid disabled` |
+| **file removed while open** | Copy File Path stays enabled, **Show in File Explorer greys** |
+| no media at all | all three rows greyed, docked Share button disabled |
+| keyboard-only | `Alt`,`F`,`S` reaches the submenu; status bar carries each item's tip |
+
+**A real `V:\` LucidLink path was NOT tested**, because `V:\` is live client
+production storage and no file was nominated. The virtual-mount branch was
+exercised through `TRACE_REMOTE_IO` instead. Phase 9 needs a nominated file.
+
+**"File removed while open" took two attempts and the first one was wrong.**
+Windows refuses to delete a video file Trace has open, so the obvious test cannot
+run at all. A **directory junction** was tried next — open through the junction,
+delete the junction — and Qt still resolved the path afterwards, so the HUD read
+`explorer ok` and it looked like a gate bug. It is not: a **still image** is the
+case where Trace does not hold the handle, and deleting one while it is displayed
+greys Show in File Explorer exactly as intended. **The junction was not a valid
+way to make a path vanish**, and the reading it produced accused the code.
+
+### Regression
+
+Control binary built from `45a083a` in a separate worktree and **verified by hash on every
+swap** (`27BF68B4…` control, `D868D72E…` phase 8). Same **1920x1080 @ 59.999Hz display** as
+phases 5–7, not the physical panel — `stalls` and `hitch` coincide at this refresh, and **no
+subjective judgement was taken and none is valid from this display**. `d3d11` default.
+Cadence in **overlay mode**, the shipping configuration; the drag, reverse and matrix runs in
+bar mode with `TRACE_TRANSPORT_BAR=1`, `win 1280x843`, `display 640x360 filtered x3`.
+
+| run | control | phase 8 |
+|---|---|---|
+| 4K H.264 cadence ×3 | 100.0 / 100.0 / 100.0%, 120 frames, `handler>budget 0 of 119` (max 4.3 / 4.7 / 5.0), p50 41.6 / 41.6 / 41.5, max 43.5 / 43.4 / 44.3 | 100.0 / 100.0 / 100.0%, 120 frames, `0 of 119` (max 4.3 / 4.1 / 4.4), p50 41.5 / 41.7 / 41.7, max 44.1 / 43.4 / 44.1 |
+| 4444 cadence ×2 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 37.5 / 37.2), max 46.4 / 46.8 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 36.9 / 36.8), max 45.6 / 47.5 |
+| reverse 1× ×3 | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 3.7 / 3.7 / 3.6), `hitch 0` | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 4.1 / 3.9 / 3.6), `hitch 0` |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, `walk 0f`, full-res planar, `hitch 0`, `stalls 0 of 113`, `ui gap max 67.2ms` | same landing, `hitch 0`, `stalls 0 of 113`, `ui gap max 61.7ms` |
+| lifecycle | `-PlayThroughDrag` PASS 39.1%, `-PausedThroughDrag` PASS 0% | PASS 39.8%, PASS 0% |
+| transitions | **25 of 25 PASS** | **25 of 25 PASS** |
+
+Cadence buckets identical on 4K H.264 (`~1x 119`, every other bucket 0) on both binaries.
+Landing exact on every run. `land` reads 0 through every shuttle press.
+
+**The one number worth watching was `paints`, and it did not move.** The overlay emits one
+more quad per frame now — the Share icon — and 4K H.264 playback reads **`paints 152/121` on
+phase 8 against `151/153/152` on the control**, i.e. inside the control's own spread. **4444
+is the file with the least headroom** (handler ~23ms of a 41.67ms budget) and it absorbed the
+extra quad at `handler>budget 0 of 260` with 261 frames and `paints 286–289/262` against the
+control's `286/262`.
+
+**`release` moved and it is not attributable.** The `-SnapRelease` landing read **24.1ms on
+the control and 3.5ms on phase 8** — an eightfold difference on a single-sample statistic,
+with the landing itself identical (`target 120 shown 120 delta 0`, `walk 0f`, same
+full-resolution planar destination) and `ui gap max` within 8%. Nothing in this phase touches
+the scrub path. Recorded rather than claimed, in the same spirit as phase 2's 12× `p2p max`
+noise and §31.2's `ui gap` asymmetry: **do not quote it as a phase 8 win.**
+
+### What phase 8 changes about the plan
+
+**Phase 9 is one function body plus the clipboard rules.**
+`trace::app::lucidLinkIntegrationAvailable(QString& reason)` is the whole seam — the gate, the
+three states, the menu, the three surfaces and the artwork all exist and are measured. It is a
+named function rather than a `false` at the call site precisely so the gate reads as three
+conditions now and still reads as three when one starts returning true. **Do not loosen the
+classifier's role when you get there**: it stays a necessary condition, and the installed
+integration is what makes the verdict Available.
+
+**Phase 9 also needs Anj to nominate a `V:\` file before it starts**, because phase 8 could
+not test a real LucidLink path at all and neither can phase 9 without one.
+
+**`TransportBar::loadIcon` is public now**, because the Share menu's items need icons and a
+second loader would be a second answer to "is the 3x file being used" — the question the `-72`
+branch inside it exists to keep answerable by reading.
+
+**A HUD field can be the right instrument for a UI state, not just for a number.** The
+`share path/explorer/lucid` field exists because the obvious verification — look at the
+screenshot, is the row grey — measurably does not work, and produced a confident wrong
+reading. It sits on the storage line beside the classification it is built from, so the
+necessary condition and the verdict it feeds are read together.
+
+**The rate chip's real home is still unimplemented.** The approved package puts it **centred
+above the transport** with its own chip styling and 900ms/200ms timing (§6); Trace draws it
+inside the panel, and phase 8 moved it from top-right to top-left only to get it out of the
+Share button's way. Whoever implements §6 properly should know the current position is an
+approximation twice over.
+
+**Still no non-file media source exists**, so "disable for non-file sources" is enforced by
+construction (`fileBacked` is asked of the `MediaItem`, not inferred from the path) and has
+never executed with a real non-file source. The no-media case is the closest thing that runs.
