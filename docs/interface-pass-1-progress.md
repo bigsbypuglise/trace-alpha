@@ -2853,3 +2853,20 @@ Same panel, same harness: 4K H.264 cadence x3 **99.1 / 99.2 / 99.2%** with
 `handler>budget 0 of 260`; `-SnapRelease` `target 120 shown 120 delta 0`
 full-res planar and **`hitch 0`**; both lifecycle legs (83.6% moved / 0% moved);
 **25 of 25 transitions**.
+
+#### One consequence for every later phase's measurements
+
+**A media-shaped window CLIPS THE DEV HUD on tall or narrow media.**
+`TransportOverlay` draws each line with `drawText` and no wrapping, so a line
+wider than the window is simply cut off. At 16:9 the window is ~1217 px wide and
+every line reads; at 9:16 it is **460 px** — the transport floor — and the
+right-hand half of every HUD line is gone, including `hitch`, `win` and
+`display` on the lines that carry them.
+
+That is not a defect in the feature and the HUD is a developer instrument, but it
+is a **measurement hazard that did not exist before phase 12**: any figure quoted
+from a 9:16, 1x1 or 4x5 capture has to be checked for having been cut off rather
+than read. Widen the window by hand before capturing, or measure on 16:9 material
+where the phase under test allows it. Sixth stale/unreadable-instrument note in
+five phases, and the first where the instrument is clipped rather than out of
+date.

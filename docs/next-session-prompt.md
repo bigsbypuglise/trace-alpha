@@ -33,6 +33,13 @@ second display (§20.4) — synthetic DPR proves the calculation and nothing abo
 `WM_DPICHANGED`, a swapchain resize, or a monitor-to-monitor move. The selftest prints that
 caveat itself; keep it attached to any claim of DPI coverage.
 
+**A MEDIA-SHAPED WINDOW CLIPS THE DEV HUD ON TALL OR NARROW MEDIA, and that is new.**
+`TransportOverlay` does not wrap: at 16:9 the window is ~1217px and every line reads, at 9:16
+it is **460px** and the right-hand half of every line is gone — `hitch`, `win` and `display`
+included. Any figure quoted from a 9:16, 1×1 or 4×5 capture must be checked for having been
+**cut off** rather than read. Widen the window before capturing, or measure on 16:9 where the
+phase allows.
+
 **TWO THINGS ARE STILL OPEN.**
 
 1. **Image sequences and stills** go through the same path (`currentImage_`) and only video has
