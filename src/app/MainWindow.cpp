@@ -33,6 +33,16 @@
 #include <cmath>
 #include <limits>
 
+#ifdef Q_OS_WIN
+// For the WM_SIZING / WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE counters in
+// nativeEvent(). NOMINMAX because <algorithm> above is what this file uses for
+// std::max, and windows.h defines a max() macro that breaks it.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+
 #include "ui/OverlaySpike.h"
 #include "ui/ViewerWidget.h"
 #include "render/OverlayModel.h"
@@ -1970,6 +1980,7 @@ void MainWindow::setupTransportControls() {
 
 void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
+    ++resizeEvents_;
     syncScrubPreviewSize();
 }
 
@@ -1982,6 +1993,8 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 
 void MainWindow::syncScrubPreviewSize() {
     if (!viewer_) return;
+    QElapsedTimer syncClock;
+    syncClock.start();
     // Clears the frame cache inside the decoder, so it needs the decoder back.
     reclaimDecoder();
     // Device pixels, not logical: on a scaled display the widget is drawn at
@@ -1990,7 +2003,41 @@ void MainWindow::syncScrubPreviewSize() {
     const double dpr = viewer_->devicePixelRatioF();
     const QSize px(static_cast<int>(std::lround(viewer_->width() * dpr)),
                    static_cast<int>(std::lround(viewer_->height() * dpr)));
-    videoDecoder_.setScrubPreviewSize(px);
+    const int dropped = videoDecoder_.setScrubPreviewSize(px);
+    if (dropped > 0 || px != lastPreviewPx_) {
+        ++previewSizeChanges_;
+        cacheEntriesDropped_ += dropped;
+    }
+    lastPreviewPx_ = px;
+    const double ms = static_cast<double>(syncClock.nsecsElapsed()) / 1'000'000.0;
+    syncPreviewMsTotal_ += ms;
+    syncPreviewMsMax_ = std::max(syncPreviewMsMax_, ms);
+}
+
+// Counting only. Every branch falls through to Qt's default handling, so this
+// changes no behaviour -- see the declaration for why it exists before the
+// aspect lock that will use these messages.
+bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr* result) {
+#ifdef Q_OS_WIN
+    if (eventType == "windows_generic_MSG" && message) {
+        const MSG* msg = static_cast<const MSG*>(message);
+        switch (msg->message) {
+            case WM_SIZING: ++wmSizing_; break;
+            case WM_ENTERSIZEMOVE: ++wmEnterSizeMove_; break;
+            case WM_EXITSIZEMOVE: ++wmExitSizeMove_; break;
+            // Not part of the design -- it is the CONTROL on the other three.
+            // WM_SIZE fires on every resize, interactive or programmatic, so a
+            // run where the window demonstrably changed size and this still
+            // reads 0 says nativeEvent is not being reached at all, which looks
+            // identical from the other three counters to a gesture that missed
+            // the resize border. The first run of resizecache.ps1 read 0/0/0
+            // and could not tell those apart.
+            case WM_SIZE: ++wmSize_; break;
+            default: break;
+        }
+    }
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
 }
 
 void MainWindow::syncPlanarOutput() {
@@ -4269,7 +4316,29 @@ void MainWindow::refreshHud(const QString& action) {
                 // docked bar's absence is now the normal case rather than the
                 // interesting one.
                 .arg(viewer_->overlayEnabled() ? QStringLiteral(" +overlay")
-                                               : QStringLiteral(" +bar"));
+                                               : QStringLiteral(" +bar"))
+              // Spec phase 12's first experiment, on the line that already
+              // carries `win` and `display`, because what it measures is what a
+              // change to those two costs.
+              //
+              // `resize N` is resizeEvents, `chg` how many reached a real
+              // preview-size change, `drop` how many cache ENTRIES those
+              // discarded -- the last is the cost, because clearing an empty
+              // cache is free and a count of clears would read as a thrash that
+              // is not there. `sync` is the total and worst time inside
+              // syncScrubPreviewSize itself. `wm` is sizing/enter/exit, counted
+              // so the messages the aspect lock will be built on are proved to
+              // arrive before anything depends on them.
+              + QString(" | resize %1 chg %2 drop %3 sync %4/%5ms | wm %6/%7/%8 size %9")
+                .arg(resizeEvents_)
+                .arg(previewSizeChanges_)
+                .arg(cacheEntriesDropped_)
+                .arg(QString::number(syncPreviewMsTotal_, 'f', 1))
+                .arg(QString::number(syncPreviewMsMax_, 'f', 2))
+                .arg(wmSizing_)
+                .arg(wmEnterSizeMove_)
+                .arg(wmExitSizeMove_)
+                .arg(wmSize_);
 
             // `upload` is the CPU -> GPU transfer for one frame and `tex` is how
             // many GPU textures have been created since launch. Both read 0 on

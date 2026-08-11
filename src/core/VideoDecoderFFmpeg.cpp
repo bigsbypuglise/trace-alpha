@@ -589,26 +589,37 @@ void VideoDecoderFFmpeg::clearForwardQueue() {
     perfStats_.forwardQueueDepth = 0;
 }
 
-void VideoDecoderFFmpeg::setScrubPreviewSize(QSize size) {
+int VideoDecoderFFmpeg::setScrubPreviewSize(QSize size) {
 #ifdef TRACE_WITH_FFMPEG
-    if (!impl_) return;
+    if (!impl_) return 0;
     // TRACE_PREVIEW_DISPLAY_SIZE=0 pins previews back to the plain half-res
     // rule, so the display-size conversion can be A/B'd on feel and sharpness
     // against the behaviour it replaced without a rebuild.
     static const bool useDisplaySize = envInt("TRACE_PREVIEW_DISPLAY_SIZE", 1) != 0;
     const int w = useDisplaySize ? std::max(0, size.width()) : 0;
     const int h = useDisplaySize ? std::max(0, size.height()) : 0;
-    if (w == impl_->previewDisplayW && h == impl_->previewDisplayH) return;
+    if (w == impl_->previewDisplayW && h == impl_->previewDisplayH) return 0;
     impl_->previewDisplayW = w;
     impl_->previewDisplayH = h;
     // Preview entries were converted at the old size. They would still draw --
     // the viewer scales whatever it is given -- but a drag would then run
     // through frames of visibly different sharpness, which reads as the picture
     // breaking up rather than as a resize. Drop them and let the drag refill.
+    const int discarded = static_cast<int>(impl_->reverseCache.size());
     impl_->reverseCache.clear();
     impl_->reverseCacheBytes = 0;
+    // The occupancy the HUD prints is otherwise only refreshed inside frameAt,
+    // so after a clear it would go on reporting a cache that no longer exists
+    // until the next decode -- and a resize is exactly the gesture that clears
+    // without decoding. That is a stale instrument of the kind this project has
+    // now been caught by four times, and it would have read as "the resize cost
+    // nothing" on the one measurement built to find out.
+    perfStats_.cacheOccupancy = 0;
+    perfStats_.cacheBytes = 0;
+    return discarded;
 #else
     Q_UNUSED(size);
+    return 0;
 #endif
 }
 

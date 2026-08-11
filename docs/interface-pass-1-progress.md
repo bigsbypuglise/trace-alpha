@@ -2374,3 +2374,143 @@ that is. Everything after it shifts by one.
 - **`V:\` was never touched this session.**
 - Regression taken on the **physical panel, 5120x1440 @ 239.999Hz**, confirmed
   with `refresh.ps1` at the start and again before quoting.
+
+## Phase 12 — Media-driven window size (spec §4), 2026-08-11
+
+Scheduled by the owner on 2026-08-11 and inserted **ahead of** the Movie
+Inspector, because the inspector reports *current viewport size* and §4 changes
+what that is. It is the chunk the spec's own phasing list never numbered.
+
+### Experiment 1 — what an interactive resize actually costs
+
+The brief names this as the phase's first work, before any design. Spec §2 item
+7 predicts a frame-cache thrash under continuous aspect-locked drag-resizing and
+attributes it to two independent costs: `reclaimDecoder()` on **every** resize
+event, and the cache clear on every real size change — which under a lock is
+every event. Both were predictions. Neither had ever been measured, and the lock
+is about to make continuous size changes the normal case.
+
+**The instrument had to be built first, and it counts entries rather than
+clears.** `setScrubPreviewSize` returns how many cache entries it discarded, and
+the HUD's geometry line gained `resize N chg M drop D sync T/Xms | wm S/E/X size
+Z`. Counting clears would have been the wrong measurement: **clearing an empty
+cache is free**, so a drag that clears 122 times may have thrown away 122 entries
+or one, and only the entry count separates them.
+
+`scripts/measure/resizecache.ps1`. The gesture is a real interactive drag of the
+bottom-right corner — 320 logical px in and back out over 1.6s, spin-paced at
+4ms the way `scrub.ps1` and `overlay_drag.ps1` pace theirs, because a synthetic
+gesture that teleports and pauses does not produce the message rate a hand does
+and **the message rate is the thing being counted**. Physical panel, 5120x1440 @
+239.999Hz, `d3d11`, confirmed with `refresh.ps1` before and after.
+
+| leg | resize events | real size changes | cache held | **entries the drag discarded** | sync total / worst | WM_SIZING / ENTER / EXIT | WM_SIZE |
+|---|---|---|---|---|---|---|---|
+| 4K H.264, **cache nearly empty** | 123 | 122 | `1/32` | **1** | 0.3 / 0.01ms | 121 / 1 / 1 | 123 |
+| 4K H.264, full cache | 123 | 122 | `32/32 (379.7MB)` | **32** | 0.2 / 0.01ms | 121 / 1 / 1 | 123 |
+| ProRes 4444, full cache | 127 | 126 | `7/7 (378.0MB)` | **7** | 0.3 / 0.02ms | 126 / 1 / 1 | 127 |
+| 4×5 ProRes, full cache | 124 | 123 | `68/68 (381.0MB)` | **68** | 0.3 / 0.01ms | 122 / 1 / 1 | 124 |
+
+`drop` is cumulative from launch, so each row is the after-capture minus the
+before-capture and the open-time clear is excluded rather than assumed — it is 1
+on two of these files and **0** on the other two, which is exactly why it was
+read off the before-capture rather than subtracted as a constant.
+
+**In every row the drag discarded precisely the number of entries the cache
+held.** One effective clear per drag, whatever the file, whatever the entry size,
+across 122–126 opportunities to clear.
+
+The nearly-empty leg is the control: without it a large `drop` and a small one
+cannot be told apart from a script that never filled the cache, which is phase
+11's `recent 10/10` lesson applied to a different counter. The seeding is proved
+on the `-1-before` capture of every fill leg — `32/32`, `7/7`, `68/68`, each at
+~380MB of the 384MB budget.
+
+#### Finding 1 — THE PREDICTED THRASH DOES NOT EXIST, and the reason is structural
+
+About 123 resize events per drag, essentially all of them real preview-size
+changes, and **exactly one of them discards anything**. The other 121 discard
+zero, because the first clear empties the cache and **nothing refills it while
+the pointer is still down** — a resize drag decodes nothing. A count of clears
+reads as a 122× thrash; the count of entries is one cache's worth.
+
+So **deferring the clear to `WM_EXITSIZEMOVE` saves nothing**. It would move one
+clear from the start of a drag to the end of it. The clear itself is not
+avoidable either and should not be: preview entries carry the size they were
+converted at, and after a resize that size is wrong.
+
+**Eighth instance of "a deferred item's premise expires; re-derive it before
+building it."** This one is unusual in that the item was re-derived once already
+— §2 item 7 is itself the 2026-08-10 correction of the 2026-08-09 text, and it
+corrected the mechanism while keeping the conclusion. The conclusion was the part
+that was wrong.
+
+#### Finding 2 — `reclaimDecoder()` per event is not a cost, and §2 item 7 misdescribes it
+
+Item 7 says `reclaimDecoder()` runs "**first and unconditionally** … a generation
+bump per event whatever the size did". It does not. `reclaimDecoder()` returns at
+its first line when `!decoderLeased_` (`MainWindow.cpp:2211`), and **no lease is
+out during a resize** — a lease exists for the duration of a scrub drag, and a
+resize drag and a scrub drag cannot be the same gesture. The generation is never
+bumped.
+
+Measured, the whole of `syncScrubPreviewSize` costs **0.2–0.3ms across ~125
+events**, i.e. 0.0016–0.0024ms each, worst single event **0.02ms**. Neither of
+§2 item 7's two costs is real, and no debounce is warranted on either.
+
+#### Finding 3 — the three Win32 messages arrive exactly as the design assumed
+
+This had never executed: there was no `nativeEvent` override anywhere in `src/`.
+Every drag, on every file: **exactly 1 `WM_ENTERSIZEMOVE`, 121–126 `WM_SIZING`,
+exactly 1 `WM_EXITSIZEMOVE`**, and `WM_SIZE` matching Qt's `resizeEvent` count to
+the digit (123/123, 127/127, 124/124).
+
+Three things follow for the design. `nativeEvent` on the **top-level Qt window**
+does receive them, so the aspect constraint is renderer-neutral and
+`TRACE_RENDERER=cpu` inherits it. The bracket pair is exact rather than
+approximate, so anything that wants "the drag is over" has a real answer. And a
+constraint applied in `WM_SIZING` runs ~120 times per drag at the message rate,
+**before Qt lays anything out** — which is what makes it a constraint rather than
+a correction.
+
+`WM_SIZE` is in the instrument as the **control on the other three**, and it
+earned its place on the first run: see finding 4.
+
+#### Finding 4 — a FIFTH stale instrument, and this one is in shipping code
+
+`refreshHud()` is not called on `resizeEvent`. Nothing else calls it either
+while the window is paused, so **a paused window that is resized redraws the HUD
+at the new size with the old string in it**.
+
+The first run of this experiment read `resize 1 chg 2 drop 0 | wm 0/0/0` — a
+gesture that had apparently missed the resize border entirely — while its own
+capture was **200 px narrower than the shot before it**. `WM_NCHITTEST` at the
+grabbed point returns **17 (`HTBOTTOMRIGHT`)**, so the gesture was correct the
+whole time and the reading was a phase old.
+
+**`win WxH` and `display WxH` — the two figures this project requires every
+measurement to quote — are stale after any resize of a paused window.** That has
+to be fixed inside phase 12, whose entire subject is window geometry. It is not a
+one-liner in `resizeEvent`: `display` is measured **by** the paint (phase 10), so
+a refresh scheduled before the paint reports the previous size, and building the
+HUD string on every one of ~123 events per drag would put the instrument inside
+the path it measures. The harness works around it for now by refreshing through a
+short play run **after** the drag, which is why the numbers above are trustworthy
+without an app change.
+
+The hit-test probe is worth keeping as a habit: it separates "the gesture missed"
+from "the reading is stale" in one call, and the two are indistinguishable from
+the counters alone.
+
+#### What is on record for the assets, before §4 changes it
+
+At the default startup geometry, `d3d11`, HUD shown:
+
+| file | `win` | `display` |
+|---|---|---|
+| 4K H.264 | 1279x767 | 640x360 `filtered x3` |
+| ProRes 4444 | 1280x760 | 652x367 `filtered x4` |
+| 4×5 ProRes | 1278x767 | **288x360** `filtered x2` |
+
+The 4×5 row is the carried owner visual-review item stated numerically: the
+floating transport is 460 logical px wide against a **288 px** picture.

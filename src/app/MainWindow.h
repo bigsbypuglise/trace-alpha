@@ -63,6 +63,17 @@ protected:
     // arrives as a bare valueChanged with no press and no release, so it is the
     // one way into the scrub lambdas that is not part of a drag.
     bool eventFilter(QObject* watched, QEvent* event) override;
+    // MEASUREMENT ONLY at this stage: it counts WM_SIZING / WM_ENTERSIZEMOVE /
+    // WM_EXITSIZEMOVE and always returns false, so every message continues to
+    // its default handling and the window behaves exactly as it did before.
+    //
+    // It is here rather than in the eventual aspect-lock commit because spec
+    // section 4's whole design rests on these three messages arriving on the
+    // top-level Qt window, and that has never executed in this project -- there
+    // is no other nativeEvent override in src/. Proving they arrive, and how
+    // many of them a real drag produces, is a prerequisite for the design
+    // rather than part of it.
+    bool nativeEvent(const QByteArray& eventType, void* message, qintptr* result) override;
 
 private:
     void setupUi();
@@ -889,6 +900,37 @@ private:
     // Long enough that ordinary reads never flicker the indicator, short
     // enough that a real stall is acknowledged before it feels like a hang.
     static constexpr double kBufferingVisibleMs = 150.0;
+
+    // Spec phase 12's first experiment: what an interactive resize actually
+    // costs. Section 2 item 7 predicted a cache thrash under continuous
+    // aspect-locked drag-resizing and named two independent costs; these count
+    // both of them separately, because the prediction is about the second and
+    // the first is the one that runs on every event.
+    //
+    // `resizeEvents_` is every resizeEvent; `previewSizeChanges_` is how many of
+    // those reached a real size change inside the decoder; `cacheEntriesDropped_`
+    // is how many entries those changes actually discarded. The three are kept
+    // apart on purpose -- a clear of an empty cache is free, so the number of
+    // clears is not the cost and only the entry count is.
+    long long resizeEvents_ = 0;
+    long long previewSizeChanges_ = 0;
+    long long cacheEntriesDropped_ = 0;
+    double syncPreviewMsTotal_ = 0.0;
+    double syncPreviewMsMax_ = 0.0;
+    // Kept here so the change can be COUNTED without moving the comparison that
+    // the decoder already makes. Section 2 item 7 also proposes hoisting that
+    // comparison above reclaimDecoder(); this is deliberately not that change --
+    // the first experiment has to measure what ships.
+    QSize lastPreviewPx_;
+    // The three Win32 messages the aspect lock will be built on, counted before
+    // anything depends on them. WM_SIZING per drag says how often a constraint
+    // would be applied; the ENTERSIZEMOVE/EXITSIZEMOVE pair says whether the
+    // brackets that would replace a debounce timer actually arrive.
+    long long wmSizing_ = 0;
+    long long wmEnterSizeMove_ = 0;
+    long long wmExitSizeMove_ = 0;
+    // The control on the three above -- see the switch in nativeEvent().
+    long long wmSize_ = 0;
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;

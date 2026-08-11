@@ -205,7 +205,12 @@ public:
     // the slack. Pass an empty size to go back to the plain half-res rule.
     // Changing it clears the frame cache, whose preview entries are stored at
     // whatever size was in force when they were made.
-    void setScrubPreviewSize(QSize size);
+    //
+    // Returns HOW MANY entries that discarded, which is the only honest measure
+    // of what a resize costs the cache: a clear of an already-empty cache is
+    // free, so a count of clears says nothing and a count of discarded entries
+    // says everything. An unchanged size returns 0 without touching anything.
+    int setScrubPreviewSize(QSize size);
 
     // Hand full-resolution frames to the renderer as separate Y/U/V planes
     // instead of running swscale to BGRA, when the source is a planar YUV

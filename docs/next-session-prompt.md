@@ -179,6 +179,37 @@ carried visual-review item that **the floating transport is 460 logical px wide 
 picture on 4×5 media** — §4's media-shaped window changes that premise rather than needing a
 panel fix, so it may close here.
 
+**Three mechanism notes, because two of §4's requirements have a standard answer and one has
+a trap.**
+
+- **Constrain the resize in `WM_SIZING`; do not correct it in `resizeEvent`.** §4 requires "the
+  dragged edge or corner remains authoritative", "adjust the other dimension smoothly", and "no
+  resize-event recursion and visible oscillation" — and those three are one requirement.
+  Correcting after the fact is what *produces* oscillation: Qt has already laid out and painted
+  a wrong-shaped window, and the correction is itself a resize. `WM_SIZING` hands you the
+  proposed rect **before** anything happens, and its `wParam` names the edge being dragged
+  (`WMSZ_LEFT`, `WMSZ_BOTTOMRIGHT`, …), so "dragged edge authoritative" falls out of the
+  message rather than needing to be inferred. Reach it through `QWidget::nativeEvent` on
+  `MainWindow` — there is no `nativeEvent` override anywhere in `src/` today, so this is new
+  plumbing, but it is on the **top-level Qt window**, which means it is renderer-neutral and
+  `TRACE_RENDERER=cpu` inherits it for free.
+- **`WM_ENTERSIZEMOVE` / `WM_EXITSIZEMOVE` bracket an interactive resize exactly — use them
+  instead of a debounce timer.** The cache-clear problem above is "do not clear on every
+  intermediate size", and those two messages *know* when the drag starts and ends, where a
+  timer only guesses and will either clear too often or lag the final size. Defer
+  `syncScrubPreviewSize()` to `WM_EXITSIZEMOVE` and measure it. Note the messages do not fire
+  for programmatic resizes, maximise, or Snap — which is correct here, since those are exactly
+  the cases §4 declares exceptions.
+- **`ViewerWidget` sets `setMinimumSize(640, 360)` (`src/ui/ViewerWidget.cpp:12`), and that is
+  itself a 16:9 assumption.** §4 says "respect minimum usable player dimensions", but a fixed
+  640×360 floor fights the aspect lock on every non-16:9 shape: a 1×1 clip cannot go below
+  640×640, a 4×5 below 640×800, a 9:16 below 640×1138 — taller than many work areas at 125%
+  DPI. The minimum has to become aspect-aware (a minimum *area* or a minimum on the constrained
+  axis) or the lock will be silently unsatisfiable on exactly the assets phase 10 used. Phase 6
+  also observed that at the default startup size the **window** shrinks to the layout's hint
+  while the viewer holds this minimum, so changing it moves startup geometry too — A/B
+  launch-to-window the way phase 11 did.
+
 **The 1×1 and 4×5 ProRes assets are the right material**, as they were for phase 10, and the
 9:16 clip is the third shape. Mixed-monitor DPI in §4's matrix is **not executable on this
 box** — `AllScreens` returns one display and Parsec replaces it rather than adding one — so
