@@ -33,11 +33,10 @@ ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
                "transport bar (TRACE_TRANSPORT_BAR).";
     }
 
-    // A test knob until spec phase 10 wires the real actions; identity unless
-    // TRACE_VIEW_TRANSFORM says otherwise, and identity costs nothing on either
-    // backend. Read before the renderer is adopted so the first frame is
-    // already oriented rather than snapping a moment later.
-    viewTransform_ = trace::render::viewTransformFromEnvironment();
+    // The view transform starts at identity and is driven by the Edit menu's
+    // actions from spec phase 10. TRACE_VIEW_TRANSFORM was the interim knob
+    // that stood in for them and it left with the phase that made it redundant,
+    // the way TRACE_SHUTTLE_ENTRY left with phase 5.
 
     renderer_ = trace::render::createRenderer();
     QString error;

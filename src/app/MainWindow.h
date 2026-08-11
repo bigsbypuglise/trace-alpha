@@ -21,6 +21,7 @@
 #include "core/AudioOutput.h"
 #include "app/ShortcutTable.h"
 #include "app/MediaShare.h"
+#include "render/ViewTransform.h"
 
 QT_BEGIN_NAMESPACE
 class QKeyEvent;
@@ -110,6 +111,13 @@ private:
     void showShareMenu(const QPoint& globalPos);
     void copyMediaFilePath();
     void showMediaInFileExplorer();
+    // Spec phase 10. The ONE place the view transform changes, so every action
+    // goes through the same apply-and-report path and none of them writes the
+    // viewer's state directly.
+    void applyViewTransform(const trace::render::ViewTransform& next, const char* action);
+    // Ticks Flip Horizontal / Flip Vertical and enables Reset from the transform
+    // actually in force, rather than from what the last press was assumed to do.
+    void syncViewTransformActions();
     // Spec phase 9. Runs the installed LucidLink integration's own copy-link
     // command on a worker and reports what it produced. Trace never composes a
     // link; see LucidLinkIntegration.h for why the daemon's REST API is not the
@@ -445,6 +453,15 @@ private:
     // broken build rather than as an answer about the file.
     QAction* copyLucidLinkAction_ = nullptr;
     QMenu* shareMenu_ = nullptr;
+
+    // View transforms (spec phase 10). Temporary VIEWING state: they change no
+    // pixel of the source, no frame identity and no timing, and they reset when
+    // media changes.
+    QAction* rotateLeftAction_ = nullptr;
+    QAction* rotateRightAction_ = nullptr;
+    QAction* flipHorizontalAction_ = nullptr;
+    QAction* flipVerticalAction_ = nullptr;
+    QAction* resetViewTransformAction_ = nullptr;
 
     QAction* fullscreenAction_ = nullptr;
     // Escape, as a second surface onto fullscreenAction_. Its ENABLED state is

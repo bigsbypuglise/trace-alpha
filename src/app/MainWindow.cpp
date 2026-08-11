@@ -1012,6 +1012,64 @@ void MainWindow::setupSharedActions() {
 
     syncShareActions();
 
+    // View transforms (spec phase 10). TEMPORARY VIEWING STATE ONLY: these run
+    // through `ViewerWidget::setViewTransform`, which reaches the renderer and
+    // nothing else. No decoder call, no cache entry, no frame index and no
+    // timing is touched, and no byte of the source is read differently -- which
+    // is why rotating during playback costs a coordinate change and not a
+    // re-decode.
+    //
+    // Rotation goes through `rotatedOnScreen`, not `quarterTurns + 1`: with a
+    // flip in force an added turn would visibly rotate the picture the wrong
+    // way. See ViewTransform.h.
+    const auto addViewAction = [this](QAction*& slot, const QString& text,
+                                      const QKeySequence& shortcut,
+                                      std::function<void()> run) {
+        slot = new QAction(text, this);
+        if (!shortcut.isEmpty()) slot->setShortcut(shortcut);
+        connect(slot, &QAction::triggered, this, std::move(run));
+        addAction(slot);
+    };
+
+    addViewAction(rotateLeftAction_, tr("Rotate &Left"),
+                  QKeySequence(Qt::CTRL | Qt::Key_L), [this]() {
+        applyViewTransform(viewer_->viewTransform().rotatedOnScreen(-1), "Rotate Left");
+    });
+    addViewAction(rotateRightAction_, tr("Rotate &Right"),
+                  QKeySequence(Qt::CTRL | Qt::Key_R), [this]() {
+        applyViewTransform(viewer_->viewTransform().rotatedOnScreen(1), "Rotate Right");
+    });
+
+    // Checkable, because a flip is a state the user can see is on, unlike a
+    // rotation which is its own evidence. Their checked state is written by
+    // syncViewTransformActions from the transform in force, never by the
+    // handler -- so Reset unticks them without needing to know they exist.
+    addViewAction(flipHorizontalAction_, tr("Flip &Horizontal"), {}, [this]() {
+        applyViewTransform(viewer_->viewTransform().withFlipH(), "Flip Horizontal");
+    });
+    flipHorizontalAction_->setCheckable(true);
+    addViewAction(flipVerticalAction_, tr("Flip &Vertical"), {}, [this]() {
+        applyViewTransform(viewer_->viewTransform().withFlipV(), "Flip Vertical");
+    });
+    flipVerticalAction_->setCheckable(true);
+
+    // NO SHORTCUT, deliberately. The approved package's section 10 puts Reset
+    // View Transform on Ctrl+0, and the interface spec's own Keyboard section
+    // gives Ctrl+0 to Actual Size. The spec is the governing document and its
+    // rule on conflict is to preserve the existing binding, so this phase
+    // claims neither: Actual Size does not exist yet, and taking its key now
+    // would have to be undone by whoever adds it. Ctrl+L and Ctrl+R above are
+    // unclaimed in both documents, so they are safe to take.
+    // "Rese&t", not "&Reset": Rotate Right already owns R in this menu, and two
+    // items sharing a mnemonic makes the key CYCLE the highlight instead of
+    // activating either -- a menu that quietly stops responding to its own
+    // underlined letter.
+    addViewAction(resetViewTransformAction_, tr("Rese&t View Transform"), {}, [this]() {
+        applyViewTransform(trace::render::ViewTransform{}, "Reset View Transform");
+    });
+
+    syncViewTransformActions();
+
     // The dev diagnostics HUD. Owner request, 2026-08-10: a quick way to put the
     // instrument away while judging feel, and back for measuring.
     //
@@ -1063,6 +1121,13 @@ void MainWindow::setupShortcuts() {
     // happens to dispatch itself.
     shortcuts_.addAction(ShortcutGroup::View, goToFrameAction_);
     shortcuts_.addAction(ShortcutGroup::View, goToTimecodeAction_);
+    // Spec phase 10. Modifier'd, so Qt dispatches them and these are
+    // documentation rows -- and they point AT the action rather than copying its
+    // key, so a rebinding cannot leave the table stale. The three view-transform
+    // actions with no shortcut are deliberately absent: the table is the
+    // KEYBOARD contract, and a row with no key in it would be a menu listing.
+    shortcuts_.addAction(ShortcutGroup::View, rotateLeftAction_);
+    shortcuts_.addAction(ShortcutGroup::View, rotateRightAction_);
 
     shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_Space, tr("Play / Pause"),
                       [this]() { togglePlayPause(); refreshHud("Space"); });
@@ -1409,6 +1474,55 @@ void MainWindow::showShareMenu(const QPoint& globalPos) {
     shareMenu_->popup(globalPos);
 }
 
+// Spec phase 10. The one place the view transform changes.
+//
+// Every action routes through here, so "what is on screen" and "what the menu
+// says" come from a single write followed by a single read-back -- the shape
+// phase 2 gave fullscreen, and for the same reason: five handlers each setting
+// their own state is five chances for the menu and the picture to disagree.
+//
+// It asks the VIEWER for the resulting transform rather than assuming `next`
+// took, which is what makes the tick marks honest if the viewer ever declines a
+// transform.
+void MainWindow::applyViewTransform(const trace::render::ViewTransform& next,
+                                    const char* action) {
+    if (!viewer_) return;
+    viewer_->setViewTransform(next);
+    syncViewTransformActions();
+    // No decoder request and no reload: the frame on screen is the frame that
+    // was already there, drawn through a different coordinate transform. That is
+    // the whole reason this is cheap during playback, and it is why the HUD's
+    // frame index and the source timecode cannot move here.
+    //
+    // repaint(), NOT update(), and the difference is visible in the HUD. The fit
+    // and the reduction taps are measured BY the paint and reported afterwards,
+    // so refreshing the HUD after a merely-scheduled repaint prints the previous
+    // transform's `display` -- and on a paused file nothing refreshes it again,
+    // so it stays wrong. Measured before the fix: a 4x5 clip rotated 90 degrees
+    // drew landscape while `display` still read `288x360`. This is the same
+    // reason the scrub walk calls repaint().
+    viewer_->repaint();
+    refreshHud(action);
+}
+
+void MainWindow::syncViewTransformActions() {
+    if (!viewer_) return;
+    const auto vt = viewer_->viewTransform();
+    if (flipHorizontalAction_) {
+        QSignalBlocker block(flipHorizontalAction_);
+        flipHorizontalAction_->setChecked(vt.flipH);
+    }
+    if (flipVerticalAction_) {
+        QSignalBlocker block(flipVerticalAction_);
+        flipVerticalAction_->setChecked(vt.flipV);
+    }
+    // Disabled at identity: there is nothing to reset, and a Reset that is
+    // always enabled says nothing about whether a transform is in force. This is
+    // the design package's Disabled state -- the action exists and cannot run
+    // right now -- rather than Unavailable, which is about the media.
+    if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(!vt.isIdentity());
+}
+
 void MainWindow::copyMediaFilePath() {
     refreshShareState();
     QString error;
@@ -1638,6 +1752,20 @@ void MainWindow::setupMenus() {
     // so its Share button is invisible to a screen reader; a real QMenu in the
     // menu bar is not.
     fileMenu->addMenu(shareMenu_);
+
+    // Edit, which the spec names as the home for the view transforms. A real
+    // top-level menu rather than another File submenu, because unlike phase 7's
+    // Time Display group this one IS a whole menu in the spec -- the only other
+    // thing the spec puts in Edit is Copy Current Frame, which is phase 12+ and
+    // conditional. Phase 13 adds the rest of the structure around it.
+    auto* editMenu = menuBar()->addMenu(tr("&Edit"));
+    editMenu->addAction(rotateLeftAction_);
+    editMenu->addAction(rotateRightAction_);
+    editMenu->addSeparator();
+    editMenu->addAction(flipHorizontalAction_);
+    editMenu->addAction(flipVerticalAction_);
+    editMenu->addSeparator();
+    editMenu->addAction(resetViewTransformAction_);
 
     fileMenu->addSeparator();
     auto* quitAction = new QAction("&Quit", this);
@@ -2106,6 +2234,16 @@ void MainWindow::openPath(const QString& path) {
     // Same shape and the same reason (spec phase 8): computed here so no
     // surface has to probe the filesystem to draw itself.
     refreshShareState();
+    // Spec phase 10: "reset the transform when new media opens". A rotation the
+    // user applied to inspect one clip must not silently follow them into the
+    // next one, where it would look like the new file is tagged wrong -- which
+    // in a review tool is a bug report about the media rather than about Trace.
+    // Placed with the other per-open resets rather than inside applyViewTransform
+    // so it is visibly part of what opening a file does.
+    if (viewer_) {
+        viewer_->setViewTransform(trace::render::ViewTransform{});
+        syncViewTransformActions();
+    }
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
     // Before the first frame: the decoder sizes scrub previews from this, and a

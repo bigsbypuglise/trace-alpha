@@ -49,15 +49,36 @@ struct ViewTransform {
         t.quarterTurns = ((turns % 4) + 4) % 4;
         return t;
     }
-};
 
-// The transform read from TRACE_VIEW_TRANSFORM, for A/B-ing the two backends
-// against each other before the interface pass wires real actions to it.
-//
-// Accepts a rotation in degrees and/or `h`/`v`, e.g. "90", "180h", "v".
-// Deliberately a test knob and not a feature: spec phase 10 owns the actions,
-// the menu items and resetting on new media. Returns identity for an empty or
-// unparseable value, and identity costs nothing anywhere.
-ViewTransform viewTransformFromEnvironment();
+    // Rotate the image AS THE USER SEES IT, which is not the same as adding to
+    // `quarterTurns`, and this is the whole of the combined-rotate-and-flip
+    // determinism question.
+    //
+    // The composition is screen = flip(rotate(source)) -- flips are applied to
+    // the rotated image, so the flip buttons already act on what is visible. A
+    // mirror REVERSES the sense of a rotation applied after it: for a mirror M,
+    // `R(t) . M == M . R(-t)`. So with exactly one mirror in force, "rotate
+    // right" has to DECREMENT quarterTurns to make the picture turn right on
+    // screen. With both mirrors it does not, because H then V is a 180 degree
+    // rotation and rotations commute with each other.
+    //
+    // Get this wrong and Rotate Right visibly turns the picture LEFT the moment
+    // a flip is on -- deterministic in the sense of repeatable, and wrong. It
+    // lives here rather than in the menu handler so both backends and every
+    // caller inherit the one answer.
+    ViewTransform rotatedOnScreen(int turns) const {
+        const bool mirrored = flipH != flipV;   // exactly one, i.e. an odd number
+        ViewTransform t = *this;
+        const int signedTurns = mirrored ? -turns : turns;
+        t.quarterTurns = ((quarterTurns + signedTurns) % 4 + 4) % 4;
+        return t;
+    }
+
+    // Flips need no such compensation: they are already expressed in screen
+    // space, so each is its own inverse and pressing one twice returns exactly
+    // the state it started from.
+    ViewTransform withFlipH() const { ViewTransform t = *this; t.flipH = !t.flipH; return t; }
+    ViewTransform withFlipV() const { ViewTransform t = *this; t.flipV = !t.flipV; return t; }
+};
 
 } // namespace trace::render
