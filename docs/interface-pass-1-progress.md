@@ -749,6 +749,249 @@ matrix flaky in exchange for catching something no build has yet done.
 
 ---
 
+## Phase 6 — fullscreen consolidation and overlay auto-hide (2026-08-11)
+
+### What shipped
+
+**The floating transport is the transport.** `transportBar_` comes out of the
+`QVBoxLayout` and the composited overlay is on by default.
+`OverlayModel::enabledByEnvironment()` decides it once for the whole application
+— `MainWindow` asks it whether to dock the bar, `ViewerWidget` asks it whether to
+draw the overlay — so the two cannot disagree and **there is no combination of
+knobs that leaves the window with no transport at all**. `TRACE_OVERLAY=0` and
+`TRACE_OVERLAY_COMPOSITED=0` now select the bar rather than selecting nothing.
+
+**`TRACE_TRANSPORT_BAR=1` restores the docked bar, and it is not only an escape
+hatch.** Eight measurement scripts locate the timeline by scanning for its groove
+colour; without a way back to the bar, most of the regression suite would have
+had to be rewritten in the same commit as the feature it exists to check. It is
+also the negative control every figure below is measured against.
+
+**The bar OBJECT stays alive in both modes, and that is deliberate.**
+`timelineSlider_` is its child and is the whole scrub state machine — the
+press/move/release the overlay drives, `isSliderDown()`, `scrubJumpPending_`, the
+step 5.6 play-intent restore. Re-homing that into the overlay would mean a second
+scrub path, which is the one thing the `OverlayHooks` design exists to avoid. So
+the overlay drives the real slider and the slider simply is not on screen.
+
+**The approved package's control geometry is adopted**: 44×44 play/pause, 34×34
+utility targets, in a 460×84 rounded panel. Phase 2 declined to apply it to the
+bar precisely because this is the geometry of the floating transport. Two icon
+sizes mean two snapped sizes in `layout()`, both reused by `rebuildAtlas()` — the
+property that keeps each atlas cell exactly the size of the rect it lands in, and
+therefore keeps the two backends agreeing pixel for pixel.
+
+**Auto-hide is finished to the spec's list.** Pointer movement, a click anywhere
+over the video, and any key the `ShortcutTable` dispatches all reveal it; 2s of
+inactivity fades it. The overlay checks the two hold conditions it can see
+(pointer over a control, timeline drag in progress) and **asks the host for the
+rest** through a new `holdVisible` hook — a popup menu, a tooltip, a modal dialog
+or a child control holding focus are application state a renderer cannot see.
+**The keyboard reveal is defined by the table rather than by a key list**: every
+row in it is a transport, stepping, shuttle or readout command, so a key the
+table does not own is by construction not "relevant keyboard input".
+
+**The cursor hides in fullscreen on the same idle timer**, through a
+`setCursorHidden` hook. The overlay decides *when*; the host decides *whether*,
+because the spec asks for it in fullscreen only. Both backends had to implement
+it and they do it differently — see the measurement note below.
+
+**Fullscreen is consolidated.** Escape exits, geometry is preserved and restored,
+maximize stays distinct from fullscreen, and double-clicking the video toggles
+it. `nextFrameAction_`-style, Escape is a **second surface onto
+`fullscreenAction_`, not a second definition**: `exitFullscreenAction_` triggers
+it and owns no window state. It is a separate action rather than a fourth
+shortcut because **a disabled QAction does not consume its shortcut** — so
+"Escape means this only while fullscreen" is expressed as enablement rather than
+as a branch inside a handler that has already swallowed the key. It also could
+not live in `ShortcutTable`'s plain-key half, whose dispatcher consumes
+unconditionally.
+
+**One rate string, two surfaces.** `hooks.rateText` was reading
+`playback_.state().speed` directly and was therefore permanently non-empty — the
+overlay showed "1.0x" or "PAUSED" whatever was happening, which is a HUD, not a
+transport. It reads `MainWindow::rateFlashText_` now: the same transient the
+docked bar's label shows, driven from `startShuttle` and cleared by the same
+1200ms `TransportBar::rateFlashMs()`.
+
+**A backend that cannot draw the overlay is now a fallback condition.**
+`VideoRenderer::overlayDrawFailed()`, read by `adoptRenderer`. It was survivable
+while the overlay was an off-by-default spike; with the overlay as the only
+transport it would leave the window with a picture and no controls.
+
+### The double-click found a real bug, and it was found by accident
+
+While setting up an unrelated check, two deliberate single clicks 300ms apart
+landed on the video and the window went fullscreen. Correct — and it exposed the
+case one step to the left.
+
+**Windows sends down, up, DBLCLK, up.** The second press of any pair inside the
+double-click interval arrives as `WM_LBUTTONDBLCLK` and **not** as
+`WM_LBUTTONDOWN`. The first cut of `onMouseDoubleClick` consumed it when the
+point was over a control, on the reasoning that "the press half already ran the
+command". It had not: that press *was* the double-click. So **every other rapid
+press on an overlay control was dropped** — and after phase 6 the overlay's is
+the only Fast-forward there is, which makes the spec's own ladder gesture (six
+rapid presses must reach 30×) the thing that breaks.
+
+**The docked bar never had this problem**, which is exactly why it would have
+gone unnoticed: `QWidget::mouseDoubleClickEvent` forwards to `mousePressEvent`,
+so Qt's buttons already did the right thing. The overlay reads raw Win32 messages
+on the D3D11 path and had to be taught it. The fix is one line — forward to
+`onMouseDown` — and it mirrors what Qt does.
+
+`scripts/measure/overlay_ladder.ps1` is the check, and it was run against a
+binary with the fix reverted:
+
+| six rapid presses | fixed | pre-fix (negative control) |
+|---|---|---|
+| Fast-forward | **`speed 30.00x`**, frame 90, still running | `speed 10.00x`, frame 49 |
+| Rewind | **`speed -30.00x`**, frame 354, still running | `speed -10.00x`, frame 382 |
+
+10× is three rungs of six presses — one press per pair, lost.
+
+**And the leg could not pass twice before it could fail once**, which is the third
+instance of that in three phases. `restart.ps1` leaves the playhead at frame 0, so
+the rewind leg ran off the head of the clip immediately and read `speed 0.00x`;
+it needs a positioning click first (`-StartFraction`, 0.95 backward / 0.05
+forward). Then `capture.ps1` raises the window and sleeps **300ms**, which at 30×
+on a 24fps clip is **216 frames** — enough on its own to run a 412-frame clip off
+the end and capture an ended run. The script grabs the window directly instead.
+Phase 5 hit the same arithmetic from the other side.
+
+### Does the overlay's timeline press land exactly? Yes — plan §31.5 item 2 is closed
+
+The open question was that a groove click is an absolute set (value first, then
+`sliderPressed`) while the overlay calls `setSliderDown(true)` then `setValue()`
+— the opposite order — and §31.5 required testing it **with the playhead
+deliberately far from the press point**, because a press already near the target
+cannot tell an exact landing from a lazy one.
+
+`scripts/measure/overlay_press.ps1`, 4K H.264, playhead at frame 0, single click
+at 0.85 of the track:
+
+| | overlay track | groove control |
+|---|---|---|
+| landed | `frame 101`, `target 101 shown 101` | `frame 102`, `target 102 shown 102` |
+| `delta` | **0** | **0** |
+| `dst` | `YUV420P8 planar` (full-res) | `YUV420P8 planar` (full-res) |
+| walk / seeks | `walk 11f`, `n=2` | `walk 12f`, `n=2` |
+
+Both take one seek plus a GOP walk and both land full-resolution and exact. The
+one-frame difference is pixel quantisation — the overlay's track is 404px against
+the groove's 827px — not a landing error.
+
+### Regression
+
+**This session ran on a 1920x1080 @ 59.999Hz display, NOT the physical panel**
+(`refresh.ps1`; the panel is 5120x1440 @ 239.999Hz), the same display phase 5 ran
+on. `stalls` and `hitch` coincide at this refresh. **No subjective judgement was
+taken and none is valid from this display** — the overlay's feel is the owner's
+and has to be taken at the machine.
+
+Control binary built from `fec93f0` in a separate worktree and **verified by
+hash** on every swap. `d3d11` default throughout.
+
+**Bar mode — phase 6 against the control, layouts identical, `win 1280x843`,
+`display 640x360 filtered x3`:**
+
+| run | control | phase 6 (`+bar`) |
+|---|---|---|
+| 4K H.264 cadence ×3 | 99.1 / 99.1 / 99.1%, 120 frames, `handler>budget 0 of 120` (max 3.6), max 84.3 / 84.0 / 83.7 | 99.2 / 99.1 / 99.2%, 120 frames, `0 of 120` (max 3.9 / 3.5 / 3.7), max 84.2 / 84.8 / 84.6 |
+| 4444 cadence ×2 | 99.8 / 99.7%, 261 frames, `0 of 260` (max 34.0 / 34.1), max 45.3 / 46.5 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 34.8 / 32.9), max 44.4 / 44.7 |
+| reverse 1× ×3 | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 5.0 / 5.5 / 5.2) | 100.0% all three, 114 frames / 4.75s, `0 of 113` (max 3.3 / 3.1 / 3.3) |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, `walk 0f`, `hitch 0`, `ui gap max 18.4ms` | same landing, `hitch 0`, `ui gap max 17.9ms` |
+| lifecycle | `-PlayThroughDrag` PASS 40.1%, `-PausedThroughDrag` PASS 0% | PASS 39.6%, PASS 0% |
+| transitions | **25 of 25 PASS** | **25 of 25 PASS**, case for case |
+
+Cadence buckets identical on both files (`~1x 118`, one frame in `1.5-2.5x`, every
+other bucket 0 on 4K H.264). **No run of the six reverse gestures reported
+`SNAP gop 2`** — and as at phase 5 that is *not* evidence the loose end is fixed,
+because this is not the display it was seen on.
+
+**Overlay mode — the configuration that ships:**
+
+| run | value |
+|---|---|
+| 4K H.264 cadence ×3 | 99.1 / 99.2 / 99.2%, 120 frames, identical buckets, `handler>budget 0 of 120` (max 4.0) |
+| 4444 cadence ×2 | 99.8 / 99.8%, 261 frames, `0 of 260` (max 36.3 / 36.1) |
+| overlay drag ×2 vs groove control ×2 | `hitch 1` all four, `delta 0` all four, landing exact all four |
+| overlay ladder | ±30.00× on six rapid presses, both directions |
+| cross-backend, 12 states | `08-mid-drag` **0 px (0%), max delta 1** |
+
+**The overlay's cost is paints, and it is visible and small.** Playback:
+`paints 152/121` against `120/121` — about 32 extra across a 5s run, from the
+fade and the reveal, at `paint 0.01/0.04ms` against a 41.67ms budget. During a
+drag: `paints 559/469` against `440/441`, roughly 120 extra at 0.02ms each.
+**4444 is the file with the least headroom** (handler ~23ms) and it absorbed the
+extra paints with `handler>budget 0 of 260` and 261 frames, unchanged.
+
+**The `ui gap max` asymmetry reproduced and is still unattributed** — 9.6 / 7.3ms
+on the overlay track against 76.0 / 72.9ms on the groove. §31.2 measured 17
+against 84ms and said explicitly not to quote it as an overlay win. It still is
+not one.
+
+### What phase 6 changes about the plan
+
+**The video rect did NOT move, and the handoff predicted it would.** The
+prediction was reasonable — the bar is 76 logical pixels and §22.8 says cache
+depth follows the video rect — but at the default startup size the **window**
+shrinks instead, because it is sized from the layout's own hint and the viewer
+keeps its 640×360 minimum:
+
+| | `win` | `display` |
+|---|---|---|
+| 4K H.264, bar | 1280x843 | 640x360 filtered x3 |
+| 4K H.264, overlay | **1280x767** | **640x367** filtered x3 |
+| 4444, bar | 1280x843 | 652x367 filtered x4 |
+| 4444, overlay | **1280x760** | **652x367** filtered x4 |
+
+So the §22.8 effect is real but is not reached by this change at the default size,
+and that is *why* the stall and cache figures did not move — an explanation rather
+than an observation. **At a held window size the video rect would grow**, so a
+maximized or user-sized window is where to look if a scrub figure is ever
+questioned; quote `display` either way.
+
+**`stalls` could not be compared across modes on the same gesture**, and the
+reason is worth keeping: `scrub.ps1` locates the groove, so in overlay mode it
+exits before dragging — the capture read `paints 0/1` and `frame 0`, which is a
+harness that ran nothing rather than an app that did nothing. `overlay_drag.ps1`
+is the comparison that works, because it drives the overlay's own track against
+the groove as its control.
+
+**The naive cursor instrument says the CPU backend is broken and it is not.**
+`GetCursorInfo` reports `flags=1` (CURSOR_SHOWING) on `cpu` even when the pointer
+is hidden, because `Qt::BlankCursor` is a real cursor with an empty bitmap, while
+the D3D11 surface answers `WM_SETCURSOR` with `SetCursor(nullptr)` and reads
+`flags=0`. The **handle** is what separates them: on `cpu` it moves `0x10003` →
+`0x6470DA7` → `0x10003` across idle and back. Two mechanisms, one behaviour, and
+the obvious measurement sees only one of them.
+
+**Fullscreen was verified against the window manager, not against the toggle:**
+F11 → `0,0 1920x1080`; Escape → `133,77 1100x806`, the pre-fullscreen rectangle
+exactly; a second Escape changes nothing, so the shortcut really is unclaimed
+when windowed. Maximized → F11 → Escape returns **MAXIMIZED**, and a later
+restore returns the pre-maximize rectangle. Double-click toggles on **both**
+backends (`CS_DBLCLKS` had to be added to the surface window class or
+`WM_LBUTTONDBLCLK` is never sent at all).
+
+**`TRACE_RENDERER=cpu` keeps its transport — verified, not assumed.**
+`overlay.ps1` was run on both backends and reports the same panel geometry, the
+same twelve states and the same interactions on each. That was §2 item 1's whole
+requirement for this phase.
+
+**Still no text-entry control anywhere in the app.** Phase 7 creates the first
+one, and `holdVisible` already carries the child-focus clause it will need — it
+cannot fire today because every transport widget is `Qt::NoFocus`, and it is
+written now so the omission would be deliberate rather than invisible.
+
+**Open, and for the owner rather than for the code**: the fade duration (165ms),
+the 2s inactivity delay, and whether the panel reads as a transport rather than a
+HUD. All three have been measured and none has been looked at. **At the machine,
+not over Parsec.**
+
+---
+
 ## Session closeout — 2026-08-11
 
 **An index, not a second copy.** Every fact below is recorded in full somewhere
@@ -766,12 +1009,18 @@ section it points at wins.
 | 3 stepping and shuttle contracts | done | `4de678e` |
 | **4 forward shuttle** | **COMPLETE** | `e559d07` |
 | **5 reverse shuttle** | **COMPLETE** | `90140f9` |
-| **6 fullscreen consolidation + overlay auto-hide** | **NEXT** | — |
+| **6 fullscreen consolidation + overlay auto-hide** | **COMPLETE** | see the phase 6 section above |
+| **7 Time Display + zero-based frame UI** | **NEXT** | — |
 
-Phases 4 and 5 together complete the **transport redesign**. Phase 6 is the next
-starting point and is the phase most likely to cost performance, because it
-removes `transportBar_` from the layout in favour of the floating overlay and
-therefore moves the video rect. Full brief in `docs/next-session-prompt.md`.
+Phases 4 and 5 together complete the **transport redesign**; phase 6 makes the
+floating overlay the only transport and consolidates fullscreen. Phase 7 is the
+next starting point and creates the first text-entry control in the app. Full
+brief in `docs/next-session-prompt.md`.
+
+**Everything below this line was written at the close of the phase 5 session and
+is left as it stood.** Where phase 6 changed something it says so in its own
+section, which wins — most notably: **the video rect did NOT move**, and the
+phase-6 brief's prediction that it would is corrected there.
 
 ### What is settled, and where the evidence is
 

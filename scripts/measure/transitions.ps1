@@ -85,7 +85,17 @@ param(
     [Parameter(Mandatory = $true)][string]$Clip,
     # Where to dump the ladder captures. The rung a press reaches cannot be
     # asserted from pixels; it is read off the HUD by eye.
-    [string]$LadderOut
+    [string]$LadderOut,
+    # NAME=VALUE, passed through to restart.ps1.
+    #
+    # THIS MATRIX NEEDS THE DOCKED TRANSPORT BAR. Every control it drives is
+    # located by scanning the bar for icon clusters and the groove for its track
+    # colour, and spec phase 6 took the bar out of the layout by default. So run
+    # it as `-Env TRACE_TRANSPORT_BAR=1`. That is not a workaround: the matrix
+    # tests run boundaries reached through QActions, and the overlay's controls
+    # trigger the same actions the bar's do, so the coverage is the same either
+    # way -- what the bar supplies is a control the harness can find.
+    [string[]]$Env = @()
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -245,7 +255,7 @@ function FastClick($x, $y) {
 # the same nine commands run against a reverse run and a forward one.
 function RunCase([string]$name, [scriptblock]$enter, [scriptblock]$transition,
                  [string]$expect, [double]$startFrac = 0.55) {
-    & $restart -Clip $Clip | Out-Null
+    & $restart -Clip $Clip -Env $Env | Out-Null
     $p = Handle
     if (-not $p) { Write-Output "$name : FAIL - no window after restart"; return }
     $h = $p.MainWindowHandle
@@ -417,7 +427,7 @@ if ($Delayed) {
 # rather than asserts: six clicks from paused should read +2, +5, +10, +30, +30,
 # +30 on the HUD's `speed` and `shuttle stride`, and -2 ... -30 for rewind.
 function LadderLeg([string]$which, [double]$from, [string]$outDir) {
-    & $restart -Clip $Clip | Out-Null
+    & $restart -Clip $Clip -Env $Env | Out-Null
     $p = Handle
     if ($null -eq $p) { Write-Output "ladder $which : FAIL - no window"; return }
     $h = $p.MainWindowHandle
@@ -458,7 +468,7 @@ function LadderLeg([string]$which, [double]$from, [string]$outDir) {
     # Click's own dwell alone spent three times that. With the dwell out, the
     # six presses cover roughly 150 frames of a 412-frame clip and the capture
     # lands while the run is still going.
-    & $restart -Clip $Clip | Out-Null
+    & $restart -Clip $Clip -Env $Env | Out-Null
     $p2 = Handle
     if ($null -eq $p2) { return }
     $h2 = $p2.MainWindowHandle

@@ -36,10 +36,32 @@ struct OverlayHooks {
     std::function<void(bool)> setScrubbing;
     std::function<void(double)> seekToFraction;
 
+    // Double-click the video toggles fullscreen (spec phase 6). A WINDOW command
+    // rather than a transport one, and it is here because this struct is the
+    // application's whole input contract for the video surface -- under the
+    // D3D11 backend the child HWND takes every mouse message and Qt sees none of
+    // them, so a second route would have to reimplement that plumbing to reach
+    // the same action.
+    std::function<void()> toggleFullscreen;
+
     // Reads. The overlay draws from these and never caches them.
     std::function<bool()> isPlaying;
     std::function<double()> positionFraction;
     std::function<QString()> rateText;
+
+    // A veto on the auto-hide, asked each time the idle timer fires. The spec's
+    // list -- a popup menu open, a tooltip open, a child control holding
+    // keyboard focus -- is entirely about application state the overlay cannot
+    // see, so it is asked rather than inferred. The two conditions the overlay
+    // CAN see (the pointer is over a control, a timeline drag is in progress) it
+    // still checks itself.
+    std::function<bool()> holdVisible;
+
+    // Hide or show the pointer. Called only on the transitions, never per move.
+    // The overlay decides WHEN -- the same inactivity that fades the panel --
+    // and the host decides WHETHER, because the spec hides the cursor in
+    // fullscreen only.
+    std::function<void(bool)> setCursorHidden;
 
     // Ask the host to repaint. Needed because hover, fade and drag change the
     // picture without a new video frame arriving.

@@ -103,10 +103,17 @@ public:
     bool onMouseMove(int x, int y);
     bool onMouseDown(int x, int y);
     bool onMouseUp(int x, int y);
+    // Double-click the video toggles fullscreen. Routed through the model
+    // because the model is the renderer-neutral home for input over the video
+    // surface, and it runs even when the overlay itself is switched off -- the
+    // gesture belongs to the window, not to the transport.
+    bool onMouseDoubleClick(int x, int y);
     void onMouseLeave();
 
     // Pointer motion anywhere over the video reveals the overlay and restarts
     // the auto-hide timer, which is the behaviour a floating transport needs.
+    // Also the host's entry point for the two reveal sources that are not mouse
+    // events: a click on the video, and relevant keyboard input.
     void reveal();
 
     Region hoverRegion() const { return hover_; }
@@ -139,7 +146,13 @@ private:
     // by rebuildAtlas() so an atlas cell is exactly the size of the rect it is
     // drawn into. Recomputing the constants there instead is how the two would
     // end up a pixel apart and resample.
-    double iconPx_ = 30.0;
+    //
+    // TWO icon sizes as of spec phase 6, because the approved package specifies
+    // a 44x44 play/pause and 34x34 utility targets. They are separate members
+    // for the same reason they are snapped at all: the atlas cell for each
+    // control has to be exactly the rect it lands in.
+    double playPx_ = 44.0;
+    double utilPx_ = 34.0;
     double handlePx_ = 16.0;
 
     QSize surfaceSize_;
@@ -150,6 +163,9 @@ private:
     Region hover_ = Region::None;
     Region pressed_ = Region::None;
     bool draggingTimeline_ = false;
+    // Mirrors what the host was last told, so reveal() on every pointer move
+    // does not call across the hook once per move to say the same thing.
+    bool cursorHidden_ = false;
 
     // Fade. targetOpacity_ is where it is going; opacity_ is where it is.
     double opacity_ = 0.0;

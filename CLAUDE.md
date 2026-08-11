@@ -294,6 +294,72 @@ paths are one command now (`stepOneFrame`). Regression flat: cadence 99.9 → 10
 identical buckets, `-SnapRelease` `delta 0` and `hitch 0` both, reverse 1× and forward 2×
 identical to the digit, all six transitions and both lifecycle legs passing.
 
+**SPEC PHASE 6 IS DONE (2026-08-11) and the floating transport is now THE transport.**
+`transportBar_` is out of the `QVBoxLayout`; `OverlayModel::enabledByEnvironment()` decides
+for the whole application, so `MainWindow` (dock the bar?) and `ViewerWidget` (draw the
+overlay?) cannot disagree and **no combination of knobs leaves the window with no transport**.
+`TRACE_TRANSPORT_BAR=1` restores the docked bar — the escape hatch, the negative control, and
+what the eight groove-scanning harness scripts need to keep running. The bar OBJECT stays
+alive either way, because `timelineSlider_` is its child and is the entire scrub state
+machine; the overlay drives the real slider and the slider is simply not on screen.
+Also shipped: the approved package's **44×44 play / 34×34 utility** geometry in a 460×84
+panel, the auto-hide reveal and hold rules, cursor hiding in fullscreen, and fullscreen
+consolidation (Escape, geometry restore, maximize kept distinct, double-click).
+**`TRACE_RENDERER=cpu` keeps its transport — verified on both backends, not assumed.**
+
+Five things to carry.
+
+- **A rapid second press on an overlay control was being DROPPED, and the docked bar could
+  never have shown it.** Windows sends down, up, DBLCLK, up, so the second press of any pair
+  inside the double-click interval arrives as `WM_LBUTTONDBLCLK`, not `WM_LBUTTONDOWN`. The
+  first cut consumed it over a control. `QWidget::mouseDoubleClickEvent` forwards to
+  `mousePressEvent`, which is why Qt's buttons were always fine — and why this reads as an
+  overlay-only ladder bug. Six rapid presses measured **±10× before the fix and ±30× after**,
+  against `scripts/measure/overlay_ladder.ps1` with the fix reverted as the negative control.
+  10× is three rungs of six presses: exactly one lost per pair.
+- **THE VIDEO RECT DID NOT MOVE, and the handoff predicted it would.** At the default startup
+  size the **window** shrinks instead — it is sized from the layout's own hint and the viewer
+  keeps its 640×360 minimum. 4K H.264 `win 1280x843 → 1280x767` with `display 640x360 →
+  640x367`; 4444 `win 1280x843 → 1280x760` with `display 652x367` **unchanged**. That is why
+  no stall or cache figure moved, and it is an explanation rather than an observation. At a
+  **held** window size the rect would grow, so a maximized window is where to look if a scrub
+  number is ever questioned. Quote `display` either way; the HUD now names the transport too
+  (`+overlay` / `+bar`).
+- **Plan §31.5 item 2 is CLOSED: the overlay's timeline press lands exactly.** Measured with
+  the playhead deliberately far from the press point, which the item required —
+  `overlay_press.ps1`, from frame 0, one click at 0.85: overlay `target 101 shown 101
+  delta 0`, groove control `target 102 shown 102 delta 0`, both full-resolution planar, both
+  one seek plus a GOP walk. The one-frame difference is a 404px track against an 827px groove.
+- **`GetCursorInfo` says the CPU backend does not hide the cursor and it does.**
+  `Qt::BlankCursor` is a real cursor with an empty bitmap so `CURSOR_SHOWING` stays set; the
+  D3D11 surface answers `WM_SETCURSOR` with `SetCursor(nullptr)` and reads `flags=0`. The
+  **handle** separates them (`0x10003 → 0x6470DA7 → 0x10003` on cpu). Two mechanisms, one
+  behaviour, and the obvious instrument sees only one.
+- **Escape is a second SURFACE onto `fullscreenAction_`, not a second definition**, and it is
+  a separate `QAction` rather than a fourth shortcut because **a disabled QAction does not
+  consume its shortcut**. "Escape means this only while fullscreen" is therefore enablement
+  rather than a branch inside a handler that has already swallowed the key — and it could not
+  live in `ShortcutTable`'s plain-key half, whose dispatcher consumes unconditionally.
+  Verified against the window manager: F11 → fullscreen, Escape → the pre-fullscreen
+  rectangle exactly, a second Escape → no change; maximized survives the round trip as
+  MAXIMIZED. Double-click needed `CS_DBLCLKS` on the surface window class or
+  `WM_LBUTTONDBLCLK` is never sent.
+
+Regression (control built from `fec93f0`, hash-verified on every swap, **1920x1080 @
+59.999Hz display, not the panel**): bar mode is flat against the control on every run — 4K
+H.264 cadence ×3 99.1→99.2% with identical buckets, 4444 99.8%, reverse 1× 100.0% ×3 at 114
+frames / 4.75s, `-SnapRelease` `delta 0` and `hitch 0`, both lifecycle legs, **25 of 25
+transitions case for case**. Overlay mode ships at the same numbers; its only measurable cost
+is **paints** — 152/121 against 120/121 on playback and 559/469 against 440/441 on a drag, at
+0.02–0.05ms each against a 41.67ms budget — and **4444, the file with the least headroom,
+absorbed them at `handler>budget 0 of 260`**. Cross-backend `08-mid-drag` still **0 px, max
+delta 1**. The `ui gap max` asymmetry reproduced (9.6/7.3 vs 76.0/72.9ms) and is **still
+unattributed — not an overlay win**.
+
+**What is open is the owner's, not the code's**: the 165ms fade, the 2s inactivity delay, and
+whether the panel reads as a transport rather than a HUD. All measured, none looked at, and
+**not judgeable over Parsec**.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
@@ -1058,15 +1124,24 @@ buttons' 2× entry was executable before those buttons existed; both buttons are
 real now and pass `AtTwoX` as an argument, so nothing needs it), **`H` (not an env knob — the keyboard
 toggle for the dev HUD, added at spec phase 2; `Return`/`Enter` still work, and
 hiding it also stops the HUD line being *built*, so it is the state to judge feel
-in and the wrong state to quote a bare `stalls` from)**, `TRACE_OVERLAY=1` (the floating transport,
-**off by default** while its artwork is still placeholder; `TRACE_OVERLAY_COMPOSITED=1`
-is retained because the harness sets it), and `TRACE_VIEW_TRANSFORM=90|180|270|h|v`
+in and the wrong state to quote a bare `stalls` from)**, **`TRACE_TRANSPORT_BAR=1`** (spec
+phase 6: back to the docked transport bar. The floating overlay is the default transport now,
+so this is the escape hatch, the negative control for every phase-6 figure, and **what the
+harness scripts that locate the timeline by scanning for its groove colour need in order to
+run at all** — `scrub.ps1`, `revplay.ps1`, `lifecycle.ps1`, `transitions.ps1`,
+`shuttleland.ps1`, `previewshot.ps1` and `overlay_drag.ps1`'s control leg. `TRACE_OVERLAY=0`
+and `TRACE_OVERLAY_COMPOSITED=0` select it too, so turning the overlay off asks for the other
+transport rather than for none), `TRACE_OVERLAY=1` (the floating transport — **on by default
+since spec phase 6**; `TRACE_OVERLAY_COMPOSITED=1` is retained because the harness sets it),
+and `TRACE_VIEW_TRANSFORM=90|180|270|h|v`
 (rotate/flip, a test knob until spec phase 10 wires the real actions).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
-a default launch reports `renderer d3d11` (`renderer cpu` before 2026-08-10),
-draws no overlay and writes no Trace diagnostics to stderr: `TRACE_OVERLAY_COMPOSITED=1` (the disposable composited
-overlay spike, placeholder art, announces itself on stderr),
+a default launch reports `renderer d3d11 +overlay` (`renderer cpu` before 2026-08-10; **the
+floating transport is drawn by default since spec phase 6**, and only bar mode announces
+itself on stderr now) and writes no other Trace diagnostics:
+`TRACE_OVERLAY_COMPOSITED=1` (the spike's original name for the overlay, retained because the
+harness sets it — it no longer selects anything a default launch does not already do),
 `TRACE_OVERLAY_SPIKE=1|2|3` (the superseded Qt-widget overlay probe that proved
 the widget route closed), `TRACE_D3D11_CLEAR_DIAG=1` (clears the back buffer red
 instead of black -- the diagnostic that separates "not presenting" from

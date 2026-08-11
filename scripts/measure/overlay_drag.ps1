@@ -74,7 +74,14 @@ function Sweep([int]$from, [int]$to, [int]$y, [double]$secs) {
 
 foreach ($mode in @("on", "off")) {
     $envs = @("TRACE_RENDERER=$Renderer")
-    if ($mode -eq "on") { $envs += "TRACE_OVERLAY=1" }
+    # SPEC PHASE 6 INVERTED THE DEFAULT. The overlay used to be opt-in and the
+    # docked bar always present, so "on" needed a knob and "off" needed none.
+    # The overlay is the transport now and the bar is what has to be asked for --
+    # and asking for it is what puts a groove on screen for the control leg to
+    # find. Setting nothing here would give BOTH legs the overlay and no groove,
+    # which would fail as "groove not found" rather than silently, but only
+    # because the scan happens to assert itself.
+    if ($mode -eq "off") { $envs += "TRACE_TRANSPORT_BAR=1" }
     & "$PSScriptRoot\restart.ps1" -Clip $Clip -Env $envs | Out-Null
 
     $p = Get-Process -Name Trace | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
@@ -119,10 +126,11 @@ foreach ($mode in @("on", "off")) {
         if ($maxX -lt 0) { Write-Output "overlay never appeared"; exit 1 }
         Write-Output ("panel bbox x {0}..{1}  y {2}..{3}" -f $minX, $maxX, $minY, $maxY)
 
-        # Track at 72% of panel height, inset each side. Both come from
-        # OverlayModel::layout(); the inset is taken as a fraction of the
-        # measured panel so this does not need to know the dpr.
-        $sy = $r.T + [int]($minY + ($maxY - $minY) * 0.72)
+        # Track at 76% of panel height, inset each side. Both come from
+        # OverlayModel::layout() -- the fraction moved from 0.72 at spec phase 6,
+        # when the panel grew to hold a 44px play control. The inset is taken as
+        # a fraction of the measured panel so this does not need to know the dpr.
+        $sy = $r.T + [int]($minY + ($maxY - $minY) * 0.76)
         $inset = [int](($maxX - $minX) * 0.06)
         $sxA = $r.L + $minX + $inset
         $sxB = $r.L + $maxX - $inset

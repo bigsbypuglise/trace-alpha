@@ -19,17 +19,18 @@ ViewerWidget::ViewerWidget(QWidget* parent) : QWidget(parent) {
     // between them a comparison of two different applications.
     overlayModel_.setEnabled(trace::render::OverlayModel::enabledByEnvironment());
     if (overlayModel_.enabled()) {
-        // Say so on stderr. The mechanism is real now, but the artwork is still
-        // the spike's placeholder geometry until the interface pass draws it,
-        // and anyone switching this on should know which half they are looking
-        // at.
-        qWarning().noquote()
-            << "Trace: floating transport overlay enabled "
-               "(mechanism is real; artwork is still placeholder).";
         // Pointer motion has to reveal it, and a move with no button held only
         // arrives with tracking on. Harmless under the D3D11 backend, which
         // never receives these events at all.
         setMouseTracking(true);
+    } else {
+        // Announce the NON-default now that the floating transport is the
+        // default (spec phase 6). The warning used to say the overlay was on
+        // and its artwork placeholder; both halves of that expired in the same
+        // commit, and a stale announcement is worse than none.
+        qWarning().noquote()
+            << "Trace: floating transport overlay disabled - using the docked "
+               "transport bar (TRACE_TRANSPORT_BAR).";
     }
 
     // A test knob until spec phase 10 wires the real actions; identity unless
@@ -81,11 +82,21 @@ bool ViewerWidget::adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> r
     hostHwndSpike_ = nativeSurface_ && !qgetenv("TRACE_D3D11_HOSTHWND").isEmpty();
     setAttribute(Qt::WA_PaintOnScreen, hostHwndSpike_);
 
-    if (!renderer->initialize(this, error)) {
+    const bool ok = renderer->initialize(this, error);
+    // A backend that came up but cannot draw the overlay is a failure now that
+    // the overlay is the only transport (spec phase 6). It was survivable while
+    // the overlay was an off-by-default spike; today it would leave the window
+    // with a picture and no controls, which is exactly the silent degradation
+    // the renderer name in the HUD exists to make visible.
+    const bool overlayLost = ok && overlayModel_.enabled() && renderer->overlayDrawFailed();
+    if (overlayLost) error = QStringLiteral("backend cannot draw the floating transport");
+    if (!ok || overlayLost) {
         // Leave no half-applied native state behind for the fallback to inherit.
         nativeSurface_ = false;
+        hostHwndSpike_ = false;
         setAttribute(Qt::WA_NoSystemBackground, false);
         setAttribute(Qt::WA_OpaquePaintEvent, false);
+        setAttribute(Qt::WA_PaintOnScreen, false);
         return false;
     }
 
@@ -130,6 +141,12 @@ QPaintEngine* ViewerWidget::paintEngine() const {
     return hostHwndSpike_ ? nullptr : QWidget::paintEngine();
 }
 
+void ViewerWidget::setCursorHidden(bool hidden) {
+    if (hidden) setCursor(Qt::BlankCursor);
+    else unsetCursor();
+    if (renderer_) renderer_->setCursorHidden(hidden);
+}
+
 void ViewerWidget::setOverlayHooks(const trace::render::OverlayHooks& hooks) {
     // The hooks belong to the model, not to a backend. That is the whole point
     // of the split: the commands are the application's, the geometry is the
@@ -159,6 +176,17 @@ void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
     }
     const QPoint p = toDevice(event->position());
     if (!overlayModel_.onMouseUp(p.x(), p.y())) QWidget::mouseReleaseEvent(event);
+}
+
+// Not gated on overlayEnabled(): the model routes this whether or not the
+// floating transport is switched on, because it is a window gesture.
+void ViewerWidget::mouseDoubleClickEvent(QMouseEvent* event) {
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mouseDoubleClickEvent(event);
+        return;
+    }
+    const QPoint p = toDevice(event->position());
+    if (!overlayModel_.onMouseDoubleClick(p.x(), p.y())) QWidget::mouseDoubleClickEvent(event);
 }
 
 void ViewerWidget::leaveEvent(QEvent* event) {

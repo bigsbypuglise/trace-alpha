@@ -54,6 +54,8 @@ public:
     // state and every command stays in the application layer -- see
     // OverlayModel and OverlayHooks.
     void setOverlay(OverlayModel* model) override;
+    bool overlayDrawFailed() const override { return overlayFailed_; }
+    void setCursorHidden(bool hidden) override;
 
     // Rotate/flip, applied to the texture coordinate in the vertex shader --
     // which is why neither pixel shader knows about it, and why it costs one
@@ -123,6 +125,10 @@ private:
     // rasterising an atlas nobody can display.
     bool overlayFailed_ = false;
     bool mouseTracking_ = false;
+    // The surface window has its own class cursor, so hiding the pointer means
+    // answering WM_SETCURSOR ourselves rather than calling Qt's setCursor() on a
+    // widget this HWND sits above.
+    bool cursorHidden_ = false;
 
 public:
     // The window class needs a plain callback; it recovers the instance from

@@ -67,6 +67,11 @@ bool registerSurfaceClass() {
     static const bool registered = [] {
         WNDCLASSEXW wc = {};
         wc.cbSize = sizeof(wc);
+        // CS_DBLCLKS or WM_LBUTTONDBLCLK is NEVER SENT -- Windows delivers a
+        // second WM_LBUTTONDOWN instead, silently, and double-click-to-fullscreen
+        // would look like it had simply not been wired up. A class style, so it
+        // has to be right at registration; there is no per-window fix later.
+        wc.style = CS_DBLCLKS;
         wc.lpfnWndProc = D3D11VideoRenderer::surfaceProcThunk;
         wc.hInstance = GetModuleHandleW(nullptr);
         wc.hCursor = LoadCursor(nullptr, IDC_ARROW);
@@ -164,6 +169,29 @@ LRESULT D3D11VideoRenderer::handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wp,
             if (overlayModel_) overlayModel_->onMouseUp(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
             handled = true;
             return 0;
+
+        case WM_LBUTTONDBLCLK:
+            // Only arrives because the window class carries CS_DBLCLKS. Note the
+            // sequence Windows sends is down, up, DBLCLK, up -- so the overlay
+            // has already seen a complete click on whatever is under the pointer,
+            // which is why the model treats a double-click on a control as that
+            // control being used rather than as a window gesture.
+            if (overlayModel_) {
+                overlayModel_->onMouseDoubleClick(GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+            }
+            handled = true;
+            return 0;
+
+        case WM_SETCURSOR:
+            // Only claim the message for the client area; the surface is a child
+            // with no frame, but answering unconditionally is the habit that
+            // breaks resize cursors the day it grows one.
+            if (cursorHidden_ && LOWORD(lp) == HTCLIENT) {
+                SetCursor(nullptr);
+                handled = true;
+                return TRUE;
+            }
+            break;
 
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:
@@ -458,6 +486,23 @@ bool D3D11VideoRenderer::initialize(QWidget* host, QString& error) {
 
 void D3D11VideoRenderer::setOverlay(OverlayModel* model) {
     overlayModel_ = overlayFailed_ ? nullptr : model;
+}
+
+void D3D11VideoRenderer::setCursorHidden(bool hidden) {
+    if (cursorHidden_ == hidden) return;
+    cursorHidden_ = hidden;
+    // WM_SETCURSOR only arrives on pointer movement, so the change has to be
+    // applied now as well as answered later: hiding it happens precisely when
+    // the pointer has STOPPED moving, and waiting for the next message would
+    // mean the cursor reappears at the moment it is meant to vanish.
+    if (surface_ && surface_ == GetCapture()) {
+        SetCursor(hidden ? nullptr : LoadCursor(nullptr, IDC_ARROW));
+    } else if (surface_) {
+        POINT pt{};
+        if (GetCursorPos(&pt) && WindowFromPoint(pt) == surface_) {
+            SetCursor(hidden ? nullptr : LoadCursor(nullptr, IDC_ARROW));
+        }
+    }
 }
 
 void D3D11VideoRenderer::releaseSizeDependent() {

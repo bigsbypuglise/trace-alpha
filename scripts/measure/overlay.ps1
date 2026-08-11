@@ -153,17 +153,26 @@ Shot "02-revealed"
 # Everything below aims at the panel that just appeared.
 $panel = LocatePanel (Join-Path $OutDir "01-hidden.png") (Join-Path $OutDir "02-revealed.png")
 if ($null -eq $panel) { Write-Output "OVERLAY: FAIL - panel not found between hidden and revealed"; exit 1 }
-if ($panel.h -lt 60 -or $panel.h -gt 100 -or $panel.w -lt 400 -or $panel.w -gt 540) {
-    Write-Output ("OVERLAY: FAIL - located region {0}x{1} is not the 460x76 panel" -f $panel.w, $panel.h)
+if ($panel.h -lt 68 -or $panel.h -gt 108 -or $panel.w -lt 400 -or $panel.w -gt 540) {
+    Write-Output ("OVERLAY: FAIL - located region {0}x{1} is not the 460x84 panel" -f $panel.w, $panel.h)
     exit 1
 }
 $panelTop = $panel.y; $panelLeft = $r.L + $panel.x; $panelH = $panel.h; $panelW = $panel.w
 $panelCx = $r.L + $panel.x + [int]($panel.w / 2)
-$iconY  = $r.T + $panelTop + [int]($panelH * 0.30)
-$trackY = $r.T + $panelTop + [int]($panelH * 0.72)
+# EVERY FRACTION HERE COMES FROM OverlayModel::layout() AND IS EXPRESSED AS A
+# FRACTION OF THE MEASURED PANEL, never as a logical pixel count. The panel is
+# located by difference and its size measured, so a fraction of it is
+# dpr-independent by construction -- which an absolute offset is not, and which
+# is why this script spent a whole phase aiming 1.2px outside every control.
+#
+# Spec phase 6 moved all four: the row centre 0.30 -> 0.36 and the track
+# 0.72 -> 0.76 as the panel grew to hold a 44px play control, and the
+# centre-to-centre gap became (44+34)/2 + 22 = 61 of the 460 panel = 0.1326.
+$iconY  = $r.T + $panelTop + [int]($panelH * 0.36)
+$trackY = $r.T + $panelTop + [int]($panelH * 0.76)
 $playX = $panelCx
-$rewX  = $panelCx - [int](30 * 1.9)
-$ffX   = $panelCx + [int](30 * 1.9)
+$rewX  = $panelCx - [int]($panelW * 0.1326)
+$ffX   = $panelCx + [int]($panelW * 0.1326)
 Write-Output ("OVERLAY panel {0}x{1} at ({2},{3}) - icons y={4}, rew/play/ff x={5}/{6}/{7}" -f `
     $panelW, $panelH, $panel.x, $panelTop, ($iconY - $r.T), ($rewX - $r.L), ($playX - $r.L), ($ffX - $r.L))
 

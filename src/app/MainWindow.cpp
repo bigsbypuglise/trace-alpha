@@ -3,6 +3,7 @@
 #include <QScreen>
 
 #include <QAction>
+#include <QApplication>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QFileDialog>
@@ -25,6 +26,7 @@
 
 #include "ui/OverlaySpike.h"
 #include "ui/ViewerWidget.h"
+#include "render/OverlayModel.h"
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
 #include "core/SequenceParser.h"
@@ -714,6 +716,22 @@ MainWindow::MainWindow() {
         uiServiceLastNs_ = nowNs;
     });
 
+    // Clears the shuttle-rate indicator. Same 1200ms the transport bar's own
+    // label has always used -- read from the bar rather than restated, so the
+    // two surfaces cannot show the rate for different lengths of time.
+    rateFlashTimer_.setSingleShot(true);
+    rateFlashTimer_.setInterval(trace::ui::TransportBar::rateFlashMs());
+    connect(&rateFlashTimer_, &QTimer::timeout, this, [this]() {
+        rateFlashText_.clear();
+        if (viewer_) viewer_->update();
+    });
+
+    // Reveal the floating transport once at startup. With the docked bar out of
+    // the layout it is the only transport there is, so an app that opened with
+    // it already faded would present the user with a black stage and no controls
+    // until they happened to move the pointer.
+    if (viewer_) viewer_->revealOverlay();
+
     statusBar()->showMessage("Ready");
     refreshHud("Idle");
 }
@@ -729,8 +747,26 @@ void MainWindow::setupUi() {
     overlay_ = new trace::ui::TransportOverlay(central);
 
     layout->addWidget(viewer_, 1);
-    layout->addWidget(transportBar_, 0);
-    // Dev diagnostics HUD sits below the transport bar. It carries the perf
+
+    // SPEC PHASE 6: the floating transport replaces the docked bar, so the bar
+    // comes out of the layout -- and the 76 logical pixels it occupied go to the
+    // viewer, which moves the VIDEO RECT and therefore cache depth and every
+    // stall figure (section 22.8, and the phase 2 measurement of `H`). Quote
+    // `display` as well as `win WxH` for anything measured across this change.
+    //
+    // The BAR OBJECT STAYS ALIVE either way, and that is deliberate rather than
+    // lazy. `timelineSlider_` is its child and is the entire scrub state
+    // machine: the press/move/release the overlay drives, `isSliderDown()`,
+    // `scrubJumpPending_`, the step 5.6 play-intent restore. Re-homing that into
+    // the overlay would mean writing a second scrub path, which is the one thing
+    // the OverlayHooks design exists to avoid -- so instead the overlay drives
+    // the real slider and the slider simply is not on screen. A hidden QSlider
+    // emits and accepts everything a visible one does.
+    barIsDocked_ = !trace::render::OverlayModel::enabledByEnvironment();
+    if (barIsDocked_) layout->addWidget(transportBar_, 0);
+    else transportBar_->hide();
+
+    // Dev diagnostics HUD sits below the transport. It carries the perf
     // readouts used for playback validation, so it stays until the playback
     // foundation is signed off.
     layout->addWidget(overlay_, 0);
@@ -783,12 +819,36 @@ void MainWindow::installOverlayHooks() {
         if (st.maxFrame <= 0) return 0.0;
         return static_cast<double>(st.currentFrame) / static_cast<double>(st.maxFrame);
     };
-    hooks.rateText = [this]() {
-        const auto st = playback_.state();
-        const double speed = std::abs(st.speed);
-        if (speed <= 0.0001) return QStringLiteral("PAUSED");
-        return QStringLiteral("%1x").arg(speed, 0, 'g', 2);
+    // The SAME transient the docked bar's label shows, not a second reading of
+    // playback_.state().speed. The old lambda was permanently non-empty -- it
+    // returned "1.0x" or "PAUSED" whatever was happening -- so the panel carried
+    // a standing readout where the spec asks for a rate that appears on a
+    // shuttle press and clears itself.
+    hooks.rateText = [this]() { return rateFlashText_; };
+
+    // Spec phase 6. The overlay checks the two conditions it can see for itself
+    // (pointer over a control, timeline drag in progress); this answers for the
+    // ones only the application knows. A popup menu or a tooltip is a top-level
+    // window of its own, so `activePopupWidget` covers both, and a modal dialog
+    // -- the file chooser -- counts for the same reason.
+    hooks.holdVisible = [this]() {
+        if (QApplication::activePopupWidget() || QApplication::activeModalWidget()) return true;
+        // A child control holding keyboard focus. Every transport widget is
+        // Qt::NoFocus today so this cannot fire yet; it is written now because
+        // phase 7 adds the first text-entry control and this is the predicate it
+        // will need, and because leaving it out would make the omission
+        // invisible rather than deliberate.
+        const QWidget* focus = QApplication::focusWidget();
+        return focus != nullptr && focus != this && focus != viewer_;
     };
+    hooks.setCursorHidden = [this](bool hidden) {
+        // The overlay decides WHEN -- the same inactivity that fades the panel.
+        // The spec hides the cursor in fullscreen only, so this decides WHETHER,
+        // and a window that leaves fullscreen while hidden gets it back below.
+        if (viewer_) viewer_->setCursorHidden(hidden && isFullScreen());
+    };
+    hooks.toggleFullscreen = [this]() { if (fullscreenAction_) fullscreenAction_->trigger(); };
+
     hooks.requestRepaint = [this]() { if (viewer_) viewer_->update(); };
 
     viewer_->setOverlayHooks(hooks);
@@ -827,6 +887,23 @@ void MainWindow::setupSharedActions() {
                                      QKeySequence(Qt::ALT | Qt::Key_Return)});
     connect(fullscreenAction_, &QAction::triggered, this, &MainWindow::toggleFullscreen);
     addAction(fullscreenAction_);
+
+    // "Escape exits fullscreen" (spec phase 6). A SECOND SURFACE onto the same
+    // command, not a second definition of it: it triggers the action above and
+    // owns no window state of its own.
+    //
+    // It is a separate action rather than a fourth shortcut on that one because
+    // Escape must only mean this WHILE FULLSCREEN -- and a disabled QAction does
+    // not consume its shortcut, so Qt passes the key straight through when the
+    // window is not fullscreen. That is the whole rule, expressed as enablement
+    // rather than as a branch inside a handler that has already swallowed the
+    // key. It also cannot go in the plain-key half of ShortcutTable, whose
+    // dispatcher consumes unconditionally.
+    exitFullscreenAction_ = new QAction(tr("Exit Fullscreen"), this);
+    exitFullscreenAction_->setShortcut(QKeySequence(Qt::Key_Escape));
+    exitFullscreenAction_->setEnabled(false);
+    connect(exitFullscreenAction_, &QAction::triggered, this, &MainWindow::toggleFullscreen);
+    addAction(exitFullscreenAction_);
 
     // The dev diagnostics HUD. Owner request, 2026-08-10: a quick way to put the
     // instrument away while judging feel, and back for measuring.
@@ -871,6 +948,7 @@ void MainWindow::setupShortcuts() {
 
     shortcuts_.addAction(ShortcutGroup::File, openAction_);
     shortcuts_.addAction(ShortcutGroup::View, fullscreenAction_);
+    shortcuts_.addAction(ShortcutGroup::View, exitFullscreenAction_);
     shortcuts_.addAction(ShortcutGroup::View, toggleHudAction_);
 
     shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_Space, tr("Play / Pause"),
@@ -946,17 +1024,61 @@ void MainWindow::setupShortcuts() {
 // delivers the keystroke to the widget. That is untested here because it is
 // untestable here -- Go to Frame and Go to Timecode create the first text field,
 // at spec phase 7, and verifying `H` does not eat a digit belongs with them.
+// Spec phase 6 completes what phase 2 started. Phase 2 made this the ONE place
+// the window's fullscreen state changes; this adds what the toggle has to DO --
+// geometry preserved and restored, maximize kept distinct from fullscreen, and
+// the monitor holding the active window.
 void MainWindow::toggleFullscreen() {
+    const bool entering = !isFullScreen();
+    if (entering) {
+        // Captured BEFORE the state change, because Qt's own restore is not
+        // something to rely on across a window manager: saveGeometry() records
+        // the normal-state rectangle and the screen it was on, which is also
+        // what puts the window back on the right monitor afterwards.
+        //
+        // The maximized bit is recorded SEPARATELY. "Do not confuse fullscreen
+        // with maximize" cuts both ways: a maximized window that goes fullscreen
+        // must come back maximized, not restored to its pre-maximize rectangle.
+        preFullscreenGeometry_ = saveGeometry();
+        preFullscreenMaximized_ = isMaximized();
+    }
+
     // XOR on the window state rather than showFullScreen()/showNormal(): the
-    // other state bits (maximized in particular) have to survive the round trip,
-    // and this is the expression that has been shipping.
+    // other state bits have to survive the round trip, and this is the
+    // expression that has been shipping. Qt takes the window fullscreen on the
+    // screen it is currently on, which is the spec's monitor rule -- note that
+    // the multi-monitor half of it is NOT testable on this box (section 20.4:
+    // one display, and Parsec replaces it rather than adding one).
     setWindowState(windowState() ^ Qt::WindowFullScreen);
+
+    if (!entering) {
+        // Clear the fullscreen bit explicitly before restoring, or
+        // restoreGeometry() applies a rectangle to a window still in a state
+        // that ignores it.
+        setWindowState(windowState() & ~Qt::WindowFullScreen);
+        if (!preFullscreenGeometry_.isEmpty()) restoreGeometry(preFullscreenGeometry_);
+        if (preFullscreenMaximized_) setWindowState(windowState() | Qt::WindowMaximized);
+    }
+
     // Read back what actually happened rather than trusting the toggle. A
     // checkable action that flipped its own tick before this handler ran would
     // otherwise be able to disagree with the window.
     viewState_.fullscreen = isFullScreen();
     if (fullscreenAction_) fullscreenAction_->setChecked(viewState_.fullscreen);
+    // The one place Escape's meaning is decided. Disabled, the shortcut is not
+    // consumed at all and Escape keeps whatever meaning the rest of the app
+    // gives it.
+    if (exitFullscreenAction_) exitFullscreenAction_->setEnabled(viewState_.fullscreen);
     if (transportBar_) transportBar_->setFullscreen(viewState_.fullscreen);
+    // Leaving fullscreen must give the pointer back unconditionally: the
+    // cursor is only ever hidden in fullscreen, so a window that exits while
+    // hidden would otherwise keep an invisible pointer over its own titlebar
+    // until the next idle cycle.
+    if (viewer_ && !viewState_.fullscreen) viewer_->setCursorHidden(false);
+    // Changing what the window looks like is interaction, so the transport comes
+    // back -- and in fullscreen with no docked bar it is the only transport
+    // there is.
+    if (viewer_) viewer_->revealOverlay();
     refreshHud("Fullscreen");
 }
 
@@ -1854,11 +1976,27 @@ void MainWindow::startShuttle(int direction, trace::core::ShuttleEntry entry) {
     //    this is the one place a shuttle rate is ever chosen. Shown only for a
     //    run: ordinary 1x forward playback has no rate to announce, and the
     //    predicate that decides whether there is a run is the same one.
-    if (transportBar_) {
-        transportBar_->flashRate(ordinaryForwardPlay
-            ? QString()
-            : QStringLiteral("%1%2x").arg(direction < 0 ? "-" : "+").arg(stride));
-    }
+    flashRate(ordinaryForwardPlay
+        ? QString()
+        : QStringLiteral("%1%2x").arg(direction < 0 ? "-" : "+").arg(stride));
+}
+
+// One rate string, two surfaces. It used to live inside the transport bar's own
+// label, which was fine while the bar was the transport; at spec phase 6 the
+// floating overlay has to show the same thing, and the overlay's rateText hook
+// was reading `playback_.state().speed` directly -- a SECOND source, and one
+// that was permanently visible, so the overlay read "1.0x" and "PAUSED" forever
+// where the spec asks for a rate that appears on a press and clears itself.
+// A readout that is always on is a HUD; a transport announces a change.
+void MainWindow::flashRate(const QString& text) {
+    rateFlashText_ = text;
+    if (transportBar_) transportBar_->flashRate(text);
+    if (text.isEmpty()) rateFlashTimer_.stop();
+    else rateFlashTimer_.start();
+    // The overlay has no widget to invalidate itself, so the repaint is asked
+    // for here -- both when the text appears and, through the timer, when it
+    // goes. Without the second one the rate would linger until the next frame.
+    if (viewer_) viewer_->update();
 }
 
 // The single exact-frame-step command. Left/Right reach it through
@@ -3269,11 +3407,15 @@ void MainWindow::refreshHud(const QString& action) {
                 // Which backend is actually presenting. A GPU path that quietly
                 // fell back to cpu would otherwise be invisible.
                 .arg(viewer_->rendererName())
-                // And whether the floating transport is switched on, for the
-                // same reason: the overlay is drawn by the renderer on both
-                // backends now, so "is it on" is not answerable from anything
-                // else on screen once it has faded out.
-                .arg(viewer_->overlayEnabled() ? QStringLiteral(" +overlay") : QString());
+                // And WHICH TRANSPORT is on screen. Named in both directions
+                // rather than only when set: the floating overlay is the default
+                // as of spec phase 6 and fades itself out, so neither state is
+                // answerable from anything else on screen -- an absent panel
+                // looks the same as a panel that was never enabled, and the
+                // docked bar's absence is now the normal case rather than the
+                // interesting one.
+                .arg(viewer_->overlayEnabled() ? QStringLiteral(" +overlay")
+                                               : QStringLiteral(" +bar"));
 
             // `upload` is the CPU -> GPU transfer for one frame and `tex` is how
             // many GPU textures have been created since launch. Both read 0 on
@@ -3795,7 +3937,15 @@ void MainWindow::refreshHud(const QString& action) {
 // shortcut before the key event is delivered to the window -- so they are in the
 // table as documentation for spec phase 13 and are skipped by the dispatcher.
 void MainWindow::keyPressEvent(QKeyEvent* event) {
-    if (shortcuts_.dispatch(event)) return;
+    if (shortcuts_.dispatch(event)) {
+        // "Relevant keyboard input reveals it" (spec phase 6). The table IS the
+        // definition of relevant: every key in it is a transport, stepping,
+        // shuttle or readout command, and a key it does not own is by
+        // construction not one. Revealing after the handler, so a shuttle press
+        // brings the panel back already showing its new rate.
+        if (viewer_) viewer_->revealOverlay();
+        return;
+    }
     QMainWindow::keyPressEvent(event);
 }
 

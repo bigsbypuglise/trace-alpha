@@ -132,6 +132,21 @@ public:
     // transport.
     virtual void setOverlay(OverlayModel* model) { (void)model; }
 
+    // True when this backend initialized but cannot draw an overlay. Deliberately
+    // separate from initialize() failing, because it was survivable while the
+    // overlay was an off-by-default spike and stopped being survivable at spec
+    // phase 6: the floating transport is now the ONLY transport, so a backend
+    // that silently cannot draw it leaves the window with no controls at all.
+    // The host reads this and falls back to the CPU backend, which always can.
+    virtual bool overlayDrawFailed() const { return false; }
+
+    // Hide or show the pointer over the video surface. Only a backend that owns
+    // a native surface needs to act: it has its own window class with its own
+    // cursor, so Qt's setCursor() on the host widget reaches nothing. The CPU
+    // backend draws into the widget and inherits the host's cursor, which is why
+    // the default here is to do nothing rather than to be pure virtual.
+    virtual void setCursorHidden(bool hidden) { (void)hidden; }
+
     // How the frame is oriented on its way to the screen. A viewing transform
     // only: no decoded pixel, frame identity, cache entry or timing changes,
     // which is why it is here and not anywhere near the decoder.

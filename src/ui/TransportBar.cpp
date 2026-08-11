@@ -344,6 +344,8 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
 // visibility is recomputed on every HUD refresh would either flicker or need a
 // second piece of state saying when it was last set. One call at the press,
 // one timer.
+int TransportBar::rateFlashMs() { return kRateFlashMs; }
+
 void TransportBar::flashRate(const QString& text) {
     if (text.isEmpty()) {
         rateTimer_->stop();

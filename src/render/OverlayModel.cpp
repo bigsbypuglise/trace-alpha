@@ -30,10 +30,16 @@ constexpr int kAutoHideMs = 2000;
 // something is actually animating, which is what keeps a hidden overlay free.
 constexpr int kAnimTickMs = 16;
 
+// The approved package's control geometry, adopted at spec phase 6. Phase 2
+// deliberately declined to apply it to the docked bar, because this is the
+// geometry of the FLOATING transport and re-laying-out a widget phase 6 removes
+// from the layout would have moved the video rect for a component with no
+// future. This is that component.
 constexpr double kPanelWidthLogical = 460.0;
-constexpr double kPanelHeightLogical = 76.0;
+constexpr double kPanelHeightLogical = 84.0;
 constexpr double kPanelMarginLogical = 28.0;
-constexpr double kIconLogical = 30.0;
+constexpr double kPlayLogical = 44.0;
+constexpr double kUtilLogical = 34.0;
 constexpr double kHandleLogical = 16.0;
 
 // The approved artwork, drawn into the atlas cell.
@@ -76,18 +82,33 @@ void paintIcon(QPainter& p, const QRectF& r, const QString& baseName) {
 
 } // namespace
 
-// Two names are accepted on purpose. TRACE_OVERLAY is what this is now -- a
-// renderer-neutral overlay, not a D3D11 compositing trick -- and
-// TRACE_OVERLAY_COMPOSITED is retained because the measurement harness
-// (`overlay.ps1`, `overlay_cost.ps1`) sets it, and silently breaking the
-// instrument that has to prove this change is free would be the wrong kind of
-// tidy.
+// THE FLOATING TRANSPORT IS THE DEFAULT AS OF SPEC PHASE 6, and this one
+// function decides it for the whole application. MainWindow asks it whether to
+// put the docked bar in the layout and ViewerWidget asks it whether to draw the
+// overlay, so the two cannot disagree and there is no combination of knobs that
+// leaves the window with no transport at all.
+//
+// `TRACE_TRANSPORT_BAR=1` is the control and the escape hatch: it restores the
+// docked bar exactly as it shipped through phase 5. It is what the eight
+// measurement scripts that locate the timeline by scanning for its groove need
+// in order to keep running unchanged, and it is the negative control for every
+// figure this phase produces.
+//
+// Three names are accepted, which is two more than a fresh design would have.
+// `TRACE_OVERLAY` is the phase-2 name and `TRACE_OVERLAY_COMPOSITED` the spike's;
+// both are kept because `overlay.ps1` and `overlay_cost.ps1` set them, and
+// silently breaking the instrument that has to prove this change is free would
+// be the wrong kind of tidy. Either set to 0 now selects bar mode, so turning
+// the overlay off means asking for the other transport rather than for none.
 bool OverlayModel::enabledByEnvironment() {
     static const bool on = [] {
+        const QByteArray bar = qgetenv("TRACE_TRANSPORT_BAR");
+        if (!bar.isEmpty() && bar != "0") return false;
         const QByteArray a = qgetenv("TRACE_OVERLAY");
         if (!a.isEmpty()) return a != "0";
         const QByteArray b = qgetenv("TRACE_OVERLAY_COMPOSITED");
-        return !b.isEmpty() && b != "0";
+        if (!b.isEmpty()) return b != "0";
+        return true;
     }();
     return on;
 }
@@ -101,10 +122,25 @@ OverlayModel::OverlayModel() {
     autoHideTimer_.setSingleShot(true);
     QObject::connect(&autoHideTimer_, &QTimer::timeout, [this]() {
         // Never hide under the pointer or mid-drag: an overlay that vanishes
-        // while being used is worse than one that never appears.
-        if (hover_ != Region::None || draggingTimeline_) { autoHideTimer_.start(); return; }
+        // while being used is worse than one that never appears. The rest of
+        // the spec's hold list -- a popup menu, a tooltip, a child control
+        // holding focus -- is application state the overlay cannot see, so it
+        // is asked for rather than guessed at.
+        if (hover_ != Region::None || draggingTimeline_
+            || (hooks_.holdVisible && hooks_.holdVisible())) {
+            autoHideTimer_.start();
+            return;
+        }
         targetOpacity_ = 0.0;
         startAnimation();
+        // The cursor goes with the panel and on the same idle timer, which is
+        // what makes "the interface got out of the way" one event rather than
+        // two that happen to be close together. Whether it is actually hidden
+        // is the host's call -- the spec asks for it in fullscreen only.
+        if (!cursorHidden_) {
+            cursorHidden_ = true;
+            if (hooks_.setCursorHidden) hooks_.setCursorHidden(true);
+        }
     });
 
     // Reserve once. The draw path must not allocate, and the quad count is
@@ -158,17 +194,26 @@ void OverlayModel::layout() {
     const double top = snap(surfaceSize_.height() - panelH - margin);
     dPanel_ = QRectF(left, top, panelW, panelH);
 
-    iconPx_ = snap(kIconLogical * s);
+    playPx_ = snap(kPlayLogical * s);
+    utilPx_ = snap(kUtilLogical * s);
     handlePx_ = snap(kHandleLogical * s);
-    const double iconY = snap(top + (panelH * 0.30) - iconPx_ / 2.0);
+
+    // The three controls sit on one centre line and differ in size, so each
+    // rect is derived from that line rather than from a shared top edge --
+    // aligning their tops would put the two 34px glyphs 5px above the 44px one.
+    const double rowCy = top + panelH * 0.36;
     const double cx = left + panelW / 2.0;
-    const double gap = snap(iconPx_ * 1.9);
-    dPlay_ = QRectF(snap(cx - iconPx_ / 2.0), iconY, iconPx_, iconPx_);
-    dRewind_ = QRectF(snap(cx - gap - iconPx_ / 2.0), iconY, iconPx_, iconPx_);
-    dFfwd_ = QRectF(snap(cx + gap - iconPx_ / 2.0), iconY, iconPx_, iconPx_);
+    // Centre-to-centre: half of each control plus a constant clear gap, so the
+    // visual spacing stays even when the two sizes differ.
+    const double gap = snap((playPx_ + utilPx_) / 2.0 + 22.0 * s);
+    dPlay_ = QRectF(snap(cx - playPx_ / 2.0), snap(rowCy - playPx_ / 2.0), playPx_, playPx_);
+    dRewind_ = QRectF(snap(cx - gap - utilPx_ / 2.0), snap(rowCy - utilPx_ / 2.0),
+                      utilPx_, utilPx_);
+    dFfwd_ = QRectF(snap(cx + gap - utilPx_ / 2.0), snap(rowCy - utilPx_ / 2.0),
+                    utilPx_, utilPx_);
 
     const double trackInset = snap(24.0 * s);
-    const double trackY = snap(top + panelH * 0.72);
+    const double trackY = snap(top + panelH * 0.76);
     dTrack_ = QRectF(left + trackInset, snap(trackY - 2.0 * s),
                      panelW - trackInset * 2.0, std::max(1.0, snap(4.0 * s)));
 }
@@ -177,15 +222,19 @@ void OverlayModel::rebuildAtlas() {
     const double s = dpr_;
     // The SAME snapped sizes layout() placed, not the constants recomputed --
     // an atlas cell one pixel off from its destination rect would reintroduce
-    // the resample the snapping exists to remove.
-    const double icon = iconPx_;
+    // the resample the snapping exists to remove. Two icon sizes since spec
+    // phase 6, and the row is as tall as the larger of them.
+    const double play = playPx_;
+    const double util = utilPx_;
+    const double rowH = std::max(play, util);
     const double handle = handlePx_;
     const double panelW = dPanel_.width();
     const double panelH = dPanel_.height();
 
     // Layout the atlas: panel on top, then a row of icons.
-    const int atlasW = static_cast<int>(std::ceil(std::max(panelW, icon * 4 + handle + 40)));
-    const int atlasH = static_cast<int>(std::ceil(panelH + icon + 16));
+    const int atlasW = static_cast<int>(
+        std::ceil(std::max(panelW, play * 2 + util * 2 + handle + 40)));
+    const int atlasH = static_cast<int>(std::ceil(panelH + rowH + 16));
     if (atlasW <= 0 || atlasH <= 0) return;
 
     QImage image(atlasW, atlasH, QImage::Format_ARGB32_Premultiplied);
@@ -205,14 +254,14 @@ void OverlayModel::rebuildAtlas() {
 
     const double row = panelH + 8;
     double x = 4;
-    aPlay_ = QRectF(x, row, icon, icon);   paintIcon(p, aPlay_, "play");        x += icon + 4;
-    aPause_ = QRectF(x, row, icon, icon);  paintIcon(p, aPause_, "pause");      x += icon + 4;
+    aPlay_ = QRectF(x, row, play, play);   paintIcon(p, aPlay_, "play");        x += play + 4;
+    aPause_ = QRectF(x, row, play, play);  paintIcon(p, aPause_, "pause");      x += play + 4;
     // Artwork follows behaviour, one control at a time -- and as of spec phase 5
     // both of them have moved. The right region became Fast-forward at phase 4
     // and the left became Rewind here, so both carry the continuous-scan glyphs
     // and neither frame-step glyph is in the tree any more.
-    aRewind_ = QRectF(x, row, icon, icon); paintIcon(p, aRewind_, "rewind");       x += icon + 4;
-    aFfwd_ = QRectF(x, row, icon, icon);   paintIcon(p, aFfwd_, "fast-forward");   x += icon + 4;
+    aRewind_ = QRectF(x, row, util, util); paintIcon(p, aRewind_, "rewind");       x += util + 4;
+    aFfwd_ = QRectF(x, row, util, util);   paintIcon(p, aFfwd_, "fast-forward");   x += util + 4;
 
     aHandle_ = QRectF(x, row, handle, handle);
     p.setBrush(QColor(255, 255, 255));
@@ -353,6 +402,13 @@ void OverlayModel::reveal() {
     targetOpacity_ = 1.0;
     startAnimation();
     autoHideTimer_.start();
+    // Guarded on the mirrored state rather than called unconditionally: reveal()
+    // runs on every pointer move, and this is a cross-boundary call into the
+    // host.
+    if (cursorHidden_) {
+        cursorHidden_ = false;
+        if (hooks_.setCursorHidden) hooks_.setCursorHidden(false);
+    }
 }
 
 bool OverlayModel::onMouseMove(int x, int y) {
@@ -372,7 +428,15 @@ bool OverlayModel::onMouseMove(int x, int y) {
 }
 
 bool OverlayModel::onMouseDown(int x, int y) {
-    if (!enabled_ || !visible()) return false;
+    if (!enabled_) return false;
+    // "Clicking the video reveals it" -- so the reveal happens before the
+    // visibility test, and a click on a hidden overlay brings it back rather
+    // than pressing a control the user cannot see. The press is NOT also
+    // delivered to that control: a click has to land on something visible.
+    const bool wasVisible = visible();
+    reveal();
+    if (!wasVisible) return false;
+
     const Region r = regionAt(x, y);
     if (r == Region::None) return false;
 
@@ -422,6 +486,37 @@ bool OverlayModel::onMouseUp(int x, int y) {
     }
     if (hooks_.requestRepaint) hooks_.requestRepaint();
     return was != Region::None;
+}
+
+bool OverlayModel::onMouseDoubleClick(int x, int y) {
+    // Deliberately NOT gated on enabled_: with the docked bar selected there is
+    // no overlay to consult, and double-click-to-fullscreen is a spec'd window
+    // gesture that must not disappear with the transport it is unrelated to.
+    if (enabled_) {
+        const bool wasVisible = visible();
+        reveal();
+        // A double-click on a control is THAT CONTROL BEING PRESSED AGAIN, not a
+        // request to change the window -- so it is forwarded as a press rather
+        // than swallowed, and the release that follows turns it into a click the
+        // same way any other press does.
+        //
+        // Windows sends down, up, DBLCLK, up: the second press of a rapid pair
+        // arrives as WM_LBUTTONDBLCLK and NOT as WM_LBUTTONDOWN. Consuming it
+        // would drop every other press inside the double-click interval, which
+        // is precisely the gesture the shuttle ladder is specified by -- six
+        // rapid presses of Fast-forward must reach 30x, and after phase 6 the
+        // overlay's is the only Fast-forward there is. Qt's own
+        // QWidget::mouseDoubleClickEvent forwards to mousePressEvent for the
+        // same reason, which is why the docked bar's buttons never had this
+        // problem and why the fault would have looked like an overlay-only
+        // ladder bug.
+        if (wasVisible && regionAt(x, y) != Region::None) return onMouseDown(x, y);
+    }
+    if (hooks_.toggleFullscreen) {
+        hooks_.toggleFullscreen();
+        return true;
+    }
+    return false;
 }
 
 void OverlayModel::onMouseLeave() {

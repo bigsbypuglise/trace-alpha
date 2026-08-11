@@ -3872,11 +3872,22 @@ d3d11 figures to the digit (99.8%, 0 doubled, 0 over budget, handler 25.22ms, wo
 1. **The `ui gap max` asymmetry above is unattributed** (§31.2). Repeatable on both backends
    and in the control's favour to explain, not the overlay's. Worth an hour if the drag path
    is ever revisited; not blocking.
-2. **The overlay's timeline press may not land exactly the way a groove click does.** A
-   groove click is an absolute set and lands through Step (`scrubJumpPending_`); the overlay
-   calls `setSliderDown(true)` then `setValue()`. Both reported `delta 0` here, but the
-   press-lands-exactly *path* was not isolated — test it in phase 6 with the playhead
-   deliberately far from the press point.
+2. ~~**The overlay's timeline press may not land exactly the way a groove click does.**~~
+   **CLOSED at spec phase 6, 2026-08-11: it lands exactly.** A groove click is an absolute
+   set and lands through Step (`scrubJumpPending_`); the overlay calls `setSliderDown(true)`
+   then `setValue()`, the opposite order. Both orders end with `scrubJumpPending_` true when
+   the coalescing flush runs, so both take the Step landing.
+
+   Measured with the playhead **deliberately far from the press point**, as this item
+   required — `scripts/measure/overlay_press.ps1`, 4K H.264, playhead at frame 0, one click
+   at 0.85 of the track. Overlay: `frame 101`, `target 101 shown 101`, `delta 0`,
+   `dst YUV420P8 planar`, `walk 11f`, `n=2`. Groove control: `frame 102`,
+   `target 102 shown 102`, `delta 0`, same full-resolution planar destination, `walk 12f`,
+   `n=2`. The one-frame difference is pixel quantisation — a 404px overlay track against an
+   827px groove — not a landing error.
+
+   The script keeps both legs. A press near the target cannot tell an exact landing from a
+   lazy one, and a leg that can only report success proves nothing.
 3. **`src/ui/OverlaySpike.*` is now doubly superseded** — it was the Qt-widget probe §18.4
    closed, and it holds the only `MouseButtonDblClick` in the tree. Retire it during phase 2's
    icon-source reconciliation.

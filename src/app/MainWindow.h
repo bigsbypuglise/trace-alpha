@@ -2,6 +2,7 @@
 
 #include <QMainWindow>
 #include <QTimer>
+#include <QByteArray>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QString>
@@ -74,6 +75,10 @@ private:
     // the window manager actually did.
     void toggleFullscreen();
     void setHudVisible(bool visible);
+    // The spec's temporary shuttle-rate indicator, driven from startShuttle --
+    // the one place a shuttle rate is ever chosen -- and delivered to both the
+    // docked bar's label and the floating overlay's text from one string.
+    void flashRate(const QString& text);
     void syncTransportBar();
     // Wires the renderer-composited overlay spike to the existing actions.
     void installOverlayHooks();
@@ -321,6 +326,20 @@ private:
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
     trace::ui::TransportBar* transportBar_ = nullptr;
+    // Whether the transport bar is in the layout (TRACE_TRANSPORT_BAR) or the
+    // floating overlay is the transport. The bar object exists in both cases,
+    // because it owns timelineSlider_ and therefore the whole scrub path.
+    bool barIsDocked_ = false;
+    // The spec's temporary shuttle-rate indicator, held here rather than in a
+    // widget so the docked bar's label and the floating overlay's text are one
+    // value. Cleared by rateFlashTimer_.
+    QString rateFlashText_;
+    QTimer rateFlashTimer_;
+    // Geometry to restore when leaving fullscreen, and whether the window was
+    // maximized when it entered. Fullscreen and maximize are different states
+    // and the spec says not to confuse them.
+    QByteArray preFullscreenGeometry_;
+    bool preFullscreenMaximized_ = false;
     // Both exact-frame-step commands still exist and are still shared -- they
     // are reached by the Left and Right arrows alone from spec phases 5 and 4
     // respectively. The spec's "frame stepping becomes keyboard-only" removes
@@ -342,6 +361,10 @@ private:
     // place the spec's "menus, buttons, tooltips, shortcuts and checked states
     // stay synchronized" requirement was not already met.
     QAction* fullscreenAction_ = nullptr;
+    // Escape, as a second surface onto fullscreenAction_. Its ENABLED state is
+    // the "only while fullscreen" rule: a disabled QAction does not consume its
+    // shortcut, so Escape passes through untouched when windowed.
+    QAction* exitFullscreenAction_ = nullptr;
     QAction* toggleHudAction_ = nullptr;
     QAction* openAction_ = nullptr;
 

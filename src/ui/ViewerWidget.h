@@ -78,6 +78,16 @@ public:
     // that is working from every other number -- the same reason rendererName()
     // is reported.
     bool overlayEnabled() const { return overlayModel_.enabled(); }
+    // Reveal the floating transport and restart its idle timer. The host's entry
+    // point for the one reveal source that is not a mouse event over the video:
+    // "relevant keyboard input reveals it". Mouse reveals are handled inside the
+    // model, on both backends' own input paths.
+    void revealOverlay() { overlayModel_.reveal(); }
+    // Hide or show the pointer over the video. Both paths are applied because
+    // which one has effect depends on the adopted backend: the CPU renderer
+    // draws into this widget and takes Qt's cursor, while the D3D11 surface is a
+    // child HWND with its own class cursor that Qt cannot reach.
+    void setCursorHidden(bool hidden);
 
     // Rotate/flip. Held here as well as handed to the backend, so a renderer
     // that fails and is replaced by the CPU fallback inherits the orientation
@@ -98,6 +108,7 @@ protected:
     void mouseMoveEvent(QMouseEvent* event) override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void leaveEvent(QEvent* event) override;
 
 private:

@@ -69,6 +69,10 @@ public:
     // cleared after a moment. An empty string clears it immediately, which is
     // what ordinary 1x playback passes.
     void flashRate(const QString& text);
+    // How long a flashed rate stays up. Exposed so the floating overlay's copy
+    // of the indicator clears at the same moment this one does, rather than
+    // through a second constant that has to be kept equal by hand.
+    static int rateFlashMs();
 
 signals:
     // Spec phases 4 and 5: the two visible side controls are Rewind and

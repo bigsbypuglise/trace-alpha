@@ -1,11 +1,13 @@
-# The interface pass is open, the transport redesign is complete, and phase 6 is next.
+# The interface pass is open, the floating transport ships, and phase 7 is next.
 
-Supersedes the previous version. **Spec phase 5 shipped** — the reverse shuttle interface,
-which completes the transport redesign: both side controls are shuttles, frame stepping is the
-arrow keys alone, and `TRACE_SHUTTLE_ENTRY` is retired. **The next thing to do is spec phase 6,
-fullscreen consolidation and overlay auto-hide** — which is the phase most likely to cost
-performance, because it removes `transportBar_` from the layout in favour of the floating
-overlay. Paste everything below the line into a fresh session in the repo root.
+Supersedes the previous version. **Spec phase 6 shipped** — the floating overlay is now the
+only transport, the docked bar is out of the layout behind `TRACE_TRANSPORT_BAR=1`, and
+fullscreen is consolidated (Escape, geometry restore, maximize kept distinct, double-click).
+**The next thing to do is spec phase 7, Time Display and zero-based frame UI** — which creates
+the first text-entry control in the app. **But read the owner-feedback item first**: phase 6
+was handed to the owner for a feel judgement that had never been taken, and his answer changes
+what phase 7 should start with. Paste everything below the line into a fresh session in the
+repo root.
 
 ---
 
@@ -59,7 +61,20 @@ A later summary that says "the transport is done" has widened it.
 - **EXR / image sequences and OCIO.** `TRACE_WITH_OIIO` is undefined in vcpkg and CI, so EXR
   does not open today. Largest untouched area, and a feature rather than a fix.
 
-## THE OPEN PHASE — interface pass 1, now at phase 6
+## FIRST: there is an owner question outstanding from phase 6
+
+The floating transport was handed over on 2026-08-11 with three things nobody has ever
+looked at — **the 165ms fade, the 2s inactivity delay, and whether the panel reads as a
+transport rather than a HUD.** All three are measured and none is judged. Per the project's
+own rule that judgement is the owner's and must be taken **at the machine, not over Parsec**.
+
+**If he has answered, act on the answer before starting phase 7.** The fade duration
+(`kFadeMs`), the idle delay (`kAutoHideMs`) and the panel geometry are all constants at the
+top of `src/render/OverlayModel.cpp`; the control geometry is the approved package's 44×34,
+so a change there is a change to the approved spec rather than a tweak. **If he has not
+answered, ask once and start phase 7 anyway** — nothing in phase 7 depends on it.
+
+## THE OPEN PHASE — interface pass 1, now at phase 7
 
 The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 `docs/interface-pass-1-spec.md`; the phase record is `docs/interface-pass-1-progress.md`.
@@ -82,47 +97,53 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 - **Phase 5 shipped** — the reverse shuttle interface. The transport redesign is now
   COMPLETE and the spec's validation list for it reads straight down. Full record in the
   progress doc.
-- CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`
-  and run 87 on `90140f9`, all including the renderer selftest.
+- **Phase 6 shipped on 2026-08-11** — the floating transport replaces the docked bar,
+  auto-hide is finished to the spec's list, and fullscreen is consolidated. Full record in the
+  progress doc.
+- CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`,
+  run 87 on `90140f9` and run 88 on `883d216`, all including the renderer selftest.
 
-### Start at spec phase 6, and read `docs/interface-pass-1-progress.md` first
+### Start at spec phase 7, and read `docs/interface-pass-1-progress.md` first
 
-**Phase 6 is the one most likely to cost performance, and priority 1 is the binding
-constraint.** It removes `transportBar_` from the `QVBoxLayout` in favour of the floating
-composited overlay, which changes the **video rect** — and the video rect is what cache depth
-and every stall figure follow (§22.8, and the phase 2 measurement of `H` where `win` did not
-move and `display` went 640x360 → 1280x720 with `stalls` 70 of 370 → 127 of 450). **Measure it
-when it lands, not at phase 14, and quote `display` as well as `win WxH`.**
+**Phase 7 creates the first text-entry control in the app**, which is when the spec's "must
+not fire while focus is inside a text-entry control" finally has something to guard — and
+`ShortcutTable`'s key-only matching makes that check **more** important, not less. Qt's own
+mechanism covers it (`QLineEdit` accepts `QEvent::ShortcutOverride` for printable keys), but
+that has never executed here because it has never been reachable. **Verify that `H` does not
+eat a digit, and that the digits reach Go to Frame.**
 
-Three things are known about it going in:
+Phase 7 also has a decision, not just work: **the `Timecode:` readout is already synthesised
+from the frame index**, which is the thing the spec forbids. Relabel it as elapsed, or disable
+it, when no source timecode exists.
 
-- **After phase 6 the ONLY Rewind and Fast-forward controls that exist are the overlay's.**
-  Both were re-pointed at the shuttle (phases 4 and 5) and both hooks have now been executed
-  on both backends — state 07 of `overlay.ps1` reads `speed -2.00x | Reverse Play` on `d3d11`
-  and on `cpu`. That is twice. Treat the overlay's input path as **new coverage rather than
-  established**: it had been aiming 1.2px outside every control from phase 2 until phase 4
-  found it, and none of its interaction legs had ever registered.
-- **The open question is plan §31.5 item 2** — whether the overlay's timeline *press* lands
-  exactly the way a groove click does. Test with the playhead deliberately far from the press
-  point, because a press that is already near the target cannot tell the two apart.
-- **`TRACE_RENDERER=cpu` must keep its transport.** §2 item 1 of the spec: the escape hatch has
-  no compositor of its own, so the overlay's renderer-neutral home is what stops phase 6 from
-  taking the transport away from the documented fallback. `OverlayModel` already owns layout,
-  art, fade and hit-testing and emits quads that both backends draw, so this is a property to
-  verify rather than work to do — verify it.
+**Two things phase 6 added that phase 7 inherits**:
 
-Phase 6 also owns what phase 2 deliberately deferred: **Escape-exits, geometry save/restore,
-the monitor rule, and the approved package's control geometry** (34×34 utility targets, 44×44
-play/pause in a rounded panel). Phase 2 declined to re-lay-out a bar that phase 6 deletes.
+- **`OverlayHooks::holdVisible` already carries the child-focus clause.** It cannot fire today
+  because every transport widget is `Qt::NoFocus`; the moment Go to Frame exists it can, and
+  the overlay must not fade out from under an open dialog. That is written and untested for
+  exactly the reason it could not be tested.
+- **The rate readout is a transient now**, shared by the bar's label and the overlay's text
+  through `MainWindow::rateFlashText_`. If phase 7 adds a second readout to the panel, it goes
+  through one source the same way — the overlay used to read `playback_.state().speed`
+  directly and was therefore permanently non-empty, which is a HUD, not a transport.
 
-**Run the harness the way phases 4 and 5 learned to.** The clip is part of the measurement:
+**Run the harness the way phases 4, 5 and 6 learned to.** The clip is part of the measurement:
 `transitions.ps1` needs a **16:9 clip of roughly 250+ frames** (`M&M_TopGun_1080.mp4`), because
 a 9:16 clip pillarboxes four fifths of the picture signature onto black and a 121-frame clip
 lets a run reach the tail inside the observation window. Both faults produce PASSes that mean
 nothing. Its `-LadderOut` leg needs the **412-frame** clip and uses `FastClick`, because at 30×
 that clip lasts 0.57s of wall time and `Click`'s own dwell alone spent three times the budget.
 
-**Three things phases 4 and 5 settled that phase 6 must not re-open:**
+**AND MOST OF THE HARNESS NEEDS `-Env TRACE_TRANSPORT_BAR=1` NOW.** `scrub.ps1`,
+`revplay.ps1`, `lifecycle.ps1`, `transitions.ps1`, `shuttleland.ps1` and `previewshot.ps1` all
+locate the timeline by scanning for the docked groove's colour, and phase 6 took the bar out of
+the layout. A script run without it does not fail loudly in every case — `scrub.ps1` exits at
+"groove not found" **before** dragging, and the capture then reads `paints 0/1` at `frame 0`,
+which looks like an app that did nothing rather than a harness that ran nothing. The overlay's
+own equivalents are `overlay_drag.ps1` (drag cost, groove control built in),
+`overlay_press.ps1` (the press landing) and `overlay_ladder.ps1` (the rung ladder).
+
+**Four things phases 4–6 settled that phase 7 must not re-open:**
 
 - **`landPreviousExactly` is gone and no shuttle press lands the previous run.** K, Space and
   running off the end still land. The HUD's `land N` field stays and **reads 0 through any
@@ -130,19 +151,21 @@ that clip lasts 0.57s of wall time and `Click`'s own dwell alone spent three tim
 - **The buttons enter both ladders at 2× and the keyboard enters at 1×.** The difference is an
   argument to `PlaybackController` (`ShuttleEntry::AtOneX`/`AtTwoX`) applied at the first rung
   only, never a call site writing `speed`. The overlay's controls trigger the same two QActions
-  the bar's do, so phase 6 inherits this by construction — do not let it become a third path.
+  the bar's do, so this is inherited by construction — do not let it become a third path.
 - **Artwork follows behaviour, one control at a time.** Both frame-step glyphs have left the
   tree, `interface/transport/` is exactly the approved package's glyphs, and nothing has a
   `-72` rendition. `loadIcon`'s `-72` branch is deliberately kept.
+- **There is exactly one place that decides which transport is on screen**, and both
+  `MainWindow` (dock the bar?) and `ViewerWidget` (draw the overlay?) ask it:
+  `OverlayModel::enabledByEnvironment()`. That is what makes "no combination of knobs leaves
+  the window with no transport" a property rather than a convention. A new surface asks it too.
 
 ### The rest of the phase list, with what is known about each
 
-7. **Phase 7 has a decision, not just work**: the `Timecode:` readout is already synthesised
-   from the frame index, which is the thing the spec forbids. Relabel it as elapsed, or
-   disable it, when no source timecode exists. Phase 7 also creates **the first text-entry
-   control in the app**, which is when the spec's "must not fire while focus is inside a
-   text-entry control" finally has something to guard — and the shortcut table's key-only
-   matching makes that check more important, not less.
+8. **Phase 8 is the Share menu and ordinary path copying**, and it is where §2 item 5's
+   distinction bites: `MediaIoSource`'s volume classifier answers a *storage-class* question,
+   which is a good necessary condition for LucidLink and a bad sufficient one. The
+   authoritative gate is the installed integration.
 10. **Phase 10 is now wiring only** — five QActions onto `viewer_->setViewTransform()`, plus
     reset on new media. `TRACE_VIEW_TRANSFORM` is the interim knob.
 13. **Phase 13 renders the Keyboard Shortcuts window from `ShortcutTable::rows()`.** The table
@@ -154,6 +177,12 @@ Every phase runs the playback and scrub regression, not just the last one. `cade
 `scrub.ps1`, `lifecycle.ps1`, `transitions.ps1` and `stalls_vs_window.ps1` exist and the
 baselines are recorded. Quote `hitch`, `win WxH` **and** `display`.
 
+**Build the control binary in a `git worktree`, not by stashing**, and **verify every swap by
+hash**. Phase 6 did it that way and the working tree was never touched; the alternative leaves
+a failed `Copy-Item` running the previous binary, which silently makes an A/B two runs of the
+same build. `windeployqt` the control, and copy the `av*`/`sw*` DLLs across from the main
+build or it will not launch.
+
 ## Loose ends worth knowing about, none of them blocking
 
 - **The keyframe grid can be learned as 2, and snapping then engages at stride 1.** Seen on the
@@ -163,9 +192,11 @@ baselines are recorded. Quote `hitch`, `win WxH` **and** `display`.
   other runs of the same gesture on the same binary. **Reverse 1× on that gesture is bimodal**
   — `frames 114 / elapsed 4.75s` at 100%, or `frames 97 / elapsed 4.59s` at 88.1% — so a
   single run cannot support a regression claim in either direction. Take three.
-  **Phase 5 saw neither the slow mode nor `SNAP gop 2` in six runs** — but on a 1920x1080 @
-  59.999Hz display rather than the panel it was seen on, so that is not evidence it is fixed.
-  Still open, still unattributed.
+  **Phase 5 saw neither the slow mode nor `SNAP gop 2` in six runs, and phase 6 saw neither in
+  six more** — but both sessions ran on a 1920x1080 @ 59.999Hz display rather than the panel it
+  was seen on, so twelve clean runs are still not evidence it is fixed. Still open, still
+  unattributed. **It has now gone unreproduced on the wrong display twice; the next attempt to
+  settle it has to be at the panel or it will produce a thirteenth clean run and mean nothing.**
 - **30× is only honestly measurable on the 412-frame 1080p clip**, and even there a *held* 30×
   run traverses the whole clip in **0.57s of wall time**. That budget is smaller than the
   harness's own mouse timing: `Click` spends ~210ms of dwell per press, so six presses spanned
@@ -207,6 +238,15 @@ did not find it**: reverse → click → arrow-key passed on a broken build. It 
 click → **K**. Phase 4 then found the axis itself was wrong: once a button becomes a shuttle
 *entry*, "exits" no longer enumerates anything.
 
+**And the same control on two input paths is two features.** Phase 6's overlay controls
+trigger the identical QActions the docked bar's do — inherited by construction, verified, and
+still wrong in one case, because *reaching* the action is not the same on both. Windows
+delivers the second press of a rapid pair as `WM_LBUTTONDBLCLK`, and
+`QWidget::mouseDoubleClickEvent` forwards it to `mousePressEvent` while a raw Win32 handler
+does not. So the bar's ladder reached 30× on six presses and the overlay's reached 10×, from
+one shared action. **The shared command hid the unshared plumbing**, and the bar could never
+have shown it.
+
 **A harness that cannot fail is not a check — and one that cannot PASS is worse.** Two in
 phase 4 alone, both silent: a 9:16 clip puts four fifths of the picture signature on black, and
 an overlay aim 1.2px outside every control still prints a plausible number for all twelve
@@ -215,7 +255,18 @@ states. Phase 5 found the other kind: the ladder cap leg spent ~1.6s of mouse dw
 ladder. **That one accuses the app instead of excusing it**, which is why it survived a phase.
 The paired discipline is the **negative control**: phase 5's re-derived matrix FAILs exactly
 four cases on the phase 4 binary and passes all 25 on its own, and without that run the
-re-derivation would have proved nothing.
+re-derivation would have proved nothing. Phase 6 did the same for the double-click fault —
+`overlay_ladder.ps1` reads ±30× on the fix and **±10× on a binary with the one-line fix
+reverted**, which is what says the check tests the change at all.
+
+**Phase 6's ladder leg could not pass twice before it could fail once, for two unrelated
+reasons, and both were arithmetic.** `restart.ps1` leaves the playhead at frame 0, so the
+rewind leg ran off the head immediately and read `speed 0.00x` — a correct stop, reported as a
+ladder that never climbed. Then `capture.ps1` raises the window and sleeps **300ms**, which at
+30× on a 24fps clip is **216 frames**, enough on its own to run a 412-frame clip off the end
+and capture an ended run. It grabs the window directly now. Phase 5 hit the second one from
+the other side. **Price a harness's own dwell against the thing it is measuring before
+believing its result.**
 
 **Reproduce on the reported case AND on a healthy one before theorising.** The fast-forward
 fault was reported as affecting every format. It did — but 4K H.264 still reached 3.97× of 4×
@@ -256,6 +307,15 @@ and is the only stall figure comparable across sessions.**
 window, and `H` changes one without the other: `win 1280x843` with the HUD shown and hidden,
 `display 640x360` against `1280x720`, `stalls 70 of 370` against `127 of 450`.
 
+**And phase 6 showed the pair can move the OTHER way round.** Removing the docked transport
+bar was expected to enlarge the video rect; at the default startup size it shrank the
+**window** instead, because the window is sized from the layout's own hint and the viewer keeps
+its 640×360 minimum — `win 1280x843 → 1280x767` with `display 640x360 → 640x367`, and on 4444
+`display 652x367` did not move at all. That is why no stall or cache figure moved. **At a held
+window size the rect really would grow**, so a maximized or user-sized window is the case to
+check if a scrub number is ever questioned. The HUD names the transport too now: `+overlay`
+or `+bar`.
+
 ## Working notes
 
 - github.com is reachable from the Windows box and you can push directly. Verify with
@@ -285,15 +345,26 @@ window, and `H` changes one without the other: `win 1280x843` with the HUD shown
   the script crashing.
 - **XML comments cannot contain `--`.** `app/resources.qrc` is XML; `rcc` fails at configure
   time with a parse error that names a line and not the reason.
-- Harness: `revplay.ps1` (both directions — `-Forward` drives L), `transitions.ps1` (every
-  shuttle run boundary, **25 cases**; **16:9, 250+ frames**, and the **412-frame** clip for
-  `-LadderOut`), `shuttleland.ps1` (the reverse-to-forward
-  direction change), `scrub.ps1` (`-SnapRelease` for anything about the landing; `-Reversals`
-  does not guarantee one), `lifecycle.ps1` (**run both `-PlayThroughDrag` and
-  `-PausedThroughDrag`**), `cadence.ps1`, `overlay.ps1` (`-Renderer cpu|d3d11`; diff only the
-  states whose frame is deterministic — and **states 06/07 are shuttle presses now**, which is
-  the only place the overlay's re-pointed hooks are actually executed), `playhud.ps1`, `refresh.ps1`, `capture.ps1`,
-  `sidebyside.ps1`, `stalls_vs_window.ps1`, `abfilter.ps1`/`croprect.ps1`/`previewshot.ps1`.
+- Harness, **and note which half needs `-Env TRACE_TRANSPORT_BAR=1` since spec phase 6**.
+
+  *Needs the docked bar* (they scan for its groove colour): `revplay.ps1` (both directions —
+  `-Forward` drives L), `transitions.ps1` (every shuttle run boundary, **25 cases**; **16:9,
+  250+ frames**, and the **412-frame** clip for `-LadderOut`), `shuttleland.ps1` (the
+  reverse-to-forward direction change), `scrub.ps1` (`-SnapRelease` for anything about the
+  landing; `-Reversals` does not guarantee one), `lifecycle.ps1` (**run both
+  `-PlayThroughDrag` and `-PausedThroughDrag`**), `previewshot.ps1`.
+
+  *Drives the floating transport instead*: `overlay.ps1` (`-Renderer cpu|d3d11`; diff only the
+  states whose frame is deterministic — and **states 06/07 are shuttle presses**, the only
+  place the re-pointed hooks are actually executed), `overlay_drag.ps1` (drag cost, with the
+  groove drag as its own control leg), **`overlay_press.ps1`** (does the timeline press land
+  exactly — `-Bar` is the control, and both legs must be read), **`overlay_ladder.ps1`** (six
+  rapid presses must reach ±30×; this is the check that caught the swallowed double-click, and
+  it grabs the window directly because `capture.ps1`'s 300ms is 216 frames at 30×).
+
+  *Mode-independent*: `cadence.ps1`, `playhud.ps1`, `refresh.ps1`, `capture.ps1`,
+  `sidebyside.ps1`, `stalls_vs_window.ps1`, `abfilter.ps1`/`croprect.ps1`.
+
   **Cadence controls need `TRACE_NO_AUDIO=1`**; shuttle runs do not, because they are silent.
 - The HUD is unreadable in a downsampled screenshot on the 5120x1440 panel. Capture the
   window at native resolution (`capture.ps1`), and **check nothing overlapped it**.
