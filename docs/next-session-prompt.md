@@ -1,3 +1,53 @@
+# The interface pass is open, phase 12 (spec §4) is BUILT and MEASURED, and phase 13 is next.
+
+**READ THIS BLOCK FIRST — it supersedes the phase-12 brief further down, which is retained as
+the record of what was asked for rather than as open work.**
+
+**Spec §4 is built, measured against its own controls, and committed** (`0ad4183`, `93215d9`,
+`41d8b76`, `9b17f08`, `42e4889`). The window is the shape of the media, the picture honours
+sample aspect and rotation metadata, `View ▸ Lock Window to Media Aspect Ratio` ships checked
+by default, and the interactive resize is constrained in `WM_SIZING`. Full record in
+`docs/interface-pass-1-progress.md` under "Phase 12".
+
+**THE FIRST EXPERIMENT REFUTED THE THING IT WAS SENT TO MEASURE.** §2 item 7's predicted cache
+thrash is not real: a drag discards **one cache's worth of entries however many times it
+clears**, because nothing refills it while the pointer is down, and `syncScrubPreviewSize` costs
+0.2–0.3ms across a whole drag. `reclaimDecoder()` never bumps the generation there either — it
+returns at its first line when no lease is out, and a resize drag cannot be a scrub drag. **So
+no debounce was built and none is wanted.** Eighth premise-expiry.
+
+**FOUR THINGS ARE STILL OPEN AND ONE OF THEM IS AN OWNER DECISION.**
+
+1. **OWNER QUESTION — the default opening size.** §4 says "start with the source's natural
+   displayed size when practical" and that is what ships, so 4K media now opens into a very
+   large window. Measured consequence, with the aspect lock as the only difference between two
+   runs of one binary: `display 1474x830` against the old `640x360`, so `cache 215 → 77`,
+   `rev-hit 98.7 → 96.7%`, **`hitch 1 → 2`** on a 4K H.264 reversal drag. That is §22.8's
+   window-size effect, not a new cost in the code, and unlocking restores the old numbers
+   exactly. **Capping the opening size would contradict the spec's own wording, so it is a
+   decision rather than a fix.** Put it to the owner with the numbers.
+2. **DPI IS ENTIRELY UNTESTED and it is the largest technical risk in the phase.** `dpr` is
+   **1.00** on this box, so every `devicePixelRatioF()` term in the sizing arithmetic is
+   currently the identity and has never executed with a real value. §4's matrix names 100 /
+   125 / 150 / 200%. `QT_SCALE_FACTOR` is the reachable instrument, as it was at §20.3.
+3. **Image sequences and stills** go through the same path (`currentImage_`) and only video has
+   been measured.
+4. **CI has not run on any phase 12 commit**, and owner visual sign-off has not been taken.
+
+**One carried item may have closed and needs an eye, not a measurement:** the floating
+transport is 460 logical px wide, and the 4×5 window is now **725 px** wide where the picture
+used to be 288 px. Better, but the owner should say whether it is finished.
+
+**Two things this phase leaves for anything that touches geometry.**
+`refreshHud()` is **not** called on `resizeEvent`, so **`win` and `display` go stale after any
+resize of a paused window** — the two figures every measurement here is required to quote. Not
+fixed, deliberately: `display` is measured *by* the paint, and building the HUD string on ~123
+events per drag would put the instrument inside the path. Refresh through a short play run
+after the gesture instead. And **`setGeometry` on a top-level widget positions the client rect,
+not the frame** — centring it puts the title bar off the work area by exactly one title bar.
+
+---
+
 # The interface pass is open, phase 11 shipped, and spec §4 is next as phase 12.
 
 **READ THIS FIRST: THE PHASE NUMBERING CHANGED.** Spec §4, *Media-driven window size*, had no

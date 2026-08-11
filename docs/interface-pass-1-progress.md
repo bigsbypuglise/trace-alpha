@@ -2514,3 +2514,229 @@ At the default startup geometry, `d3d11`, HUD shown:
 
 The 4×5 row is the carried owner visual-review item stated numerically: the
 floating transport is 460 logical px wide against a **288 px** picture.
+
+### The shape the media states, read and never assumed
+
+`VideoMetadata` carried width and height and nothing else about shape, and the
+renderer fitted `content.scaled(host, KeepAspectRatio)` on raw stored
+dimensions — so **anamorphic media has been drawn squeezed for Trace's whole
+existence**, and rotation metadata has been ignored outright.
+
+**`av_guess_sample_aspect_ratio`, not `codecpar->sample_aspect_ratio`**, because
+it is the function that composes the codec's SAR with the container's and
+resolves which wins. That composition **is** the spec's "display-aspect-ratio
+metadata when authoritative" — a demuxer that reads a container DAR turns it
+into a SAR there — so there is deliberately no second DAR field, which could
+only ever disagree with this one. Rotation comes from the display matrix through
+`av_display_rotation_get`, converted to clockwise and snapped to a quarter turn,
+with **the snapping reported**: Trace has no arbitrary-rotation path, and a
+player that silently squares off 12.5 degrees looks identical from outside to one
+with nothing to rotate.
+
+**`sarStated` is separate from the value**, for the same reason
+`colorMatrixInferred` is: "1:1 because the file says so" and "1:1 because nobody
+said" are different claims and only one is evidence. It has a **real negative
+control in the shipping assets rather than a simulated one** — three of four
+real files state 1:1 and the 9x16 clip states nothing.
+
+#### The fixtures, because the asset set cannot test this
+
+Every file in the set is square-pixel and unrotated, so shipping the ratio work
+against it would have been section 29.2 again and phase 7's drop-frame problem
+exactly: the code compiles, every existing file looks right, and the two branches
+that make the requirement a requirement never execute.
+`scripts/measure/make_shape_fixtures.ps1` builds four, each chosen so a build
+that ignores the metadata gives a **visibly different shape** rather than a
+rounding difference:
+
+| fixture | encoded | states | expected DAR | what a wrong build reads |
+|---|---|---|---|---|
+| `anamorphic-4x3-to-16x9` | 1440x1080 | SAR 4:3 | **1.7778** | 1.3333 — SAR ignored |
+| `anamorphic-2x1-to-239` | 1920x816 | SAR 6:5 | **2.8235** | 1.9608 — num/den swapped |
+| `rotated-90` | 1920x1080 | rotation 90 | **0.5625** | 1.7778 — rotation ignored |
+| **`rotated-180`** | 1920x1080 | rotation 180 | **1.7778** | 0.5625 — **transposed on any nonzero rotation** |
+
+**`rotated-180` is the one that matters.** 180 degrees leaves the ratio alone, so
+it is the only fixture that fails a build which checks `rotation != 0` instead of
+asking which rotation. Without it, "rotation is handled" would be provable by a
+build that transposes on all of them.
+
+Trace agrees with ffprobe's independent answer on all four — `1.777778`,
+`2.823529`, `0.562500` at `rot 270`, `1.777778` at `rot 180`.
+
+**`-display_rotation` is an INPUT option**, and written as an output option
+ffmpeg accepts it and produces no file. The first version of the script failed
+exactly that way: the anamorphic pair appeared, the rotated pair did not, and the
+only symptom was ffprobe reporting "No such file or directory" at the end of a
+run that had otherwise looked fine. The fixture is made in two passes now, and
+the second being `-c copy` is right anyway — it writes the display matrix
+without re-encoding, so the pixels are one way up and the container asks for
+another, which is the case under test. Re-encoding through an autorotate filter
+would bake the rotation into the pixels and test nothing.
+
+#### Presenting it, and the one place the two rotations meet
+
+Sizing the window to the display ratio is incoherent while the picture is still
+fitted on stored dimensions: an anamorphic file in a correctly shaped window
+simply pillarboxes inside it, and section 4's "the image touches all four
+viewport edges" is unsatisfiable by construction.
+
+Both backends already fitted `transform.apply(pixelSize)` through shared
+arithmetic, so this is **one line each** plus a shared `applyPixelAspect()` —
+the same reason `hostDeviceSize` and `fitDeviceRect` are shared rather than
+written twice. Pixel aspect first, then the transform: SAR describes stored
+samples, and a quarter turn exchanges the axes of what those samples become.
+
+**Container rotation is never sent to a backend as its own thing.** It is
+composed with the user's transform in `ViewerWidget::applySourceShape`, one
+place, because a file that carries `rot90` and a user who pressed Rotate Right
+are asking for the same operation for different reasons. Keeping them separate
+up to that point is what makes **Reset View Transform mean "back to how the file
+says it should look"** rather than "back to un-rotated", which on a phone clip
+would be wrong. Measured: `rotated-90` plus one `Ctrl+R` draws the frame exactly
+as encoded, while the HUD still reports `rot270` on the media line and
+`view rot90` on the geometry line.
+
+**The reduction taps take the source size WITHOUT the pixel-aspect stretch**, and
+that is the opposite correction to phase 10's. `updateReduction`'s ratio answers
+"how many source *texels* does one destination pixel cover", and the pixel aspect
+adds no texels — it only says how wide they are. Feeding it the stretched size
+buys an extra tap filtering an axis with no extra detail on it. Rotation *does*
+have to move the taps, because it exchanges real texel axes.
+
+### The window itself
+
+`View > Lock Window to Media Aspect Ratio`, checked by default, persisted
+through `trace::app::settings()` — **its second consumer, not a second home**.
+
+**The constraint is applied in `WM_SIZING`, not corrected in `resizeEvent`.**
+Section 4's three requirements — dragged edge authoritative, other dimension
+follows smoothly, no resize recursion or visible oscillation — are one
+requirement with one answer. Correcting afterwards is what *produces*
+oscillation: Qt has already laid out and painted a wrong-shaped window, and the
+correction is itself a resize. `WM_SIZING` hands over the proposed rect first and
+its `wParam` names the edge, so only the edges the user is *not* dragging are
+moved. Measured on the 4x5, a five-step right-edge drag: **the right edge tracks
+the cursor to the pixel** while height follows width at 40:50 — the media's 0.8
+ratio.
+
+A corner drags both axes, so the authoritative one is whichever moved further
+from the rect at `WM_ENTERSIZEMOVE`. Comparing against the **drag start** rather
+than the previous proposal keeps that choice stable for the whole gesture; a
+per-message comparison can change its mind mid-drag and reads exactly like the
+oscillation this exists to avoid.
+
+#### Two faults the first version had, and neither is visible in `win WxH`
+
+**`setGeometry` on a top-level widget positions the CLIENT rect.** Centring that
+on the work area pushed the title bar off the top — **exactly -7px on every
+shape**, which reads as a rounding error and is a whole title bar. The frame is
+centred now and the client inset inside it.
+
+**Chrome measured as window-minus-viewer is only the chrome while the layout can
+satisfy everything.** At open the window is smaller than the layout's minimum,
+the viewer is pinned at its own floor, and the difference is not what the chrome
+needs: it read **310 against a real 407** and pillarboxed the 4x5 inside a window
+whose entire purpose was to have no bars. It **converges in at most two passes**
+now, measuring what the layout actually did rather than predicting it — which
+also avoids hand-listing "menu bar plus status bar plus HUD plus transport bar",
+the alternative, and a list phase 6's transport change would already have broken.
+
+| media | aspect | passes | final viewer | measured |
+|---|---|---|---|---|
+| 4K H.264 | 1.7778 | 2 | 1611x906 | **1.7781** |
+| 4x5 ProRes | 0.8000 | 2 | 725x906 | **0.8002** |
+| 1x1 ProRes | 1.0000 | 2 | 906x906 | **1.0000** |
+| 9:16 1080p | 0.5625 | 2 | 510x906 | **0.5629** |
+| 2.39:1 anamorphic | 2.8235 | **1** | 2304x816 | **2.8235** |
+
+The 2.39 row converges in one pass because its natural size fits without
+touching a minimum. The 9:16 row is why the minimum had to change at all.
+
+**`ViewerWidget`'s fixed 640x360 floor was itself a 16:9 assumption** and it
+fought the lock on every other shape — a 9:16 clip could not go below 640x1138,
+taller than many work areas at 125% DPI. It is **360 logical px on the shorter
+displayed axis** now, which is 640x360 at 16:9 **to the pixel**, so no 16:9
+startup geometry moves and every recorded `win` figure for 16:9 media stays
+comparable.
+
+**`TRACE_SHAPE_LOG=1` prints every term and what the layout did with it**,
+through `fprintf` rather than `qWarning`: in a GUI-subsystem build Qt's handler
+does not reliably reach a console's stderr, and the first version printed nothing
+while FFmpeg's own messages came through from the same run — which reads as a
+function that never ran. `Settings.cpp` reached the same conclusion at phase 11.
+
+#### The window-state exceptions
+
+Fullscreen, maximized and minimized decline outright. **Snap needs no detection**:
+Windows Snap resizes through `SetWindowPos` and sends no `WM_SIZING` at all, so
+"never fight Windows by continuously resizing a snapped window" is automatic
+rather than something the code has to recognise.
+
+Returning to normal reapplies the lock **only when the restored geometry is
+actually the wrong shape** (1% tolerance), because section 4 asks in one
+paragraph both to restore the previous position and to reapply the lock, and
+reshaping recentres. Measured on the 4x5, both round trips: normal
+`741x1352 at 2189,24` -> maximized `5136x1408` -> restored to
+**`741x1352 at 2189,24`**, and identically through F11 and Escape.
+
+### Regression — priority 1
+
+Physical panel, **5120x1440 @ 239.999Hz**, confirmed with `refresh.ps1` before
+and after. `d3d11`.
+
+| check | phase 12 | control / phase 11 |
+|---|---|---|
+| 4K H.264 cadence x3 | **99.1 / 99.1 / 99.2%**, `handler>budget 0 of 120` | lock off, same binary: **99.2 / 99.1 / 99.2%**, identical buckets |
+| ProRes 4444 cadence x2 | **99.8%**, `handler>budget 0 of 260`, max 37.8ms | phase 11: 99.8% x3 |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, full-res planar, **`hitch 0`** | phase 11: identical |
+| reversal drag | `delta 0`, **`hitch 2`**, `rev-hit 96.7%`, `cache 77/77` | lock off: `hitch 1`, `rev-hit 98.7%`, `cache 215/298` |
+| lifecycle | `-PlayThroughDrag` **86.2% moved**, `-PausedThroughDrag` **0%** | both legs pass, negative control live |
+| transitions | **25 of 25 PASS** | — |
+
+**The cadence figure is flat against its own control**, which is the check that
+matters: the shaped window costs nothing there. Today's 99.1-99.2% is not phase
+11's recorded 100.0%, and **the lock-off leg reads the same**, so that is the
+session and not this work.
+
+**The reversal drag DID move, and it is attributed rather than excused.** The
+shaped window gives 4K H.264 a video rect of `1474x830` against the old
+`640x360` — 5.6x the area — so cache entries are larger, `cache` falls 215 -> 77,
+`rev-hit` 98.7 -> 96.7% and `hitch` 1 -> 2. That is **section 22.8's window-size
+effect, measured on one binary with the lock as the only difference**, not a new
+cost in the code. The landing is exact both ways.
+
+Two things follow. **Every scrub baseline recorded before phase 12 was taken in a
+much smaller window** and is not comparable to a default-size run today — the
+same re-tagging obligation the `cpu` -> `d3d11` default flip created. And the
+trade is now **user-controllable**: unlocking and shrinking the window restores
+the old cache depth exactly, which is what the control leg is.
+
+**THIS ONE WANTS AN OWNER OPINION.** Section 4 says to open at natural displayed
+size "when practical", and that is what ships — but on 4K media it makes the
+default window very large, and scrub hitch on 4K H.264 goes 1 -> 2 because of it.
+The alternative is a cap on the opening size, which contradicts the spec's own
+wording. Not a defect; a decision.
+
+### What phase 12 does NOT yet cover
+
+- **100 / 125 / 150 / 200% DPI** — section 4's matrix names them and none has
+  been run. The arithmetic divides by `devicePixelRatioF()` throughout and **dpr
+  is 1.00 on this box**, so every DPI term is currently the identity and
+  untested. This is the largest open risk in the phase.
+- **Mixed-monitor DPI and secondary monitors** — deferred with section 20.4, not
+  executable on this box; recorded as untested rather than skipped.
+- **Taskbar on different edges** — `availableGeometry()` handles it by
+  construction and it has not been run.
+- **Image sequences and stills** — the code path exists (`currentImage_`) and
+  only video has been measured.
+- **Owner visual sign-off on the shaped window**, and on whether the 4x5 and 1x1
+  carried transport-width item is now closed: the 4x5 window is 725 logical px
+  wide against the 460px panel, where it was 288 px of picture before.
+- **CI** has not run on any phase 12 commit.
+
+### One more PowerShell alias trap, the third recorded
+
+A helper named `R` is `Invoke-History`, and aliases outrank functions — so a
+window-rect helper called `R` produced five "Cannot locate most recent history"
+errors and no measurement. `Diff` and `Move` are already on this list.

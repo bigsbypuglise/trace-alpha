@@ -640,11 +640,114 @@ the first three-run pass read 3 of 3 slow against 1 of 3 and looked like a regre
 more each settled it at **3 of 8 against 5 of 8**. One transitions case FAILed once with "no
 window after restart" and re-ran 3 of 3 PASS.
 
-**SPEC §4, MEDIA-DRIVEN WINDOW SIZE, IS SCHEDULED AND RUNS NEXT AS PHASE 12** (owner,
-2026-08-11). It had **no phase number**: the spec's own phasing list stops at 14 and §4 was
-appended after the main body. It goes before the Movie Inspector because the inspector reports
-*current viewport size* and §4 changes what that is. Everything after it shifts by one — Movie
+**SPEC PHASE 12 IS BUILT AND MEASURED (2026-08-11): the window is the shape of the media.**
+Spec §4. It had **no phase number** — the spec's own phasing list stops at 14 and §4 was
+appended after the main body — and the owner scheduled it ahead of the Movie Inspector because
+the inspector reports *current viewport size*. Everything after it shifts by one: Movie
 Inspector 13, menus/help/accessibility 14, full regression 15.
+
+**§2 ITEM 7'S PREDICTED CACHE THRASH DOES NOT EXIST, and that was the phase's first
+experiment** (`scripts/measure/resizecache.ps1`). A real corner drag produces ~123 resize
+events and ~122 real preview-size changes, and **exactly one of them discards anything** —
+the drag throws away precisely the number of entries the cache held (1, 32, 7 and 68 on four
+legs), because clearing an empty cache is free and **nothing refills it while the pointer is
+down**. So deferring the clear to `WM_EXITSIZEMOVE` saves nothing; it moves one clear from the
+start of a drag to the end. `syncScrubPreviewSize` costs **0.2–0.3ms across a whole drag**,
+0.02ms worst event. Item 7's *other* cost is misdescribed too: `reclaimDecoder()` returns at
+its first line when `!decoderLeased_`, and **no lease is out during a resize** — a resize drag
+and a scrub drag cannot be the same gesture — so the "unconditional generation bump per event"
+never happens. **Eighth premise-expiry, and the first where the item had already been
+re-derived once**: §2 item 7 is the 2026-08-10 correction of the 2026-08-09 text, and it fixed
+the mechanism while keeping the conclusion. The conclusion was the wrong half.
+
+**THE THREE WIN32 MESSAGES ARRIVE EXACTLY AS ASSUMED, and `nativeEvent` had never run in this
+project.** Every drag: **1 `WM_ENTERSIZEMOVE`, 121–126 `WM_SIZING`, 1 `WM_EXITSIZEMOVE`**, with
+`WM_SIZE` matching Qt's `resizeEvent` count to the digit. `WM_SIZE` is counted as the **control
+on the other three** and earned its place immediately — see the stale instrument below.
+
+**FIFTH STALE INSTRUMENT, AND THIS ONE IS IN SHIPPING CODE.** `refreshHud()` is not called on
+`resizeEvent`, so **a paused window that is resized redraws the HUD at the new size with the
+old string in it** — `win`, `display` and every counter a phase quotes. The first run of the
+experiment read `resize 1 … wm 0/0/0` while its own capture was 200px narrower than the shot
+before it, which looks exactly like a gesture that missed the resize border; `WM_NCHITTEST` at
+the grabbed point returns **17 (`HTBOTTOMRIGHT`)**, so it had worked all along. Not fixed in
+`resizeEvent`, because `display` is measured **by** the paint (phase 10) and building the HUD
+string on 123 events per drag would put the instrument inside the path. The harness refreshes
+through a short play run *after* the drag instead.
+
+**THE SOURCE'S SHAPE IS READ AND NEVER ASSUMED.** `av_guess_sample_aspect_ratio` (not
+`codecpar->sample_aspect_ratio`) composes the codec's SAR with the container's and with any
+container DAR — **that composition IS the spec's "DAR metadata when authoritative"**, so there
+is deliberately no second DAR field to disagree with it. Rotation comes from the display matrix
+through `av_display_rotation_get`, converted to clockwise, snapped to a quarter turn, **and the
+snapping is reported**. `sarStated` is separate from the value for the same reason
+`colorMatrixInferred` is, and it has a **real negative control in the shipping assets** —
+three of four real files state 1:1, the 9:16 clip states nothing.
+
+**THE ASSET SET IS ENTIRELY SQUARE-PIXEL AND UNROTATED, so the fixtures were made**
+(`scripts/measure/make_shape_fixtures.ps1`): 1440x1080 SAR 4:3, 1920x816 SAR 6:5, and a rotated
+pair. **`rotated-180` is the fixture that matters** — 180° leaves the ratio alone, so it is the
+only one that fails a build checking `rotation != 0` instead of asking *which* rotation.
+Without it, "rotation is handled" would be provable by a build that transposes on all of them.
+Trace agrees with ffprobe on all four. Note **`-display_rotation` is an INPUT option**: written
+as an output option ffmpeg accepts it and produces no file, which is how the first version
+failed silently.
+
+**THE PICTURE HONOURS THE SHAPE TOO, and it had to.** Sizing the window to the display ratio
+while the picture is still fitted on stored dimensions just pillarboxes inside it, and §4's
+"the image touches all four viewport edges" is then unsatisfiable. One line per backend plus a
+shared `applyPixelAspect()`. **Container rotation is composed with the user's transform in ONE
+place** (`ViewerWidget::applySourceShape`) rather than sent to a backend separately — which is
+what makes **Reset View Transform mean "back to how the file says it should look"** rather than
+"back to un-rotated". Verified: `rotated-90` plus one `Ctrl+R` draws the frame exactly as
+encoded while the HUD reports `rot270` and `view rot90` separately. **The reduction taps take
+the source size WITHOUT the pixel-aspect stretch** — the opposite correction to phase 10's,
+because SAR adds no texels while rotation exchanges real texel axes.
+
+**THE CONSTRAINT IS APPLIED IN `WM_SIZING`, NEVER CORRECTED IN `resizeEvent`.** §4's three
+requirements — dragged edge authoritative, other dimension follows smoothly, no recursion or
+oscillation — are one requirement with one answer: correcting afterwards is what *produces*
+oscillation, because Qt has already laid out a wrong-shaped window and the correction is itself
+a resize. Only the edges the user is not dragging are moved. Measured: **the right edge tracks
+the cursor to the pixel** through a five-step drag while height follows width at 40:50 on 0.8
+media. A corner's authoritative axis is decided against the rect at `WM_ENTERSIZEMOVE`, not
+against the previous proposal, or it can change its mind mid-drag.
+
+Two faults the first cut had, **neither visible in `win WxH`**. **`setGeometry` on a top-level
+widget positions the CLIENT rect**, so centring it pushed the title bar off the work area by
+exactly −7px on every shape — a whole title bar, reading as a rounding error. And **chrome
+measured as window-minus-viewer is only the chrome while the layout can satisfy everything**:
+at open the viewer is pinned at its own floor, so it read **310 against a real 407** and
+pillarboxed the 4×5 inside a window built to have no bars. It **converges in at most two
+passes** now, measuring what the layout did rather than predicting it — which also avoids
+hand-listing menu + status + HUD + transport bar, a list phase 6 would already have broken.
+Final viewer aspects: **1.7781, 0.8002, 1.0000, 0.5629, 2.8235**.
+
+**`ViewerWidget`'s fixed 640x360 floor was itself a 16:9 assumption** — a 9:16 clip could not
+go below 640x1138. It is **360 logical px on the shorter displayed axis** now, which is
+640x360 at 16:9 **to the pixel**, so no 16:9 startup geometry moves.
+
+**Snap needs no detection**: it resizes through `SetWindowPos` and sends no `WM_SIZING`, so
+"never fight Windows" is automatic. Returning to normal reapplies the lock **only when the
+restored geometry is the wrong shape**, because §4 asks in one paragraph both to restore the
+previous position and to reapply the lock, and reshaping recentres.
+
+**Regression (physical panel, 5120x1440 @ 239.999Hz):** 4K H.264 cadence ×3 **99.1/99.1/99.2%**
+against a lock-off control on the same binary at **99.2/99.1/99.2%** with identical buckets —
+flat; 4444 ×2 **99.8%** with `handler>budget 0 of 260`; `-SnapRelease` `delta 0` / `hitch 0`;
+both lifecycle legs; **25 of 25 transitions**. **The reversal drag moved and is attributed
+rather than excused**: the shaped window gives 4K H.264 `display 1474x830` against `640x360`,
+5.6× the area, so `cache 215 → 77`, `rev-hit 98.7 → 96.7%`, **`hitch 1 → 2`** — §22.8's
+window-size effect with the lock as the only difference between the two runs. **Every scrub
+baseline recorded before phase 12 was taken in a much smaller window and is not comparable to a
+default-size run today.**
+
+**OPEN OWNER QUESTION:** §4 says to open at natural displayed size "when practical" and that is
+what ships, but on 4K media the default window is now very large and scrub `hitch` goes 1 → 2
+because of it. A cap on the opening size would contradict the spec's wording. **Not a defect, a
+decision.** Also **untested: 125/150/200% DPI** — `dpr` is 1.00 on this box, so every DPI term
+in the arithmetic is currently the identity — image sequences and stills, and owner visual
+sign-off.
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
@@ -1420,6 +1523,11 @@ run at all** — `scrub.ps1`, `revplay.ps1`, `lifecycle.ps1`, `transitions.ps1`,
 and `TRACE_OVERLAY_COMPOSITED=0` select it too, so turning the overlay off asks for the other
 transport rather than for none), `TRACE_OVERLAY=1` (the floating transport — **on by default
 since spec phase 6**; `TRACE_OVERLAY_COMPOSITED=1` is retained because the harness sets it),
+**`TRACE_SHAPE_LOG=1`** (spec phase 12: one stderr line per window-shaping pass, printing every
+term of the calculation **and what the layout actually did with it** — the two disagreeing is
+the failure mode there and is invisible from `win WxH`. Through `fprintf`, not `qWarning`: in
+this GUI-subsystem build Qt's handler does not reliably reach a console's stderr, and the first
+version printed nothing while FFmpeg's own messages came through the same run),
 **`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second
@@ -1474,6 +1582,16 @@ entries including two unreachable UNC hosts and times launch-to-window against a
 `-Mode home` runs all three settings-home branches. It uses `TRACE_SETTINGS_FILE`, so it never
 writes the real per-user file. **`scripts/measure/swapexe.ps1`** does the control-binary swap
 every phase since 6 has done by hand and prints the hash of what is actually live.
+
+**Window shape has a harness now** (spec phase 12): `scripts/measure/resizecache.ps1` drives a
+real corner drag and reports `resize/chg/drop/sync` and the three Win32 resize messages —
+**read `drop`, the entries discarded, not the number of clears**, because clearing an empty
+cache is free and a count of clears reads as a 122x thrash that is not there; its nearly-empty
+leg is the control that says the fill worked at all. `scripts/measure/make_shape_fixtures.ps1`
+generates the anamorphic and rotation-metadata material the asset set does not contain, and
+**`rotated-180` is the fixture that matters** — the only one that fails a build which transposes
+on any nonzero rotation. `TRACE_SHAPE_LOG=1` prints the sizing calculation and what the layout
+did with it.
 
 **Lifecycle gestures have a harness now**: `scripts/measure/lifecycle.ps1`
 covers step +/-5 determinism after a release, play-after-release, opening
