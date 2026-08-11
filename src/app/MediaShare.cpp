@@ -7,6 +7,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QMetaObject>
+#include <QObject>
 #include <QPointer>
 #include <QRunnable>
 #include <QThreadPool>
@@ -151,9 +152,16 @@ bool copyPathToClipboard(const ShareState& state, QString& error) {
 
 void revealInFileExplorer(const ShareState& state, QObject* context,
                           std::function<void(const QString&)> onFailure) {
-    const auto fail = [context, onFailure](const QString& message) {
-        if (!onFailure || !context) return;
-        QMetaObject::invokeMethod(context, [onFailure, message]() { onFailure(message); },
+    // A QPointer, not the raw pointer. The callback is invoked from a pool
+    // thread that can still be running SHOpenFolderAndSelectItems after the
+    // window has been destroyed -- quitting the application while Explorer is
+    // starting is an ordinary thing to do -- and posting to a dangling QObject
+    // is undefined rather than merely useless. QPointer clears itself when the
+    // object dies, so the late result is dropped instead.
+    const QPointer<QObject> guard(context);
+    const auto fail = [guard, onFailure](const QString& message) {
+        if (!onFailure || guard.isNull()) return;
+        QMetaObject::invokeMethod(guard, [onFailure, message]() { onFailure(message); },
                                   Qt::QueuedConnection);
     };
 
