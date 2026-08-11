@@ -1,10 +1,25 @@
-# The interface pass is open, PHASE 13 IS DONE, and PHASE 14 IS NEXT.
+# The interface pass is open, PHASE 13 IS SIGNED OFF, and PHASE 14 IS NEXT.
 
-**PHASE 13 SHIPPED (`368e3b8`): the Movie Inspector is built, measured and in the Window
-menu.** The metadata layer was `9ec7ec3`; the window is `368e3b8`. Full record in
-`docs/interface-pass-1-progress.md` under "Phase 13". **A phase 12 defect closed with it
-(`3a38516`) — see the last block here, because it changes window geometry the owner signed
-off.**
+**PHASE 13 SHIPPED AND IS SIGNED OFF (owner, 2026-08-11; `368e3b8`): the Movie Inspector is
+built, measured, visually reviewed and in the Window menu.** The metadata layer was `9ec7ec3`;
+the window is `368e3b8`. Full record in `docs/interface-pass-1-progress.md` under "Phase 13".
+**Nothing about the inspector is open.** What was accepted: the layout and wording, **the
+origin labels as useful rather than cluttered** — the one choice with no measurement behind it
+— and tagged / untagged / inferred / observed being distinguished honestly. Not accepted,
+because not in scope: the menus around it (phase 14 restructures them).
+
+**A PHASE 12 DEFECT CLOSED WITH IT AND ITS SIGN-OFF WAS REPLACED (`3a38516`).** §4 had never
+applied to stills or image sequences; the owner re-reviewed the corrected build on 2026-08-11
+and signed the still / image-sequence media-shaped window off. The video half of the phase 12
+sign-off was untouched and did not need replacing.
+
+**ONE OPEN ITEM, AND IT IS SMALL: THE INSPECTOR HAS NO DURATION ROW.** The sign-off's field
+list named duration; the window has never had one, and the spec's own field list for the
+Movie Inspector does not ask for one. It is on the dev HUD (`dur 5.042s`) and the transport
+prints frame counts, so it was almost certainly read there. Recorded as a discrepancy rather
+than as a verified field. **It is a one-row addition — `VideoMetadata::durationSeconds` is
+already read at open — and it needs an owner decision or a phase 14 slot, not a quiet
+insertion into a closed phase.**
 
 **PHASE 14 IS THE OPEN PHASE: menus, help and the accessibility proxy tree.** It renders the
 Keyboard Shortcuts window from `ShortcutTable::rows()`, fills in the File/Edit/View/Window/Help
@@ -59,8 +74,9 @@ media-shaped window had **never applied to a still image or an image sequence**:
 Measured on the 4096×2304 still — viewer **1280×675, ratio 1.896 against the file's 1.7778**,
 pillarboxed inside a window built to have no bars; after, **1280×720 exactly**, and a 1920×1080
 PNG sequence likewise. **The phase 12 sign-off recorded the opposite**, because on 16:9 material
-the error is 6% of the height and looks like a correctly-shaped window. **The owner should be
-told the still and sequence window sizes have changed**, since geometry is what he signed off.
+the error is 6% of the height and looks like a correctly-shaped window. **The owner was told,
+re-reviewed the corrected build and re-signed that clause off on 2026-08-11** — so this is
+settled, not carried.
 
 **A validated PREDICTION is not a validated MECHANISM — eighth instance, and the sharpest.**
 That stills used "the same sizing path" was checked and was true. That a value flowed through

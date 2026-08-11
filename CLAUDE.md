@@ -788,6 +788,16 @@ the fitted orientation; and **stills and image sequences use the same correct si
 which closes the phase's one remaining measurement gap by observation, because that path was
 built to be the same path.
 
+**THAT LAST CLAUSE WAS WRONG AND HAS BEEN RE-SIGNED-OFF ON A CORRECTED BUILD (owner,
+2026-08-11; fix at `3a38516`, re-sign-off recorded in the phase 13 block below).** §4 had
+**never applied to a still or an image sequence at all** — `LoadedImageInfo::image` is left
+default-constructed at both sites that build one, so `currentDisplayAspect()` read an empty
+`QSize` and declined. The path really was the same path; **its input was empty**, and the
+distinction is the whole lesson. The 4096×2304 still opened at ratio **1.896 against the
+file's 1.7778**, pillarboxed inside a window built to have no bars; it is **1280×720 exactly**
+now. **The video half of this sign-off is untouched and did not need replacing** — only the
+still and image-sequence clause did.
+
 **TWO CARRIED ITEMS CLOSE WITH IT.** The **narrow-media transport-width item is CLOSED** — the
 460px panel on 1×1, 4×5 and 9×16 media is *tight but usable and visually acceptable*. It had
 been carried since phase 9, when the panel was 460px against a **288px** picture, and §4's
@@ -886,6 +896,44 @@ Regression (physical panel, 5120x1440 @ 239.999Hz): 4K H.264 cadence ×3 **100.0
 `handler>budget 0 of 119` and every gap in the ~1x bucket; 4444 ×2 **99.8%** at 0 of 260;
 `-SnapRelease` `delta 0` full-res planar, `hitch 0`, `land 0`; both lifecycle legs; **25 of 25
 transitions**.
+
+**PHASE 13 IS SIGNED OFF (owner, 2026-08-11) and nothing about the Movie Inspector is open.**
+The layout and wording are clear; **the metadata-origin labels are useful and do not read as
+clutter**, which was the one design choice with no measurement behind it and the reason the
+window was built to be judged rather than asserted. **Tagged, untagged, inferred and observed
+information are distinguished honestly** — that is the spec's hardest rule accepted on the
+evidence rather than on the implementation. Codec, pixel format, bit depth, dimensions,
+viewport size, frame rate, file size and timecode all read correctly across the representative
+files, and **the window stays modeless and does not interfere with the floating transport's
+auto-hide** — the `holdVisible` decision confirmed by eye as well as by its control.
+
+Read it at its stated width. What was accepted is **the inspector's contents, its wording and
+its origin labels**; it is not a sign-off on the menus around it (phase 14 restructures them),
+and **the accessibility position is unchanged** — the inspector is a real Qt widget tree and is
+therefore reachable by construction, but plan §31.5 item 4 still stands for the *overlay*, which
+is not final until a screen reader has driven one.
+
+**ONE FIELD IN THE SIGN-OFF IS NOT A FIELD IN THE WINDOW: there is no Duration row.** The
+owner's list named duration; the inspector has never had it. The spec's field list for the
+Movie Inspector does not ask for one either — General is filename, source path, resolution,
+file size, overall data rate, current viewport size, container, video format, audio format, and
+Video details is the fps rational and decimal, bitrate, pixel aspect, display aspect, current
+scale, pixel format, bit depth, the four colour tags, codec/profile and track ID. Duration is
+on the dev HUD (`dur 5.042s`) and the transport prints frame counts, so it was almost certainly
+read there. **Recorded as a discrepancy rather than as a verified field**, because a sign-off
+that covers something the window does not show is exactly the kind of widening this project
+keeps having to undo. **It is a one-row addition if wanted — `VideoMetadata::durationSeconds`
+is already read at open — and it belongs to phase 14 or to an owner decision, not to a phase
+that has just been closed.**
+
+**THE PHASE 12 STILL / IMAGE-SEQUENCE BEHAVIOUR IS RE-SIGNED-OFF ON THE CORRECTED BUILD
+(owner, 2026-08-11).** Media-shaped windows for stills and image sequences now use the correct
+aspect ratio and framing. **This REPLACES the phase 12 sign-off for that media class**, which
+was taken on a build where §4 had never applied to it at all: `LoadedImageInfo::image` is left
+default-constructed, so `currentDisplayAspect()` read an empty `QSize` and declined. The
+original sign-off is not wrong about what was observed — on 16:9 material the error is 6% of
+the height — it was taken on material that could not show the fault. The video sign-off from
+phase 12 is untouched and did not need replacing.
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across

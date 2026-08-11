@@ -3196,3 +3196,43 @@ are already there.
 - **The inspector is a real Qt widget tree**, which the composited overlay is
   not. It is therefore visible to a screen reader by construction, and it is the
   first surface added since phase 6 of which that is true.
+
+### Owner sign-off (2026-08-11)
+
+**PHASE 13 IS SIGNED OFF (owner, 2026-08-11) and nothing about the Movie Inspector is open.**
+The layout and wording are clear; **the metadata-origin labels are useful and do not read as
+clutter**, which was the one design choice with no measurement behind it and the reason the
+window was built to be judged rather than asserted. **Tagged, untagged, inferred and observed
+information are distinguished honestly** — that is the spec's hardest rule accepted on the
+evidence rather than on the implementation. Codec, pixel format, bit depth, dimensions,
+viewport size, frame rate, file size and timecode all read correctly across the representative
+files, and **the window stays modeless and does not interfere with the floating transport's
+auto-hide** — the `holdVisible` decision confirmed by eye as well as by its control.
+
+Read it at its stated width. What was accepted is **the inspector's contents, its wording and
+its origin labels**; it is not a sign-off on the menus around it (phase 14 restructures them),
+and **the accessibility position is unchanged** — the inspector is a real Qt widget tree and is
+therefore reachable by construction, but plan §31.5 item 4 still stands for the *overlay*, which
+is not final until a screen reader has driven one.
+
+**ONE FIELD IN THE SIGN-OFF IS NOT A FIELD IN THE WINDOW: there is no Duration row.** The
+owner's list named duration; the inspector has never had it. The spec's field list for the
+Movie Inspector does not ask for one either — General is filename, source path, resolution,
+file size, overall data rate, current viewport size, container, video format, audio format, and
+Video details is the fps rational and decimal, bitrate, pixel aspect, display aspect, current
+scale, pixel format, bit depth, the four colour tags, codec/profile and track ID. Duration is
+on the dev HUD (`dur 5.042s`) and the transport prints frame counts, so it was almost certainly
+read there. **Recorded as a discrepancy rather than as a verified field**, because a sign-off
+that covers something the window does not show is exactly the kind of widening this project
+keeps having to undo. **It is a one-row addition if wanted — `VideoMetadata::durationSeconds`
+is already read at open — and it belongs to phase 14 or to an owner decision, not to a phase
+that has just been closed.**
+
+**THE PHASE 12 STILL / IMAGE-SEQUENCE BEHAVIOUR IS RE-SIGNED-OFF ON THE CORRECTED BUILD
+(owner, 2026-08-11).** Media-shaped windows for stills and image sequences now use the correct
+aspect ratio and framing. **This REPLACES the phase 12 sign-off for that media class**, which
+was taken on a build where §4 had never applied to it at all: `LoadedImageInfo::image` is left
+default-constructed, so `currentDisplayAspect()` read an empty `QSize` and declined. The
+original sign-off is not wrong about what was observed — on 16:9 material the error is 6% of
+the height — it was taken on material that could not show the fault. The video sign-off from
+phase 12 is untouched and did not need replacing.
