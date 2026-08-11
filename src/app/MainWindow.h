@@ -22,6 +22,7 @@
 #include "app/ShortcutTable.h"
 #include "app/MediaShare.h"
 #include "app/RecentFiles.h"
+#include "app/MovieInspector.h"
 #include "render/ViewTransform.h"
 
 QT_BEGIN_NAMESPACE
@@ -120,6 +121,24 @@ private:
     long long frameForSourceTimecode(const QString& text) const;
     void promptGoToFrame();
     void promptGoToTimecode();
+    // Spec phase 13. Shows or hides the Movie Inspector, creating it on first
+    // use so a session that never opens it pays nothing for it.
+    void toggleMovieInspector(bool show);
+    // Everything the inspector displays, gathered from state this window already
+    // holds. NOTHING here stats a path, opens a file or asks the decoder a
+    // question: the file size comes from the open, the colour tags from the
+    // metadata read at open, and the viewport from the last paint.
+    trace::app::InspectorSnapshot buildInspectorSnapshot() const;
+    // Rebuild the inspector's contents, if it exists and is visible.
+    //
+    // THE ONLY PLACE THAT PUSHES A SNAPSHOT, and it is reached from exactly two
+    // routes: the window becoming visible, and inspectorRefreshTimer_. See
+    // scheduleInspectorRefresh() for why there is a timer at all.
+    void refreshInspector();
+    // Arm the coalescing refresh. Cheap enough to call from a resize: it starts
+    // a single-shot timer and does nothing else, and it returns immediately when
+    // the inspector is not on screen.
+    void scheduleInspectorRefresh();
     // Spec phase 8. Re-evaluates the Share gate ONCE per media open -- the spec
     // forbids filesystem probing in paint or timeline updates and the gate
     // queries the volume, so this follows refreshSourceTimecode()'s shape
@@ -536,6 +555,39 @@ private:
     QAction* exitFullscreenAction_ = nullptr;
     QAction* toggleHudAction_ = nullptr;
     QAction* openAction_ = nullptr;
+
+    // Movie Inspector (spec phase 13). Created lazily; null until first shown.
+    trace::app::MovieInspector* inspector_ = nullptr;
+    QAction* inspectorAction_ = nullptr;
+    // WHY A TIMER, WHEN THE RULE IS "THE DIALOG READS, IT DOES NOT ASK".
+    //
+    // It still only reads -- this decides WHEN, and it exists because of phase
+    // 10's trap. `RenderStats::lastDrawSize` is measured BY the paint, so a
+    // panel refreshed at the instant the window changed reports the previous
+    // viewport, and a paused file never refreshes again to correct it. The
+    // obvious fix -- refresh from resizeEvent -- is the one the phase 12 record
+    // rules out for the HUD, because building the string on ~123 events per
+    // drag puts the instrument inside the path being measured.
+    //
+    // A single-shot armed by every event that can change what the panel shows
+    // answers both: arming costs a timer restart, and by the time it fires the
+    // paint has happened, so the size it reads is the size actually drawn. It
+    // is not a poll -- it is never armed while the window is hidden, and it
+    // fires once per settled change rather than on a schedule.
+    QTimer inspectorRefreshTimer_;
+    // Long enough that a whole interactive resize collapses into one refresh
+    // and the paint that follows it has certainly landed; short enough that the
+    // panel is not visibly stale after a gesture ends.
+    static constexpr int kInspectorRefreshMs = 150;
+    // Size of the file currently open, for media that does NOT go through
+    // VideoDecoderFFmpeg -- a still image or a sequence frame. Video takes it
+    // from VideoPerfStats::sourceBytes, which MediaIoSource already read as part
+    // of opening the file.
+    //
+    // Taken ONCE, in openPath, where the path is being touched anyway. Never
+    // when the inspector is shown: an unreachable UNC path costs 21,037ms to
+    // stat on this box and the spec forbids blocking to compute optional values.
+    qint64 openedFileBytes_ = -1;
 
     // Open Recent (spec phase 11). The list is the model and the submenu is
     // rebuilt from it; the actions inside are owned by the submenu and replaced

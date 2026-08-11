@@ -24,6 +24,37 @@ so a refresh scheduled before one reports the previous size (phase 10's trap). A
 continuously poll expensive decoder state"*: everything the inspector needs is read once at
 open or already maintained, so **the dialog reads, it does not ask**.
 
+**Four more for the dialog specifically.**
+
+- **`File size` and `Overall data rate` are a filesystem stat, and that is the phase 11 trap
+  wearing a different costume.** An unreachable UNC path costs **21,037ms** to stat on this box
+  and a cold LucidLink read measured **407ms**; the spec's own rule here is *do not block
+  remote-media opening to calculate optional values*. So the size comes from the open — where
+  the path is being touched anyway — or from a worker, and **never from a stat issued when the
+  dialog is shown**. `RecentFiles.cpp` made this structural by containing no `QFile`,
+  `QFileInfo` or `QDir` at all; the inspector cannot do that, since it must report a size, so
+  it needs the discipline the recent list got for free.
+- **The encoded-versus-observed split is not only about colour, and the dialog should show
+  which is which.** The metadata layer was built for *"distinguish encoded metadata from
+  playback inference"* on primaries/transfer/matrix/range — but the same line runs through the
+  rest of the panel. **Encoded**: resolution, pixel aspect, display aspect, bit depth, pixel
+  format, codec/profile, track IDs, the exact FPS rational. **Observed**: current viewport size,
+  current scale, and the orientation actually on screen once phase 10's transform and §4's
+  container rotation are composed. A user reading `Display aspect ratio` next to
+  `Current scale` should not have to guess that one is the file's claim and the other is this
+  window's state.
+- **"Non-blocking" means modeless, and a modeless window is a NEW case for
+  `OverlayHooks::holdVisible`.** It covers popups, tooltips, modal dialogs and child focus; the
+  Go To prompts made the modal branch live at phase 7. A modeless inspector is a separate
+  top-level window, so decide deliberately what the floating transport does while it has focus —
+  staying revealed indefinitely because another window is focused is a plausible accident, and
+  so is the reverse. Whatever is chosen, it is a `holdVisible` answer, not a second mechanism.
+- **`Ctrl+I` goes on a `QAction`, not in the dispatched half of `ShortcutTable`.** Phase 3's
+  rule: the dispatcher matches on the key and **ignores modifiers**, so every modifier'd
+  shortcut in Trace is action-owned and appears in the table as a documentation row pointing at
+  its action. Note also that plain `I` used to toggle the deleted `showInfo`; there is no
+  conflict, but do not resurrect it.
+
 **READ THIS BLOCK FIRST — it supersedes the phase-12 brief further down, which is retained as
 the record of what was asked for rather than as open work.**
 

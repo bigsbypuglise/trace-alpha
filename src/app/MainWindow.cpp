@@ -14,6 +14,7 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QKeyEvent>
+#include <QLocale>
 #include <QMenuBar>
 #include <QMessageBox>
 #include <QPointer>
@@ -34,6 +35,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numeric>
 
 #ifdef Q_OS_WIN
 // For the WM_SIZING / WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE counters in
@@ -880,8 +882,26 @@ void MainWindow::installOverlayHooks() {
         // phase 7 adds the first text-entry control and this is the predicate it
         // will need, and because leaving it out would make the omission
         // invisible rather than deliberate.
+        //
+        // SCOPED TO THIS WINDOW'S OWN CHILDREN, AND SPEC PHASE 13 IS WHY.
+        //
+        // QApplication::focusWidget() is application-wide, so a MODELESS window
+        // that takes focus -- the Movie Inspector is Trace's first -- satisfies
+        // `focus != this && focus != viewer_` for as long as it is focused. The
+        // transport would then be held revealed indefinitely, not because
+        // anything about the video is being interacted with, but because another
+        // window is. A user reading metadata is looking at the picture, and a
+        // panel that never fades back off it is the wrong answer.
+        //
+        // Deliberate, and it is a holdVisible answer rather than a second
+        // mechanism: the veto is what "an interaction is in progress" means, and
+        // an interaction in a separate top-level window is not one with this
+        // one. The modal branch above is untouched, so both Go To prompts still
+        // hold exactly as they did at phase 7 -- and they should, because a
+        // modal dialog blocks this window rather than sitting beside it.
         const QWidget* focus = QApplication::focusWidget();
-        return focus != nullptr && focus != this && focus != viewer_;
+        return focus != nullptr && focus != this && focus != viewer_ &&
+               focus->window() == this;
     };
     hooks.setCursorHidden = [this](bool hidden) {
         // The overlay decides WHEN -- the same inactivity that fades the panel.
@@ -975,6 +995,29 @@ void MainWindow::setupSharedActions() {
         rebuildRecentMenu();
         statusBar()->showMessage(tr("Recent files cleared."), 2000);
     });
+
+    // Movie Inspector (spec phase 13). Ctrl+I, and it goes on a QAction rather
+    // than into ShortcutTable's dispatched half -- phase 3's rule: that
+    // dispatcher matches on the key and IGNORES MODIFIERS, so every modifier'd
+    // shortcut in Trace is action-owned and appears in the table as a
+    // documentation row pointing at its action. Put in the dispatched half,
+    // Ctrl+I would have been reachable by pressing plain I.
+    //
+    // Which is worth stating, because plain I used to exist: it toggled
+    // viewState_.showInfo, nothing read the flag, and phase 2 deleted both. The
+    // key is free and stays free -- this does not resurrect it.
+    inspectorAction_ = new QAction(tr("Show Movie &Inspector"), this);
+    inspectorAction_->setCheckable(true);
+    inspectorAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_I));
+    connect(inspectorAction_, &QAction::triggered, this, &MainWindow::toggleMovieInspector);
+    addAction(inspectorAction_);
+
+    // Single-shot and armed by events, never running on a schedule. See the
+    // declaration for why the refresh is deferred at all rather than done where
+    // the change happens.
+    inspectorRefreshTimer_.setSingleShot(true);
+    inspectorRefreshTimer_.setInterval(kInspectorRefreshMs);
+    connect(&inspectorRefreshTimer_, &QTimer::timeout, this, &MainWindow::refreshInspector);
 
     // Time Display (spec phase 7). Four mutually exclusive readouts in one
     // QActionGroup, so "which readout is showing" has one owner and the menu
@@ -1177,6 +1220,11 @@ void MainWindow::setupShortcuts() {
     // KEYBOARD contract, and a row with no key in it would be a menu listing.
     shortcuts_.addAction(ShortcutGroup::View, rotateLeftAction_);
     shortcuts_.addAction(ShortcutGroup::View, rotateRightAction_);
+    // Spec phase 13, and a documentation row for the same reason: Ctrl+I carries
+    // a modifier, so Qt dispatches it and this row exists so the Keyboard
+    // Shortcuts window phase 14 renders is the COMPLETE contract rather than the
+    // part keyPressEvent happens to own.
+    shortcuts_.addAction(ShortcutGroup::View, inspectorAction_);
 
     shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_Space, tr("Play / Pause"),
                       [this]() { togglePlayPause(); refreshHud("Space"); });
@@ -1558,6 +1606,11 @@ void MainWindow::applyViewTransform(const trace::render::ViewTransform& next,
     // reason the scrub walk calls repaint().
     viewer_->repaint();
     refreshHud(action);
+    // Spec phase 13. The inspector's "Orientation on screen" and "Current scale"
+    // are both observed rows and both move here. Through the timer like every
+    // other route, even though the repaint above has already happened -- one
+    // refresh path is what stops a later caller getting the ordering wrong.
+    scheduleInspectorRefresh();
 }
 
 void MainWindow::syncViewTransformActions() {
@@ -1733,6 +1786,444 @@ void MainWindow::promptGoToTimecode() {
     goToFrame(frame, "Go to Timecode");
 }
 
+// ---- Movie Inspector (spec phase 13) ---------------------------------------
+
+namespace {
+
+QString formatByteSize(qint64 bytes) {
+    if (bytes < 0) return MainWindow::tr("Unknown");
+    // Exact byte count alongside the readable one. A review tool gets asked
+    // "is this the same file as the one on the server", and the rounded figure
+    // cannot answer it.
+    const QString exact = QLocale::system().toString(bytes) + MainWindow::tr(" bytes");
+    static const char* units[] = {"KB", "MB", "GB", "TB"};
+    double value = static_cast<double>(bytes);
+    int unit = -1;
+    while (value >= 1024.0 && unit < 3) {
+        value /= 1024.0;
+        ++unit;
+    }
+    if (unit < 0) return exact;
+    return QStringLiteral("%1 %2 (%3)")
+        .arg(QString::number(value, 'f', value < 10.0 ? 2 : 1))
+        .arg(QLatin1String(units[unit]))
+        .arg(exact);
+}
+
+QString formatBitrate(double bitsPerSecond) {
+    if (bitsPerSecond <= 0.0) return {};
+    if (bitsPerSecond >= 1'000'000.0)
+        return QStringLiteral("%1 Mbps").arg(QString::number(bitsPerSecond / 1'000'000.0, 'f', 2));
+    return QStringLiteral("%1 kbps").arg(QString::number(bitsPerSecond / 1000.0, 'f', 1));
+}
+
+// The rotation and flips the user is actually looking at, as a sentence.
+QString describeOrientation(int quarterTurns, bool flipH, bool flipV) {
+    QStringList parts;
+    if (quarterTurns) {
+        parts << MainWindow::tr("rotated %1° clockwise").arg(quarterTurns * 90);
+    }
+    if (flipH) parts << MainWindow::tr("flipped horizontally");
+    if (flipV) parts << MainWindow::tr("flipped vertically");
+    if (parts.isEmpty()) return MainWindow::tr("Upright, unflipped");
+    QString text = parts.join(QStringLiteral(", "));
+    text[0] = text[0].toUpper();
+    return text;
+}
+
+} // namespace
+
+// EVERYTHING THE INSPECTOR SHOWS, AND NOTHING IT HAD TO ASK FOR.
+//
+// Two of the spec's rules govern this function rather than the window: "do not
+// continuously poll expensive decoder state" and "do not block remote-media
+// opening to calculate optional values". Every value below is either read once
+// at open (the colour tags, the codec, the audio stream, the file size) or
+// already maintained for something else (the drawn size, the view transform),
+// so building a snapshot costs string formatting and no I/O at all.
+//
+// The decoder's METADATA is safe to read live -- only open() writes it, and
+// open() cannot run while a scrub lease is out. Its PERF STATS are not, which
+// is why the file size and the playback colour state come from `hudPerf_`, the
+// snapshot captureDecoderTelemetry() maintains from whichever side owns the
+// decoder. Reading videoDecoder_.perfStats() here would be the one thing the
+// lease exists to prevent.
+trace::app::InspectorSnapshot MainWindow::buildInspectorSnapshot() const {
+    using trace::app::FieldOrigin;
+    using trace::app::InspectorField;
+    using trace::app::InspectorSection;
+
+    trace::app::InspectorSnapshot snap;
+    if (!currentMedia_.has_value() || !frameSource_) return snap;
+
+    const QString path = QString::fromStdString(currentMedia_->path);
+    // The canonical path the Share gate computed at open, not a fresh
+    // QFileInfo: two answers to "what is this file's path" eventually disagree,
+    // which is the reason MediaShare::canonicalNativePath was exported at phase
+    // 11 rather than reimplemented.
+    snap.sourcePath = shareState_.canonicalPath.isEmpty() ? path : shareState_.canonicalPath;
+    // The basename by searching the string, RecentFiles' rule and for its
+    // reason: QFileInfo is the call that must not appear on this path.
+    const int slash = std::max(snap.sourcePath.lastIndexOf(QLatin1Char('/')),
+                               snap.sourcePath.lastIndexOf(QLatin1Char('\\')));
+    snap.fileName = slash >= 0 ? snap.sourcePath.mid(slash + 1) : snap.sourcePath;
+
+    const bool isVideo = currentMedia_->kind == MediaKind::VideoFile;
+    const auto& vm = videoDecoder_.metadata();
+    const auto& perf = hudPerf_;
+    const auto& drawPerf = viewer_ ? viewer_->perfStats() : trace::ui::ViewerPerfStats{};
+    const trace::render::ViewTransform view =
+        viewer_ ? viewer_->viewTransform() : trace::render::ViewTransform{};
+
+    // ---- observed geometry, computed once and used by two rows -------------
+    //
+    // lastDrawSize is DEVICE pixels and is measured BY the paint (phase 10), so
+    // it is only current because refreshInspector() is reached from a timer that
+    // fires after one. See scheduleInspectorRefresh().
+    const QSize drawn = drawPerf.lastDrawSize;
+    QSize naturalOnScreen;
+    if (isVideo) naturalOnScreen = view.apply(vm.naturalDisplaySize());
+    // width/height, NOT image.size(): LoadedImageInfo::image is left default at
+    // both sites that build one, so its size is empty. See currentDisplayAspect.
+    else if (currentImage_.has_value())
+        naturalOnScreen = view.apply(QSize(currentImage_->width, currentImage_->height));
+
+    // ---- General -----------------------------------------------------------
+    InspectorSection general;
+    general.title = tr("General");
+    general.fields.push_back({tr("File name"), snap.fileName, FieldOrigin::File});
+    // `entry`: a path is one unbroken token and gets a read-only field rather
+    // than a wrapping label. See InspectorField::entry for the two layout faults
+    // that produced the rule.
+    general.fields.push_back({tr("Source path"), snap.sourcePath, FieldOrigin::File, true});
+
+    if (isVideo) {
+        general.fields.push_back(
+            {tr("Resolution"), tr("%1 × %2").arg(vm.width).arg(vm.height), FieldOrigin::Encoded});
+    } else if (currentImage_.has_value()) {
+        general.fields.push_back({tr("Resolution"),
+                                  tr("%1 × %2").arg(currentImage_->width).arg(currentImage_->height),
+                                  FieldOrigin::Encoded});
+    }
+
+    // THE FILE SIZE COMES FROM THE OPEN, NEVER FROM A STAT ISSUED HERE.
+    // MediaIoSource read it while opening the file; a still or a sequence frame
+    // does not go through the decoder, so openPath takes it there instead --
+    // also at open, also on a path being touched anyway.
+    const qint64 bytes = isVideo ? perf.sourceBytes : openedFileBytes_;
+    general.fields.push_back({tr("File size"), formatByteSize(bytes), FieldOrigin::File});
+
+    if (isVideo) {
+        const QString rate = formatBitrate(perf.sourceBitrateMbps * 1'000'000.0);
+        general.fields.push_back(
+            {tr("Overall data rate"), rate.isEmpty() ? tr("Unknown") : rate, FieldOrigin::File});
+    }
+
+    // Current viewport size. Reported as the VIDEO AREA, and the viewer's own
+    // size is named alongside it whenever the two differ -- with the aspect lock
+    // on they are the same rectangle by construction (spec section 4 eliminates
+    // the bars), and with it off they are not.
+    QString viewport = tr("Unknown");
+    if (viewer_ && drawn.isValid() && !drawn.isEmpty()) {
+        const double dpr = viewer_->devicePixelRatioF();
+        const QSize viewerDevice(static_cast<int>(std::lround(viewer_->width() * dpr)),
+                                 static_cast<int>(std::lround(viewer_->height() * dpr)));
+        viewport = tr("%1 × %2 px (video area)").arg(drawn.width()).arg(drawn.height());
+        if (viewerDevice != drawn) {
+            viewport += tr("; viewer is %1 × %2 px").arg(viewerDevice.width()).arg(viewerDevice.height());
+        }
+        if (dpr != 1.0) {
+            viewport += tr(" — device pixels at %1% scaling")
+                            .arg(QString::number(dpr * 100.0, 'f', 0));
+        }
+    }
+    general.fields.push_back({tr("Current viewport size"), viewport, FieldOrigin::Observed});
+
+    if (isVideo) {
+        QString container = vm.containerLongName.isEmpty() ? vm.containerName : vm.containerLongName;
+        if (container.isEmpty()) container = tr("Unknown");
+        else if (!vm.containerName.isEmpty() && !vm.containerLongName.isEmpty())
+            container = tr("%1 (%2)").arg(vm.containerLongName, vm.containerName);
+        general.fields.push_back({tr("Container"), container, FieldOrigin::Encoded});
+
+        QString videoFormat = vm.codecName;
+        if (!vm.codecProfile.isEmpty()) videoFormat += tr(" (%1)").arg(vm.codecProfile);
+        videoFormat += tr(", %1 fps").arg(QString::number(vm.fps, 'f', 3));
+        general.fields.push_back({tr("Video format"), videoFormat, FieldOrigin::Encoded});
+
+        QString audioFormat = tr("None");
+        if (vm.hasAudio) {
+            audioFormat = vm.audioCodecName;
+            if (!vm.audioProfile.isEmpty()) audioFormat += tr(" (%1)").arg(vm.audioProfile);
+            audioFormat += tr(", %1 Hz").arg(vm.audioSampleRate);
+            if (!vm.audioChannelLayout.isEmpty()) audioFormat += tr(", %1").arg(vm.audioChannelLayout);
+        }
+        general.fields.push_back({tr("Audio format"), audioFormat, FieldOrigin::Encoded});
+    } else {
+        general.fields.push_back({tr("Video format"),
+                                  currentMedia_->kind == MediaKind::ImageSequence
+                                      ? tr("Image sequence")
+                                      : tr("Still image"),
+                                  FieldOrigin::Encoded});
+    }
+    snap.sections.push_back(std::move(general));
+
+    // ---- Video details -----------------------------------------------------
+    InspectorSection video;
+    video.title = isVideo ? tr("Video details") : tr("Image details");
+
+    if (isVideo) {
+        video.fields.push_back({tr("Frame rate"),
+                                tr("%1/%2 (%3 fps)")
+                                    .arg(vm.fpsNum)
+                                    .arg(vm.fpsDen)
+                                    .arg(QString::number(vm.fps, 'f', 6)),
+                                FieldOrigin::Encoded});
+
+        // Start timecode is not in the spec's field list, and it is here because
+        // phase 7 read it from the container under exactly this phase's rule --
+        // absent stays absent, never synthesised from zero. A metadata panel that
+        // omitted it would be the one place in Trace that does not report it.
+        video.fields.push_back(
+            {tr("Start timecode"),
+             vm.hasStartTimecode
+                 ? tr("%1 (%2)").arg(vm.startTimecode,
+                                     vm.startTimecodeDropFrame ? tr("drop frame") : tr("non-drop"))
+                 : tr("None — the container states no timecode"),
+             FieldOrigin::Encoded});
+
+        const QString streamRate = formatBitrate(static_cast<double>(vm.videoBitrateBps));
+        video.fields.push_back({tr("Video bitrate"),
+                                streamRate.isEmpty() ? tr("Not stated by the container")
+                                                     : streamRate,
+                                FieldOrigin::Encoded});
+
+        // `sarStated` is phase 12's negative control, and it is exactly the
+        // distinction this window exists to make: "1:1 because the file says so"
+        // and "1:1 because nobody said" are different claims. Three of the four
+        // shipping assets state 1:1; the 9:16 clip states nothing.
+        video.fields.push_back({tr("Pixel aspect ratio"),
+                                tr("%1:%2 %3")
+                                    .arg(vm.sarNum)
+                                    .arg(vm.sarDen)
+                                    .arg(vm.sarStated ? tr("(stated)")
+                                                      : tr("(assumed square — the container states none)")),
+                                FieldOrigin::Encoded});
+
+        QString dar = QString::number(vm.displayAspect(), 'f', 4);
+        {
+            long long an = static_cast<long long>(vm.width) * vm.sarNum;
+            long long ad = static_cast<long long>(vm.height) * vm.sarDen;
+            if (vm.rotationDegrees == 90 || vm.rotationDegrees == 270) std::swap(an, ad);
+            const long long g = std::gcd(an, ad);
+            if (g > 0) {
+                an /= g;
+                ad /= g;
+                // Only when it reduces to something a person can read. An exact
+                // 3839:2160 is true and useless, and printing it would make the
+                // useful cases harder to spot.
+                if (an <= 999 && ad <= 999) dar = tr("%1:%2 (%3)").arg(an).arg(ad).arg(dar);
+            }
+        }
+        video.fields.push_back({tr("Display aspect ratio"), dar, FieldOrigin::Encoded});
+
+        video.fields.push_back(
+            {tr("Container rotation"),
+             vm.rotationDegrees == 0 && !vm.rotationSnapped
+                 ? tr("None")
+                 : tr("%1° clockwise%2")
+                       .arg(vm.rotationDegrees)
+                       .arg(vm.rotationSnapped
+                                ? tr(" (snapped — the display matrix is not a quarter turn)")
+                                : QString()),
+             FieldOrigin::Encoded});
+    }
+
+    // Current scale, against the size the media is MEANT to be shown at, with
+    // the view transform applied so a rotated picture is not reported as scaled
+    // by the ratio of two different axes.
+    QString scale = tr("Unknown");
+    if (naturalOnScreen.width() > 0 && drawn.width() > 0) {
+        const double factor = static_cast<double>(drawn.width()) /
+                              static_cast<double>(naturalOnScreen.width());
+        scale = drawPerf.lastDrawWasScaled
+                    ? tr("%1% of natural displayed size (%2 × %3)")
+                          .arg(QString::number(factor * 100.0, 'f', 1))
+                          .arg(naturalOnScreen.width())
+                          .arg(naturalOnScreen.height())
+                    : tr("1:1 — drawn at natural displayed size");
+    }
+    video.fields.push_back({tr("Current scale"), scale, FieldOrigin::Observed});
+
+    // ORIENTATION ON SCREEN, WHICH IS THE COMPOSITION AND NOT EITHER HALF.
+    // ViewerWidget::applySourceShape is the one place the container's rotation
+    // and the user's are combined; this reports the same sum, and names both
+    // contributions so "the file is sideways" and "I rotated it" stay distinct.
+    {
+        const int containerTurns = viewer_ ? viewer_->sourceRotationDegrees() / 90 : 0;
+        const int composed = ((view.quarterTurns + containerTurns) % 4 + 4) % 4;
+        video.fields.push_back(
+            {tr("Orientation on screen"),
+             tr("%1 (file %2°, view transform %3°)")
+                 .arg(describeOrientation(composed, view.flipH, view.flipV))
+                 .arg(containerTurns * 90)
+                 .arg(view.quarterTurns * 90),
+             FieldOrigin::Observed});
+    }
+
+    if (isVideo) {
+        // The ENCODED format, from the metadata read at open -- not
+        // VideoPerfStats::srcPixelFormat, which is what the last conversion saw
+        // and carries " (a-skip)" once playback drops an alpha plane.
+        video.fields.push_back({tr("Pixel format"),
+                                vm.pixelFormatName.isEmpty() ? tr("Unknown") : vm.pixelFormatName,
+                                FieldOrigin::Encoded});
+        video.fields.push_back(
+            {tr("Bit depth"),
+             vm.bitsPerComponent > 0
+                 ? tr("%1-bit per component (%2 bits per pixel)")
+                       .arg(vm.bitsPerComponent)
+                       .arg(vm.bitsPerPixel)
+                 : tr("Unknown"),
+             FieldOrigin::Encoded});
+
+        // THE FOUR TAGS, VERBATIM INCLUDING THEIR ABSENCE. This is the rule the
+        // whole phase was shaped by: two of the four shipping assets state
+        // nothing at all here, and they are precisely the two whose HUD reads
+        // `bt709*`, so an inspector built on VideoPerfStats would tell the user
+        // they are tagged BT.709. In a review tool that is a bug report about
+        // the media rather than about Trace.
+        const QString untagged = tr("Untagged");
+        video.fields.push_back({tr("Colour primaries"),
+                                vm.taggedColorPrimaries.isEmpty() ? untagged : vm.taggedColorPrimaries,
+                                FieldOrigin::Encoded});
+        video.fields.push_back({tr("Transfer characteristics"),
+                                vm.taggedColorTransfer.isEmpty() ? untagged : vm.taggedColorTransfer,
+                                FieldOrigin::Encoded});
+        video.fields.push_back({tr("Matrix coefficients"),
+                                vm.taggedColorMatrix.isEmpty() ? untagged : vm.taggedColorMatrix,
+                                FieldOrigin::Encoded});
+        video.fields.push_back({tr("Range"),
+                                !vm.hasTaggedRange
+                                    ? untagged
+                                    : (vm.taggedRangeIsFull ? tr("Full") : tr("Limited")),
+                                FieldOrigin::Encoded});
+
+        // AND WHAT TRACE DID ABOUT IT, on its own row and under its own origin.
+        // swsCoefficientsFor applies the standard "HD and up is 709" heuristic
+        // to an untagged file: correct for decoding, and an answer Trace
+        // invented. Showing both is what "distinguish encoded metadata from
+        // playback inference" asks for -- the alternative is showing one of them
+        // and hoping the user knows which.
+        QString playback = tr("%1 matrix (%2), %3 range")
+                               .arg(perf.colorMatrix.isEmpty() ? tr("unknown") : perf.colorMatrix)
+                               .arg(perf.colorMatrixInferred
+                                        ? tr("inferred by Trace — the file states none")
+                                        : tr("as tagged"))
+                               .arg(perf.srcFullRange ? tr("full") : tr("limited"));
+        if (!perf.srcPixelFormat.isEmpty() && !perf.dstPixelFormat.isEmpty()) {
+            playback += tr(" · converting %1 → %2").arg(perf.srcPixelFormat, perf.dstPixelFormat);
+        }
+        video.fields.push_back({tr("Playback is using"), playback, FieldOrigin::Playback});
+
+        QString codec = vm.codecName;
+        if (!vm.codecProfile.isEmpty()) codec += tr(" · %1").arg(vm.codecProfile);
+        video.fields.push_back({tr("Codec / profile"), codec, FieldOrigin::Encoded});
+        // The CONTAINER's track id, which is what an editorial tool means by
+        // "track ID". FFmpeg's array position is named separately rather than
+        // substituted for it.
+        video.fields.push_back({tr("Track ID"),
+                                tr("%1 (stream index %2)").arg(vm.videoTrackId).arg(vm.videoStreamIndex),
+                                FieldOrigin::Encoded});
+    }
+    snap.sections.push_back(std::move(video));
+
+    // ---- Audio details -----------------------------------------------------
+    if (isVideo) {
+        InspectorSection audioSection;
+        audioSection.title = tr("Audio details");
+        if (!vm.hasAudio) {
+            audioSection.fields.push_back(
+                {tr("Audio"), tr("No audio track"), FieldOrigin::Encoded});
+        } else {
+            QString codec = vm.audioCodecName;
+            if (!vm.audioProfile.isEmpty()) codec += tr(" · %1").arg(vm.audioProfile);
+            audioSection.fields.push_back({tr("Codec"), codec, FieldOrigin::Encoded});
+            audioSection.fields.push_back(
+                {tr("Sample rate"), tr("%1 Hz").arg(vm.audioSampleRate), FieldOrigin::Encoded});
+            const QString aRate = formatBitrate(static_cast<double>(vm.audioBitrateBps));
+            audioSection.fields.push_back({tr("Bitrate"),
+                                           aRate.isEmpty() ? tr("Not stated by the container") : aRate,
+                                           FieldOrigin::Encoded});
+            audioSection.fields.push_back(
+                {tr("Channel layout"),
+                 tr("%1 (%2 channels)")
+                     .arg(vm.audioChannelLayout.isEmpty() ? tr("unknown") : vm.audioChannelLayout)
+                     .arg(vm.audioChannels),
+                 FieldOrigin::Encoded});
+            audioSection.fields.push_back(
+                {tr("Track ID"),
+                 tr("%1 (stream index %2)").arg(vm.audioTrackId).arg(vm.audioStreamIndex),
+                 FieldOrigin::Encoded});
+        }
+        snap.sections.push_back(std::move(audioSection));
+    }
+
+    return snap;
+}
+
+void MainWindow::refreshInspector() {
+    if (!inspector_ || !inspector_->isVisible()) return;
+    inspector_->setSnapshot(buildInspectorSnapshot());
+}
+
+// ARMED BY EVENTS, NOT RUNNING ON A SCHEDULE, AND SILENT WHEN THE WINDOW IS
+// SHUT. That combination is what keeps "do not continuously poll" true while
+// still satisfying "update when active media changes".
+//
+// The deferral is phase 10's trap: `RenderStats::lastDrawSize` and the fit it
+// implies are measured BY the paint, so a refresh issued at the moment the
+// window changed reports the PREVIOUS viewport, and on a paused file nothing
+// ever comes along to correct it. Waiting for the paint is the whole reason
+// this is a timer rather than a direct call -- and it also collapses the ~123
+// resize events of a real drag into one rebuild, which is what keeps the
+// instrument out of the path the phase 12 record ruled it out of for the HUD.
+void MainWindow::scheduleInspectorRefresh() {
+    if (!inspector_ || !inspector_->isVisible()) return;
+    inspectorRefreshTimer_.start();
+}
+
+void MainWindow::toggleMovieInspector(bool show) {
+    if (!inspector_) {
+        if (!show) return;
+        // Created on first use, so a session that never opens it pays nothing.
+        inspector_ = new trace::app::MovieInspector(this);
+        // The menu item FOLLOWS the window rather than assuming it drove every
+        // change: the title bar's close button is a route the action never sees,
+        // and a checkable item that says "shown" over a closed window is the
+        // kind of small disagreement this pass exists to remove.
+        connect(inspector_, &trace::app::MovieInspector::visibilityChanged, this,
+                [this](bool visible) {
+                    if (inspectorAction_) inspectorAction_->setChecked(visible);
+                    // Hidden: stop any refresh already armed, so nothing runs for
+                    // a window nobody is looking at.
+                    if (!visible) inspectorRefreshTimer_.stop();
+                });
+    }
+    if (show) {
+        // Filled synchronously here, and this is the one place a direct read is
+        // the RIGHT answer rather than the trap: nothing has just changed, so
+        // the last paint's drawn size is the size on screen. Everywhere else
+        // goes through the timer.
+        inspector_->setSnapshot(buildInspectorSnapshot());
+        inspector_->show();
+        inspector_->raise();
+        inspector_->activateWindow();
+    } else {
+        inspector_->hide();
+    }
+}
+
 // One exact seek, shared by both prompts. Goes through the same Step path a
 // slider release uses, which is the spec's "use the existing exact-frame seek
 // path" -- and is why neither prompt needed any decoder work at all.
@@ -1853,6 +2344,16 @@ void MainWindow::setupMenus() {
         refreshHud(on ? "Lock aspect" : "Unlock aspect");
     });
     viewMenu->addAction(lockAspectAction_);
+
+    // Window, which is where the spec's Menus section puts Show/Hide Movie
+    // Inspector literally -- the same reasoning that created View for the aspect
+    // lock at phase 12 and put Time Display under File at phase 7: build the
+    // menu the spec names, with the one item this phase owns in it, and let
+    // phase 14 fill in Minimize / Maximize / Actual Size / Fit to Window around
+    // it. None of those four exist yet, so a Window menu holding only this is
+    // the complete truth about what the application can currently do.
+    auto* windowMenu = menuBar()->addMenu(tr("&Window"));
+    windowMenu->addAction(inspectorAction_);
 
     fileMenu->addSeparator();
     auto* quitAction = new QAction("&Quit", this);
@@ -2047,6 +2548,16 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
     QMainWindow::resizeEvent(event);
     ++resizeEvents_;
     syncScrubPreviewSize();
+    // Spec phase 13. The inspector reports the current viewport size, so a
+    // resize changes what it says. ARMING a single-shot is all that happens
+    // here -- the refresh itself is deferred, because the size it has to read is
+    // measured by the paint that has not run yet, and because a real corner drag
+    // produces ~123 of these and the phase 12 record rules out building a panel
+    // on every one of them. Returns immediately when the window is not open, so
+    // the common case costs one null test.
+    scheduleInspectorRefresh();
+    // Fullscreen, maximize and Snap all arrive here as resizes too, so none of
+    // them needs its own hook.
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
@@ -2758,6 +3269,10 @@ bool MainWindow::openPath(const QString& path) {
     mediaSeekCount_ = 0;
     mediaSeeksSeen_ = 0;
 
+    // Cleared before anything can succeed, so a failed open cannot leave the
+    // previous file's size attached to the next one.
+    openedFileBytes_ = -1;
+
     trace::core::MediaItem item;
     item.path = path.toStdString();
 
@@ -2828,6 +3343,17 @@ bool MainWindow::openPath(const QString& path) {
     }
 
     currentMedia_ = item;
+    // THE FILE SIZE FOR MEDIA THAT DOES NOT GO THROUGH THE DECODER, TAKEN HERE
+    // AND ONLY HERE (spec phase 13).
+    //
+    // A video's size arrives free: MediaIoSource reads it while opening the
+    // file, and VideoPerfStats::sourceBytes already carries it. A still or a
+    // sequence frame has no MediaIoSource, so the one `QFileInfo` above -- which
+    // this open already constructed to read the extension -- answers it. What
+    // must never happen is a stat issued when the inspector is SHOWN: the spec
+    // forbids blocking to compute optional values, and phase 11 measured an
+    // unreachable UNC path at 21,037ms and a cold LucidLink read at 407ms.
+    if (item.kind != MediaKind::VideoFile) openedFileBytes_ = fi.size();
     frameCache_.clear();
     frameCache_.setWindowCenter(playback_.state().currentFrame);
 
@@ -2954,6 +3480,13 @@ bool MainWindow::openPath(const QString& path) {
     // window that was supposed to eliminate bars. Measured on the 4x5: the
     // viewer came out 982x905 for a 0.8 ratio that wanted 724x905.
     applyMediaWindowShape();
+    // "Update when active media changes" (spec). Armed rather than called: the
+    // line above has just resized the window, so the paint that decides the
+    // viewport size has not happened yet -- refreshing here would print the
+    // PREVIOUS media's viewport into a panel about this one, and on a paused
+    // file nothing would correct it. Phase 10's trap, and the reason the timer
+    // is the only refresh route.
+    scheduleInspectorRefresh();
     return true;
 }
 

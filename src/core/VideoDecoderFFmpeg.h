@@ -141,6 +141,25 @@ struct VideoMetadata {
     // container does not state one, which is common in MOV.
     long long videoBitrateBps = -1;
 
+    // THE ENCODED PIXEL FORMAT AND ITS DEPTH, AND NEITHER OF THE TWO OBVIOUS
+    // SOURCES IS USABLE FOR EITHER -- which is the same trap as the colour tags
+    // above, in a different costume.
+    //
+    // `VideoPerfStats::srcPixelFormat` is rewritten by every conversion and
+    // gains a " (a-skip)" suffix when the alpha plane is dropped, so it is what
+    // playback last DID rather than what the file IS. And
+    // `VideoPerfStats::srcBitDepth` is av_get_bits_per_pixel(), which is bits
+    // per PIXEL: it reads 12 for 8-bit yuv420p, so an inspector row labelled
+    // "Bit depth" built from it would tell the user an 8-bit H.264 file is
+    // 12-bit. In a review tool that is a bug report about the media.
+    //
+    // So the format is read once at open, from the descriptor, and the depth is
+    // taken from the component rather than from the pixel. Both are kept,
+    // because both are real and they are different numbers.
+    QString pixelFormatName;
+    int bitsPerComponent = 0;
+    int bitsPerPixel = 0;
+
     bool hasAudio = false;
     QString audioCodecName;
     QString audioProfile;

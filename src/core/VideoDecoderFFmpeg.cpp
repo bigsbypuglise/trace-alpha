@@ -1001,6 +1001,24 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     perfStats_.dstPixelFormat = QStringLiteral("RGB32/BGRA");
     perfStats_.experimentalFastPathEnabled = impl_->forceFastConvert;
 
+    // THE SAME TWO FACTS, AS METADATA RATHER THAN AS TELEMETRY (spec phase 13),
+    // and written here beside the two lines above so the difference is visible
+    // in one place rather than argued about in two.
+    //
+    // The perfStats pair is rewritten by every conversion and measures the
+    // PIXEL, not the component: yuv420p reads 12 there, and a 4444 file reads a
+    // format with " (a-skip)" appended once playback drops its alpha plane.
+    // Neither is a property of the file. These are: read once, from the
+    // descriptor, and never touched again.
+    if (srcDesc) {
+        if (srcDesc->name) metadata_.pixelFormatName = QString::fromUtf8(srcDesc->name);
+        // comp[0] is the luma/first component. Every format Trace opens has a
+        // uniform depth across components; a hypothetical one that did not would
+        // still report its first honestly rather than an average.
+        metadata_.bitsPerComponent = srcDesc->comp[0].depth;
+        metadata_.bitsPerPixel = av_get_bits_per_pixel(srcDesc);
+    }
+
     AVRational fr = av_guess_frame_rate(impl_->fmt, stream, nullptr);
     if (fr.num <= 0 || fr.den <= 0) fr = AVRational{24, 1};
     impl_->fpsQ = fr;
@@ -1236,7 +1254,13 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             // decoder then applies a heuristic to. An empty field here would be
             // ambiguous in a tab-separated log, so absence prints as the word.
             "\ttagpri=%39\ttagtrc=%40\ttagmtx=%41\ttagrange=%42"
-            "\tcontainer=%43\tprofile=%44\tvtrack=%45\taudio=%46")
+            "\tcontainer=%43\tprofile=%44\tvtrack=%45\taudio=%46"
+            // `pixfmt=` above is perfStats_'s copy and is what the last
+            // CONVERSION saw; `encpixfmt=` is the file's own. They differ on
+            // 4444 the moment the alpha plane is dropped. `depth=` is per
+            // COMPONENT and `bpp=` per pixel -- printed together because the
+            // pair is the whole point: 8 and 12 on yuv420p.
+            "\tencpixfmt=%47\tdepth=%48\tbpp=%49")
             .arg(QFileInfo(path).fileName())
             .arg(si.remote ? "remote" : "local")
             .arg(perfStats_.probeSizeLimit)
@@ -1294,7 +1318,11 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
                            .arg(metadata_.audioSampleRate)
                            .arg(metadata_.audioChannelLayout)
                            .arg(metadata_.audioTrackId)
-                     : QStringLiteral("none")));
+                     : QStringLiteral("none"))
+            .arg(metadata_.pixelFormatName.isEmpty() ? QStringLiteral("?")
+                                                     : metadata_.pixelFormatName)
+            .arg(metadata_.bitsPerComponent)
+            .arg(metadata_.bitsPerPixel));
     }
 
     error.clear();
