@@ -2318,7 +2318,7 @@ disagrees with the section it points at, the section wins.
 | 8 Share menu + path copying | done | `a6447aa` + `f39eb67` (CI 94) |
 | 9 LucidLink shell integration | done, **owner accepted** | `9b62ab0` (CI 96) |
 | 10 temporary view transforms | done | `d2b4481` (CI 98) |
-| **11 Open Recent + the settings home** | **COMPLETE** | `84be1a1` |
+| **11 Open Recent + the settings home** | **COMPLETE** | `84be1a1` (CI 101 on `700446e`) |
 | **12 Media-driven window size (spec section 4)** | **NEXT — inserted by owner decision** | — |
 | 13 Movie Inspector | pending (was 12) | — |
 | 14 Menus, help, accessibility proxy tree | pending (was 13) | — |
