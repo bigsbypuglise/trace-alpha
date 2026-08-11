@@ -1,7 +1,84 @@
-# The interface pass is open, PHASE 12 IS SIGNED OFF, and PHASE 13 IS UNDER WAY.
+# The interface pass is open, PHASE 13 IS DONE, and PHASE 14 IS NEXT.
 
-**PHASE 13 STARTED: the Movie Inspector's metadata layer is built and verified** (`9ec7ec3`);
-**the dialog itself is not written.** Pick it up there.
+**PHASE 13 SHIPPED (`368e3b8`): the Movie Inspector is built, measured and in the Window
+menu.** The metadata layer was `9ec7ec3`; the window is `368e3b8`. Full record in
+`docs/interface-pass-1-progress.md` under "Phase 13". **A phase 12 defect closed with it
+(`3a38516`) — see the last block here, because it changes window geometry the owner signed
+off.**
+
+**PHASE 14 IS THE OPEN PHASE: menus, help and the accessibility proxy tree.** It renders the
+Keyboard Shortcuts window from `ShortcutTable::rows()`, fills in the File/Edit/View/Window/Help
+structure the spec names, and — by owner decision, 2026-08-11 — **builds an accessibility proxy
+tree over the composited overlay** (plan §19.7). **Estimate it as construction, not polish.**
+Phase 15 is the full regression pass and can then honestly close the interface pass.
+
+**Five things phase 13 leaves for it.**
+
+- **`Ctrl+I` is already in `ShortcutTable` as a documentation row**, pointing at
+  `inspectorAction_` rather than copying its key. So is every other modifier'd shortcut. The
+  Keyboard Shortcuts window renders `rows()` and nothing is added by hand — that is the whole
+  reason phase 3 built the table before there was anything to render it into.
+- **The Window menu EXISTS and holds exactly one item.** Minimize, Maximize/Restore, Actual
+  Size and Fit to Window are phase 14's, and **none of the four exists yet**, so a one-item
+  menu is the complete truth about what the application can currently do rather than a stub.
+- **`Ctrl+0` is still unclaimed and still spoken for twice** — the approved package wants it
+  for Reset View Transform, the spec for Actual Size. Whoever adds Actual Size takes it, and
+  Reset stays shortcut-less unless the owner rules otherwise. Unchanged since phase 10.
+- **The inspector is a real Qt widget tree and is therefore accessible by construction**, which
+  the composited overlay is not. It is the first surface added since phase 6 of which that is
+  true, and it is worth knowing which surfaces already work before building the proxy tree:
+  the menus are real `QMenu`s, `TRACE_TRANSPORT_BAR=1` restores real widgets, and every command
+  has a keyboard shortcut. What has no widget tree at all is the floating transport.
+- **`OverlayHooks::holdVisible` now answers for a MODELESS window as well**, and its rule is
+  `focus->window() == this`. A new panel that takes focus in its own top-level window inherits
+  the answer "do not hold"; one that takes focus inside the main window inherits "hold".
+
+**The rules the inspector was actually shaped by, because they generalise.**
+
+- **A row's ORIGIN is part of its value.** The window prints four — `encoded` (what the file
+  states), `file` (the file on disk), `observed` (this window now), `playback` (what Trace did
+  about it) — and the two untagged assets are the proof it was needed: `Splash_1.mp4` reads
+  `Untagged` on all four colour rows with `bt709 matrix (inferred by Trace — the file states
+  none)` beneath it. A panel that printed one of those two would be a bug report about the
+  media rather than about Trace.
+- **BOTH OBVIOUS SOURCES FOR PIXEL FORMAT AND BIT DEPTH ARE WRONG, AND ONE OF THEM IS WRONG BY
+  A FACTOR.** `VideoPerfStats::srcPixelFormat` is per-conversion state that gains `" (a-skip)"`;
+  `srcBitDepth` is `av_get_bits_per_pixel()`, so **yuv420p reads 12 and 4444 reads 48**.
+  `VideoMetadata::bitsPerComponent` is the one to use. ffprobe agrees: 8 / 12 / 10.
+- **`MovieInspector.cpp` has no `QFile`, `QFileInfo` or `QDir` in it**, the `RecentFiles.cpp`
+  rule. Anything that wants to add a filesystem read there has to add the include first, which
+  is a visible act. The file size arrives from the open.
+- **The viewport row is refreshed by a 150ms coalescing single-shot, never where the change
+  happens.** `lastDrawSize` is measured *by* the paint (phase 10), and the phase 12 record
+  rules out building a panel on ~123 resize events. Never armed while the window is hidden.
+
+**A PHASE 12 DEFECT CLOSED HERE, AND IT CHANGES SIGNED-OFF GEOMETRY (`3a38516`).** Spec §4's
+media-shaped window had **never applied to a still image or an image sequence**:
+`LoadedImageInfo::image` is left default-constructed at both sites that build one, so
+`currentImage_->image.size()` is an empty `QSize` and `currentDisplayAspect()` returned 0.0.
+Measured on the 4096×2304 still — viewer **1280×675, ratio 1.896 against the file's 1.7778**,
+pillarboxed inside a window built to have no bars; after, **1280×720 exactly**, and a 1920×1080
+PNG sequence likewise. **The phase 12 sign-off recorded the opposite**, because on 16:9 material
+the error is 6% of the height and looks like a correctly-shaped window. **The owner should be
+told the still and sequence window sizes have changed**, since geometry is what he signed off.
+
+**A validated PREDICTION is not a validated MECHANISM — eighth instance, and the sharpest.**
+That stills used "the same sizing path" was checked and was true. That a value flowed through
+it was not checked, and did not.
+
+**THE HARNESS ACCUSED THE APP FOR THREE RUNS, AND THE FAULT WAS PowerShell STRING
+CONCATENATION.** `$mn[0] + 30` on the strings `-split` returns is `"192030"`, not `1950`, so
+every synthetic pointer coordinate landed off-screen; the run then read 0% changed with the HUD
+showing `+overlay`, which is exactly what a transport that never appears looks like. Cast once,
+at the split. And the first `hold` leg took its baseline **before** opening the inspector and
+read 39% changed — the inspector *window* appearing over the transport, not the panel fading —
+which would have passed a build that held the transport up forever.
+
+---
+
+**The phase 13 brief, retained as the record of what was asked for rather than as open
+work. All six rules were followed; each one is answered in the block above and in the phase
+record.**
 
 **The rule that shaped it, because it is the phase's real content.** The spec requires the
 inspector to *display Unknown or Untagged honestly, not infer missing colour metadata, and
@@ -55,8 +132,8 @@ open or already maintained, so **the dialog reads, it does not ask**.
   its action. Note also that plain `I` used to toggle the deleted `showInfo`; there is no
   conflict, but do not resurrect it.
 
-**READ THIS BLOCK FIRST — it supersedes the phase-12 brief further down, which is retained as
-the record of what was asked for rather than as open work.**
+**THE PHASE 12 RECORD FOLLOWS, retained because §4 is what the inspector's viewport row
+reports and because the defect closed at `3a38516` is against it. Not open work.**
 
 **Spec §4 is built, measured against its own controls, capped by owner decision, and closed**
 (`0ad4183`, `93215d9`, `41d8b76`, `9b17f08`, `42e4889`, `458a5ec`). The window is the shape of
@@ -733,6 +810,11 @@ or `+bar`.
   **`recentfiles.ps1`** (spec phase 11; **run `-Mode calibrate` beside any startup figure you
   quote** — it prints the 21,037ms unreachable-UNC stat that makes "startup did not move" a
   measurement. It uses `TRACE_SETTINGS_FILE`, so it never writes the real per-user file),
+  **`inspector.ps1`** (spec phase 13; `show` / `viewport` / `hold` / `media`. **`-Mode hold` is
+  the one leg that can fail on a plausible build** — it is the negative control on the
+  transport not being held revealed by a modeless window, and its own guard reports whether the
+  panel was ever up. Its second leg prints **NOT RUN**: Windows refuses `SetForegroundWindow`
+  to a background process, so the control re-reveal is not drivable from a script),
   **`swapexe.ps1`** (the hash-verified control-binary swap), and
   **`make_timecode_fixtures.ps1`** — which generates the 29.97 drop/non-drop pair the asset
   set does not contain. Read its header before changing the fixture: the start time is chosen

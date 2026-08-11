@@ -3032,3 +3032,167 @@ Two rules to carry into it. **`lastDrawSize` is device pixels** and is measured
 previous size (phase 10). And **"do not continuously poll expensive decoder
 state"** — everything above is either read once at open or already maintained,
 so the dialog must read, not ask.
+
+### The window itself (`368e3b8`), and what it reports
+
+Built. Three spec sections — General, Video details (Image details for a still
+or a sequence), Audio details — in collapsible groups, modeless, with every
+value selectable and a Copy All that carries the origin tags with it.
+
+**Every row carries its ORIGIN, and that is the phase's second requirement
+rather than decoration.** The metadata layer answered *"distinguish encoded
+metadata from playback inference"* for the four colour tags; the same line runs
+through the rest of the panel, so the window prints four origins:
+
+| tag | means |
+|---|---|
+| `encoded` | what the file states |
+| `file` | the file on disk — name, path, size, overall data rate |
+| `observed` | this window now — viewport size, current scale, orientation on screen |
+| `playback` | what Trace decided to do about what the file said |
+
+Measured on the 2–2 split: **`Splash_1.mp4` reads `Untagged` on all four colour
+rows with `Playback is using: bt709 matrix (inferred by Trace — the file states
+none), limited range` directly beneath**, and ProRes 4444 reads
+`bt709`/`bt709`/`bt709`/`Limited` with `(as tagged)`. Both true, both on screen
+at once, neither presented as the other.
+
+**THREE ENCODED FIELDS THE METADATA LAYER DID NOT CARRY, AND BOTH OBVIOUS
+SOURCES ARE WRONG.** `VideoPerfStats::srcPixelFormat` is rewritten by every
+conversion and gains `" (a-skip)"` once playback drops an alpha plane — it is
+what playback last *did*. And `VideoPerfStats::srcBitDepth` is
+`av_get_bits_per_pixel()`, which is bits per **pixel**: it reads **12 on 8-bit
+yuv420p and 48 on 4444**, so a row labelled "Bit depth" built from it would tell
+the user an 8-bit H.264 file is 12-bit. `pixelFormatName`, `bitsPerComponent`
+and `bitsPerPixel` are read once at open from the descriptor. **Verified against
+ffprobe's `bits_per_raw_sample` on three files: 8 / 12 / 10.** The contrast is
+visible in one window on 4444 — `Pixel format: yuva444p12le` under `encoded`,
+and `converting yuva444p12le (a-skip) -> YUV444P12 planar` under `playback`.
+
+**THE DIALOG READS AND CANNOT ASK, ENFORCED THE WAY `RecentFiles.cpp` ENFORCES
+ITS OWN REFUSAL.** `MovieInspector.cpp` contains no `QFile`, `QFileInfo` or
+`QDir`, no decoder and no viewer — it takes a value type. The handoff predicted
+this file could not do that *"since it must report a size"*; it can, because the
+size is not computed here. Video takes it from `VideoPerfStats::sourceBytes`,
+which `MediaIoSource` read while opening the file; a still or a sequence frame
+takes it from the **one `QFileInfo` `openPath` had already built to read the
+extension**. Nothing stats a path when the window is shown, which on an
+unreachable UNC host would be 21,037ms.
+
+**THE REFRESH IS A COALESCING SINGLE-SHOT, AND THAT IS PHASE 10's TRAP RATHER
+THAN A DEBOUNCE.** `RenderStats::lastDrawSize` is measured *by* the paint, so a
+refresh issued where the change happens reports the **previous** viewport, and a
+paused file never comes back to correct it. A 150ms single-shot armed by media
+open, view transform and resize fires *after* the paint — and collapses a corner
+drag's ~123 resize events into one rebuild, which keeps the instrument out of
+the path the phase 12 record ruled it out of for the HUD. It is never armed
+while the window is hidden, so "do not continuously poll" holds by construction.
+**Cross-checked after a resize: the HUD reads `display 643x362` and the
+inspector `643 x 362 px`** — and the HUD needed a frame step to refresh at all,
+which is the documented staleness, not a disagreement.
+
+**THE MODELESS WINDOW MUST NOT HOLD THE TRANSPORT REVEALED, AND THE CONTROL
+SAYS THE ACCIDENT WAS REAL.** `QApplication::focusWidget()` is application-wide,
+so a separate top-level window satisfies `holdVisible`'s child-focus branch for
+as long as it is focused — the transport would sit over the video indefinitely
+because *another window* is being read. Scoped to `focus->window() == this`.
+Measured (`inspector.ps1 -Mode hold`): hidden to revealed changes **4.24%** of
+the video band, which is what a 460x84 panel is of it; with the inspector
+focused for 4.5s the band reads **0.07% from hidden and 4.32% from revealed** —
+the panel is gone. **On a control binary with that one clause reverted the two
+numbers swap exactly, 4.32% and 0.07%.** The modal branch is untouched, so both
+Go To prompts still hold as they did at phase 7.
+
+`Ctrl+I` is a `QAction`, not a `ShortcutTable` dispatch row (phase 3's rule —
+that dispatcher ignores modifiers, so it would have opened on plain `I`), and it
+appears in the table as a documentation row so phase 14's Keyboard Shortcuts
+window stays complete. Plain `I` is **not** resurrected. The menu is **Window**,
+where the spec puts Show/Hide Movie Inspector literally.
+
+**Two layout faults, both found by looking at the window rather than at the
+code.** A source path is one unbroken token, so a wrapping `QLabel` holding it
+demanded a very wide minimum from the grid and pushed the **origin column off
+screen entirely** — every tag outside the viewport, on the one window whose
+purpose is to say which claim is which. Constraining the label instead cost it
+height-for-width and clipped the path to **`C:`**. The path gets a read-only
+entry; every other value keeps a wrapping label, because every other value
+contains spaces and therefore has a short minimum.
+
+**`scripts/measure/inspector.ps1` is new**, four modes: `show`, `viewport`,
+`hold` (the negative control above), `media`. Two harness faults in it are worth
+carrying. **`$mn[0] + 30` on the strings `-split` returns is CONCATENATION in
+PowerShell** — `"1920" + 30` is `"192030"` — so every pointer coordinate was off
+the screen, the run read 0% changed with the HUD showing `+overlay`, and it
+looked exactly like a transport that never appears. It accused the app for three
+runs. And the first `hold` leg took its revealed baseline **before** `Ctrl+I` and
+its faded capture after, reading 39% changed — which was the inspector *window*
+appearing over the transport, not the panel fading, and would have passed a build
+that held the transport up forever.
+
+**`-Mode media` opens the second file through File > Open in the SAME process**,
+which is the only form that tests anything: "update when active media changes"
+is about a panel already on screen when the media changes underneath it, and a
+second launch builds a fresh snapshot whatever the refresh path does. Verified —
+every row re-read, including the viewport, which moves because the window
+reshapes.
+
+**`-Mode hold` cannot run its second leg and says so rather than printing a
+number.** Windows refuses `SetForegroundWindow` to a background process, so once
+the inspector has taken focus the script cannot give it back to the video window
+and the control re-reveal is not drivable. What leg 1 rests on instead is the
+guard: the panel was measurably up, and it returned to the hidden state.
+
+**Regression** (physical panel, 5120x1440 @ 239.999Hz): 4K H.264 cadence x3
+**100.0/100.0/100.0%** with `handler>budget 0 of 119` and all 119 gaps in the
+~1x bucket; 4444 x2 **99.8%** at 0 of 260; `-SnapRelease` `target 120 shown 120
+delta 0` full-res planar with `hitch 0` and `land 0`; both lifecycle legs PASS
+with `-PausedThroughDrag` at 0% moved; **25 of 25 transitions**.
+
+### A phase 12 defect this phase found (`3a38516`)
+
+**Spec section 4's media-shaped window had been a no-op for every still and
+every image sequence since phase 12, and the phase 12 sign-off recorded the
+opposite** — *"stills and image sequences use the same correct sizing path …
+which closes the phase's one remaining measurement gap by observation, because
+that path was built to be the same path"*.
+
+The path is the same path. **Its input was empty.** `LoadedImageInfo::image` is
+left default-constructed at both sites in `loadCurrentFrame` that build one —
+only `filePath`, `fileName`, `extension`, `width`, `height` and `channels` are
+ever filled — so `currentImage_->image.size()` is an empty `QSize`,
+`currentDisplayAspect()` returned 0.0 at its `isEmpty()` test, and the window
+came out at whatever the layout hint gave.
+
+Measured on the 4096x2304 still: **viewer 1280x675, ratio 1.896 against the
+file's 1.7778**, with the picture pillarboxed inside a window built to have no
+bars. After: **1280x720 exactly**, and the inspector's viewport row stops
+printing a separate viewer size — which is what "the image touches all four
+viewport edges" looks like from outside. A 1920x1080 PNG sequence reads
+**1280x720** as well.
+
+**Why it survived an owner sign-off, and it is the project's own rule again:**
+on 16:9 material the error is 6% of the height and looks like a correctly-shaped
+window. Only comparing the numbers finds it, and nothing printed them until this
+phase's inspector reported `Current scale: Unknown` from the same empty size.
+**A validated prediction is not a validated mechanism** — that the path was
+shared had been checked; that a value flowed through it had not.
+
+Fixed at the two reads rather than at the source. Populating
+`LoadedImageInfo::image` would add a second full-resolution copy per frame on
+the image-sequence path to serve two reads of a size, and the width and height
+are already there.
+
+### What phase 13 leaves for phase 14
+
+- **`inspectorAction_` is in `ShortcutTable` as a documentation row**, so the
+  Keyboard Shortcuts window renders `Ctrl+I` without anyone adding it by hand.
+- **The Window menu exists and holds one item.** Minimize, Maximize/Restore,
+  Actual Size and Fit to Window are phase 14's, and none of them exists yet, so
+  a menu with one item in it is the complete truth about what the application
+  can currently do.
+- **`Ctrl+0` is still unclaimed.** Unchanged from phase 10: the approved package
+  wants it for Reset View Transform, the spec for Actual Size, and whoever adds
+  Actual Size takes it.
+- **The inspector is a real Qt widget tree**, which the composited overlay is
+  not. It is therefore visible to a screen reader by construction, and it is the
+  first surface added since phase 6 of which that is true.
