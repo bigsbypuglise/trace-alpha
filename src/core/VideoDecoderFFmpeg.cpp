@@ -8,6 +8,10 @@ extern "C" {
 #include <libswscale/swscale.h>
 #include <libavutil/pixdesc.h>
 #include <libavutil/opt.h>
+// Rotation metadata (spec phase 12): the display matrix is a 3x3 affine in
+// stream side data, and av_display_rotation_get is the only thing that should
+// ever interpret it.
+#include <libavutil/display.h>
 }
 #endif
 
@@ -1011,6 +1015,70 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     impl_->streamTimeBase = stream->time_base;
     impl_->streamStartTs = (stream->start_time != AV_NOPTS_VALUE) ? stream->start_time : 0;
 
+    // SAMPLE ASPECT AND ROTATION, READ AND NEVER ASSUMED (spec phase 12).
+    //
+    // Both are read here, beside the timecode, because they are the same kind of
+    // thing: a statement the container makes about how the media is meant to be
+    // presented, which is nothing to do with the pixels that come out of the
+    // decoder. Section 4's first requirement is that the window adopt the real
+    // display ratio, and it says outright not to assume that is width/height.
+    {
+        // av_guess_sample_aspect_ratio, not codecpar->sample_aspect_ratio: it is
+        // the function that composes the codec's SAR with the container's and
+        // resolves which one wins. That composition IS the spec's "display
+        // aspect ratio metadata when authoritative" -- a demuxer that reads a
+        // container DAR turns it into a SAR here, so a second field asking the
+        // same question a different way could only ever disagree with this one.
+        const AVRational sar = av_guess_sample_aspect_ratio(impl_->fmt, stream, nullptr);
+        if (sar.num > 0 && sar.den > 0) {
+            metadata_.sarNum = sar.num;
+            metadata_.sarDen = sar.den;
+            // A file that states 1:1 and a file that states nothing both give
+            // square pixels; only the first is evidence, and the HUD says which.
+            metadata_.sarStated = true;
+        }
+
+        const uint8_t* matrix = nullptr;
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+        // FFmpeg 7 moved stream side data onto codecpar. Guarded rather than
+        // assumed: this box builds against 8.x, and CI resolves its own vcpkg
+        // baseline, so the one place they could differ should not be a
+        // compile error discovered on a runner.
+        if (const AVPacketSideData* sd = av_packet_side_data_get(
+                stream->codecpar->coded_side_data, stream->codecpar->nb_coded_side_data,
+                AV_PKT_DATA_DISPLAYMATRIX)) {
+            if (sd->size >= 9 * 4) matrix = sd->data;
+        }
+#else
+        {
+            size_t sz = 0;
+            const uint8_t* sd = av_stream_get_side_data(stream, AV_PKT_DATA_DISPLAYMATRIX, &sz);
+            if (sd && sz >= 9 * 4) matrix = sd;
+        }
+#endif
+        if (matrix) {
+            // av_display_rotation_get returns the ANTICLOCKWISE angle the
+            // picture must be rotated by to be shown correctly, in degrees, and
+            // it is the only thing that should ever read those nine integers.
+            const double theta = av_display_rotation_get(reinterpret_cast<const int32_t*>(matrix));
+            if (!std::isnan(theta)) {
+                // To clockwise, then to the nearest quarter turn. The matrix is
+                // a general affine and can legitimately hold 12.5 degrees; Trace
+                // has no arbitrary-rotation path, so it is snapped and the
+                // snapping is REPORTED rather than hidden -- silently squaring
+                // off an arbitrary rotation looks exactly like having nothing to
+                // rotate at all.
+                double cw = -theta;
+                while (cw < 0.0) cw += 360.0;
+                while (cw >= 360.0) cw -= 360.0;
+                const int quarter = static_cast<int>(std::lround(cw / 90.0)) % 4;
+                metadata_.rotationDegrees = quarter * 90;
+                metadata_.rotationSnapped = std::abs(cw - quarter * 90.0) > 0.5
+                                         && std::abs(cw - 360.0) > 0.5;
+            }
+        }
+    }
+
     // SOURCE TIMECODE, READ AND NEVER SYNTHESISED (spec phase 7).
     //
     // Three places are checked, in the order a real file is most likely to
@@ -1094,7 +1162,12 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             "\tprobeReads=%11\tprobeBytes=%12\tprobeSeeks=%13"
             "\tstreams=%14\tvideoIdx=%15\taudioIdx=%16\tcodec=%17"
             "\tw=%18\th=%19\tpixfmt=%20\tfps=%21\tfpsQ=%22/%23\ttb=%24/%25"
-            "\tdur=%26\tframes=%27\tcolorspace=%28\trange=%29\ttimecode=%30")
+            "\tdur=%26\tframes=%27\tcolorspace=%28\trange=%29\ttimecode=%30"
+            // Spec phase 12. `sar` carries "stated" explicitly rather than
+            // leaving 1/1 to mean two different things, and `dar` is the
+            // composed answer so a fixture can be checked against one number
+            // instead of being recomputed by whoever reads the log.
+            "\tsar=%31/%32%33\trot=%34%35\tdar=%36\tnatural=%37x%38")
             .arg(QFileInfo(path).fileName())
             .arg(si.remote ? "remote" : "local")
             .arg(perfStats_.probeSizeLimit)
@@ -1126,7 +1199,14 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
             // extraction is that absence is a real answer, and a blank column
             // in a tab-separated log reads as a bug in the logger.
             .arg(metadata_.hasStartTimecode ? metadata_.startTimecode
-                                            : QStringLiteral("none")));
+                                            : QStringLiteral("none"))
+            .arg(metadata_.sarNum).arg(metadata_.sarDen)
+            .arg(metadata_.sarStated ? QString() : QStringLiteral("(assumed)"))
+            .arg(metadata_.rotationDegrees)
+            .arg(metadata_.rotationSnapped ? QStringLiteral("(snapped)") : QString())
+            .arg(QString::number(metadata_.displayAspect(), 'f', 6))
+            .arg(metadata_.naturalDisplaySize().width())
+            .arg(metadata_.naturalDisplaySize().height()));
     }
 
     error.clear();

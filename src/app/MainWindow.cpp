@@ -4238,7 +4238,23 @@ void MainWindow::refreshHud(const QString& action) {
                                      + drawPerf.lastUploadMs
                                      + drawPerf.lastPaintMs;
 
-            const QString l1 = QString("%1 | %2x%3 | fps %4 | codec %5 | src %6 %7b -> dst %8 | F:%9 | open %10ms | first %11ms")
+            // The SOURCE's shape, beside the encoded size it is not the same as
+            // (spec phase 12). `sar` says whether square pixels were stated or
+            // assumed, `rot` is the container's rotation metadata, and `dar` is
+            // the composed display ratio the window is sized from -- printed
+            // here rather than left to be recomputed, because the whole failure
+            // this guards against is two places deriving it differently.
+            QString shape = QStringLiteral(" | sar %1:%2%3 dar %4")
+                                .arg(vm.sarNum)
+                                .arg(vm.sarDen)
+                                .arg(vm.sarStated ? QString() : QStringLiteral("*"))
+                                .arg(QString::number(vm.displayAspect(), 'f', 4));
+            if (vm.rotationDegrees != 0 || vm.rotationSnapped) {
+                shape += QStringLiteral(" rot%1%2")
+                             .arg(vm.rotationDegrees)
+                             .arg(vm.rotationSnapped ? QStringLiteral("~") : QString());
+            }
+            const QString l1 = QString("%1 | %2x%3%12 | fps %4 | codec %5 | src %6 %7b -> dst %8 | F:%9 | open %10ms | first %11ms")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
                 .arg(vm.width)
                 .arg(vm.height)
@@ -4249,7 +4265,8 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.dstPixelFormat)
                 .arg(st.currentFrame)
                 .arg(QString::number(perf.openMs, 'f', 2))
-                .arg(QString::number(perf.firstFrameMs, 'f', 2));
+                .arg(QString::number(perf.firstFrameMs, 'f', 2))
+                .arg(shape);
 
             // Colour and resampling state: a picture that looks wrong is either
             // a matrix/range mismatch or a scaled presentation, and both are

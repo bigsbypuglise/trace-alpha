@@ -2,6 +2,7 @@
 
 #include <QString>
 #include <QSize>
+#include <cmath>
 #include <functional>
 #include "core/MediaIoSource.h"
 #include "core/VideoFrame.h"
@@ -48,6 +49,75 @@ struct VideoMetadata {
     // legitimately carries either, and the container's separator says which.
     bool startTimecodeDropFrame = false;
     bool hasStartTimecode = false;
+
+    // HOW THE SOURCE IS MEANT TO BE SHOWN, WHICH IS NOT width/height (spec
+    // section 4, whose first requirement says so outright: "do not assume
+    // display ratio is always encoded width divided by encoded height").
+    //
+    // The sample (pixel) aspect ratio actually in force, as FFmpeg composes it
+    // from the codec's SAR, the container's, and any display-aspect metadata the
+    // container states -- av_guess_sample_aspect_ratio is that composition, and
+    // is why there is no separate "DAR metadata" field here. 1/1 when nothing
+    // states otherwise, never 0/0 or 0/1: an unknown SAR means square pixels,
+    // and a zero would silently turn the ratio into a divide by zero at the one
+    // place it is used.
+    int sarNum = 1;
+    int sarDen = 1;
+    // True when the container stated a SAR at all, as opposed to Trace assuming
+    // square pixels. Reported rather than inferred, for the same reason
+    // colorMatrixInferred is: "1:1 because the file says so" and "1:1 because
+    // nobody said" are different claims and only one of them is evidence.
+    bool sarStated = false;
+
+    // Clockwise rotation the container asks for, from the display matrix,
+    // normalised to 0/90/180/270. Rotation metadata is orientation, not pixels:
+    // the frame is decoded exactly as encoded and this says which way up it is
+    // meant to be seen.
+    int rotationDegrees = 0;
+    // The display matrix said something that is not a multiple of 90 (a real if
+    // rare thing -- it is a general affine). It is snapped to the nearest
+    // quarter turn and this records that it was, because a player that silently
+    // squares off an arbitrary rotation and one that had nothing to rotate look
+    // identical from the outside.
+    bool rotationSnapped = false;
+
+    // The display aspect ratio as a double: encoded size corrected by SAR, then
+    // transposed if the rotation metadata turns the picture on its side.
+    //
+    // The VIEW transform is deliberately NOT folded in here. This is a property
+    // of the media; Rotate Left/Right is a property of the session, lives on
+    // ViewTransform, and is composed on top by whoever needs the on-screen
+    // ratio. Mixing the two would mean a file's shape changed when a menu item
+    // was ticked, and the aspect lock has to be able to tell those apart to
+    // restore "the original media ratio when transforms reset".
+    double displayAspect() const {
+        if (width <= 0 || height <= 0) return 0.0;
+        const double sar = (sarNum > 0 && sarDen > 0)
+                               ? static_cast<double>(sarNum) / static_cast<double>(sarDen)
+                               : 1.0;
+        const double a = (static_cast<double>(width) * sar) / static_cast<double>(height);
+        if (a <= 0.0) return 0.0;
+        return (rotationDegrees == 90 || rotationDegrees == 270) ? 1.0 / a : a;
+    }
+    // The size the source is meant to be shown at with square pixels and no
+    // scaling -- section 4's "natural displayed size", which is what the window
+    // is sized from on open. Rotation is applied; the view transform is not,
+    // for the reason above.
+    QSize naturalDisplaySize() const {
+        if (width <= 0 || height <= 0) return QSize();
+        const double sar = (sarNum > 0 && sarDen > 0)
+                               ? static_cast<double>(sarNum) / static_cast<double>(sarDen)
+                               : 1.0;
+        // Widen rather than narrow when SAR > 1, and heighten when SAR < 1: a
+        // natural size that discards resolution would make "do not upscale small
+        // media" throw away detail the file has.
+        int w = width;
+        int h = height;
+        if (sar >= 1.0) w = static_cast<int>(std::lround(width * sar));
+        else h = static_cast<int>(std::lround(height / sar));
+        if (rotationDegrees == 90 || rotationDegrees == 270) return QSize(h, w);
+        return QSize(w, h);
+    }
 };
 
 struct VideoPerfStats {
