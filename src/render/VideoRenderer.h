@@ -163,6 +163,26 @@ public:
     // such backend today, and adding one means answering this first.
     virtual void setViewTransform(const ViewTransform& transform) { (void)transform; }
 
+    // The source's PIXEL aspect ratio -- width of one stored sample divided by
+    // its height. 1.0 for everything with square pixels, which is every file in
+    // the asset set; not 1.0 for anamorphic media, which Trace has drawn
+    // squeezed for its whole existence because the fit was taken on stored
+    // dimensions (spec section 4: "do not assume display ratio is always encoded
+    // width divided by encoded height").
+    //
+    // It belongs beside setViewTransform for the same reason that one does:
+    // it changes where the frame lands and nothing about the frame. Neither
+    // backend needed a new code path for it -- the destination rect is
+    // stretched, the sampling is in normalised coordinates, so every
+    // subsampling, bit depth and the box-average reduction inherit it.
+    //
+    // CONTAINER ROTATION IS NOT HERE. It is composed into the ViewTransform by
+    // the host, in one place, because it and the user's Rotate Left/Right are
+    // the same operation applied for different reasons -- and two places
+    // deciding "which way up" is exactly the divergence the transform contract
+    // was built to prevent.
+    virtual void setPixelAspect(double par) { (void)par; }
+
     // Identifies the backend in the HUD, so a fallback is visible rather than
     // silent -- a GPU path that quietly never engages is the failure mode worth
     // designing against.
@@ -185,6 +205,15 @@ public:
 // rect by half of one.
 QSize hostDeviceSize(const QWidget* host);
 QRect fitDeviceRect(QSize content, QSize deviceHost);
+
+// Stored sample dimensions -> the size those samples are meant to be SHOWN at,
+// before any view transform. Shared for the same reason the two above are: it
+// is one line of arithmetic that both backends must do identically, and a copy
+// in each is a copy that can drift.
+//
+// The larger axis is grown rather than the smaller shrunk, so the fit never
+// starts from fewer pixels than the file has.
+QSize applyPixelAspect(QSize pixelSize, double par);
 
 // Builds the renderer selected by TRACE_RENDERER. **"d3d11" is the default** as
 // of 2026-08-10, on any build that has it (Windows + MSVC + fxc); "cpu" is

@@ -81,7 +81,10 @@ void CpuImageRenderer::paint(QWidget* host) {
             // Fit the DISPLAYED size, exactly as the D3D11 backend does: a
             // quarter turn exchanges the axes, so a 16:9 source letterboxes as
             // 9:16 and the destination rect has to follow.
-            const QSize displayed = transform_.apply(image_.size());
+            // Pixel aspect first, then the transform -- see the identical line
+            // in the D3D11 backend for why that order, and applyPixelAspect for
+            // why the arithmetic is shared rather than written twice.
+            const QSize displayed = transform_.apply(applyPixelAspect(image_.size(), pixelAspect_));
             const QRect dev = fitDeviceRect(displayed, hostDeviceSize(host));
             const QSize drawn = dev.size();
             const QRectF target(dev.x() / dpr, dev.y() / dpr,

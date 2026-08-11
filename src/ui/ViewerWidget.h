@@ -94,7 +94,23 @@ public:
     // rather than quietly resetting it -- the same reason the overlay model
     // lives here.
     void setViewTransform(const trace::render::ViewTransform& transform);
+    // The USER's transform -- what the Edit menu set and what Reset returns to.
+    // Not what the renderer is drawing with, which is this composed with the
+    // container's own rotation. The menu, the HUD and Reset all want this one:
+    // a file that carries rot90 must not make Reset look like it failed.
     const trace::render::ViewTransform& viewTransform() const { return viewTransform_; }
+
+    // The shape the MEDIA states it should be shown as: its pixel aspect ratio
+    // and the clockwise rotation its container asks for (spec phase 12). Session
+    // state and media state are kept apart here and composed in one place --
+    // see applySourceShape().
+    void setSourceShape(double pixelAspect, int rotationDegrees);
+    double sourcePixelAspect() const { return sourcePixelAspect_; }
+    int sourceRotationDegrees() const { return sourceRotationDegrees_; }
+    // The on-screen display aspect: the media's shape with the user's transform
+    // composed onto it. This is what the window is sized to, and it is here
+    // rather than in MainWindow because the composition rule lives here.
+    double displayedAspect(QSize sourcePixels) const;
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -125,6 +141,12 @@ private:
     // would be handed to the backend before it existed.
     trace::render::OverlayModel overlayModel_;
     trace::render::ViewTransform viewTransform_{};
+    double sourcePixelAspect_ = 1.0;
+    int sourceRotationDegrees_ = 0;
+    // Pushes the composition of viewTransform_ and the source's own rotation at
+    // the renderer, plus the pixel aspect. The one place either reaches a
+    // backend.
+    void applySourceShape();
     std::unique_ptr<trace::render::VideoRenderer> renderer_;
     // Mirrors the active renderer's usesNativeSurface(), so the widget-level
     // attributes can be undone if a backend fails to initialize and the CPU

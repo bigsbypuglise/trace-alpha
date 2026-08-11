@@ -809,6 +809,17 @@ void D3D11VideoRenderer::setViewTransform(const ViewTransform& transform) {
     if (host_) host_->update();
 }
 
+// No uploadViewParams() here, unlike setViewTransform: the pixel aspect is not
+// in the shader at all. It stretches the DESTINATION rect, and the sampling
+// stays in normalised source coordinates, which is what lets one shader keep
+// covering every subsampling and bit depth (GATE C) without a variant for
+// anamorphic media.
+void D3D11VideoRenderer::setPixelAspect(double par) {
+    if (par == pixelAspect_) return;
+    pixelAspect_ = par;
+    if (host_) host_->update();
+}
+
 void D3D11VideoRenderer::updateReduction(QSize content, QSize fitted) {
     float taps = 1.0f;
     float fu = 0.0f;
@@ -1028,7 +1039,23 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     // quarter turn exchanges the axes, so a 16:9 source letterboxes as 9:16 and
     // the viewport has to follow it. The placeholder deliberately does not
     // rotate -- it is a message, not the media.
-    const QSize displayedSize = viewTransform_.apply(contentSize_);
+    // Pixel aspect first, then the transform: the SAR describes the stored
+    // samples, and a quarter turn exchanges the axes of what those samples
+    // become. The other order would apply a horizontal stretch to a picture
+    // that had already been turned on its side.
+    const QSize displayedSize = viewTransform_.apply(applyPixelAspect(contentSize_, pixelAspect_));
+    // The same content in the same on-screen axes but WITHOUT the pixel-aspect
+    // stretch, which is what the reduction has to be measured against. See
+    // updateReduction: its ratio answers "how many source TEXELS does one
+    // destination pixel cover", and the pixel aspect adds no texels -- it only
+    // says how wide they are. Feeding it the stretched size would report an
+    // anamorphic frame as reducing harder than it is and buy an extra tap per
+    // axis, filtering along an axis that has no extra detail on it.
+    //
+    // Phase 10 hit the neighbouring version of this and the fix was the
+    // opposite direction: the taps DO have to follow the rotation. Rotation
+    // exchanges real texel axes; the pixel aspect does not.
+    const QSize sourceOnScreenAxes = viewTransform_.apply(contentSize_);
     QRect dest(QPoint(0, 0), pixels);
     bool resampled = false;
     if (hasContent_ && !displayedSize.isEmpty()) {
@@ -1076,7 +1103,7 @@ void D3D11VideoRenderer::paint(QWidget* host) {
         if (drawPlanar) {
             // Before the draw and after the fit, because the ratio is a property
             // of the destination rect. A resize changes it with no new frame.
-            updateReduction(displayedSize, fitted);
+            updateReduction(sourceOnScreenAxes, fitted);
             context_->PSSetShader(yuvPixelShader_.Get(), nullptr, 0);
             ID3D11ShaderResourceView* srvs[] = {planeSrv_[0].Get(), planeSrv_[1].Get(),
                                                 planeSrv_[2].Get()};

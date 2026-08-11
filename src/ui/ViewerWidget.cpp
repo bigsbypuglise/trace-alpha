@@ -105,15 +105,60 @@ bool ViewerWidget::adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> r
     // both backends unconditionally: whether anything is drawn is the model's
     // enabled() to decide, not the renderer's.
     renderer_->setOverlay(&overlayModel_);
-    renderer_->setViewTransform(viewTransform_);
+    // Through applySourceShape rather than setViewTransform directly, so a
+    // backend adopted after media was already open inherits the container's
+    // rotation and pixel aspect too. Handing it the bare user transform here is
+    // how a fallback to cpu would silently un-rotate a phone clip.
+    applySourceShape();
     return true;
 }
 
 void ViewerWidget::setViewTransform(const trace::render::ViewTransform& transform) {
     if (transform == viewTransform_) return;
     viewTransform_ = transform;
-    if (renderer_) renderer_->setViewTransform(viewTransform_);
+    applySourceShape();
     update();
+}
+
+void ViewerWidget::setSourceShape(double pixelAspect, int rotationDegrees) {
+    const double par = (pixelAspect > 0.0) ? pixelAspect : 1.0;
+    const int rot = ((rotationDegrees % 360) + 360) % 360;
+    if (par == sourcePixelAspect_ && rot == sourceRotationDegrees_) return;
+    sourcePixelAspect_ = par;
+    sourceRotationDegrees_ = rot;
+    applySourceShape();
+    update();
+}
+
+// THE ONE PLACE THE CONTAINER'S ROTATION AND THE USER'S ARE COMBINED.
+//
+// A file that carries rotation metadata and a user who pressed Rotate Right are
+// asking for the same operation for different reasons, and the renderer should
+// only ever be told the answer. Keeping them separate up to this point is what
+// makes Reset View Transform mean "back to how the file says it should look"
+// rather than "back to un-rotated", which on a phone clip would be wrong.
+//
+// Rotations commute, so the composition is an addition; the user's flips stay
+// as they are, because they are already expressed in screen space and the
+// container states no flip. rotatedOnScreen()'s mirror compensation is
+// unaffected by a constant offset -- it decides the SIGN of the user's step,
+// and the step is the same whatever constant is added afterwards.
+void ViewerWidget::applySourceShape() {
+    if (!renderer_) return;
+    trace::render::ViewTransform composed = viewTransform_;
+    composed.quarterTurns =
+        ((viewTransform_.quarterTurns + sourceRotationDegrees_ / 90) % 4 + 4) % 4;
+    renderer_->setViewTransform(composed);
+    renderer_->setPixelAspect(sourcePixelAspect_);
+}
+
+double ViewerWidget::displayedAspect(QSize sourcePixels) const {
+    if (sourcePixels.isEmpty()) return 0.0;
+    const QSize shown = trace::render::ViewTransform::rotated(
+                            viewTransform_.quarterTurns + sourceRotationDegrees_ / 90)
+                            .apply(trace::render::applyPixelAspect(sourcePixels, sourcePixelAspect_));
+    if (shown.isEmpty()) return 0.0;
+    return static_cast<double>(shown.width()) / static_cast<double>(shown.height());
 }
 
 // Logical -> device. The model lays out in device pixels because the D3D11

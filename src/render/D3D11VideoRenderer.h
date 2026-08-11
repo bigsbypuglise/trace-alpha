@@ -61,6 +61,7 @@ public:
     // which is why neither pixel shader knows about it, and why it costs one
     // 2x2 multiply for three vertices rather than anything per pixel.
     void setViewTransform(const ViewTransform& transform) override;
+    void setPixelAspect(double par) override;
 
     QString name() const override { return name_; }
     const RenderStats& stats() const override { return stats_; }
@@ -162,6 +163,7 @@ private:
     // b0, which does not collide with the YUV params at the pixel stage's b0.
     ComPtr<ID3D11Buffer> viewParams_;
     ViewTransform viewTransform_{};
+    double pixelAspect_ = 1.0;
 
     // Mirrors cbuffer YuvParams in YuvToRgb.ps.hlsl. Held rather than built on
     // the stack because the colour terms come from the frame (setFrame) and the

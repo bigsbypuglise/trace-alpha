@@ -2435,6 +2435,20 @@ bool MainWindow::openPath(const QString& path) {
     if (viewer_) {
         viewer_->setViewTransform(trace::render::ViewTransform{});
         syncViewTransformActions();
+        // The MEDIA's own shape (spec phase 12), set immediately after the
+        // user's transform is reset and never conflated with it. Reset to 1.0/0
+        // for anything that is not a video file -- a still or an image sequence
+        // has square pixels and no container rotation, and leaving the previous
+        // clip's values in place would silently stretch the next thing opened.
+        if (currentMedia_->kind == MediaKind::VideoFile) {
+            const auto& vm = videoDecoder_.metadata();
+            const double par = (vm.sarNum > 0 && vm.sarDen > 0)
+                                   ? static_cast<double>(vm.sarNum) / static_cast<double>(vm.sarDen)
+                                   : 1.0;
+            viewer_->setSourceShape(par, vm.rotationDegrees);
+        } else {
+            viewer_->setSourceShape(1.0, 0);
+        }
     }
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);

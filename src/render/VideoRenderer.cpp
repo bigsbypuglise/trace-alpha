@@ -5,6 +5,7 @@
 #include <QWidget>
 
 #include <algorithm>
+#include <cmath>
 
 #include "render/CpuImageRenderer.h"
 #ifdef TRACE_WITH_D3D11
@@ -24,6 +25,19 @@ QSize hostDeviceSize(const QWidget* host) {
     // header and defines a max() macro that breaks the qualified call.
     return QSize(qMax(1, static_cast<int>(host->width() * dpr)),
                  qMax(1, static_cast<int>(host->height() * dpr)));
+}
+
+QSize applyPixelAspect(QSize pixelSize, double par) {
+    // Guard the degenerate values rather than trusting the caller: a par of 0
+    // or a NaN would collapse the fit to nothing, and the value ultimately
+    // comes from a file.
+    if (pixelSize.isEmpty() || !(par > 0.0) || par == 1.0) return pixelSize;
+    if (par > 1.0) {
+        return QSize(qMax(1, static_cast<int>(std::lround(pixelSize.width() * par))),
+                     pixelSize.height());
+    }
+    return QSize(pixelSize.width(),
+                 qMax(1, static_cast<int>(std::lround(pixelSize.height() / par))));
 }
 
 QRect fitDeviceRect(QSize content, QSize deviceHost) {
