@@ -2597,7 +2597,23 @@ double MainWindow::currentDisplayAspect() const {
         const auto& vm = videoDecoder_.metadata();
         pixels = QSize(vm.width, vm.height);
     } else if (currentImage_.has_value()) {
-        pixels = currentImage_->image.size();
+        // WIDTH AND HEIGHT, NOT image.size(), AND THIS WAS A REAL DEFECT.
+        //
+        // `LoadedImageInfo::image` is left default-constructed at BOTH sites
+        // that build one in loadCurrentFrame -- only filePath, fileName,
+        // extension, width, height and channels are ever filled -- so
+        // `image.size()` is an empty QSize for every still and every image
+        // sequence. This function then returned 0.0 at the isEmpty() test below,
+        // and spec section 4's media-shaped window silently did nothing at all
+        // for that whole media class.
+        //
+        // Found at spec phase 13, because the inspector reports current scale
+        // from the same natural size and read "Unknown" on a still. It is
+        // invisible from the window itself on 16:9 material, which is what a
+        // by-observation check looks at: the 4096x2304 still opened with a
+        // viewer of 1280x675 -- ratio 1.896 against the file's 1.7778 -- which
+        // reads as a correctly-shaped window unless the numbers are compared.
+        pixels = QSize(currentImage_->width, currentImage_->height);
     }
     if (pixels.isEmpty()) return 0.0;
     // Through the viewer, because the composition of media shape and session
@@ -2685,7 +2701,10 @@ bool MainWindow::applyMediaWindowShapePass(double aspect, int pass) {
     if (currentMedia_->kind == MediaKind::VideoFile) {
         natural = videoDecoder_.metadata().naturalDisplaySize();
     } else if (currentImage_.has_value()) {
-        natural = currentImage_->image.size();
+        // Same defect as in currentDisplayAspect, and the two had to be fixed
+        // together: an aspect ratio with no natural size to apply it to would
+        // have gone on sizing the window from the layout's own hint.
+        natural = QSize(currentImage_->width, currentImage_->height);
     }
     if (natural.isEmpty()) return false;
     // The user's transform can turn it on its side; the media's own rotation is
