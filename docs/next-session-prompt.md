@@ -82,8 +82,8 @@ The owner chose it on 2026-08-10 and lifted priority 2 to allow it. The spec is
 - **Phase 5 shipped** — the reverse shuttle interface. The transport redesign is now
   COMPLETE and the spec's validation list for it reads straight down. Full record in the
   progress doc.
-- CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, all including the
-  renderer selftest.
+- CI run 79 green on `2bb1901`, run 81 on `58bfca6`, run 84 on `cbf6d98`, run 86 on `e559d07`
+  and run 87 on `90140f9`, all including the renderer selftest.
 
 ### Start at spec phase 6, and read `docs/interface-pass-1-progress.md` first
 
