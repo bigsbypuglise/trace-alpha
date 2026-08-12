@@ -1,5 +1,7 @@
 #include "ui/TransportBar.h"
 
+#include <QAccessible>
+#include <QAccessibleWidget>
 #include <QPainter>
 #include <QPainterPath>
 #include <QMouseEvent>
@@ -14,6 +16,51 @@
 
 namespace trace::ui {
 namespace {
+
+// TransportButton is a plain QWidget that PAINTS a button, so Qt types it as a
+// generic client area and UI Automation reports ControlType.Group. Measured with
+// uiatree.ps1: with accessible names added but no role, a screen reader read the
+// docked transport as "Rewind, group ... Play, group".
+//
+// This is the second half of making "TRACE_TRANSPORT_BAR=1 restores real
+// widgets" true rather than nearly true. Spec phase 14 found that claim -- which
+// the project has cited as the accessibility mitigation for the composited
+// overlay since phase 6 -- was resting on widgets that had no names and no
+// roles. Names alone would have left the escape hatch announcing five untyped
+// somethings.
+class TransportButtonAccessible final : public QAccessibleWidget {
+public:
+    explicit TransportButtonAccessible(QWidget* widget)
+        : QAccessibleWidget(widget, QAccessible::Button) {}
+
+    QStringList actionNames() const override {
+        if (auto* widget = qobject_cast<QWidget*>(object()); widget && widget->isEnabled()) {
+            return {QAccessibleActionInterface::pressAction()};
+        }
+        return {};
+    }
+
+    void doAction(const QString& name) override {
+        if (name != QAccessibleActionInterface::pressAction()) return;
+        // Emitting the button's own `clicked` rather than reaching for a
+        // QAction keeps this widget's one outward contract intact: TransportBar
+        // emits intent and holds no playback state, and everything downstream
+        // of the signal -- including which QAction it ends up triggering --
+        // stays the bar's business.
+        if (auto* button = qobject_cast<TransportButton*>(object())) {
+            emit button->clicked();
+        }
+    }
+};
+
+QAccessibleInterface* transportAccessibleFactory(const QString& className, QObject* object) {
+    if (className == QLatin1String("trace::ui::TransportButton")) {
+        if (auto* widget = qobject_cast<QWidget*>(object)) {
+            return new TransportButtonAccessible(widget);
+        }
+    }
+    return nullptr;
+}
 
 // Design tokens. STATE VALUES are the approved set's
 // (assets/source/original-design-package/base-ui-icons/README.txt);
@@ -235,6 +282,14 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     setFocusPolicy(Qt::NoFocus);
     setAutoFillBackground(false);
 
+    // Once for the process. Qt asks each installed factory in turn and takes the
+    // first non-null answer, so every other widget keeps what it had.
+    static bool accessibleFactoryInstalled = false;
+    if (!accessibleFactoryInstalled) {
+        QAccessible::installFactory(&transportAccessibleFactory);
+        accessibleFactoryInstalled = true;
+    }
+
     playIcon_ = loadIcon(QStringLiteral("play"));
     pauseIcon_ = loadIcon(QStringLiteral("pause"));
     fullscreenIcon_ = loadIcon(QStringLiteral("fullscreen"));
@@ -244,14 +299,35 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     // frame backward; it is Rewind now, and the artwork moved in the same change
     // because artwork follows behaviour. Frame stepping is the Left arrow -- the
     // command is untouched, only the button that used to reach it is gone.
+    // ACCESSIBLE NAMES, ADDED AT SPEC PHASE 14, AND THEY WERE MISSING THE WHOLE
+    // TIME. These are icon-only QPushButtons, so their text() is empty -- and a
+    // button with no text has no accessible name, whatever else it has. Measured
+    // with uiatree.ps1 on the docked bar: five controls, every one reported as
+    // `Group ""`, so a screen reader announced the entire transport as five
+    // unnamed groups.
+    //
+    // That matters beyond this widget, because it corrects a claim this project
+    // has leaned on since phase 6: "TRACE_TRANSPORT_BAR=1 restores real
+    // widgets" was cited as the accessibility mitigation for the composited
+    // overlay having no widget tree. It is only half true. The widgets were
+    // there and the NAMES never were, so the escape hatch was announcing almost
+    // nothing either -- and phase 14's proxy tree over the overlay is now
+    // strictly better than the bar it was written to make up for.
+    //
+    // The name is the tooltip minus its shortcut hint: a tooltip is read aloud
+    // as a description, and "Rewind - 2x, 5x, 10x, 30x (J)" is a sentence, not
+    // a name.
     rewindBtn_ = new TransportButton(this);
     rewindBtn_->setIcon(loadIcon(QStringLiteral("rewind")));
     rewindBtn_->setToolTip(tr("Rewind — 2x, 5x, 10x, 30x (J)"));
+    rewindBtn_->setAccessibleName(tr("Rewind"));
+    rewindBtn_->setAccessibleDescription(tr("Each press goes faster: 2x, 5x, 10x, 30x."));
 
     playPauseBtn_ = new TransportButton(this);
     playPauseBtn_->setCenterControl(true);
     playPauseBtn_->setIcon(playIcon_);
     playPauseBtn_->setToolTip(tr("Play / Pause (Space)"));
+    playPauseBtn_->setAccessibleName(tr("Play"));
 
     // Spec phase 4. This control used to step one frame forward; it is
     // Fast-forward now, and the artwork moved in the same change because
@@ -260,18 +336,28 @@ TransportBar::TransportBar(QWidget* parent) : QWidget(parent) {
     fastForwardBtn_ = new TransportButton(this);
     fastForwardBtn_->setIcon(loadIcon(QStringLiteral("fast-forward")));
     fastForwardBtn_->setToolTip(tr("Fast-forward — 2x, 5x, 10x, 30x (L)"));
+    fastForwardBtn_->setAccessibleName(tr("Fast-forward"));
+    fastForwardBtn_->setAccessibleDescription(tr("Each press goes faster: 2x, 5x, 10x, 30x."));
 
     fullscreenBtn_ = new TransportButton(this);
     fullscreenBtn_->setIcon(fullscreenIcon_);
     fullscreenBtn_->setToolTip(tr("Fullscreen (F11)"));
+    fullscreenBtn_->setAccessibleName(tr("Fullscreen"));
 
     // Spec phase 8. Last in the row and last in the design's tab order, which
     // are the same thing: "... forward -> fullscreen -> share".
     shareBtn_ = new TransportButton(this);
     shareBtn_->setIcon(loadIcon(QStringLiteral("share")));
     shareBtn_->setToolTip(tr("Share — copy path, show in File Explorer"));
+    shareBtn_->setAccessibleName(tr("Share"));
+    shareBtn_->setAccessibleDescription(
+        tr("Copy the file path, show the file in Explorer, or copy a LucidLink link."));
 
     slider_ = new QSlider(Qt::Horizontal, this);
+    slider_->setAccessibleName(tr("Timeline"));
+    slider_->setAccessibleDescription(
+        tr("Playback position. Use Left and Right to step one frame, or Ctrl+G to "
+           "go to a frame."));
     slider_->setMinimum(0);
     slider_->setMaximum(0);
     slider_->setValue(0);
@@ -375,6 +461,10 @@ void TransportBar::setPlaying(bool playing) {
     playing_ = playing;
     playPauseBtn_->setIcon(playing ? pauseIcon_ : playIcon_);
     playPauseBtn_->setToolTip(playing ? tr("Pause (Space)") : tr("Play (Space)"));
+    // The NAME follows the state as well as the icon and the tooltip. A control
+    // whose picture says Pause and whose accessible name says Play is the same
+    // disagreement in a place only a screen reader hears.
+    playPauseBtn_->setAccessibleName(playing ? tr("Pause") : tr("Play"));
 }
 
 void TransportBar::setFullscreen(bool fullscreen) {

@@ -96,6 +96,19 @@ public:
     const QImage& textImage() const { return text_; }
     long long atlasRevision() const { return atlasRevision_; }
     long long textRevision() const { return textRevision_; }
+    // Bumped every time layout() moves a control rect. Same promise the atlas
+    // and text revisions make -- a revision that does not move means the rects
+    // did not -- and it exists for the same reason: so a consumer can tell
+    // whether to redo work WITHOUT comparing geometry.
+    //
+    // Its consumer is the accessibility proxy tree, which has to reposition
+    // itself when the panel does. It cannot be driven from the viewer's resize
+    // alone: layout() runs inside buildFrame(), i.e. during the PAINT, so a
+    // proxy synced on resize reads the rects from before the layout that resize
+    // caused. Measured -- the proxies were exposed to UI Automation with an
+    // EMPTY bounding rectangle, so a screen reader could name every control and
+    // locate none of them.
+    long long layoutRevision() const { return layoutRevision_; }
 
     // --- input, in surface device pixels -------------------------------------
     // Return true when the overlay consumed the event, so the caller knows
@@ -116,6 +129,25 @@ public:
     // events: a click on the video, and relevant keyboard input.
     void reveal();
 
+    // The interactive controls and where they are, in SURFACE DEVICE PIXELS.
+    //
+    // Exists so spec phase 14's accessibility proxy tree can be positioned from
+    // THE SAME RECTS the compositor draws and hit-tests, rather than from a
+    // second layout that agrees today. Plan section 19.7 asks for "one
+    // zero-painting Qt widget per control, positioned on the same rects the
+    // compositor lays out", and the only way for that to stay true through a
+    // panel resize, a DPI change or a future layout change is for there to be
+    // one set of rects. A screen reader announcing a button that moved two
+    // phases ago is not a bug anyone would notice from the picture.
+    //
+    // Region::None is never returned; Region::Timeline is, because the track is
+    // a control even though it is not a button.
+    struct ControlRect {
+        Region region = Region::None;
+        QRectF dst;
+    };
+    std::vector<ControlRect> controlRects() const;
+
     Region hoverRegion() const { return hover_; }
     bool visible() const { return opacity_ > 0.001; }
     // True while the overlay is mid-fade. The host uses it to decide whether a
@@ -127,6 +159,9 @@ private:
     void rebuildAtlas();
     void rebuildText();
     Region regionAt(int x, int y) const;
+    // The track's HIT rect, which is much taller than its drawn one. One
+    // definition, shared by regionAt() and controlRects().
+    QRectF trackHitRect() const;
     void startAnimation();
     void tickAnimation();
     double fractionAt(int x) const;
@@ -135,6 +170,7 @@ private:
     QImage text_;
     long long atlasRevision_ = 0;
     long long textRevision_ = 0;
+    long long layoutRevision_ = 0;
     QString textCached_;
 
     // Atlas sub-rects, in atlas pixels.

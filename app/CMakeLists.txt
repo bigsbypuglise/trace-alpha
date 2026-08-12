@@ -134,6 +134,8 @@ add_executable(Trace
   ../src/app/MovieInspector.cpp
   ../src/app/ShortcutsWindow.h
   ../src/app/ShortcutsWindow.cpp
+  ../src/app/OverlayAccessibility.h
+  ../src/app/OverlayAccessibility.cpp
   ../src/app/WindowShape.h
   ../src/app/WindowShape.cpp
   ../src/app/LucidLinkIntegration.h

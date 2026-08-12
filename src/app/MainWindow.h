@@ -52,6 +52,7 @@ class TransportBar;
 
 namespace trace::app {
 
+class OverlayAccessibility;
 class ShortcutsWindow;
 
 class MainWindow final : public QMainWindow {
@@ -644,6 +645,12 @@ private:
     // Created lazily and reused, like the inspector: modeless, so a second
     // invocation raises the existing window rather than stacking another.
     trace::app::ShortcutsWindow* shortcutsWindow_ = nullptr;
+
+    // The accessibility proxy tree over the composited transport (plan section
+    // 19.7). Null in TRACE_TRANSPORT_BAR=1 mode, where the transport is real
+    // widgets that Qt already exposes. Parented to the viewer, so it is
+    // destroyed with it.
+    trace::app::OverlayAccessibility* overlayAccessibility_ = nullptr;
 
     // Movie Inspector (spec phase 13). Created lazily; null until first shown.
     trace::app::MovieInspector* inspector_ = nullptr;

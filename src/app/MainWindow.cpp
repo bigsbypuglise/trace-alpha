@@ -57,6 +57,7 @@
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
 #include "app/LucidLinkIntegration.h"
+#include "app/OverlayAccessibility.h"
 #include "app/Settings.h"
 #include "app/ShortcutsWindow.h"
 #include "app/WindowShape.h"
@@ -292,6 +293,21 @@ MainWindow::MainWindow() {
     // disagreement this pass exists to remove.
     if (alwaysOnTopAction_ && alwaysOnTopAction_->isChecked()) applyAlwaysOnTop(true);
 
+    // The accessibility proxy tree over the composited transport (plan section
+    // 19.7). Built for the OVERLAY only: in TRACE_TRANSPORT_BAR=1 mode the
+    // transport is real QPushButtons and a real QSlider, which Qt already
+    // exposes to UI Automation -- a proxy tree there would announce every
+    // control twice.
+    //
+    // After setupTransportControls(), because it points at those actions.
+    if (viewer_ && viewer_->overlayEnabled()) {
+        OverlayAccessibility::Commands commands;
+        commands.playPause = playPauseAction_;
+        commands.rewind = rewindAction_;
+        commands.fastForward = fastForwardAction_;
+        overlayAccessibility_ =
+            new OverlayAccessibility(viewer_, &viewer_->overlayModel(), commands);
+    }
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
         // GATE E: the timer is re-armed per wake against an absolute deadline,

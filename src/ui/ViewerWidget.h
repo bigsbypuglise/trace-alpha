@@ -78,6 +78,10 @@ public:
     // that is working from every other number -- the same reason rendererName()
     // is reported.
     bool overlayEnabled() const { return overlayModel_.enabled(); }
+    // Read-only, for spec phase 14's accessibility proxy tree, which positions
+    // itself from the model's own control rects rather than from a second
+    // layout. Const on purpose: the proxies read geometry and never change it.
+    const trace::render::OverlayModel& overlayModel() const { return overlayModel_; }
     // Reveal the floating transport and restart its idle timer. The host's entry
     // point for the one reveal source that is not a mouse event over the video:
     // "relevant keyboard input reveals it". Mouse reveals are handled inside the

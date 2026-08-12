@@ -227,6 +227,45 @@ void OverlayModel::layout() {
     const double trackY = snap(top + panelH * 0.76);
     dTrack_ = QRectF(left + trackInset, snap(trackY - 2.0 * s),
                      panelW - trackInset * 2.0, std::max(1.0, snap(4.0 * s)));
+
+    // Last, so it is bumped only once every rect above is settled. See
+    // layoutRevision() for who reads it and what went wrong without it.
+    ++layoutRevision_;
+}
+
+// The drawn rects, handed out. Nothing is computed here: this returns exactly
+// what layout() put in the destination members and buildFrame() pushed quads
+// for, which is what makes the accessibility proxies and the picture the same
+// geometry rather than two that match.
+//
+// THE TIMELINE'S TOUCHABLE HEIGHT IS NOT ITS DRAWN HEIGHT. dTrack_ is four
+// device pixels tall -- a hairline -- and the hit test deliberately accepts a
+// much taller band around it so the track can be grabbed. A proxy the height of
+// the drawn line would be a four-pixel target for anyone driving by touch or by
+// a magnifier, so the HIT rect is what is reported. That is also the honest
+// answer: it is the region that responds.
+//
+// Through trackHitRect() rather than by repeating the adjustment, so this and
+// regionAt() cannot come to disagree about where the track is -- which would
+// show up as a control a screen reader can find and a pointer cannot, or the
+// reverse.
+std::vector<OverlayModel::ControlRect> OverlayModel::controlRects() const {
+    std::vector<ControlRect> rects;
+    if (dPanel_.isEmpty()) return rects;
+    rects.reserve(5);
+    rects.push_back({Region::Rewind, dRewind_});
+    rects.push_back({Region::PlayPause, dPlay_});
+    rects.push_back({Region::FastForward, dFfwd_});
+    rects.push_back({Region::Share, dShare_});
+    rects.push_back({Region::Timeline, trackHitRect()});
+    return rects;
+}
+
+// Generous vertical band around the track, because a 4px line is not a pointer
+// target. ONE definition, asked by the hit test and by the accessibility
+// proxies alike.
+QRectF OverlayModel::trackHitRect() const {
+    return dTrack_.adjusted(-8 * dpr_, -12 * dpr_, 8 * dpr_, 12 * dpr_);
 }
 
 void OverlayModel::rebuildAtlas() {
@@ -411,9 +450,7 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
 
 OverlayModel::Region OverlayModel::regionAt(int x, int y) const {
     const QPointF p(x, y);
-    // Generous vertical band around the track, because a 4px line is not a
-    // pointer target.
-    const QRectF trackHit = dTrack_.adjusted(-8 * dpr_, -12 * dpr_, 8 * dpr_, 12 * dpr_);
+    const QRectF trackHit = trackHitRect();
     if (dPlay_.contains(p)) return Region::PlayPause;
     if (dRewind_.contains(p)) return Region::Rewind;
     if (dFfwd_.contains(p)) return Region::FastForward;
