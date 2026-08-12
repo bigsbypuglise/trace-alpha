@@ -3721,3 +3721,151 @@ magnification filter, the pan and the zoomed-scrub trade**. It is **not** a sign
 menus and Help wording, which phase 14 left open and which this phase added four rows to; and
 the **Narrator listen is still owed** (plan §31.5 item 4). One item leaves this phase as polish
 rather than as work: the pan cursor.
+
+---
+
+## Phase 16 — the full regression that closes the interface pass (2026-08-11)
+
+Display: **physical panel, 5120x1440 @ 239.999Hz** (`refresh.ps1`, exact rate from
+`QueryDisplayConfig`), so every figure below is comparable with phases 11–15 and not with 5–9.
+Binary built from HEAD at `04789d6`. No source change was needed for the regression itself.
+
+### (b) The two owner items — CLOSED BEFORE THE REGRESSION BEGAN
+
+The menus and Help wording are accepted as they now stand, and the Narrator listen is done, so
+plan §31.5 item 4 is closed. Both are written up in the phase 14 section above. **Every owner
+item in the interface pass is answered**, which is what lets this phase close the pass honestly
+rather than over two open questions.
+
+### (c) THE SPEC AUDIT — AND THE ONE "CONFIRMED MISS" DOES NOT EXIST
+
+The handoff named one confirmed miss: *"THE MOVIE INSPECTOR STILL HAS NO DURATION ROW"*, with
+the phase 14 owner ruling quoted from three documents and a verification at HEAD —
+`grep -rni "duration" src/app/MovieInspector.cpp` returning nothing.
+
+**It was built at spec phase 14, in `bccd21e`, and it is live at `MainWindow.cpp:2276`.**
+Verified on screen rather than by reading: the inspector on `Splash_1.mp4` reads
+**`Duration: 0:05.042 (121 frames)`**, origin **`encoded`** — the ruling's stated origin,
+followed exactly, with the reasoning written into the code beside it (it is the *container's*
+claim, deliberately not frame count ÷ frame rate, and the frame count is printed alongside so
+the two can be compared rather than smoothed over).
+
+**The grep could not have found it, and the reason is the inspector's own design rule.**
+`MovieInspector.cpp` contains no fields at all — no `QFile`, no `QFileInfo`, no `QDir`, no
+decoder, no viewer. It takes a value type. Every row is built in
+`MainWindow::buildInspectorSnapshot()`, which is where Duration is. The handoff's second piece
+of evidence — that the General labels "run File name, Source path, Resolution, File size,
+Overall data rate with no Duration among them" — was read from a window that stops ~60 lines
+short of it.
+
+**This is the SEVENTH stale instrument to accuse a correct build**, after phase 8's menu-icon
+luminance, phase 9's un-refreshed HUD, phase 10's HUD after a transform, phase 12's HUD on
+resize, phase 14's ANSI-marshalled window titles and phase 15's HUD after a view scale — and it
+is the first that is a **grep aimed at the wrong file**. The lesson generalises past this row:
+*a negative grep is only evidence if the thing being grepped for would have to be in that file*,
+and here the whole point of the file is that it is not.
+
+**A second near-miss, checked the same way.** The first inspector capture showed only General
+and Video details, with no **Audio details** section — which the spec requires (codec, sample
+rate, bitrate, channel layout, track ID). All five fields are built at `MainWindow.cpp:2501–2530`
+and the section was simply **below the fold** of a 739px-tall window. Read the code before
+concluding from a screenshot, which is the same rule in the opposite direction.
+
+### What the audit did find: nothing missing
+
+The union of fifteen phases was read against `docs/interface-pass-1-spec.md` §3 and §4 end to
+end, and against the owner rulings in `CLAUDE.md` and each progress section's sign-off text.
+
+- **All five menus match the spec exactly**, captured with `menushot.ps1` (every menu asserted
+  to have changed the capture, so none of them silently failed to open). File — Open, Open
+  Recent, Close Media, Share, Exit. Edit — Copy Current Frame, Rotate Left/Right, Flip
+  Horizontal/Vertical, Reset View Transform. View — Toggle Fullscreen, Always on Top, Playback
+  Speed, Time Display, Loop, Lock Window to Media Aspect Ratio, Actual Size, Fit to Window, Zoom
+  In, Zoom Out, Show Diagnostics HUD. Window — Minimize, Maximize, Actual Size, Fit to Window,
+  Show Movie Inspector. Help — Trace Help, Keyboard Shortcuts, Report an Issue, About Trace.
+  **Check for Updates is correctly ABSENT**, not greyed, per the phase 14 ruling.
+- **Fit to Window shows checked and enabled** in both View and Window — the phase 15 correction,
+  visible in the capture, and Actual Size behaves alike.
+- **Every shortcut the spec's Keyboard section names is registered**: Space, Left, Right,
+  Escape, F11 (plus Ctrl+Return and Alt+Return), `QKeySequence::Open`, Ctrl+I, Ctrl+0,
+  Ctrl+plus / Ctrl+equal and Ctrl+minus / Ctrl+underscore, and **M is Mute** — the spec's
+  "if unclaimed" case, taken.
+- **Zero-based numbering holds at the right endpoint on all three media classes.**
+  `resetForNewMedia` is called with `frameCount - 1` for video and for image sequences, and the
+  transport prints `currentFrame / maxFrame`. Measured: a 168-file PNG sequence reads
+  **`Frame: 136/167`**, and a single still reads **`Frame: 0/0`**.
+- **Spec §4's View ▸ Lock Window to Media Aspect Ratio exists, is checkable, is checked by
+  default and is persisted** through `trace::app::settings()`.
+- **The shuttle audio policy survives a round trip, and it is implemented rather than assumed.**
+  `AudioOutput::start()` re-applies the stored `impl_->muted` to the newly created sink before
+  starting it, so "preserve the user's previous mute and restore it when normal 1x playback
+  resumes" is a property of the code rather than of the stop/start ordering.
+
+**One thing is carried, and it is a design-package detail rather than a spec item.** The
+temporary rate indicator required by the spec exists and works; the approved package's §6 places
+it *centred above* the transport and it is top-left (moved there at phase 8, because at 84px of
+panel height a top-right chip overlaps a 34px control). Not a spec miss, and not phase 16's to
+change.
+
+### (a) The standing regression, across the WHOLE asset set
+
+The pass had never been re-measured on 1080p, 4K 60fps, 422 HQ, the 1x1, the 4x5, the still or
+the image sequence since the interface work began. All seven were run. Cadence runs use
+`TRACE_NO_AUDIO=1` and a scratch `TRACE_SETTINGS_FILE`, so no persisted Loop can rewrite what
+they measure.
+
+| file | cadence | `display` / `win` |
+|---|---|---|
+| 4K H.264 x3 | **100.0 / 100.0 / 100.0%**, 120 frames, `handler>budget 0 of 119`, **all 119 gaps in the ~1x bucket** | `1226x690 filtered x2` / `1226x1083` |
+| ProRes 4444 x2 | **99.8 / 99.8%**, 261 frames, `0 of 260` | `1226x690 filtered x2` / `1226x1083` |
+| 1080p H.264 x2 | **100.0 / 100.0%**, 240 frames, `0 of 239`, all 239 gaps ~1x | `1226x690 filtered x1` / `1226x1083` |
+| 4K 60fps x2 | **100.0 / 100.0%**, 162 frames, `0 of 161`, **budget 16.67ms** | `1226x690 filtered x2` / `1226x1083` |
+| ProRes 422 HQ x2 | **99.9 / 99.9%**, 168 frames, `0 of 167` | `1226x690 filtered x2` / `1226x1083` |
+| 1x1 ProRes x2 | **100.0 / 100.0%**, 323 / 319 frames, all gaps ~1x, `hitch 0` | `690x690 filtered x1` / `690x1083` |
+| 4x5 ProRes x2 | **100.0 / 100.0%**, 323 / 319 frames, all gaps ~1x, `hitch 0` | `552x690 filtered x1` / `552x1083` |
+
+| gesture | result |
+|---|---|
+| `scrub -SnapRelease` (4K H.264) | `scrub exact`, `target 120 shown 120 delta 0`, `walk 0f`, `dst YUV420P8 planar`, **`hitch 0`**, `land 0`, at `display 1066x600 1:1` / `win 1066x1083` |
+| `lifecycle -PlayThroughDrag` | **PASS** — 83.6% of samples moved |
+| `lifecycle -PausedThroughDrag` | **PASS** — **0% moved** (the control) |
+| `transitions -All` (`M&M_TopGun_1080.mp4`) | **25 of 25 PASS** |
+| still (`SEPR_02.png`, 4096x2304) | opens 16:9, image touching all four viewport edges, `Frame: 0/0` |
+| image sequence (168 PNG frames, 1920x1080) | plays, `Frame: 136/167`, §4-shaped window |
+| `uiatree.ps1` | five controls — **Rewind, Play, Fast-forward, Share, Timeline** — named, typed `Button` / `Slider`, on the drawn rects (44x44 play, 34x34 utility), each with a help string |
+
+**Case for case with phases 12, 13, 14 and 15 on every figure those phases recorded.** The four
+files they never covered are at or above the rest: 4K 60fps holds 100.0% against a **16.67ms**
+budget, the tightest in the set, with `handler>budget 0 of 161`.
+
+**Two readings that need their limits stated rather than hidden.**
+
+- **`handler>budget` is NOT READABLE on the 1x1 and the 4x5**, because §4 gives those media a
+  narrow window and the dev HUD is clipped at the right edge — the **diagnostic limitation the
+  owner ruled on at phase 12**, reproducing exactly. What *is* readable on both bounds it:
+  `presented 100.0% of real time`, **every one of 322 / 318 gaps in the ~1x bucket with zero in
+  every other**, `handler 2.15/1.76` and `2.44/1.97` against a 41.71ms budget, max present gap
+  44.0 / 44.4ms, and `hitch 0`. A handler over budget would have to appear as a gap outside the
+  ~1x bucket, and none does. Stated as an inference, because it is one.
+- **`stalls` is quoted nowhere above.** On this display its bar is 8.3ms — the 4K H.264 scrub run
+  reads `stalls 97 of 112 (>8.3ms)` beside `hitch 0 (>33ms)` on the same line. `hitch` is the
+  figure comparable across sessions and it is the one recorded.
+
+### One harness fault, and it was the invocation rather than the harness
+
+`transitions.ps1 -All` first reported **`FAIL - groove or controls not located` on all 25
+cases** — the same signature as phase 15's window-border fault, which `163c439` fixed. It was
+neither. **The run omitted `-Env TRACE_TRANSPORT_BAR=1`**, which that matrix requires because it
+locates every control by scanning the docked bar for icon clusters and the groove for its track
+colour, and spec phase 6 took the bar out of the layout by default. The script's own param block
+says so in six lines. Re-run with it: **25 of 25 PASS.**
+
+Worth carrying because the failure mode is identical to a real regression and to a real
+environment fault: *all 25 failing the same way is a statement about the harness's inputs, not
+about the build.* Check the invocation against the script's header before building a control.
+
+### The pass is closed
+
+Fifteen phases of interface work, measured against the spec and the owner rulings, with the
+playback and scrub regression flat across the whole asset set on the physical panel. Priority 1
+held throughout: **no cadence figure moved, on any file, in either direction.**

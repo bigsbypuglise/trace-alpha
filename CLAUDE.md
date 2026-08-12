@@ -1256,6 +1256,65 @@ on the Narrator listen. **Both of those were then accepted separately on 2026-08
 sign-off part 2 above), which is what left the pass with no open owner item; they are not
 covered by *this* sign-off and were never meant to be.
 
+**SPEC PHASE 16 IS DONE AND THE INTERFACE PASS IS CLOSED (2026-08-11).** The full regression,
+the spec-and-rulings audit, and both owner items. Record in `docs/interface-pass-1-progress.md`
+under "Phase 16". Display: **physical panel, 5120x1440 @ 239.999Hz** throughout.
+
+**THE HANDOFF'S ONE CONFIRMED MISS DOES NOT EXIST, AND FINDING THAT OUT IS THE PHASE'S MAIN
+RESULT.** It stated that the Movie Inspector still had no Duration row, quoting the phase 14
+owner ruling from three documents and a verification at HEAD. **The row was built at phase 14 in
+`bccd21e` and is live at `MainWindow.cpp:2276`** — confirmed on screen, not by reading:
+**`Duration: 0:05.042 (121 frames)`**, origin **`encoded`**, which is the ruling's stated origin
+followed exactly. **The grep could not have found it**: it was aimed at `MovieInspector.cpp`,
+which by design holds no fields at all — no `QFile`, no `QFileInfo`, no decoder, no viewer, it
+takes a value type — and every row is built in `MainWindow::buildInspectorSnapshot()`.
+
+**Seventh stale instrument to accuse a correct build**, after phase 8's menu-icon luminance,
+phase 9's un-refreshed HUD, phase 10's HUD after a transform, phase 12's HUD on resize, phase
+14's ANSI-marshalled window titles and phase 15's HUD after a view scale — and **the first that
+is a grep aimed at the wrong file**. The rule: *a negative grep is only evidence if the thing
+being grepped for would have to be in that file.* A near-miss the same session went the other
+way — the **Audio details** section looked absent from a capture and is simply below the fold of
+a 739px window, with all five spec fields built at `MainWindow.cpp:2501–2530`.
+
+**THE AUDIT FOUND NOTHING MISSING.** All five menus match the spec exactly (Check for Updates
+correctly **absent**, not greyed); every shortcut the Keyboard section names is registered,
+including **M for Mute**, the spec's "if unclaimed" case; zero-based numbering holds at the right
+endpoint on all three media classes (`resetForNewMedia(frameCount - 1)`, a 168-file sequence
+reading `Frame: 136/167`, a still reading `Frame: 0/0`); §4's `Lock Window to Media Aspect Ratio`
+is present, checked by default and persisted; and **the shuttle mute policy is implemented rather
+than incidental** — `AudioOutput::start()` re-applies the stored `impl_->muted` to the new sink
+before starting it. One item is carried and is a **design-package** detail rather than a spec
+one: the rate chip is top-left, the package's §6 puts it centred above the transport.
+
+**REGRESSION — FLAT ACROSS THE WHOLE ASSET SET, and four of these files had never been measured
+since the interface work began.** Cadence with `TRACE_NO_AUDIO=1` and a scratch
+`TRACE_SETTINGS_FILE`: **4K H.264 x3 100.0/100.0/100.0%** (120 frames, `0 of 119`, all 119 gaps
+in the ~1x bucket) · **4444 x2 99.8%** (`0 of 260`) · **1080p x2 100.0%** (`0 of 239`) · **4K
+60fps x2 100.0%** (`0 of 161`, against a **16.67ms** budget, the tightest in the set) · **422 HQ
+x2 99.9%** (`0 of 167`) · **1x1 and 4x5 ProRes x2 each 100.0%**, every gap ~1x, `hitch 0`. All
+16:9 files at `display 1226x690` / `win 1226x1083`; 1x1 `690x690`/`690x1083`; 4x5
+`552x690`/`552x1083`. `scrub -SnapRelease` `target 120 shown 120 delta 0` full-res planar with
+**`hitch 0`** and `land 0`; both lifecycle legs (83.6% and the 0% control); **25 of 25
+transitions**; the still and the image sequence both §4-shaped and zero-based; `uiatree.ps1`
+still reporting five named, correctly typed controls on the drawn rects. **Case for case with
+phases 12–15.**
+
+**`handler>budget` IS NOT READABLE ON THE 1x1 AND THE 4x5** — §4 makes those windows narrow and
+the dev HUD clips, which is the **phase 12 diagnostic limitation reproducing**, not a defect.
+What bounds it is readable: 100.0% of real time with every one of 322/318 gaps in the ~1x bucket
+and none in any other, handler ~2ms against a 41.71ms budget, `hitch 0`. Recorded as an
+inference, because it is one.
+
+**ONE HARNESS FAULT, AND IT WAS THE INVOCATION.** `transitions.ps1 -All` reported
+`FAIL - groove or controls not located` on **all 25 cases** — the exact signature of phase 15's
+window-border fault. It was neither that nor a regression: the run **omitted
+`-Env TRACE_TRANSPORT_BAR=1`**, which the matrix needs because it finds every control by scanning
+the docked bar, and phase 6 took that bar out of the layout by default. The script's own param
+block says so. Re-run with it: **25 of 25 PASS.** *All 25 failing the same way is a statement
+about the harness's inputs, not about the build* — check the invocation against the script header
+before building a control.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
