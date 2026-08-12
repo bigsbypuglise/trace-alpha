@@ -26,8 +26,12 @@
 #include <QStatusBar>
 
 #include <QCoreApplication>
+#include <QGuiApplication>
+#include <QDesktopServices>
 #include <QEventLoop>
 #include <QSlider>
+#include <QUrl>
+#include <QUrlQuery>
 #include <QVBoxLayout>
 #include <QWidget>
 #include <QtGlobal>
@@ -54,6 +58,7 @@
 #include "ui/TransportBar.h"
 #include "app/LucidLinkIntegration.h"
 #include "app/Settings.h"
+#include "app/ShortcutsWindow.h"
 #include "app/WindowShape.h"
 #include "core/MediaIoSource.h"
 #include "core/SequenceParser.h"
@@ -280,6 +285,13 @@ MainWindow::MainWindow() {
     // call in them rather than a rule someone has to remember.
     recentFiles_.load();
     rebuildRecentMenu();
+
+    // Spec phase 14. Applied here rather than only when the item is toggled, so
+    // the stored preference is in force from the first frame -- a checked menu
+    // item over a window that is not on top is exactly the kind of small
+    // disagreement this pass exists to remove.
+    if (alwaysOnTopAction_ && alwaysOnTopAction_->isChecked()) applyAlwaysOnTop(true);
+
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
         // GATE E: the timer is re-armed per wake against an absolute deadline,
@@ -620,6 +632,7 @@ MainWindow::MainWindow() {
                     playbackAtEnd_ = true;
                     playbackEndFrame_ = playback_.state().currentFrame;
                 }
+                syncPlaybackSpeedActions();
             }
             refreshHud(shuttleDir_ > 0 ? "FF" : "Reverse Play");
             return;
@@ -708,6 +721,7 @@ MainWindow::MainWindow() {
                 playbackAtEnd_ = true;
                 playbackEndFrame_ = playback_.state().currentFrame;
             }
+            syncPlaybackSpeedActions();
             if (!error.isEmpty()) statusBar()->showMessage(error, 2000);
         } else {
             notePresentedPlaybackFrame(frameDurationMs);
@@ -727,6 +741,7 @@ MainWindow::MainWindow() {
                 playbackAtEnd_ = true;
                 playbackEndFrame_ = targetFrame;
             }
+            syncPlaybackSpeedActions();
         }
         refreshHud(direction > 0 ? "Play" : "Reverse Play");
 
@@ -1045,7 +1060,12 @@ void MainWindow::setupSharedActions() {
     connect(goToFrameAction_, &QAction::triggered, this, &MainWindow::promptGoToFrame);
     addAction(goToFrameAction_);
 
-    goToTimecodeAction_ = new QAction(tr("Go to &Timecode..."), this);
+    // "Timec&ode", not "&Timecode". SMPTE Timecode is three items above in the
+    // same submenu and already owns T -- a collision that shipped at phase 7
+    // and was found at phase 14 by warnOnDuplicateMnemonics() on its first run,
+    // not by anyone using the menu. C, S, E and G are taken by the four items
+    // around it, so this one takes O.
+    goToTimecodeAction_ = new QAction(tr("Go to Timec&ode..."), this);
     goToTimecodeAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::SHIFT | Qt::Key_G));
     connect(goToTimecodeAction_, &QAction::triggered, this, &MainWindow::promptGoToTimecode);
     addAction(goToTimecodeAction_);
@@ -1179,6 +1199,96 @@ void MainWindow::setupSharedActions() {
                                     QKeySequence(Qt::Key_Enter)});
     connect(toggleHudAction_, &QAction::triggered, this, &MainWindow::setHudVisible);
     addAction(toggleHudAction_);
+
+    // ---- spec phase 14 ------------------------------------------------------
+
+    // NO SHORTCUT, deliberately. Ctrl+M is the macOS convention and Windows has
+    // none, the spec's Keyboard section does not ask for one, and `M` is
+    // already Mute -- a table-dispatched row, and that dispatcher MATCHES ON
+    // THE KEY AND IGNORES MODIFIERS. Qt would resolve Ctrl+M to this action
+    // before keyPressEvent was reached so the two would not actually collide,
+    // but a mute key and a minimize key one modifier apart is a trap to walk
+    // into rather than to document. The menu item is the surface.
+    minimizeAction_ = new QAction(tr("Mi&nimize"), this);
+    connect(minimizeAction_, &QAction::triggered, this, &QWidget::showMinimized);
+    addAction(minimizeAction_);
+
+    // ONE action for both directions, with its TEXT following the window state,
+    // because the spec names one item ("Maximize/Restore") and two would need
+    // one of them greyed at all times. The text is written from what the window
+    // manager actually did, in changeEvent, never from what this handler asked
+    // for -- phase 6's rule for fullscreen, and for the same reason: a maximize
+    // Windows declines would otherwise leave the menu claiming it happened.
+    maximizeRestoreAction_ = new QAction(tr("Ma&ximize"), this);
+    connect(maximizeRestoreAction_, &QAction::triggered, this, [this]() {
+        if (isMaximized()) showNormal();
+        else showMaximized();
+    });
+    addAction(maximizeRestoreAction_);
+
+    // ALWAYS ON TOP GOES THROUGH SetWindowPos, NOT setWindowFlag, and that is a
+    // correctness requirement rather than a preference. Changing a top-level
+    // widget's window flags makes Qt destroy and recreate the native window, and
+    // the D3D11 swapchain's surface is a child HWND created once in
+    // initialize() from the viewer's winId() -- so the obvious implementation
+    // would orphan the surface the picture is presented into, on the default
+    // renderer, the first time anyone ticked the box.
+    alwaysOnTopAction_ = new QAction(tr("Always on &Top"), this);
+    alwaysOnTopAction_->setCheckable(true);
+    alwaysOnTopAction_->setChecked(
+        trace::app::settings().value(QLatin1String(kAlwaysOnTopKey), false).toBool());
+    connect(alwaysOnTopAction_, &QAction::toggled, this, [this](bool on) {
+        trace::app::settings().setValue(QLatin1String(kAlwaysOnTopKey), on);
+        applyAlwaysOnTop(on);
+        refreshHud(on ? "Always on top" : "Not always on top");
+    });
+    addAction(alwaysOnTopAction_);
+
+    // Loop. Persisted, because it is a review preference rather than a property
+    // of the media -- someone checking a cycling animation wants it to survive
+    // opening the next version of the same shot.
+    closeMediaAction_ = new QAction(tr("&Close Media"), this);
+    closeMediaAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
+    connect(closeMediaAction_, &QAction::triggered, this, &MainWindow::closeMedia);
+    addAction(closeMediaAction_);
+
+    keyboardShortcutsAction_ = new QAction(tr("&Keyboard Shortcuts"), this);
+    connect(keyboardShortcutsAction_, &QAction::triggered,
+            this, &MainWindow::showKeyboardShortcuts);
+    addAction(keyboardShortcutsAction_);
+
+    // TRACE HELP HAS REAL CONTENT AND IS NOT A SECOND SURFACE ONTO ABOUT.
+    // Pointing it at the About box, or at the Keyboard Shortcuts window, would
+    // be two menu items sharing one window -- a stub wearing a menu entry,
+    // which is the thing Check for Updates was omitted to avoid. There is no
+    // help site to link to (the repository is private), so the help is written
+    // here: what Trace is for, and the four things about it that are not
+    // guessable from the interface.
+    traceHelpAction_ = new QAction(tr("&Trace Help"), this);
+    connect(traceHelpAction_, &QAction::triggered, this, &MainWindow::showTraceHelp);
+
+    // REPORT AN ISSUE IS A PRE-FILLED mailto, NOT A LINK INTO THE REPOSITORY.
+    // Owner decision, 2026-08-11: the GitHub repo is private, so a link there
+    // works for one person and is a dead end for every other tester. The body
+    // carries the build identity because the first question about any report is
+    // which build produced it, and a tester should not have to go and find it.
+    reportIssueAction_ = new QAction(tr("&Report an Issue"), this);
+    connect(reportIssueAction_, &QAction::triggered, this, [this]() {
+        QUrl url(QStringLiteral("mailto:") + QLatin1String(kIssueEmail));
+        QUrlQuery query;
+        query.addQueryItem(QStringLiteral("subject"),
+                           tr("Trace alpha - issue report"));
+        query.addQueryItem(QStringLiteral("body"),
+                           tr("What happened:\n\n\nWhat you expected:\n\n\n"
+                              "Media (format, resolution, frame rate):\n\n\n"
+                              "--- please leave the lines below ---\n%1")
+                               .arg(buildIdentity()));
+        url.setQuery(query);
+        QDesktopServices::openUrl(url);
+    });
+
+    aboutAction_ = new QAction(tr("&About Trace"), this);
+    connect(aboutAction_, &QAction::triggered, this, &MainWindow::showAboutDialog);
 }
 
 // Trace's complete keyboard contract, in one place.
@@ -1225,6 +1335,18 @@ void MainWindow::setupShortcuts() {
     // Shortcuts window phase 14 renders is the COMPLETE contract rather than the
     // part keyPressEvent happens to own.
     shortcuts_.addAction(ShortcutGroup::View, inspectorAction_);
+
+    // Spec phase 14, all documentation rows for the same reason as the block
+    // above: every one carries a modifier, so Qt dispatches it and the row
+    // exists so the Keyboard Shortcuts window this phase renders is the
+    // COMPLETE contract. They point at their action rather than copying its
+    // key, so a rebinding cannot leave this window stale -- which matters more
+    // now than it ever has, since this window is the only place the contract is
+    // read out loud.
+    shortcuts_.addAction(ShortcutGroup::File, closeMediaAction_);
+    // Minimize is NOT listed: it has no shortcut, and the table is the KEYBOARD
+    // contract. A row with no key in it would be a menu listing -- the same
+    // rule that keeps the three shortcut-less view transforms out of it.
 
     shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_Space, tr("Play / Pause"),
                       [this]() { togglePlayPause(); refreshHud("Space"); });
@@ -1917,6 +2039,39 @@ trace::app::InspectorSnapshot MainWindow::buildInspectorSnapshot() const {
         const QString rate = formatBitrate(perf.sourceBitrateMbps * 1'000'000.0);
         general.fields.push_back(
             {tr("Overall data rate"), rate.isEmpty() ? tr("Unknown") : rate, FieldOrigin::File});
+
+        // DURATION, added at spec phase 14 and carried from phase 13's sign-off.
+        //
+        // The owner's field list named it, the window had never had it, and the
+        // spec's own field list for the inspector does not ask for one -- so it
+        // was recorded as a discrepancy rather than quietly inserted into a
+        // closed phase, and taken as a decision here.
+        //
+        // `encoded`, not `observed`: this is the container's claim about the
+        // media's length. It is NOT the frame count divided by the frame rate,
+        // and the two genuinely disagree on files whose last packet is short --
+        // which is exactly the kind of difference an inspector exists to show
+        // rather than to smooth over. The frame count is printed beside it for
+        // that reason.
+        if (vm.durationSeconds > 0.0) {
+            const double totalSeconds = vm.durationSeconds;
+            const int hours = static_cast<int>(totalSeconds) / 3600;
+            const int minutes = (static_cast<int>(totalSeconds) % 3600) / 60;
+            const double seconds = totalSeconds - hours * 3600.0 - minutes * 60.0;
+            QString duration =
+                hours > 0
+                    ? tr("%1:%2:%3")
+                          .arg(hours)
+                          .arg(minutes, 2, 10, QLatin1Char('0'))
+                          .arg(seconds, 6, 'f', 3, QLatin1Char('0'))
+                    : tr("%1:%2").arg(minutes).arg(seconds, 6, 'f', 3, QLatin1Char('0'));
+            if (vm.frameCount > 0) {
+                duration += tr(" (%1 frames)").arg(vm.frameCount);
+            }
+            general.fields.push_back({tr("Duration"), duration, FieldOrigin::Encoded});
+        } else {
+            general.fields.push_back({tr("Duration"), tr("Unknown"), FieldOrigin::Encoded});
+        }
     }
 
     // Current viewport size. Reported as the VIDEO AREA, and the viewer's own
@@ -2224,6 +2379,351 @@ void MainWindow::toggleMovieInspector(bool show) {
     }
 }
 
+// ============================================================================
+// Spec phase 14 -- menus, help and window commands.
+// ============================================================================
+
+// What build this is, in one place, because About and the Report an Issue mail
+// body both have to say it and two answers would be worse than none.
+//
+// The renderer is read from the ADOPTED one, never from TRACE_RENDERER: a GPU
+// backend that failed to initialize has already been replaced by the CPU one,
+// and an issue report naming the requested backend rather than the running one
+// would send every fallback investigation down the wrong path.
+QString MainWindow::buildIdentity() const {
+    QString renderer = tr("unknown");
+    if (viewer_) renderer = viewer_->rendererName();
+    return tr("Trace %1 (alpha)\nQt %2\nRenderer: %3\nTransport: %4")
+        .arg(QStringLiteral(TRACE_VERSION_STRING))
+        .arg(QString::fromLatin1(qVersion()))
+        .arg(renderer)
+        .arg(trace::render::OverlayModel::enabledByEnvironment() ? tr("overlay")
+                                                                 : tr("docked bar"));
+}
+
+void MainWindow::showAboutDialog() {
+    QMessageBox::about(
+        this, tr("About Trace"),
+        tr("<h3>Trace %1</h3>"
+           "<p>A fast, minimal media player for review work.</p>"
+           "<p style='white-space:pre'>Qt %2<br>Renderer: %3</p>"
+           "<p><small>Alpha. Frame order, stepping and timing are exact; "
+           "formats and interface are still being filled in.</small></p>")
+            .arg(QStringLiteral(TRACE_VERSION_STRING))
+            .arg(QString::fromLatin1(qVersion()))
+            .arg(viewer_ ? viewer_->rendererName() : tr("unknown")));
+}
+
+// REAL CONTENT, and the four things it says are the four that are not guessable
+// from the interface: that the arrows are exact rather than approximate, that
+// the side buttons enter the ladder at 2x while J and L enter at 1x, that
+// scrubbing never skips a frame on release however it looked during the drag,
+// and that the diagnostics HUD exists at all.
+//
+// It is deliberately short. A help window nobody reads is the same failure as a
+// menu item that does nothing, and the full keyboard contract is one menu item
+// away in a window that is generated rather than written.
+void MainWindow::showTraceHelp() {
+    QMessageBox box(this);
+    box.setWindowTitle(tr("Trace Help"));
+    box.setTextFormat(Qt::RichText);
+    box.setText(tr("<h3>Trace</h3>"
+                   "<p>Open a render, check a frame, move on. Trace is a viewer, "
+                   "not an editor or an asset manager.</p>"));
+    box.setInformativeText(
+        tr("<p><b>Stepping is exact.</b> Left and Right move exactly one frame. "
+           "\"Next frame\" always means the actual next frame, including "
+           "backwards.</p>"
+           "<p><b>Rewind and Fast-forward start at 2x</b> and climb "
+           "2x - 5x - 10x - 30x on each press. The <b>J</b> and <b>L</b> keys do "
+           "the same thing but start at 1x, so <b>L</b> is ordinary playback and "
+           "<b>K</b> stops. Sound plays at 1x forward only.</p>"
+           "<p><b>Scrubbing may look soft while you drag</b> on heavy media, and "
+           "always lands on the exact frame you release on, at full "
+           "resolution.</p>"
+           "<p><b>Press H</b> for the diagnostics overlay - frame timing, cache "
+           "and decode figures. <b>Ctrl+I</b> opens the Movie Inspector, which "
+           "says where every value came from.</p>"
+           "<p>The complete key list is in <b>Help &gt; Keyboard Shortcuts</b>.</p>"));
+    box.setIcon(QMessageBox::NoIcon);
+    box.exec();
+}
+
+// The Keyboard Shortcuts window, rendered from ShortcutTable::rows().
+//
+// NOTHING IS WRITTEN BY HAND HERE, and that is the entire reason phase 3
+// replaced keyPressEvent's flat switch with a table months before there was a
+// window to render it into: a switch cannot be enumerated, grouped or printed,
+// so the alternative was a second hand-maintained list of the same keys. Rows
+// that carry a QAction point AT it rather than copying its keys, so a rebinding
+// updates this window without anyone remembering to.
+void MainWindow::showKeyboardShortcuts() {
+    if (!shortcutsWindow_) {
+        shortcutsWindow_ = new trace::app::ShortcutsWindow(shortcuts_, this);
+    }
+    shortcutsWindow_->show();
+    shortcutsWindow_->raise();
+    shortcutsWindow_->activateWindow();
+}
+
+// Always on Top, through the z-order band rather than through the window flags.
+//
+// setWindowFlag(Qt::WindowStaysOnTopHint) is the obvious implementation and it
+// is wrong here: Qt destroys and recreates the native window when a top-level
+// widget's flags change, and the D3D11 swapchain's surface is a child HWND
+// created once from the viewer's winId(). SetWindowPos moves the window between
+// the topmost and non-topmost bands and changes nothing about its identity, so
+// the surface, the swapchain and every handle survive untouched.
+//
+// SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE: the position, the size and which
+// window has focus are all somebody else's business. Only the band changes.
+void MainWindow::applyAlwaysOnTop(bool on) {
+#ifdef Q_OS_WIN
+    auto hwnd = reinterpret_cast<HWND>(winId());
+    if (!hwnd) return;
+    SetWindowPos(hwnd, on ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+#else
+    Q_UNUSED(on);
+#endif
+}
+
+// EVERYTHING THAT MUST BE FORGOTTEN BEFORE THE NEXT THING HAPPENS, whether the
+// next thing is a different file or nothing at all.
+//
+// This was the first sixty lines of openPath until spec phase 14, and Close
+// Media is the reason it has a name: two call sites clearing "most of" the same
+// state is how a stale audio ring or a keyframe grid learned from the previous
+// file survives into the next one, and neither would be visible until some
+// unrelated measurement came out wrong.
+//
+// It does NOT touch currentMedia_, currentImage_ or the viewer. The caller
+// decides what replaces them -- openPath is about to assign new ones and
+// closeMedia clears them -- and doing it here would mean openPath briefly
+// having no media, which is a state its failure paths do not expect.
+void MainWindow::releaseCurrentMedia() {
+    // Before anything else touches the decoder. Bumps the generation, so a
+    // frame the worker is producing for the OUTGOING media can never be
+    // inserted against the incoming media, and waits for it to park so
+    // close() below is not racing a decode.
+    //
+    // No landing decode: the outgoing media is about to be closed, and decoding
+    // a frame of it here would be work thrown away at best and a frame of the
+    // wrong file on screen at worst.
+    endShuttleRun(/*landExactly=*/false);
+    reclaimDecoder();
+    scrubWorker_.stop();
+    playTimer_.stop();
+    stopAudio();
+    userPlayIntent_ = false;
+    audio_.close();
+    scrubTimer_.stop();
+    scrubbing_ = false;
+    scrubJumpPending_ = false;
+    scrubShownExact_ = false;
+    scrubPaintGapLastMs_ = scrubPaintGapMaxMs_ = scrubPaintGapSumMs_ = 0.0;
+    scrubPaintGapSamples_ = scrubPaintsWasted_ = scrubPaintStalls_ = 0;
+    scrubPaintHitches_ = 0;
+    stopUiServiceMeasurement();
+    uiServiceGapMaxMs_ = uiServiceGapSumMs_ = 0.0;
+    uiServiceSamples_ = uiServiceGapsOver_ = 0;
+    scrubReleaseLatencyMs_ = 0.0;
+    scrubLastPresentNs_ = -1;
+    pendingScrubFrame_ = -1;
+    activeScrubFrame_ = -1;
+    // Per file: a keyframe grid learned from the outgoing media would snap the
+    // incoming one onto positions that are not keyframes in it.
+    shuttleGop_ = 0;
+    shuttleKfAnchor_ = -1;
+    shuttleSnapping_ = false;
+    shuttleAdvance_ = 1;
+    playbackClock_.invalidate();
+    playbackAccumulatorMs_ = 0.0;
+    videoDecoder_.close();
+    frameSource_.reset();
+    videoFrameBuffer_ = trace::core::VideoFrame{};
+    lastFrameHandoffMs_ = 0.0;
+    avgFrameHandoffMs_ = 0.0;
+    frameHandoffSamples_ = 0;
+    // Re-seed per media: a 1080p estimate would let a 4K file walk far enough
+    // to fall behind the pointer on its first drag.
+    scrubWalkPerFrameMs_ = 1.0;
+    // Learned from the seeks this media actually performs; assumed free until
+    // then, so an all-intra file is never penalised for a property it lacks.
+    mediaWalkFramesTotal_ = 0;
+    mediaSeekCount_ = 0;
+    mediaSeeksSeen_ = 0;
+
+    // Cleared before anything can succeed, so a failed open cannot leave the
+    // previous file's size attached to the next one.
+    openedFileBytes_ = -1;
+}
+
+// File > Close Media. The empty state, reached deliberately rather than only by
+// starting the application.
+//
+// TRACE HAS NEVER HAD "MEDIA WAS OPEN AND NOW NOTHING IS" -- it had "nothing
+// has been opened yet", which looks identical and is not: everything below had
+// a value that has to be given up, and the window has a shape that came from
+// the media it no longer has.
+void MainWindow::closeMedia() {
+    if (!currentMedia_.has_value()) return;
+
+    releaseCurrentMedia();
+
+    currentMedia_.reset();
+    currentImage_.reset();
+    playbackAtEnd_ = false;
+    playbackEndFrame_ = -1;
+    hasSourceTimecode_ = false;
+    // Empty rather than paused: paused implies a frame to be paused ON.
+    playback_.resetForNewMedia(-1);
+
+    // The view transform resets, because it resets on a media change and this
+    // is a media change. Leaving a rotation in force over nothing would apply
+    // it to whatever was opened next, which the phase 10 rule forbids.
+    if (viewer_) {
+        viewer_->setFrame(trace::core::VideoFrame{});
+        viewer_->setViewTransform(trace::render::ViewTransform{});
+        // Back to square pixels and no container rotation, and back to the
+        // 16:9 minimum. Leaving a 9:16 floor behind would constrain the empty
+        // window to a shape whose media is gone.
+        viewer_->setSourceShape(1.0, 0);
+        viewer_->setMinimumAspect(16.0 / 9.0);
+    }
+    syncViewTransformActions();
+
+    // The window keeps the size it has. Section 4 shapes the window to the
+    // MEDIA, and there is none -- resizing to some default here would move a
+    // window the user had placed, to say nothing new.
+    setWindowTitle(QStringLiteral("Trace"));
+    statusBar()->showMessage(tr("No media open"), 2000);
+
+    syncTransportBar();
+    syncShareActions();
+    syncTimeDisplayActions();
+    syncMediaDependentActions();
+    // The inspector is modeless and may be on screen. It already renders "No
+    // media open." -- this is what makes it say so at the moment it becomes
+    // true rather than at the next resize.
+    refreshInspector();
+    refreshHud("Close Media");
+}
+
+// THE PLAYBACK SPEED MENU, AND WHY IT IS NOT A SIXTH CALLER OF startShuttle.
+//
+// A shuttle press means "one rung up from wherever I am" and the ladder decides
+// which; a menu item means "this rate", and there is no rung to compute. Routing
+// the menu through startShuttle would have had to fake a press count to reach
+// 10x.
+//
+// So it follows startShuttle's SEQUENCE -- which is the part that matters, and
+// which section 29.2 is the record of getting wrong -- while choosing the rate
+// itself. Steps 1, 4, 5, 6 and 7 below are that function's, in its order.
+void MainWindow::setPlaybackSpeed(double speed) {
+    if (!frameSource_ || !frameSource_->canPlay()) return;
+
+    // 1. End the run in progress: a new rate invalidates everything already
+    //    produced at the old one.
+    endShuttleRun(/*landExactly=*/false);
+
+    // Play from the end restarts the file, exactly as the Play action does --
+    // otherwise picking a speed at the last frame reads as a dead menu, which
+    // is the complaint `c3335ec` fixed for the Play button.
+    if (playbackAtEnd_) {
+        playback_.setCurrentFrame(0);
+        playbackAtEnd_ = false;
+        QString error;
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
+            && !error.isEmpty()) {
+            statusBar()->showMessage(error, 3000);
+        }
+        syncTransportBar();
+    }
+
+    // 2. The controller owns the rate. Nothing here writes state_.speed.
+    playback_.playForwardAt(speed);
+
+    const double actual = playback_.state().speed;
+    const bool ordinaryForwardPlay = std::abs(actual - 1.0) < 1e-4;
+
+    // 3. Intent, not state -- the same rule startShuttle applies. Only 1x
+    //    forward is worth restoring after a drag; the fast rungs are deliberate
+    //    gestures, and resuming one at 1x would be the wrong answer.
+    userPlayIntent_ = ordinaryForwardPlay;
+
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, 1, true);
+
+    // 4. Audio. One call, which declines for everything that is not 1x forward.
+    startAudioForPlayback();
+
+    // 5. The timeline, never a bare playTimer_.start().
+    beginPlaybackTimeline();
+
+    // 6. Above 1x the rate is a sampling STRIDE and the run is a shuttle. At
+    //    exactly 1x it is ordinary playback on the validated audio-mastered
+    //    path.
+    if (actual > 1.0 + 1e-4) {
+        startShuttleRun(1, static_cast<int>(std::lround(actual)));
+    }
+
+    // 7. The rate indicator, for every surface at once. Blank at 1x: ordinary
+    //    playback has no rate to announce.
+    flashRate(ordinaryForwardPlay ? QString()
+                                  : QStringLiteral("%1x").arg(actual, 0, 'g', 3));
+
+    syncPlaybackSpeedActions();
+    syncTransportBar();
+    refreshHud("Playback Speed");
+}
+
+// Ticked from the ENGINE's rate, never from the item that was clicked.
+//
+// The spec's requirement is that "the checked item must reflect the effective
+// playback rate", and the difference matters in three cases that all really
+// happen: Rewind puts the rate negative and no forward item should be ticked;
+// K and Space put it at zero; and running off the end stops playback. A menu
+// that remembered what it last set would claim 10x over a stopped file.
+void MainWindow::syncPlaybackSpeedActions() {
+    if (speedActions_.empty()) return;
+    const auto st = playback_.state();
+    const bool forward = st.mode == PlaybackMode::PlayingForward;
+    QAction* match = nullptr;
+    if (forward) {
+        for (auto* action : speedActions_) {
+            if (std::abs(action->data().toDouble() - st.speed) < 1e-4) {
+                match = action;
+                break;
+            }
+        }
+    }
+    // QActionGroup is exclusive, so unchecking every item needs the group
+    // released first -- otherwise it refuses to leave nothing checked and the
+    // stale item stays ticked over a paused file.
+    if (speedGroup_) speedGroup_->setExclusive(match != nullptr);
+    for (auto* action : speedActions_) action->setChecked(action == match);
+    if (speedGroup_) speedGroup_->setExclusive(true);
+}
+
+// Everything that needs media open. ONE function, so a command added later has
+// one place to be listed rather than a condition repeated at every menu -- and
+// so "what does the application do with nothing open" has a single answer that
+// can be read.
+void MainWindow::syncMediaDependentActions() {
+    const bool haveMedia = currentMedia_.has_value();
+    if (closeMediaAction_) closeMediaAction_->setEnabled(haveMedia);
+    for (auto* action : speedActions_) action->setEnabled(haveMedia);
+    // The view transforms need a picture to transform; the aspect lock needs a
+    // shape to lock to. Both are harmless with nothing open and both would be
+    // commands that visibly do nothing, which is the showInfo failure.
+    if (rotateLeftAction_) rotateLeftAction_->setEnabled(haveMedia);
+    if (rotateRightAction_) rotateRightAction_->setEnabled(haveMedia);
+    if (flipHorizontalAction_) flipHorizontalAction_->setEnabled(haveMedia);
+    if (flipVerticalAction_) flipVerticalAction_->setEnabled(haveMedia);
+    if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(haveMedia);
+}
+
 // One exact seek, shared by both prompts. Goes through the same Step path a
 // slider release uses, which is the spec's "use the existing exact-frame seek
 // path" -- and is why neither prompt needed any decoder work at all.
@@ -2258,14 +2758,42 @@ void MainWindow::goToFrame(long long frame, const char* action) {
     refreshHud(action);
 }
 
+// THE FULL File / Edit / View / Window / Help STRUCTURE (spec phase 14).
+//
+// Until this phase the menus were where each feature could be REACHED rather
+// than where the spec puts them: Time Display and Share lived under File
+// because phases 7 and 8 needed them reachable and the structure did not exist
+// yet, and every one of those placements carried a comment saying so. This is
+// the phase that pays that off, and the whole of it is `addAction` calls --
+// every command already exists as a shared QAction, which is what phases 2
+// through 13 were building toward.
+//
+// A menu ADDS actions and never defines them. The two exceptions below define
+// theirs inline and are marked; everything else comes from setupSharedActions,
+// setupTransportControls or setupWindowActions.
+//
+// TWO ITEMS THE SPEC NAMES ARE DELIBERATELY ABSENT, and their absence is the
+// honest state rather than an oversight:
+//
+//   - Check for Updates. The spec conditions it on "only if an updater exists"
+//     and none does. Owner decision, 2026-08-11: omit it rather than ship a
+//     greyed row -- the same reasoning that left phase 13's Window menu holding
+//     one item.
+//   - Actual Size / Fit to Window / Zoom In / Zoom Out. They change the FIT,
+//     which drives the scrub preview size and therefore cache depth, and Actual
+//     Size on 4K media puts the picture larger than the viewport, which needs a
+//     pan model Trace has never had. The phase 14 audit split them out as
+//     phase 15 and the owner accepted the split. Ctrl+0 stays unclaimed until
+//     then, exactly as phase 10 left it.
 void MainWindow::setupMenus() {
-    auto* fileMenu = menuBar()->addMenu("&File");
+    // ---- File ---------------------------------------------------------------
+    auto* fileMenu = menuBar()->addMenu(tr("&File"));
 
     // A member rather than a local, so setupShortcuts() can list it: the
-    // Keyboard Shortcuts window at spec phase 13 has to print Ctrl+O too, and a
-    // table that can only see the actions someone remembered to hoist is the
-    // second hand-written list it exists to avoid.
-    openAction_ = new QAction("&Open...", this);
+    // Keyboard Shortcuts window has to print Ctrl+O too, and a table that can
+    // only see the actions someone remembered to hoist is the second
+    // hand-written list it exists to avoid.
+    openAction_ = new QAction(tr("&Open..."), this);
     openAction_->setShortcut(QKeySequence::Open);
     connect(openAction_, &QAction::triggered, this, &MainWindow::openFileDialog);
     fileMenu->addAction(openAction_);
@@ -2277,40 +2805,37 @@ void MainWindow::setupMenus() {
     // performance requirement.
     recentMenu_ = fileMenu->addMenu(tr("Open &Recent"));
 
-    fileMenu->addAction(fullscreenAction_);
-    fileMenu->addAction(toggleHudAction_);
-
-    // Time Display, as the spec's View menu names it. A menu ADDS actions and
-    // never defines them -- all six were created in setupSharedActions, which is
-    // the rule phase 2 established when fullscreen stopped being four duplicated
-    // lines. The full View/Window/Help structure is phase 13; this is the group
-    // phase 7 owns, put where it belongs rather than left unreachable until then.
-    auto* timeMenu = fileMenu->addMenu(tr("&Time Display"));
-    timeMenu->addAction(timeDisplayFrameAction_);
-    timeMenu->addAction(timeDisplaySecondsAction_);
-    timeMenu->addAction(timeDisplayElapsedAction_);
-    timeMenu->addAction(timeDisplayTimecodeAction_);
-    timeMenu->addSeparator();
-    timeMenu->addAction(goToFrameAction_);
-    timeMenu->addAction(goToTimecodeAction_);
+    fileMenu->addAction(closeMediaAction_);
+    fileMenu->addSeparator();
 
     // Share (spec phase 8), the same submenu object the two transport buttons
-    // pop. The spec's Menus section does not give Share a top level of its own,
-    // and the full File/Edit/View/Window/Help structure is phase 13 -- so it
-    // goes under File beside Time Display, which is exactly where phase 7 put
-    // its group and for the same reason: reachable now, restructured then.
+    // pop. The spec's Menus section gives Share no top level of its own, so it
+    // stays under File -- which is where it has been since phase 8, and this
+    // time by the structure rather than for want of one.
     //
     // This is also the ONLY keyboard-reachable Share surface, and after phase 6
     // that matters more than it reads. The floating overlay has no widget tree,
     // so its Share button is invisible to a screen reader; a real QMenu in the
-    // menu bar is not.
+    // menu bar is not. The proxy tree below changes that, but the menu remains
+    // the surface that works with no proxy at all.
     fileMenu->addMenu(shareMenu_);
 
-    // Edit, which the spec names as the home for the view transforms. A real
-    // top-level menu rather than another File submenu, because unlike phase 7's
-    // Time Display group this one IS a whole menu in the spec -- the only other
-    // thing the spec puts in Edit is Copy Current Frame, which is phase 12+ and
-    // conditional. Phase 13 adds the rest of the structure around it.
+    fileMenu->addSeparator();
+    // DEFINED HERE, not in setupSharedActions, and it is one of the two
+    // exceptions: Quit has exactly one surface and no state to synchronise.
+    //
+    // NO SHORTCUT, and it used to carry QKeySequence::Quit. That standard key
+    // has no Windows binding, and Qt 6.10 renders the unbound sequence as the
+    // literal word "Exit" -- so the menu read `Exit    Exit`, advertising a key
+    // no keyboard has. It was invisible until phase 14 put the item in a menu
+    // anyone reads. Alt+F4 closes the window and needs no declaration; the
+    // Keyboard Shortcuts window is generated from the table, so an imaginary
+    // binding would have been printed there too.
+    auto* quitAction = new QAction(tr("E&xit"), this);
+    connect(quitAction, &QAction::triggered, this, &QWidget::close);
+    fileMenu->addAction(quitAction);
+
+    // ---- Edit ---------------------------------------------------------------
     auto* editMenu = menuBar()->addMenu(tr("&Edit"));
     editMenu->addAction(rotateLeftAction_);
     editMenu->addAction(rotateRightAction_);
@@ -2320,11 +2845,63 @@ void MainWindow::setupMenus() {
     editMenu->addSeparator();
     editMenu->addAction(resetViewTransformAction_);
 
-    // View, which spec section 4 names as the home for the aspect lock. Phase 14
-    // builds out the rest of it; this is the first item in it, and it is here
-    // rather than in Edit because the spec says "View > Lock Window to Media
-    // Aspect Ratio" literally.
+    // ---- View ---------------------------------------------------------------
     auto* viewMenu = menuBar()->addMenu(tr("&View"));
+    viewMenu->addAction(fullscreenAction_);
+    viewMenu->addAction(alwaysOnTopAction_);
+    viewMenu->addSeparator();
+
+    // Playback Speed. Explicit numeric labels only, as the spec requires --
+    // "Fast" and "Faster" are exactly what a review tool must not say. The
+    // checked item is written by syncPlaybackSpeedActions from
+    // playback_.state().speed, never by the handler that set it, so the menu
+    // reports the rate in force rather than the rate last asked for.
+    //
+    // NEGATIVE RATES ARE NOT HERE, by the spec's own instruction: reverse is
+    // Rewind's, and duplicating every rung with a minus sign would be a second
+    // way to command the one rate machine.
+    auto* speedMenu = viewMenu->addMenu(tr("Playback &Speed"));
+    speedGroup_ = new QActionGroup(this);
+    speedGroup_->setExclusive(true);
+    struct SpeedRung { double speed; const char* label; };
+    // The ladder above 1x is PlaybackController's kShuttleLadder verbatim.
+    // Mnemonics: N, 2, 5, 0, 3 -- all distinct.
+    static constexpr SpeedRung kRungs[] = {
+        {1.0, QT_TR_NOOP("&Normal - 1x")},
+        {2.0, QT_TR_NOOP("&2x")},
+        {5.0, QT_TR_NOOP("&5x")},
+        {10.0, QT_TR_NOOP("1&0x")},
+        {30.0, QT_TR_NOOP("&30x")},
+    };
+    for (const auto& rung : kRungs) {
+        auto* action = new QAction(tr(rung.label), this);
+        action->setCheckable(true);
+        action->setData(rung.speed);
+        speedGroup_->addAction(action);
+        speedMenu->addAction(action);
+        speedActions_.push_back(action);
+        const double speed = rung.speed;
+        connect(action, &QAction::triggered, this, [this, speed]() { setPlaybackSpeed(speed); });
+    }
+
+    // Time Display, where the spec's View menu names it. All six actions were
+    // created in setupSharedActions at phase 7; only their home moves.
+    // "Time Displa&y", not "&Time Display": T is Always on Top's, one item up.
+    auto* timeMenu = viewMenu->addMenu(tr("Time Displa&y"));
+    timeMenu->addAction(timeDisplayFrameAction_);
+    timeMenu->addAction(timeDisplaySecondsAction_);
+    timeMenu->addAction(timeDisplayElapsedAction_);
+    timeMenu->addAction(timeDisplayTimecodeAction_);
+    timeMenu->addSeparator();
+    timeMenu->addAction(goToFrameAction_);
+    timeMenu->addAction(goToTimecodeAction_);
+
+    viewMenu->addSeparator();
+
+    // Spec section 4's aspect lock. DEFINED HERE and it is the second
+    // exception, because its handler is the only consumer and it writes the
+    // settings key it reads -- splitting the two apart would put the default
+    // and the persistence in different files.
     lockAspectAction_ = new QAction(tr("&Lock Window to Media Aspect Ratio"), this);
     lockAspectAction_->setCheckable(true);
     // CHECKED BY DEFAULT, as the spec requires -- and the default is what the
@@ -2344,22 +2921,92 @@ void MainWindow::setupMenus() {
         refreshHud(on ? "Lock aspect" : "Unlock aspect");
     });
     viewMenu->addAction(lockAspectAction_);
+    viewMenu->addAction(toggleHudAction_);
 
-    // Window, which is where the spec's Menus section puts Show/Hide Movie
-    // Inspector literally -- the same reasoning that created View for the aspect
-    // lock at phase 12 and put Time Display under File at phase 7: build the
-    // menu the spec names, with the one item this phase owns in it, and let
-    // phase 14 fill in Minimize / Maximize / Actual Size / Fit to Window around
-    // it. None of those four exist yet, so a Window menu holding only this is
-    // the complete truth about what the application can currently do.
+    // ---- Window -------------------------------------------------------------
     auto* windowMenu = menuBar()->addMenu(tr("&Window"));
+    windowMenu->addAction(minimizeAction_);
+    windowMenu->addAction(maximizeRestoreAction_);
+    windowMenu->addSeparator();
     windowMenu->addAction(inspectorAction_);
 
-    fileMenu->addSeparator();
-    auto* quitAction = new QAction("&Quit", this);
-    quitAction->setShortcut(QKeySequence::Quit);
-    connect(quitAction, &QAction::triggered, this, &QWidget::close);
-    fileMenu->addAction(quitAction);
+    // ---- Help ---------------------------------------------------------------
+    auto* helpMenu = menuBar()->addMenu(tr("&Help"));
+    helpMenu->addAction(traceHelpAction_);
+    helpMenu->addAction(keyboardShortcutsAction_);
+    helpMenu->addSeparator();
+    helpMenu->addAction(reportIssueAction_);
+    helpMenu->addSeparator();
+    helpMenu->addAction(aboutAction_);
+
+    syncPlaybackSpeedActions();
+    syncMediaDependentActions();
+    warnOnDuplicateMnemonics();
+}
+
+// TWO ITEMS IN ONE MENU SHARING A MNEMONIC MAKES THE KEY CYCLE THE HIGHLIGHT
+// INSTEAD OF ACTIVATING EITHER -- a menu that quietly stops responding to its
+// own underlined letter.
+//
+// Phase 10 hit it once, between Rotate Right and Reset, and fixed it by
+// inspection. Phase 14 built the full five-menu structure and introduced TWO in
+// the View menu alone: Time Display took T from Always on Top, and Loop took L
+// from Lock Window to Media Aspect Ratio. Neither is visible in a screenshot --
+// the underlines all render, and the key simply does the wrong thing -- and
+// both were found by a harness trying to drive the menu rather than by anyone
+// reading it.
+//
+// So the third time it is a check rather than a habit. It walks the real menu
+// bar after it is built, which means it sees what a user sees, including items
+// added by a later phase that never read this comment.
+//
+// A WARNING, NOT AN ASSERT. A duplicated mnemonic is a usability defect and not
+// a corruption; failing the launch over one would be worse than the defect. It
+// goes to stderr through fprintf for the reason TRACE_SHAPE_LOG does: in this
+// GUI-subsystem build Qt's message handler does not reliably reach a console.
+void MainWindow::warnOnDuplicateMnemonics() const {
+    const auto scan = [](const QList<QAction*>& actions, const QString& menuName) {
+        QHash<QChar, QString> seen;
+        for (const QAction* action : actions) {
+            if (action->isSeparator()) continue;
+            const QString text = action->text();
+            const int amp = text.indexOf(QLatin1Char('&'));
+            // Trailing '&', or "&&" which is a literal ampersand rather than a
+            // mnemonic -- the M&M asset name is why that case is real here.
+            if (amp < 0 || amp + 1 >= text.size()) continue;
+            const QChar key = text.at(amp + 1).toLower();
+            if (key == QLatin1Char('&')) continue;
+            const auto it = seen.constFind(key);
+            if (it != seen.constEnd()) {
+                fprintf(stderr,
+                        "trace-menu: DUPLICATE MNEMONIC '&%s' in the %s menu -- "
+                        "\"%s\" and \"%s\". The key will cycle the highlight "
+                        "instead of activating either.\n",
+                        qPrintable(QString(key)), qPrintable(menuName),
+                        qPrintable(it.value()), qPrintable(text));
+            } else {
+                seen.insert(key, text);
+            }
+        }
+    };
+
+    if (!menuBar()) return;
+    // The menu bar's own titles, then each menu's items and each submenu's.
+    scan(menuBar()->actions(), QStringLiteral("menu bar"));
+    for (const QAction* top : menuBar()->actions()) {
+        QMenu* menu = top->menu();
+        if (!menu) continue;
+        QString name = top->text();
+        name.remove(QLatin1Char('&'));
+        scan(menu->actions(), name);
+        for (const QAction* item : menu->actions()) {
+            if (QMenu* sub = item->menu()) {
+                QString subName = item->text();
+                subName.remove(QLatin1Char('&'));
+                scan(sub->actions(), name + QStringLiteral(" > ") + subName);
+            }
+        }
+    }
 }
 
 void MainWindow::setupTransportControls() {
@@ -2535,6 +3182,17 @@ void MainWindow::setupTransportControls() {
 void MainWindow::changeEvent(QEvent* event) {
     QMainWindow::changeEvent(event);
     if (event->type() != QEvent::WindowStateChange) return;
+
+    // Spec phase 14: the one Window-menu item whose TEXT is state. Written from
+    // what the window manager actually did rather than from what the handler
+    // asked for -- phase 6's rule for fullscreen, and it applies here for the
+    // same reason: a maximize Windows declines (a size the work area cannot
+    // hold, a snapped window) would otherwise leave the menu offering to
+    // Restore a window that never maximized.
+    if (maximizeRestoreAction_) {
+        maximizeRestoreAction_->setText(isMaximized() ? tr("&Restore") : tr("Ma&ximize"));
+    }
+
     if (!viewer_ || !windowGeometryIsOurs()) return;
     if (!lockAspectAction_ || !lockAspectAction_->isChecked()) return;
     const double wanted = currentDisplayAspect();
@@ -3236,61 +3894,8 @@ bool MainWindow::openPath(const QString& path) {
         supersedeInFlightRequests();
         return false;
     }
-    // Before anything else touches the decoder. Bumps the generation, so a
-    // frame the worker is producing for the OUTGOING media can never be
-    // inserted against the incoming media, and waits for it to park so
-    // close() below is not racing a decode.
-    //
-    // No landing decode: the outgoing media is about to be closed, and decoding
-    // a frame of it here would be work thrown away at best and a frame of the
-    // wrong file on screen at worst.
-    endShuttleRun(/*landExactly=*/false);
-    reclaimDecoder();
-    scrubWorker_.stop();
-    playTimer_.stop();
-    stopAudio();
-    userPlayIntent_ = false;
-    audio_.close();
-    scrubTimer_.stop();
-    scrubbing_ = false;
-    scrubJumpPending_ = false;
-    scrubShownExact_ = false;
-    scrubPaintGapLastMs_ = scrubPaintGapMaxMs_ = scrubPaintGapSumMs_ = 0.0;
-    scrubPaintGapSamples_ = scrubPaintsWasted_ = scrubPaintStalls_ = 0;
-    scrubPaintHitches_ = 0;
-    stopUiServiceMeasurement();
-    uiServiceGapMaxMs_ = uiServiceGapSumMs_ = 0.0;
-    uiServiceSamples_ = uiServiceGapsOver_ = 0;
-    scrubReleaseLatencyMs_ = 0.0;
-    scrubLastPresentNs_ = -1;
-    pendingScrubFrame_ = -1;
-    activeScrubFrame_ = -1;
-    // Per file: a keyframe grid learned from the outgoing media would snap the
-    // incoming one onto positions that are not keyframes in it.
-    shuttleGop_ = 0;
-    shuttleKfAnchor_ = -1;
-    shuttleSnapping_ = false;
-    shuttleAdvance_ = 1;
-    playbackClock_.invalidate();
-    playbackAccumulatorMs_ = 0.0;
-    videoDecoder_.close();
-    frameSource_.reset();
-    videoFrameBuffer_ = trace::core::VideoFrame{};
-    lastFrameHandoffMs_ = 0.0;
-    avgFrameHandoffMs_ = 0.0;
-    frameHandoffSamples_ = 0;
-    // Re-seed per media: a 1080p estimate would let a 4K file walk far enough
-    // to fall behind the pointer on its first drag.
-    scrubWalkPerFrameMs_ = 1.0;
-    // Learned from the seeks this media actually performs; assumed free until
-    // then, so an all-intra file is never penalised for a property it lacks.
-    mediaWalkFramesTotal_ = 0;
-    mediaSeekCount_ = 0;
-    mediaSeeksSeen_ = 0;
 
-    // Cleared before anything can succeed, so a failed open cannot leave the
-    // previous file's size attached to the next one.
-    openedFileBytes_ = -1;
+    releaseCurrentMedia();
 
     trace::core::MediaItem item;
     item.path = path.toStdString();
@@ -3385,6 +3990,15 @@ bool MainWindow::openPath(const QString& path) {
     // Same shape and the same reason (spec phase 8): computed here so no
     // surface has to probe the filesystem to draw itself.
     refreshShareState();
+    // Spec phase 14. Close Media, Copy Current Frame, Loop and every Playback
+    // Speed rung need media open, and setupMenus() disabled them all at
+    // construction -- correctly, since nothing was open then. Without this they
+    // STAY disabled for the life of the process: the menu items render, the
+    // shortcuts do nothing, and the failure is silent because a disabled
+    // QAction does not report being triggered. Measured before it was added --
+    // Ctrl+C put nothing on the clipboard and Edit > Copy Current Frame showed
+    // no status message, which reads exactly like a broken conversion.
+    syncMediaDependentActions();
     // Spec phase 10: "reset the transform when new media opens". A rotation the
     // user applied to inspect one clip must not silently follow them into the
     // next one, where it would look like the new file is tagged wrong -- which

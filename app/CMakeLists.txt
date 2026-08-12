@@ -132,6 +132,8 @@ add_executable(Trace
   ../src/app/RecentFiles.cpp
   ../src/app/MovieInspector.h
   ../src/app/MovieInspector.cpp
+  ../src/app/ShortcutsWindow.h
+  ../src/app/ShortcutsWindow.cpp
   ../src/app/WindowShape.h
   ../src/app/WindowShape.cpp
   ../src/app/LucidLinkIntegration.h
@@ -193,6 +195,14 @@ endif()
 
 target_include_directories(Trace PRIVATE ../src)
 target_link_libraries(Trace PRIVATE Qt6::Widgets)
+
+# Spec phase 14: About Trace and the Report an Issue mail body both have to say
+# which build the user is running. The version lives in the top-level project()
+# call and nothing read it until now -- so it is passed as a definition rather
+# than typed a second time in C++, where the two would drift the first time one
+# of them was bumped.
+target_compile_definitions(Trace PRIVATE
+  TRACE_VERSION_STRING="${PROJECT_VERSION}")
 
 if(WIN32)
   # Spec phase 8: SHOpenFolderAndSelectItems / SHParseDisplayName for Show in

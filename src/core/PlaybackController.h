@@ -31,6 +31,10 @@ public:
     void pause();
     void jogForward(ShuttleEntry entry = ShuttleEntry::AtOneX);
     void jogReverse(ShuttleEntry entry = ShuttleEntry::AtOneX);
+    // Forward at a rate the user named outright, rather than a rung reached by
+    // pressing. See the definition for why this is not a hole in "the
+    // controller owns the ladder".
+    void playForwardAt(double speed);
     void stepForward();
     void stepBackward();
 

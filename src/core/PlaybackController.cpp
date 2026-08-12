@@ -27,6 +27,22 @@ void PlaybackController::pause() {
     state_.speed = 0.0;
 }
 
+// Forward playback at an EXPLICIT rate (spec phase 14's Playback Speed menu).
+//
+// This is not a hole in "the controller owns the ladder". The ladder is what a
+// shuttle PRESS means -- one press, one rung up, and the caller never says
+// which. A menu item naming 0.5x or 10x is a different command: the user picked
+// the rate, so there is no rung to compute. What the rule actually forbids is a
+// call site writing state_.speed itself, and that is still true -- this is the
+// controller doing it, with the clamp and the mode change in one place.
+//
+// Clamped at 1.0: nothing below it is reachable, since the menu's slowest rung
+// and the ladder's first rung are both 1x.
+void PlaybackController::playForwardAt(double speed) {
+    state_.mode = PlaybackMode::PlayingForward;
+    state_.speed = speed < 1.0 ? 1.0 : speed;
+}
+
 // The forward ladder is 1x, 2x, 5x, 10x, 30x -- the same rungs as rewind, and
 // for the same reason: above 1x the speed is a SAMPLING STRIDE, not a tick rate.
 //

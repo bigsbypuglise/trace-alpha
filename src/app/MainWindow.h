@@ -9,6 +9,7 @@
 #include <optional>
 #include <memory>
 #include <deque>
+#include <vector>
 #include "core/MediaItem.h"
 #include "core/ViewState.h"
 #include "core/PlaybackController.h"
@@ -32,6 +33,7 @@ class QDropEvent;
 
 class QSlider;
 class QAction;
+class QActionGroup;
 class QMenu;
 QT_END_NAMESPACE
 
@@ -49,6 +51,8 @@ class TransportBar;
 }
 
 namespace trace::app {
+
+class ShortcutsWindow;
 
 class MainWindow final : public QMainWindow {
     Q_OBJECT
@@ -93,6 +97,11 @@ private:
     // because a menu is one consumer of an action, never its definition.
     void setupSharedActions();
     void setupMenus();
+    // Walks the built menu bar and warns on stderr when two items in one menu
+    // claim the same Alt mnemonic -- which makes the key cycle the highlight
+    // rather than activate either. Phase 14 introduced two of them in one menu;
+    // see the definition.
+    void warnOnDuplicateMnemonics() const;
     void setupTransportControls();
     // Fills shortcuts_. Runs LAST, after every action it lists exists.
     void setupShortcuts();
@@ -139,6 +148,47 @@ private:
     // a single-shot timer and does nothing else, and it returns immediately when
     // the inspector is not on screen.
     void scheduleInspectorRefresh();
+
+    // --- spec phase 14 -------------------------------------------------------
+    // Show or raise the Keyboard Shortcuts window, built from
+    // ShortcutTable::rows(). Modeless and created on first use, like the
+    // inspector.
+    void showKeyboardShortcuts();
+    void showAboutDialog();
+    // Real content, not a second surface onto About. See its definition.
+    void showTraceHelp();
+    // Human-readable build identity: version, Qt, renderer in force. One
+    // function so About and the Report an Issue mail body cannot disagree about
+    // which build the user is running.
+    QString buildIdentity() const;
+
+    // Put the window in front of every non-topmost window, or stop doing so.
+    // Goes through SetWindowPos rather than setWindowFlag -- see
+    // alwaysOnTopAction_ for why that is load-bearing rather than stylistic.
+    void applyAlwaysOnTop(bool on);
+
+    // Tear the current media down and return to the empty state, WITHOUT
+    // opening anything. Shares openPath's teardown so the two cannot drift into
+    // clearing different things.
+    void closeMedia();
+    // The teardown itself: everything that must be forgotten before either a
+    // different file is opened or nothing is. Called by openPath and closeMedia.
+    void releaseCurrentMedia();
+    // Enable or disable everything that needs media to be open. One function, so
+    // a new media-dependent command has one place to be listed rather than a
+    // condition repeated at each menu.
+    void syncMediaDependentActions();
+
+    // The ONE way the playback rate is commanded, and the only caller that may
+    // choose a rate other than through the shuttle ladder. `speed` is signed;
+    // 0.5 is the half-speed path, 1.0 is ordinary playback, and the rest of the
+    // ladder routes through startShuttleRun exactly as J/L and the buttons do.
+    void setPlaybackSpeed(double speed);
+    // Tick the Playback Speed menu from playback_.state().speed. Read back from
+    // the controller, never remembered, so the menu cannot claim a rate the
+    // engine is not running.
+    void syncPlaybackSpeedActions();
+
     // Spec phase 8. Re-evaluates the Share gate ONCE per media open -- the spec
     // forbids filesystem probing in paint or timeline updates and the gate
     // queries the volume, so this follows refreshSourceTimecode()'s shape
@@ -555,6 +605,45 @@ private:
     QAction* exitFullscreenAction_ = nullptr;
     QAction* toggleHudAction_ = nullptr;
     QAction* openAction_ = nullptr;
+
+    // --- spec phase 14 -------------------------------------------------------
+    // The window commands the spec's Window menu names. Minimize and
+    // Maximize/Restore are one Qt call each; they are QActions rather than
+    // inline lambdas for the reason phase 2 established when fullscreen stopped
+    // being four duplicated lines -- a menu ADDS actions and never defines them,
+    // and the Keyboard Shortcuts window renders whatever carries a shortcut.
+    QAction* minimizeAction_ = nullptr;
+    QAction* maximizeRestoreAction_ = nullptr;
+
+    // Always on Top. Checkable, persisted through trace::app::settings().
+    //
+    // IMPLEMENTED WITH SetWindowPos, NOT setWindowFlag, AND THE DIFFERENCE IS
+    // NOT COSMETIC. Changing a top-level widget's window flags makes Qt destroy
+    // and recreate the native window -- and the D3D11 swapchain's surface is a
+    // child HWND created once in initialize() from the viewer's winId(), so
+    // recreating the parent orphans it. SetWindowPos(HWND_TOPMOST) changes the
+    // z-order band and nothing about the window's identity.
+    QAction* alwaysOnTopAction_ = nullptr;
+
+    // The Playback Speed group. A menu over the ONE rate machine -- every item
+    // calls setPlaybackSpeed, and the checked item is read back from
+    // playback_.state().speed rather than remembered here. Two sources for
+    // "what rate is in force" is exactly what the spec's shared-actions rule
+    // exists to prevent.
+    QActionGroup* speedGroup_ = nullptr;
+    std::vector<QAction*> speedActions_;
+
+    QAction* closeMediaAction_ = nullptr;
+
+    // Help. Keyboard Shortcuts renders ShortcutTable::rows() and nothing is
+    // written by hand -- that is the whole reason phase 3 built the table.
+    QAction* keyboardShortcutsAction_ = nullptr;
+    QAction* traceHelpAction_ = nullptr;
+    QAction* reportIssueAction_ = nullptr;
+    QAction* aboutAction_ = nullptr;
+    // Created lazily and reused, like the inspector: modeless, so a second
+    // invocation raises the existing window rather than stacking another.
+    trace::app::ShortcutsWindow* shortcutsWindow_ = nullptr;
 
     // Movie Inspector (spec phase 13). Created lazily; null until first shown.
     trace::app::MovieInspector* inspector_ = nullptr;
@@ -1026,6 +1115,12 @@ private:
     // one of.
     QAction* lockAspectAction_ = nullptr;
     static constexpr const char* kLockAspectKey = "view/lockWindowToMediaAspect";
+    // Spec phase 14, through the same one home. A review preference rather than
+    // a property of the media, so it survives a file change.
+    static constexpr const char* kAlwaysOnTopKey = "view/alwaysOnTop";
+    // Where Report an Issue sends mail. Owner decision, 2026-08-11: a mailto
+    // rather than the repository, which is private.
+    static constexpr const char* kIssueEmail = "bigsbypuglise@gmail.com";
     // The outer rect at WM_ENTERSIZEMOVE, in physical pixels. A corner drag
     // moves both axes at once and the constraint has to pick one to honour;
     // comparing against where the drag STARTED is what makes that choice stable
