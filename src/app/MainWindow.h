@@ -184,6 +184,11 @@ private:
     // choose a rate other than through the shuttle ladder. `speed` is signed;
     // 0.5 is the half-speed path, 1.0 is ordinary playback, and the rest of the
     // ladder routes through startShuttleRun exactly as J/L and the buttons do.
+    // The ONE place "playback reached the end of the media" decides what to do.
+    // Three sites in the tick reach it; all three ask this. Returns true when
+    // the playhead has been wrapped and playback should continue.
+    bool loopWrap(int direction);
+
     void setPlaybackSpeed(double speed);
     // Tick the Playback Speed menu from playback_.state().speed. Read back from
     // the controller, never remembered, so the menu cannot claim a rate the
@@ -626,11 +631,13 @@ private:
     // z-order band and nothing about the window's identity.
     QAction* alwaysOnTopAction_ = nullptr;
 
-    // The Playback Speed group. A menu over the ONE rate machine -- every item
-    // calls setPlaybackSpeed, and the checked item is read back from
-    // playback_.state().speed rather than remembered here. Two sources for
+    // Loop, and the Playback Speed group. Speed is a menu over the ONE rate
+    // machine -- every item calls setPlaybackSpeed, which routes through
+    // startShuttle or the half-speed path, and the checked item is read back
+    // from playback_.state().speed rather than remembered here. Two sources for
     // "what rate is in force" is exactly what the spec's shared-actions rule
     // exists to prevent.
+    QAction* loopAction_ = nullptr;
     QActionGroup* speedGroup_ = nullptr;
     std::vector<QAction*> speedActions_;
 
@@ -1122,12 +1129,22 @@ private:
     // one of.
     QAction* lockAspectAction_ = nullptr;
     static constexpr const char* kLockAspectKey = "view/lockWindowToMediaAspect";
-    // Spec phase 14, through the same one home. A review preference rather than
-    // a property of the media, so it survives a file change.
+    // Spec phase 14, through the same one home. Both are review preferences
+    // rather than properties of the media, so both survive a file change.
     static constexpr const char* kAlwaysOnTopKey = "view/alwaysOnTop";
+    static constexpr const char* kLoopKey = "playback/loop";
     // Where Report an Issue sends mail. Owner decision, 2026-08-11: a mailto
     // rather than the repository, which is private.
     static constexpr const char* kIssueEmail = "bigsbypuglise@gmail.com";
+    // Mirrors loopAction_ so the playback tick reads a bool rather than
+    // dereferencing a QAction on the hot path -- and so the tick keeps working
+    // if the action is ever created later than the timer.
+    bool loopEnabled_ = false;
+    // How many times the current session has wrapped. On the HUD, because a
+    // wrap re-establishes the playback timeline and therefore RESETS every
+    // cadence counter beside it -- a figure quoted from a looping run is one
+    // lap's, and this is what says so.
+    long long loopWraps_ = 0;
     // The outer rect at WM_ENTERSIZEMOVE, in physical pixels. A corner drag
     // moves both axes at once and the constraint has to pick one to honour;
     // comparing against where the drag STARTED is what makes that choice stable

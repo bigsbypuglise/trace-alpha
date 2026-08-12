@@ -635,7 +635,22 @@ MainWindow::MainWindow() {
             // a run that had presented perfectly, i.e. only in its tail.
             if (shuttleNextTarget_ < 0 && shuttleQueue_.empty() && !scrubWorker_.busy()) {
                 const bool hitTail = shuttleDir_ > 0;
+                // Captured before endShuttleRun clears them: a wrap restarts
+                // the run at the same speed and direction from the far end, so
+                // Loop at 10x keeps running at 10x rather than dropping to 1x.
+                const int wrapDir = shuttleDir_;
+                const int wrapStride = shuttleStride_;
                 endShuttleRun(/*landExactly=*/true);
+
+                // Loop applies to a SHUTTLE run too, not only to 1x playback. A
+                // Loop that silently stopped applying above 1x would be a menu
+                // item whose meaning depended on the rate.
+                if (loopWrap(wrapDir)) {
+                    startShuttleRun(wrapDir, wrapStride);
+                    refreshHud(hitTail ? "FF loop" : "Reverse loop");
+                    return;
+                }
+
                 playTimer_.stop();
                 stopAudio();
                 playback_.pause();
@@ -722,6 +737,14 @@ MainWindow::MainWindow() {
         QString error;
         if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Playback)) {
             playback_.setCurrentFrame(beforeFrame);
+            // THE SECOND OF THE THREE END-OF-MEDIA SITES, and the one only
+            // long-GOP media reaches -- the decoder is exhausted before the
+            // frame count says it should be. Loop has to be answered here as
+            // well or a file would loop or not depending on its codec.
+            if (direction > 0 && loopWrap(direction)) {
+                refreshHud("Play loop");
+                return;
+            }
             playTimer_.stop();
             stopAudio();
             playback_.pause();
@@ -747,6 +770,20 @@ MainWindow::MainWindow() {
         }
 
         if (targetFrame == beforeFrame || (direction > 0 && targetFrame >= maxFrame) || (direction < 0 && targetFrame <= minFrame)) {
+            // THE THIRD END-OF-MEDIA SITE: the target clamped to an end. This
+            // is the one ordinary 1x playback reaches on well-formed media, and
+            // therefore the one Loop is normally exercised through.
+            //
+            // `targetFrame == beforeFrame` alone is NOT an end -- it is also
+            // what an audio hold looks like -- so the wrap is offered only when
+            // an end was actually reached, or a paused-looking tick would
+            // restart the file from the middle.
+            const bool atEnd = (direction > 0 && targetFrame >= maxFrame)
+                            || (direction < 0 && targetFrame <= minFrame);
+            if (atEnd && loopWrap(direction)) {
+                refreshHud(direction > 0 ? "Play loop" : "Reverse loop");
+                return;
+            }
             playTimer_.stop();
             stopAudio();
             playback_.pause();
@@ -1263,6 +1300,27 @@ void MainWindow::setupSharedActions() {
     // Loop. Persisted, because it is a review preference rather than a property
     // of the media -- someone checking a cycling animation wants it to survive
     // opening the next version of the same shot.
+    // "L&oop", not "&Loop": the View menu already gives L to Lock Window to
+    // Media Aspect Ratio. Two items sharing a mnemonic makes the key CYCLE the
+    // highlight instead of activating either -- phase 10 hit this once and
+    // named it; phase 14 built a View menu that hit it twice. See
+    // warnOnDuplicateMnemonics(), which is why it will not happen a fourth time.
+    loopAction_ = new QAction(tr("L&oop"), this);
+    loopAction_->setCheckable(true);
+    loopAction_->setChecked(
+        trace::app::settings().value(QLatin1String(kLoopKey), false).toBool());
+    loopEnabled_ = loopAction_->isChecked();
+    connect(loopAction_, &QAction::toggled, this, [this](bool on) {
+        loopEnabled_ = on;
+        trace::app::settings().setValue(QLatin1String(kLoopKey), on);
+        // Turning Loop ON at the end of a file does NOT restart it. Loop
+        // decides what happens when playback REACHES the end, and the playhead
+        // is only ever moved by an explicit request -- the same rule that keeps
+        // the Play-at-end rewind inside the Play action rather than in the tick.
+        refreshHud(on ? "Loop on" : "Loop off");
+    });
+    addAction(loopAction_);
+
     closeMediaAction_ = new QAction(tr("&Close Media"), this);
     closeMediaAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_W));
     connect(closeMediaAction_, &QAction::triggered, this, &MainWindow::closeMedia);
@@ -2626,6 +2684,65 @@ void MainWindow::closeMedia() {
     refreshHud("Close Media");
 }
 
+// LOOP, AND THE ONE PLACE "PLAYBACK REACHED THE END" IS DECIDED.
+//
+// Three sites in the tick reach that moment and each used to set playbackAtEnd_
+// itself: the shuttle run running off the tail, a Playback decode that finds
+// nothing left (the decoder exhausted before the frame count says it should
+// be), and the target clamping to maxFrame. Before Loop they only had to agree
+// on a flag. Now they have to agree on a BEHAVIOUR, and a wrap that happens at
+// two sites of three is a file that loops except when it does not -- with which
+// one you get depending on the codec, since only long-GOP media reaches the
+// second site at all.
+//
+// Returns true when the playhead has been moved to the other end and playback
+// should CONTINUE; false when the caller must stop as it always did. Returning
+// false on a failed landing is deliberate: a wrap that could not decode its
+// first frame must stop, not spin at the boundary.
+bool MainWindow::loopWrap(int direction) {
+    if (!loopEnabled_ || !frameSource_) return false;
+    const long long maxFrame = playback_.state().maxFrame;
+    // Nothing to loop: a still, or a one-frame sequence. Wrapping would
+    // re-present the same frame forever and read as a hang.
+    if (maxFrame <= 0) return false;
+
+    const long long target = direction > 0 ? 0 : maxFrame;
+    playback_.setCurrentFrame(target);
+
+    // Step, not Playback: the wrap is a jump to the far end, and the frame is
+    // being landed on rather than decoded in sequence. Same reasoning as the
+    // Play-at-end rewind, and it reuses the same exact seek path.
+    QString error;
+    supersedeInFlightRequests();
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, direction, true);
+    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
+        if (!error.isEmpty()) statusBar()->showMessage(error, 2000);
+        return false;
+    }
+    syncTransportBar();
+
+    // AUDIO IS RESTARTED AFTER THE PLAYHEAD MOVES, NOT BEFORE, because
+    // startAudioForPlayback takes its offset from the current frame. Started
+    // first it would seek the device to the OLD position -- the end of the file
+    // -- and the picture would run from the head against sound running out.
+    // This is the same ordering the scrub-release resume needed and for the
+    // same reason.
+    stopAudio();
+    startAudioForPlayback();
+
+    // The wrap is a discontinuity: it paid a landing decode on the UI thread,
+    // so the schedule is far past its deadline and every cadence figure spans a
+    // gap that is not playback. Re-establishing the timeline restarts both.
+    //
+    // NOTE FOR MEASUREMENT: this resets the cadence counters, so a cadence run
+    // taken with Loop on reports the last lap rather than the whole run. Leave
+    // Loop off for cadence.ps1, as its controls already assume.
+    beginPlaybackTimeline();
+
+    ++loopWraps_;
+    return true;
+}
+
 // THE PLAYBACK SPEED MENU, AND WHY IT IS NOT A SIXTH CALLER OF startShuttle.
 //
 // A shuttle press means "one rung up from wherever I am" and the ladder decides
@@ -2730,6 +2847,13 @@ void MainWindow::syncMediaDependentActions() {
     const bool haveMedia = currentMedia_.has_value();
     if (closeMediaAction_) closeMediaAction_->setEnabled(haveMedia);
     for (auto* action : speedActions_) action->setEnabled(haveMedia);
+    // Deliberately NOT beside the Copy Current Frame line above. Loop and Copy
+    // Current Frame are separate commits so either can be reverted alone, and
+    // two one-line additions on adjacent lines make `git revert` conflict on
+    // whichever goes second -- the lines are independent, and git can only see
+    // that they touch. The speed loop between them is pre-existing context, so
+    // each hunk now has something stable on both sides.
+    if (loopAction_) loopAction_->setEnabled(haveMedia);
     // The view transforms need a picture to transform; the aspect lock needs a
     // shape to lock to. Both are harmless with nothing open and both would be
     // commands that visibly do nothing, which is the showInfo failure.
@@ -2739,6 +2863,7 @@ void MainWindow::syncMediaDependentActions() {
     if (flipVerticalAction_) flipVerticalAction_->setEnabled(haveMedia);
     if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(haveMedia);
 }
+
 
 // One exact seek, shared by both prompts. Goes through the same Step path a
 // slider release uses, which is the spec's "use the existing exact-frame seek
@@ -2912,6 +3037,7 @@ void MainWindow::setupMenus() {
     timeMenu->addAction(goToFrameAction_);
     timeMenu->addAction(goToTimecodeAction_);
 
+    viewMenu->addAction(loopAction_);
     viewMenu->addSeparator();
 
     // Spec section 4's aspect lock. DEFINED HERE and it is the second
@@ -6427,7 +6553,13 @@ void MainWindow::refreshHud(const QString& action) {
             // a GOP walk. It is reported separately because it happens BEFORE
             // beginPlaybackTimeline() resets the run counters, so every other
             // instrument in this HUD measures it as free.
-            const QString l7g = QString("shuttle | %1 %9 | stride %2 adv %10 | %11 gop %12 | q %3/%4 (max %5) | starve %6 | next %7 | last %8 | land %13 (%14ms max %15ms)")
+            // `loop` is on this line because it decides what the END of a run
+            // does, and because a wrap RE-ESTABLISHES the playback timeline and
+            // therefore zeroes every cadence counter beside it. A run that
+            // wrapped is reporting one lap, and `wraps` is what says so -- a
+            // cadence figure quoted from a looping run without it is the
+            // stalls-versus-refresh mistake in a new costume.
+            const QString l7g = QString("loop %16 wraps %17 | shuttle | %1 %9 | stride %2 adv %10 | %11 gop %12 | q %3/%4 (max %5) | starve %6 | next %7 | last %8 | land %13 (%14ms max %15ms)")
                 .arg(!shuttleAsyncEnabled() ? "OFF" : shuttleRunActive_ ? "RUN" : "idle")
                 .arg(shuttleStride_)
                 .arg(static_cast<long long>(shuttleQueue_.size()))
@@ -6442,7 +6574,9 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(shuttleGop_)
                 .arg(shuttleLandCount_)
                 .arg(shuttleLandLastMs_, 0, 'f', 1)
-                .arg(shuttleLandMaxMs_, 0, 'f', 1);
+                .arg(shuttleLandMaxMs_, 0, 'f', 1)
+                .arg(loopEnabled_ ? "ON" : "off")
+                .arg(loopWraps_);
 
             const QString l7f = QString("sample %1 | stride %2 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
                 .arg(!scrubSamplingEnabled() ? "OFF"
