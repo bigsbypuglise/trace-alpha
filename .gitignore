@@ -19,6 +19,15 @@ compile_commands.json
 .idea/
 *.swp
 
+# Stray measurement captures at the repo root. capture.ps1 defaults to
+# `shot.png` in the working directory, so running it by hand from the checkout
+# leaves a multi-megabyte PNG next to the source -- one was committed by
+# accident during spec phase 14 and had to be taken back out of the history
+# before it was pushed. A screenshot is measurement output, never a source file;
+# the harness writes to $env:TEMP for everything else and these are what is left.
+/shot.png
+/*.png
+
 # Claude Code local settings. settings.local.json holds a per-machine tool
 # allowlist with absolute paths into this checkout and a scratchpad -- it is
 # useful to whoever is sitting at this box and meaningless anywhere else.
