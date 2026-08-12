@@ -4,7 +4,9 @@
 #include <QMouseEvent>
 #include <QResizeEvent>
 
+#include <algorithm>
 #include <cmath>
+#include <iterator>
 
 namespace trace::ui {
 
@@ -150,6 +152,166 @@ void ViewerWidget::applySourceShape() {
         ((viewTransform_.quarterTurns + sourceRotationDegrees_ / 90) % 4 + 4) % 4;
     renderer_->setViewTransform(composed);
     renderer_->setPixelAspect(sourcePixelAspect_);
+    // The scale's reference is this same composition, so it is re-pushed from
+    // here rather than left to whoever changed the transform to remember. A
+    // rotation applied while zoomed to 2:1 must keep 2:1 and change what 2:1 is
+    // measured against; those are the same statement and this is the only place
+    // that can make them one call.
+    applyViewScale();
+}
+
+// Stored samples -> what those samples occupy on screen at 1:1: the pixel
+// aspect, then the composed rotation. The same two operations, in the same
+// order, that displayedAspect() takes the ratio of and that both backends apply
+// to the frame -- expressed once here so the scale and the aspect cannot come
+// to different conclusions about the shape of the same file.
+QSize ViewerWidget::displayedSourceSize() const {
+    if (sourcePixels_.isEmpty()) return QSize();
+    return trace::render::ViewTransform::rotated(
+               viewTransform_.quarterTurns + sourceRotationDegrees_ / 90)
+        .apply(trace::render::applyPixelAspect(sourcePixels_, sourcePixelAspect_));
+}
+
+void ViewerWidget::applyViewScale() {
+    if (!renderer_) return;
+    viewScale_.referenceDisplayed = displayedSourceSize();
+    renderer_->setViewScale(viewScale_);
+}
+
+void ViewerWidget::setSourcePixelSize(QSize pixels) {
+    if (pixels == sourcePixels_) return;
+    sourcePixels_ = pixels;
+    // NOT a reset to fit. Opening media resets the scale, and MainWindow does
+    // that explicitly at the same point it resets the transform -- putting it
+    // here as well would make "the source size was re-stated" and "a new file
+    // was opened" the same event, and they are not: a rotation restates the
+    // first without being the second.
+    applyViewScale();
+    // repaint(), NOT update(), and it is phase 10's finding applied to the
+    // second thing that has it. The fit and the reduction taps are measured BY
+    // the paint and reported after it, so refreshing the HUD after a merely
+    // SCHEDULED repaint prints the previous scale's `display` -- and on a
+    // paused file nothing refreshes it again, so it stays wrong. Measured
+    // before the fix: Ctrl+0 on 4K media visibly magnified the picture while
+    // `display` still read the fit's `1201x676 filtered x2`, which is exactly
+    // what a build whose zoom had failed to reach the renderer would print.
+    repaint();
+}
+
+double ViewerWidget::fitScale() const {
+    const QSize ref = displayedSourceSize();
+    if (ref.isEmpty()) return 1.0;
+    const QSize host = trace::render::hostDeviceSize(this);
+    return std::min(static_cast<double>(host.width()) / ref.width(),
+                    static_cast<double>(host.height()) / ref.height());
+}
+
+double ViewerWidget::currentScale() const {
+    if (viewScale_.fitToWindow) return fitScale();
+    return std::min(viewScale_.scale, trace::render::maxViewScale(displayedSourceSize()));
+}
+
+void ViewerWidget::setFitToWindow() {
+    if (viewScale_.fitToWindow) return;
+    viewScale_.fitToWindow = true;
+    // The pan goes with it. It is meaningless at fit -- the picture is inside
+    // the viewport on both axes, so clampPan would zero it anyway -- and
+    // leaving a value behind would make a later Actual Size land somewhere the
+    // user last dragged to rather than on the middle of the picture.
+    viewScale_.pan = QPointF();
+    applyViewScale();
+    // repaint(), for the reason given at setFitToWindow().
+    repaint();
+}
+
+void ViewerWidget::setActualSize() {
+    setScaleAnchored(1.0);
+}
+
+// The ladder, and it is anchored on 1:1 by DOUBLING for a reason that outlives
+// taste: at an integer power of two, point sampling replicates each source
+// sample into an exact square block. A ladder of 1.25 steps would magnify by a
+// non-integer factor, and nearest-neighbour at 3.2:1 draws some samples three
+// device pixels wide and others four -- visibly uneven, on the one path whose
+// whole purpose is showing the samples faithfully.
+void ViewerWidget::zoomStep(int direction) {
+    if (direction == 0 || sourcePixels_.isEmpty()) return;
+    static constexpr double kLadder[] = {0.0625, 0.125, 0.25, 0.5, 1.0, 2.0, 4.0, 8.0};
+    const double maxScale = trace::render::maxViewScale(displayedSourceSize());
+    const double now = currentScale();
+
+    double target = 0.0;
+    if (direction > 0) {
+        // The first rung strictly above where the picture is. From fit that is
+        // "the next rung past this arbitrary ratio", which is what makes one
+        // press from fit always visibly zoom in rather than sometimes landing
+        // on the ratio it was already at.
+        for (const double rung : kLadder) {
+            if (rung > now * 1.0001 && rung <= maxScale) { target = rung; break; }
+        }
+        // Already at or past the top rung this media can reach. Pin to the cap
+        // rather than doing nothing, so the command is not silently dead on a
+        // plate whose ladder is short.
+        if (target == 0.0) target = std::min(maxScale, kLadder[std::size(kLadder) - 1]);
+    } else {
+        for (auto it = std::rbegin(kLadder); it != std::rend(kLadder); ++it) {
+            if (*it < now * 0.9999) { target = *it; break; }
+        }
+        if (target == 0.0) target = kLadder[0];
+    }
+    setScaleAnchored(target);
+}
+
+// Zoom keeps the CENTRE OF THE VIEWPORT on the same point of the picture. The
+// destination rect is the viewport's centre plus the pan, so the source point
+// under the centre stays put exactly when the pan scales with the picture --
+// without this, zooming in while panned to a corner walks the picture back
+// toward the middle, one rung at a time.
+void ViewerWidget::setScaleAnchored(double scale) {
+    if (!(scale > 0.0) || sourcePixels_.isEmpty()) return;
+    const double from = currentScale();
+    const double to = std::min(scale, trace::render::maxViewScale(displayedSourceSize()));
+    if (from > 0.0 && !viewScale_.fitToWindow) viewScale_.pan *= (to / from);
+    viewScale_.fitToWindow = false;
+    viewScale_.scale = to;
+    viewScale_.pan = trace::render::clampPan(pictureDeviceSize(),
+                                             trace::render::hostDeviceSize(this),
+                                             viewScale_.pan);
+    applyViewScale();
+    // repaint(), for the reason given at setFitToWindow().
+    repaint();
+}
+
+// The picture's size on screen at the scale in force -- the same product
+// viewDeviceRect computes, and the reason a pan can be clamped here without the
+// host learning how the renderer lays a rect out.
+QSize ViewerWidget::pictureDeviceSize() const {
+    const QSize ref = displayedSourceSize();
+    if (ref.isEmpty()) return QSize();
+    const double s = currentScale();
+    return QSize(std::max(1, static_cast<int>(std::lround(ref.width() * s))),
+                 std::max(1, static_cast<int>(std::lround(ref.height() * s))));
+}
+
+bool ViewerWidget::canPan() const {
+    if (viewScale_.fitToWindow) return false;
+    const QSize picture = pictureDeviceSize();
+    if (picture.isEmpty()) return false;
+    const QSize host = trace::render::hostDeviceSize(this);
+    return picture.width() > host.width() || picture.height() > host.height();
+}
+
+void ViewerWidget::panBy(QPointF deltaDevice) {
+    if (!canPan()) return;
+    // Clamped on every step rather than only at the draw, so holding the
+    // pointer against the edge of the screen cannot accumulate an offset that
+    // then has to be dragged back through before the picture moves.
+    viewScale_.pan = trace::render::clampPan(pictureDeviceSize(),
+                                             trace::render::hostDeviceSize(this),
+                                             viewScale_.pan + deltaDevice);
+    applyViewScale();
+    // repaint(), for the reason given at setFitToWindow().
+    repaint();
 }
 
 // A FIXED 640x360 FLOOR IS ITSELF A 16:9 ASSUMPTION, and it fights the aspect
@@ -236,14 +398,19 @@ void ViewerWidget::setOverlayHooks(const trace::render::OverlayHooks& hooks) {
     overlayModel_.setHooks(hooks);
 }
 
+// NO LONGER GATED ON overlayEnabled(), and that is spec phase 15 rather than a
+// tidy-up. The model routes a press that lands on no control to the pan
+// gesture, which is a VIEW gesture and must survive TRACE_TRANSPORT_BAR=1 --
+// the same reason mouseDoubleClickEvent below has never been gated. The model
+// still checks enabled_ for everything that belongs to the transport, so with
+// the docked bar selected these reach the pan branch and nothing else.
 void ViewerWidget::mouseMoveEvent(QMouseEvent* event) {
-    if (!overlayModel_.enabled()) { QWidget::mouseMoveEvent(event); return; }
     const QPoint p = toDevice(event->position());
     if (!overlayModel_.onMouseMove(p.x(), p.y())) QWidget::mouseMoveEvent(event);
 }
 
 void ViewerWidget::mousePressEvent(QMouseEvent* event) {
-    if (!overlayModel_.enabled() || event->button() != Qt::LeftButton) {
+    if (event->button() != Qt::LeftButton) {
         QWidget::mousePressEvent(event);
         return;
     }
@@ -252,7 +419,7 @@ void ViewerWidget::mousePressEvent(QMouseEvent* event) {
 }
 
 void ViewerWidget::mouseReleaseEvent(QMouseEvent* event) {
-    if (!overlayModel_.enabled() || event->button() != Qt::LeftButton) {
+    if (event->button() != Qt::LeftButton) {
         QWidget::mouseReleaseEvent(event);
         return;
     }

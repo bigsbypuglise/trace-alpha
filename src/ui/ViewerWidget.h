@@ -119,6 +119,41 @@ public:
     // otherwise, which reproduces the old fixed 640x360 exactly.
     void setMinimumAspect(double aspect);
 
+    // ---- View scaling (spec phase 15) ---------------------------------------
+    //
+    // The state lives here, beside the transform and for the same reasons: a
+    // backend that fails and is replaced by the CPU fallback must inherit the
+    // zoom rather than quietly returning to fit, and the composition with the
+    // media's own shape has to happen in ONE place or the two backends can
+    // disagree about how big the picture is.
+
+    // The full-resolution STORED size of the source. Separate from the frame
+    // the renderer is holding, which during a drag is a viewport-sized preview
+    // -- see ViewScale::referenceDisplayed for why scaling that instead would
+    // make the picture jump on release.
+    void setSourcePixelSize(QSize pixels);
+
+    void setFitToWindow();
+    void setActualSize();
+    // +1 in, -1 out. One rung of the ladder, from wherever the picture is now
+    // -- including from fit, whose scale is an arbitrary ratio rather than a
+    // rung, which is why the step is "the next rung past here" and not
+    // "multiply by two".
+    void zoomStep(int direction);
+    // True while the picture is larger than the viewport on either axis, which
+    // is the only state in which a pan can move anything.
+    bool canPan() const;
+    void panBy(QPointF deltaDevice);
+    // Device pixels per displayed source pixel, INCLUDING while fitting. The
+    // fit's value is computed from the current geometry rather than read back
+    // from the last paint: `lastDrawSize` is measured BY the paint, so a menu
+    // built from it would report the size before the resize that opened it.
+    double currentScale() const;
+    bool isFitToWindow() const { return viewScale_.fitToWindow; }
+    // The full-resolution source's on-screen size, with the pixel aspect and
+    // the composed transform applied. What the scale scales.
+    QSize displayedSourceSize() const;
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -152,8 +187,23 @@ private:
     int sourceRotationDegrees_ = 0;
     // Pushes the composition of viewTransform_ and the source's own rotation at
     // the renderer, plus the pixel aspect. The one place either reaches a
-    // backend.
+    // backend. It also re-pushes the view scale, because the reference the
+    // scale is measured against is that same composition -- a quarter turn
+    // exchanges the axes of the thing being scaled.
     void applySourceShape();
+    // The one place the view scale reaches a backend, and the one place the
+    // reference size is computed.
+    void applyViewScale();
+    // The scale a fit-to-window draw is currently using. Computed from the
+    // geometry, never read back from RenderStats.
+    double fitScale() const;
+    // Set the scale, keeping the viewport's centre on the same point of the
+    // picture. Every route to a non-fit scale goes through it, so the anchoring
+    // is a property of the state rather than of each caller.
+    void setScaleAnchored(double scale);
+    QSize pictureDeviceSize() const;
+    trace::render::ViewScale viewScale_{};
+    QSize sourcePixels_;
     double minimumAspect_ = 16.0 / 9.0;
     // The settled floating-transport width (spec phase 6). Named here rather
     // than reached for from OverlayModel because this is a FLOOR expressed in

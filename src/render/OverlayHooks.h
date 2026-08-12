@@ -54,6 +54,25 @@ struct OverlayHooks {
     // fade out from under a menu it opened.
     std::function<void(int, int)> shareMenu;
 
+    // PANNING THE ZOOMED PICTURE (spec phase 15), as a read and a command.
+    //
+    // It is in this struct for exactly the reason toggleFullscreen is, and the
+    // reason is worth restating because it is the thing that makes the overlay
+    // model the right home for a gesture that has nothing to do with the
+    // transport: under the D3D11 backend -- the default -- the video is a child
+    // HWND that takes every mouse message, and Qt's widget never sees one. A
+    // pan implemented in ViewerWidget's mousePressEvent would work on
+    // TRACE_RENDERER=cpu and do nothing at all on the shipping build.
+    //
+    // `canPan` is asked on the press, not cached: whether a drag can move
+    // anything depends on the zoom and the window size, and both change without
+    // the overlay being told. `panBy` takes a DELTA in surface device pixels,
+    // so the host stores no drag anchor -- the model already owns one for the
+    // timeline and a second copy of "where was the pointer last" is a second
+    // thing to keep in step.
+    std::function<bool()> canPan;
+    std::function<void(int, int)> panBy;
+
     // Reads. The overlay draws from these and never caches them.
     std::function<bool()> isPlaying;
     std::function<double()> positionFraction;

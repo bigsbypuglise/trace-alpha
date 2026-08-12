@@ -55,6 +55,18 @@ bool reductionEnabled() {
     return on;
 }
 
+// Spec phase 15's magnification filter, and the same spelling as the CPU
+// backend's so one variable moves both. Owner decision, 2026-08-11: above 1:1
+// a review tool draws pixels, and TRACE_MAG_FILTER=linear is the control that
+// puts the smoothed magnification back for the comparison.
+bool magnifyLinearFilter() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_MAG_FILTER").toLower();
+        return v == "linear" || v == "bilinear" || v == "1";
+    }();
+    return on;
+}
+
 QString hrText(const char* what, HRESULT hr) {
     return QStringLiteral("%1 failed (hr 0x%2)")
         .arg(QString::fromLatin1(what))
@@ -430,6 +442,19 @@ bool D3D11VideoRenderer::createPipeline(QString& error) {
     sd.MaxLOD = D3D11_FLOAT32_MAX;
     hr = device_->CreateSamplerState(&sd, &sampler_);
     if (FAILED(hr)) { error = hrText("CreateSamplerState", hr); return false; }
+
+    // The magnification sampler. Owner decision, 2026-08-11: above 1:1 a review
+    // tool shows pixels, not a blend of pixels that is not in the file.
+    //
+    // IT POINT-SAMPLES THE CHROMA PLANES TOO, and that is the honest reading
+    // rather than an oversight: on 4:2:0 media a chroma sample really does
+    // cover four luma samples, so at 4:1 it really is an 8x8 block of one
+    // colour. Filtering chroma while point-sampling luma would draw colour
+    // detail the file does not carry, at the one magnification where someone
+    // is looking for exactly that distinction.
+    sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
+    hr = device_->CreateSamplerState(&sd, &pointSampler_);
+    if (FAILED(hr)) { error = hrText("CreateSamplerState(point)", hr); return false; }
 
     D3D11_RASTERIZER_DESC rd = {};
     rd.FillMode = D3D11_FILL_SOLID;
@@ -820,6 +845,15 @@ void D3D11VideoRenderer::setPixelAspect(double par) {
     if (host_) host_->update();
 }
 
+// No shader constant and no upload, for the same reason setPixelAspect has
+// none: the scale and the pan move the DESTINATION rect -- here the viewport --
+// and the sampling stays in normalised source coordinates. The picture leaving
+// the viewport on three sides is the rasteriser's business, not the shader's.
+void D3D11VideoRenderer::setViewScale(const ViewScale& view) {
+    viewScale_ = view;
+    if (host_) host_->update();
+}
+
 void D3D11VideoRenderer::updateReduction(QSize content, QSize fitted) {
     float taps = 1.0f;
     float fu = 0.0f;
@@ -1059,10 +1093,21 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     QRect dest(QPoint(0, 0), pixels);
     bool resampled = false;
     if (hasContent_ && !displayedSize.isEmpty()) {
-        dest = fitDeviceRect(displayedSize, pixels);
+        // Spec phase 15. The viewport may now start outside the back buffer and
+        // extend past it -- that is Actual Size on 4K media in a capped window,
+        // and the rasteriser clips it. It is bounded by maxViewScale(), because
+        // a viewport past D3D11_VIEWPORT_BOUNDS_MAX is rejected and draws
+        // nothing rather than drawing something wrong.
+        dest = viewDeviceRect(displayedSize, pixels, viewScale_);
         resampled = (dest.size() != displayedSize);
     }
     const QSize fitted = dest.size();
+    // Which filter, decided once from the destination rect and used by both
+    // the sampler choice below and (through updateReduction) the box average.
+    // Magnification takes the point sampler: owner decision, spec phase 15.
+    const bool reducing = fitted.width() < sourceOnScreenAxes.width()
+                          || fitted.height() < sourceOnScreenAxes.height();
+    const bool magnifyLinear = magnifyLinearFilter();
 
     D3D11_VIEWPORT vp = {};
     vp.TopLeftX = static_cast<float>(dest.x());
@@ -1118,7 +1163,12 @@ void D3D11VideoRenderer::paint(QWidget* host) {
             ID3D11ShaderResourceView* srvs[] = {textureSrv_.Get(), nullptr, nullptr};
             context_->PSSetShaderResources(0, 3, srvs);
         }
-        ID3D11SamplerState* samplers[] = {sampler_.Get()};
+        // The one place the two sampler states are told apart. Bilinear while
+        // reducing -- which is every fit-to-window draw, so the signed-off
+        // picture is untouched -- and point above that.
+        ID3D11SamplerState* samplers[] = {
+            (reducing || magnifyLinear || !pointSampler_) ? sampler_.Get()
+                                                          : pointSampler_.Get()};
         context_->PSSetSamplers(0, 1, samplers);
         context_->Draw(3, 0);
 
@@ -1133,9 +1183,11 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     }
 
     stats_.lastDrawWasScaled = resampled;
-    // Always filtered when resampled: unlike the CPU path there is no
-    // point-sampled variant to A/B against, and the sampler is set once.
-    stats_.lastDrawWasFiltered = resampled;
+    // There IS a point-sampled variant now (spec phase 15), so this stopped
+    // being "resampled" and became the predicate the draw actually used. The
+    // HUD reads `NEAREST` when magnifying, which is the only external evidence
+    // that the second sampler state was selected rather than merely created.
+    stats_.lastDrawWasFiltered = resampled && (reducing || magnifyLinear);
     stats_.lastDrawSize = fitted;
     // How many taps per axis the reduction is actually using. Reported for the
     // reason every other capability on this backend is: a filtered reduction that

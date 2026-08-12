@@ -198,6 +198,13 @@ private:
 
     Region hover_ = Region::None;
     Region pressed_ = Region::None;
+    // A pan drag on the picture (spec phase 15). Kept beside the timeline drag
+    // because it is the same kind of state -- a gesture in progress that
+    // outlives any one event -- and because the two are mutually exclusive by
+    // construction: a press either lands on a control or it does not.
+    bool panning_ = false;
+    int panLastX_ = 0;
+    int panLastY_ = 0;
     bool draggingTimeline_ = false;
     // Mirrors what the host was last told, so reveal() on every pointer move
     // does not call across the hook once per move to say the same thing.

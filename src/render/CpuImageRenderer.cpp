@@ -25,6 +25,23 @@ bool nearestScaleForced() {
     return on;
 }
 
+// ABOVE 1:1 THE PICTURE IS PIXELS, NOT A SMOOTHED FRAME -- owner decision,
+// 2026-08-11, spec phase 15. Someone who has zoomed a review tool to 4:1 is
+// inspecting the samples, and a bilinear magnification shows them a blend of
+// samples that is not in the file. TRACE_MAG_FILTER=linear restores the
+// smoothed magnification for the A/B, on both backends, so the decision can be
+// looked at rather than argued about.
+//
+// Reduction is untouched and stays filtered: undersampling a downscale is step
+// 9's defect and it is signed off.
+bool magnifyLinearForced() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_MAG_FILTER").toLower();
+        return v == "linear" || v == "bilinear" || v == "1";
+    }();
+    return on;
+}
+
 } // namespace
 
 bool CpuImageRenderer::initialize(QWidget* host, QString& error) {
@@ -85,7 +102,13 @@ void CpuImageRenderer::paint(QWidget* host) {
             // in the D3D11 backend for why that order, and applyPixelAspect for
             // why the arithmetic is shared rather than written twice.
             const QSize displayed = transform_.apply(applyPixelAspect(image_.size(), pixelAspect_));
-            const QRect dev = fitDeviceRect(displayed, hostDeviceSize(host));
+            // Spec phase 15: the fit is one case of this, taken by one branch
+            // inside the shared expression. What comes back can be LARGER than
+            // the host and can start outside it, which is what Actual Size on
+            // 4K media in a capped window means; QPainter clips the blit to the
+            // widget, so the cost tracks the visible area rather than the
+            // picture's.
+            const QRect dev = viewDeviceRect(displayed, hostDeviceSize(host), viewScale_);
             const QSize drawn = dev.size();
             const QRectF target(dev.x() / dpr, dev.y() / dpr,
                                 dev.width() / dpr, dev.height() / dpr);
@@ -100,7 +123,17 @@ void CpuImageRenderer::paint(QWidget* host) {
             // upscaled by half again, and comparing logical sizes called that
             // 1:1 and switched filtering off for it.
             const bool resampled = drawn != displayed;
-            const bool filtered = resampled && !nearestScaleForced();
+            // ONE PREDICATE, AND IT SUBSUMES THE 1:1 SPECIAL CASE RATHER THAN
+            // SITTING BESIDE IT. The old rule was "filter whenever resampled",
+            // with 1:1 falling out because an unresampled frame is not
+            // resampled. The rule is now "filter only when REDUCING", and 1:1
+            // still falls out of it -- so the exactly-1:1 behaviour this
+            // backend has had since the filter was added is unchanged, and
+            // magnification joins it instead of being a second exception.
+            const bool reducing = drawn.width() < displayed.width()
+                                  || drawn.height() < displayed.height();
+            const bool filtered = resampled && !nearestScaleForced()
+                                  && (reducing || magnifyLinearForced());
             p.setRenderHint(QPainter::SmoothPixmapTransform, filtered);
             stats_.lastDrawWasScaled = resampled;
             stats_.lastDrawWasFiltered = filtered;

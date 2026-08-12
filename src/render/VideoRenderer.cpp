@@ -48,6 +48,56 @@ QRect fitDeviceRect(QSize content, QSize deviceHost) {
                  fitted.width(), fitted.height());
 }
 
+QPointF clampPan(QSize picture, QSize deviceHost, QPointF pan) {
+    // Half the overhang on each axis. Negative when the picture is smaller than
+    // the viewport, and the max with 0 turns that into "centred, no argument"
+    // -- which is what makes a zoom back down to fit forget an offset the user
+    // left behind at 4:1 instead of drifting the picture off centre.
+    const double limitX = qMax(0.0, (picture.width() - deviceHost.width()) / 2.0);
+    const double limitY = qMax(0.0, (picture.height() - deviceHost.height()) / 2.0);
+    return QPointF(std::clamp(pan.x(), -limitX, limitX),
+                   std::clamp(pan.y(), -limitY, limitY));
+}
+
+double maxViewScale(QSize referenceDisplayed) {
+    // D3D11_VIEWPORT_BOUNDS_MAX. Named as a literal here rather than included
+    // from d3d11.h because this file is built on every platform and the CPU
+    // backend has to agree with the limit whether or not the GPU one exists --
+    // a cap only one backend honoured would make TRACE_RENDERER=cpu zoom
+    // further than the shipping path, which is the escape hatch behaving
+    // differently in a way nobody would think to check.
+    constexpr double kMaxExtent = 32768.0;
+    const int longest = qMax(referenceDisplayed.width(), referenceDisplayed.height());
+    if (longest <= 0) return 1.0;
+    return qMax(1.0, kMaxExtent / static_cast<double>(longest));
+}
+
+QRect viewDeviceRect(QSize contentDisplayed, QSize deviceHost, const ViewScale& view) {
+    // The fit path is the expression it always was, reached by one branch. A
+    // "unified" version that fitted by computing a fit scale and running it
+    // through the scale path would be the same answer by a different route,
+    // and every recorded fit measurement in this project would be comparing
+    // against arithmetic it was not taken on.
+    if (view.fitToWindow || view.referenceDisplayed.isEmpty() || !(view.scale > 0.0)) {
+        return fitDeviceRect(contentDisplayed, deviceHost);
+    }
+
+    const QSize ref = view.referenceDisplayed;
+    // Clamped here as well as where the ladder is built. The ladder is a menu
+    // and this is the draw, and only one of them is the last thing that runs.
+    const double scale = qMin(view.scale, maxViewScale(ref));
+    const int w = qMax(1, static_cast<int>(std::lround(ref.width() * scale)));
+    const int h = qMax(1, static_cast<int>(std::lround(ref.height() * scale)));
+    const QSize picture(w, h);
+    const QPointF pan = clampPan(picture, deviceHost, view.pan);
+
+    // Centred, then offset. Truncation matches fitDeviceRect's, so a scale of
+    // exactly the fit ratio lands on the fit rect rather than a pixel beside it.
+    return QRect(static_cast<int>((deviceHost.width() - w) / 2 + std::lround(pan.x())),
+                 static_cast<int>((deviceHost.height() - h) / 2 + std::lround(pan.y())),
+                 w, h);
+}
+
 std::unique_ptr<VideoRenderer> createCpuRenderer() {
     return std::make_unique<CpuImageRenderer>();
 }

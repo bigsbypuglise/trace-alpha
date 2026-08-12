@@ -478,6 +478,16 @@ void OverlayModel::reveal() {
 }
 
 bool OverlayModel::onMouseMove(int x, int y) {
+    // Before the enabled_ gate, because a pan can be in progress with the
+    // docked bar selected. The delta is taken here rather than by the host, so
+    // there is one drag anchor in the application rather than two.
+    if (panning_) {
+        if (hooks_.panBy) hooks_.panBy(x - panLastX_, y - panLastY_);
+        panLastX_ = x;
+        panLastY_ = y;
+        if (enabled_) reveal();
+        return true;
+    }
     if (!enabled_) return false;
     reveal();
 
@@ -494,32 +504,49 @@ bool OverlayModel::onMouseMove(int x, int y) {
 }
 
 bool OverlayModel::onMouseDown(int x, int y) {
-    if (!enabled_) return false;
-    // "Clicking the video reveals it" -- so the reveal happens before the
-    // visibility test, and a click on a hidden overlay brings it back rather
-    // than pressing a control the user cannot see. The press is NOT also
-    // delivered to that control: a click has to land on something visible.
-    const bool wasVisible = visible();
-    reveal();
-    if (!wasVisible) return false;
-
-    const Region r = regionAt(x, y);
-    if (r == Region::None) return false;
-
-    pressed_ = r;
-    if (r == Region::Timeline) {
-        draggingTimeline_ = true;
-        // Press first, then position: this is the slider's own order, and going
-        // through it is what gives the overlay the real scrub path rather than
-        // a second one.
-        if (hooks_.setScrubbing) hooks_.setScrubbing(true);
-        if (hooks_.seekToFraction) hooks_.seekToFraction(fractionAt(x));
+    if (enabled_) {
+        // "Clicking the video reveals it" -- so the reveal happens before the
+        // visibility test, and a click on a hidden overlay brings it back rather
+        // than pressing a control the user cannot see. The press is NOT also
+        // delivered to that control: a click has to land on something visible.
+        const bool wasVisible = visible();
+        reveal();
+        if (wasVisible) {
+            const Region r = regionAt(x, y);
+            if (r != Region::None) {
+                pressed_ = r;
+                if (r == Region::Timeline) {
+                    draggingTimeline_ = true;
+                    // Press first, then position: this is the slider's own
+                    // order, and going through it is what gives the overlay the
+                    // real scrub path rather than a second one.
+                    if (hooks_.setScrubbing) hooks_.setScrubbing(true);
+                    if (hooks_.seekToFraction) hooks_.seekToFraction(fractionAt(x));
+                }
+                if (hooks_.requestRepaint) hooks_.requestRepaint();
+                return true;
+            }
+        }
     }
-    if (hooks_.requestRepaint) hooks_.requestRepaint();
-    return true;
+    // Not a control, or there is no overlay at all. A press on the PICTURE, and
+    // spec phase 15 gives that a meaning when the picture is bigger than the
+    // viewport. Reached with the overlay disabled too, deliberately: panning is
+    // a view gesture and must not disappear with TRACE_TRANSPORT_BAR=1, exactly
+    // as double-click-to-fullscreen does not.
+    if (hooks_.canPan && hooks_.canPan()) {
+        panning_ = true;
+        panLastX_ = x;
+        panLastY_ = y;
+        return true;
+    }
+    return false;
 }
 
 bool OverlayModel::onMouseUp(int x, int y) {
+    if (panning_) {
+        panning_ = false;
+        return true;
+    }
     if (!enabled_) return false;
     const Region r = regionAt(x, y);
     const Region was = pressed_;

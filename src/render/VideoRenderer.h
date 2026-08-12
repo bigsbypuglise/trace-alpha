@@ -7,6 +7,7 @@
 
 #include "core/VideoFrame.h"
 #include "render/OverlayHooks.h"
+#include "render/ViewScale.h"
 #include "render/ViewTransform.h"
 
 class QWidget;
@@ -183,6 +184,16 @@ public:
     // was built to prevent.
     virtual void setPixelAspect(double par) { (void)par; }
 
+    // How large the picture is drawn and where it sits. Beside the two above
+    // for the same reason both of those are here: it changes where the frame
+    // lands and nothing about the frame.
+    //
+    // BOTH BACKENDS MUST HONOUR IT FROM THIS ONE DESCRIPTION, and they do it by
+    // calling one shared expression rather than by each implementing the words
+    // -- see viewDeviceRect(). A scale and an origin written twice is the
+    // divergence ddb38ca had to fix for the fit that had no scale at all.
+    virtual void setViewScale(const ViewScale& view) { (void)view; }
+
     // Identifies the backend in the HUD, so a fallback is visible rather than
     // silent -- a GPU path that quietly never engages is the failure mode worth
     // designing against.
@@ -205,6 +216,39 @@ public:
 // rect by half of one.
 QSize hostDeviceSize(const QWidget* host);
 QRect fitDeviceRect(QSize content, QSize deviceHost);
+
+// The destination rect under a ViewScale: fitDeviceRect when fitting, and the
+// reference scaled and panned otherwise. Spec phase 15's whole mechanism, and
+// it is one function for the same reason the fit is -- a scale term and a pan
+// origin implemented once in a shader and once in a QPainter is how two paths
+// end up a pixel apart while every number agrees.
+//
+// `contentDisplayed` is the DELIVERED frame's on-screen size; the reference in
+// the ViewScale is the full-resolution source's. They differ during a drag and
+// the difference is the point -- see ViewScale::referenceDisplayed. The fit
+// branch deliberately still fits the delivered frame, so it is unchanged
+// arithmetic rather than the same answer by a new route.
+QRect viewDeviceRect(QSize contentDisplayed, QSize deviceHost, const ViewScale& view);
+
+// The pan offset a picture of this size is allowed inside a viewport of that
+// size: zero on any axis where the picture already fits (so it stays centred
+// and spec section 4's "no bars" holds), and otherwise bounded so an edge of
+// the picture can never come inside the viewport. Shared because the host
+// clamps the value it STORES and the renderer clamps the value it DRAWS, and
+// the two agreeing by inspection is not the same as by construction.
+QPointF clampPan(QSize picture, QSize deviceHost, QPointF pan);
+
+// The largest scale this reference may be drawn at. IT IS A HARD BACKEND LIMIT
+// EXPRESSED ONCE, not a taste judgement about how far a review tool should
+// zoom: the D3D11 path letterboxes by VIEWPORT, and a D3D11_VIEWPORT is
+// rejected outright above D3D11_VIEWPORT_BOUNDS_MAX -- which does not draw a
+// distorted picture, it draws nothing at all, silently.
+//
+// So the ladder is built against this and viewDeviceRect clamps to it as well.
+// The consequence is visible and worth stating rather than hiding: 4K media
+// reaches 8:1, and a 9K plate stops at 2:1 because eight times its width is
+// twice the bound.
+double maxViewScale(QSize referenceDisplayed);
 
 // Stored sample dimensions -> the size those samples are meant to be SHOWN at,
 // before any view transform. Shared for the same reason the two above are: it

@@ -62,6 +62,7 @@ public:
     // 2x2 multiply for three vertices rather than anything per pixel.
     void setViewTransform(const ViewTransform& transform) override;
     void setPixelAspect(double par) override;
+    void setViewScale(const ViewScale& view) override;
 
     QString name() const override { return name_; }
     const RenderStats& stats() const override { return stats_; }
@@ -147,6 +148,12 @@ private:
     ComPtr<ID3D11VertexShader> vertexShader_;
     ComPtr<ID3D11PixelShader> pixelShader_;
     ComPtr<ID3D11SamplerState> sampler_;
+    // The magnification sampler (spec phase 15). A second STATE, not a second
+    // shader and not a second path: the draw picks one of the two by the same
+    // predicate updateReduction() gates on, so "which filter" is answered once
+    // per paint from the destination rect and every subsampling, bit depth and
+    // the box-average reduction stay on the one shader GATE C built.
+    ComPtr<ID3D11SamplerState> pointSampler_;
     ComPtr<ID3D11RasterizerState> rasterizer_;
     ComPtr<ID3D11Texture2D> texture_;
     ComPtr<ID3D11ShaderResourceView> textureSrv_;
@@ -164,6 +171,7 @@ private:
     ComPtr<ID3D11Buffer> viewParams_;
     ViewTransform viewTransform_{};
     double pixelAspect_ = 1.0;
+    ViewScale viewScale_{};
 
     // Mirrors cbuffer YuvParams in YuvToRgb.ps.hlsl. Held rather than built on
     // the stack because the colour terms come from the frame (setFrame) and the

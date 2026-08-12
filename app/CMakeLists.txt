@@ -150,6 +150,7 @@ add_executable(Trace
   ../src/render/OverlayModel.h
   ../src/render/OverlayModel.cpp
   ../src/render/ViewTransform.h
+  ../src/render/ViewScale.h
   ../src/render/VideoRenderer.h
   ../src/render/VideoRenderer.cpp
   ../src/render/CpuImageRenderer.h
