@@ -421,7 +421,14 @@ MainWindow::MainWindow() {
         const double speed = shuttleRunActive_
             ? (static_cast<double>(std::max<long long>(1, shuttleStride_))
                    / static_cast<double>(std::max<long long>(1, shuttleAdvance_)))
-            : std::max(1.0, std::abs(playbackState.speed));
+            // kMinPlaybackSpeed, not 1.0. The clamp exists to stop a zero or a
+            // negative dividing the period, and it read 1.0 for as long as 1x
+            // was the slowest rate there was. Spec phase 14's 0.5x is below it,
+            // and under the old clamp it would have been silently rounded UP to
+            // 1x -- the menu would have ticked 0.5x and the file would have
+            // played at normal speed, which is the kind of disagreement between
+            // the label and the engine that section 11b.2 spent a session on.
+            : std::max(trace::core::kMinPlaybackSpeed, std::abs(playbackState.speed));
         const double fps = std::max(1.0, frameSource_->fps());
 
         // GATE E: the frame period comes from the EXACT rational when the
@@ -2748,7 +2755,10 @@ bool MainWindow::loopWrap(int direction) {
 // A shuttle press means "one rung up from wherever I am" and the ladder decides
 // which; a menu item means "this rate", and there is no rung to compute. Routing
 // the menu through startShuttle would have had to fake a press count to reach
-// 10x.
+// 10x, and would have been wrong at 0.5x in a way that looks right: stride is
+// lround(speed), lround(0.5) is 1, so 0.5x would have satisfied the
+// `ordinaryForwardPlay` predicate, started audio, and played at 1x while the
+// menu ticked 0.5x.
 //
 // So it follows startShuttle's SEQUENCE -- which is the part that matters, and
 // which section 29.2 is the record of getting wrong -- while choosing the rate
@@ -2782,13 +2792,15 @@ void MainWindow::setPlaybackSpeed(double speed) {
     const bool ordinaryForwardPlay = std::abs(actual - 1.0) < 1e-4;
 
     // 3. Intent, not state -- the same rule startShuttle applies. Only 1x
-    //    forward is worth restoring after a drag; the fast rungs are deliberate
-    //    gestures, and resuming one at 1x would be the wrong answer.
+    //    forward is worth restoring after a drag; 0.5x and the fast rungs are
+    //    deliberate gestures, and resuming one at 1x would be the wrong answer.
     userPlayIntent_ = ordinaryForwardPlay;
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, 1, true);
 
-    // 4. Audio. One call, which declines for everything that is not 1x forward.
+    // 4. Audio. One call, which declines for everything that is not exactly 1x
+    //    forward -- including 0.5x, and see audioShouldDrive for why that
+    //    predicate had to be tightened before this menu could exist.
     startAudioForPlayback();
 
     // 5. The timeline, never a bare playTimer_.start().
@@ -2796,7 +2808,11 @@ void MainWindow::setPlaybackSpeed(double speed) {
 
     // 6. Above 1x the rate is a sampling STRIDE and the run is a shuttle. At
     //    exactly 1x it is ordinary playback on the validated audio-mastered
-    //    path.
+    //    path. And at 0.5x it is ordinary playback with a DOUBLED PERIOD --
+    //    the tick divides the frame period by the speed, so every source frame
+    //    is presented for two frame periods and none is skipped. That is the
+    //    honest meaning of half speed for a review tool, and it costs the
+    //    decoder less per second than 1x rather than more.
     if (actual > 1.0 + 1e-4) {
         startShuttleRun(1, static_cast<int>(std::lround(actual)));
     }
@@ -3005,13 +3021,18 @@ void MainWindow::setupMenus() {
     speedGroup_ = new QActionGroup(this);
     speedGroup_->setExclusive(true);
     struct SpeedRung { double speed; const char* label; };
-    // The ladder above 1x is PlaybackController's kShuttleLadder verbatim.
-    // Mnemonics: N, 2, 5, 0, 3 -- all distinct.
+    // 0.5x first, then Normal, then the shuttle ladder. The ladder above 1x is
+    // PlaybackController's kShuttleLadder verbatim; 0.5x is the one rung that
+    // did not exist before this phase.
+    // Mnemonics: 0, N, 2, 5, X, 3 -- all distinct. 10x takes the `x` rather
+    // than the obvious `0`, which 0.5x already has; that collision is the third
+    // this phase produced and the reason warnOnDuplicateMnemonics() exists.
     static constexpr SpeedRung kRungs[] = {
+        {0.5, QT_TR_NOOP("&0.5x")},
         {1.0, QT_TR_NOOP("&Normal - 1x")},
         {2.0, QT_TR_NOOP("&2x")},
         {5.0, QT_TR_NOOP("&5x")},
-        {10.0, QT_TR_NOOP("1&0x")},
+        {10.0, QT_TR_NOOP("10&x")},
         {30.0, QT_TR_NOOP("&30x")},
     };
     for (const auto& rung : kRungs) {
@@ -5134,11 +5155,27 @@ void MainWindow::resumePlaybackAfterScrub() {
 // are deliberately silent in this build: resampled or reversed audio is a
 // separate piece of work, and half-working sound is worse than none in a
 // review tool.
+// EXACTLY 1x, NOT "AT MOST 1x", and spec phase 14 is what made the difference
+// observable. This read `<= 1.0001` from the day it was written, which was
+// correct for as long as the ladder's slowest rung WAS 1x -- there was no speed
+// below it, so "at most 1x" and "exactly 1x" named the same set.
+//
+// 0.5x is the first speed that separates them, and the failure it would have
+// produced is one this project has already measured once. Under `<=` the device
+// would run at real time while the picture presented at half rate; the audio
+// clock is the master, so the tick would read a frame index racing ahead of the
+// picture and advance to catch it -- section 29.3's "L forward is worse than
+// slow", where video skipped 35 frames chasing sound. A "never skip a frame"
+// violation outside the one sanctioned exception, from a comparison operator.
+//
+// So the rule stands as it has always been stated -- audio is 1x forward only,
+// and every other rate is silent -- and 0.5x needs no new decision, only a
+// predicate that says what the rule says.
 bool MainWindow::audioShouldDrive() const {
     if (!audio_.hasAudio()) return false;
     if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::VideoFile) return false;
     const auto st = playback_.state();
-    return st.mode == PlaybackMode::PlayingForward && std::abs(st.speed) <= 1.0001;
+    return st.mode == PlaybackMode::PlayingForward && std::abs(st.speed - 1.0) < 1e-4;
 }
 
 void MainWindow::startAudioForPlayback() {

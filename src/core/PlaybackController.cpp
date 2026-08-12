@@ -36,11 +36,12 @@ void PlaybackController::pause() {
 // call site writing state_.speed itself, and that is still true -- this is the
 // controller doing it, with the clamp and the mode change in one place.
 //
-// Clamped at 1.0: nothing below it is reachable, since the menu's slowest rung
-// and the ladder's first rung are both 1x.
+// Clamped at kMinPlaybackSpeed rather than at 1.0: 0.5x is the first rate below
+// 1x this state machine has ever held, and the whole point of it is that the
+// engine runs the number on the label.
 void PlaybackController::playForwardAt(double speed) {
     state_.mode = PlaybackMode::PlayingForward;
-    state_.speed = speed < 1.0 ? 1.0 : speed;
+    state_.speed = speed < kMinPlaybackSpeed ? kMinPlaybackSpeed : speed;
 }
 
 // The forward ladder is 1x, 2x, 5x, 10x, 30x -- the same rungs as rewind, and

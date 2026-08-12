@@ -23,6 +23,16 @@ namespace trace::core {
 // implementation and the state machine keeps one owner.
 enum class ShuttleEntry { AtOneX, AtTwoX };
 
+// The slowest rate the engine will run, and the floor every speed clamp uses.
+//
+// It was an unwritten 1.0 in two places until spec phase 14 -- the tick's period
+// divisor and this controller -- for the good reason that 1x was the slowest
+// rung there was. The Playback Speed menu's 0.5x is below it, and a clamp left
+// at 1.0 would have rounded it silently back up: the menu ticking 0.5x over a
+// file playing at normal speed. Named rather than repeated so the two cannot
+// disagree again.
+inline constexpr double kMinPlaybackSpeed = 0.5;
+
 class PlaybackController {
 public:
     void resetForNewMedia(long long maxFrame);
