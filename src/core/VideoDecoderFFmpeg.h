@@ -367,6 +367,28 @@ public:
     void setPlanarOutputEnabled(bool enabled);
     bool planarOutputEnabled() const { return planarOutput_; }
 
+    // An RGB copy of an already-decoded frame, for Copy Current Frame (spec
+    // phase 14). Returns false and leaves `out` null on any failure.
+    //
+    // IT EXISTS BECAUSE SINCE GATE C THERE IS NO RGB ANYWHERE ON THE SHIPPING
+    // PATH. A full-resolution frame on d3d11 is three YUV planes and the matrix
+    // is applied in the pixel shader, so VideoFrame::toQImage() returns a null
+    // image for one by construction -- qtFormatFor() refuses planar layouts on
+    // purpose, so that a luma plane can never be shown as garbage. Copying the
+    // picture therefore needs a conversion that the presentation path no longer
+    // performs.
+    //
+    // It takes the FRAME, not an index, so what is copied is exactly what is on
+    // screen -- asking the decoder to re-decode the current index would pay a
+    // seek, could land differently after a cache hit, and would be a second
+    // answer to "which frame is displayed".
+    //
+    // Its swscale context is created and destroyed per call and never enters
+    // the four-slot LRU. This runs once per keypress and costs a few
+    // milliseconds; letting it evict a slot would make the next playback frame
+    // pay a context rebuild, which is the cost `5e57d86` exists to avoid.
+    bool frameToRgbImage(const VideoFrame& frame, QImage& out, QString& error) const;
+
     long long currentFrame() const { return currentFrame_; }
     const VideoMetadata& metadata() const { return metadata_; }
     const VideoPerfStats& perfStats() const { return perfStats_; }

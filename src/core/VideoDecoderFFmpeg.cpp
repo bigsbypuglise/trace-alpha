@@ -644,6 +644,127 @@ void VideoDecoderFFmpeg::setPlanarOutputEnabled(bool enabled) {
 #endif
 }
 
+// An RGB copy of a frame that has already been decoded (spec phase 14).
+//
+// See the header for why this has to exist at all. Two things about the
+// implementation are deliberate:
+//
+// ITS OWN CONTEXT, CREATED AND DESTROYED HERE. The four-slot LRU is sized and
+// keyed for the three configurations a scrub cycle alternates between, and
+// letting a once-per-keypress conversion evict one would make the next playback
+// frame pay a rebuild -- the ~8-9ms cost `5e57d86` was written to remove.
+//
+// THE FRAME'S OWN COLORIMETRY, not the decoder's current state. `frame.color`
+// was resolved when the frame was converted; perfStats_ has been overwritten
+// many times since. A copy taken with the wrong matrix looks plausible and is
+// wrong, which is the worst kind of output for a review tool.
+bool VideoDecoderFFmpeg::frameToRgbImage(const VideoFrame& frame, QImage& out,
+                                         QString& error) const {
+    out = QImage();
+#ifdef TRACE_WITH_FFMPEG
+    if (frame.isNull() || !frame.buffer) {
+        error = QStringLiteral("No frame to copy");
+        return false;
+    }
+    const FrameBuffer& buffer = *frame.buffer;
+
+    // Already RGB -- the CPU backend's path, and every still image. A deep copy
+    // rather than the zero-copy view: the clipboard outlives this frame, and
+    // the buffer underneath it goes back to the conversion pool.
+    if (!isPlanarYuv(buffer.layout())) {
+        const QImage view = frame.toQImage();
+        if (view.isNull()) {
+            error = QStringLiteral("Frame layout cannot be copied");
+            return false;
+        }
+        out = view.copy();
+        return !out.isNull();
+    }
+
+    AVPixelFormat srcFmt = AV_PIX_FMT_NONE;
+    switch (buffer.layout()) {
+        case PixelLayout::YUV420P:
+            srcFmt = buffer.bitDepth() <= 8    ? AV_PIX_FMT_YUV420P
+                     : buffer.bitDepth() <= 10 ? AV_PIX_FMT_YUV420P10LE
+                     : buffer.bitDepth() <= 12 ? AV_PIX_FMT_YUV420P12LE
+                                               : AV_PIX_FMT_YUV420P16LE;
+            break;
+        case PixelLayout::YUV422P:
+            srcFmt = buffer.bitDepth() <= 8    ? AV_PIX_FMT_YUV422P
+                     : buffer.bitDepth() <= 10 ? AV_PIX_FMT_YUV422P10LE
+                     : buffer.bitDepth() <= 12 ? AV_PIX_FMT_YUV422P12LE
+                                               : AV_PIX_FMT_YUV422P16LE;
+            break;
+        case PixelLayout::YUV444P:
+            srcFmt = buffer.bitDepth() <= 8    ? AV_PIX_FMT_YUV444P
+                     : buffer.bitDepth() <= 10 ? AV_PIX_FMT_YUV444P10LE
+                     : buffer.bitDepth() <= 12 ? AV_PIX_FMT_YUV444P12LE
+                                               : AV_PIX_FMT_YUV444P16LE;
+            break;
+        default: break;
+    }
+    if (srcFmt == AV_PIX_FMT_NONE) {
+        error = QStringLiteral("Frame layout cannot be copied");
+        return false;
+    }
+
+    const int w = buffer.width();
+    const int h = buffer.height();
+    QImage image(w, h, QImage::Format_RGB32);
+    if (image.isNull()) {
+        error = QStringLiteral("Out of memory copying frame");
+        return false;
+    }
+
+    // Accurate, not fast. This is a still being taken away for inspection, so it
+    // is the Step case rather than the Playback one -- the same reasoning that
+    // gives a paused frame SWS_FULL_CHR_H_INT|SWS_ACCURATE_RND.
+    SwsContext* ctx = createSwsContext(w, h, srcFmt, w, h, AV_PIX_FMT_BGRA,
+                                       /*fast=*/false);
+    if (!ctx) {
+        error = QStringLiteral("Could not create the conversion context");
+        return false;
+    }
+
+    int coefficients = SWS_CS_ITU709;
+    switch (frame.color.matrix) {
+        case ColorInfo::Matrix::BT601:      coefficients = SWS_CS_ITU601; break;
+        case ColorInfo::Matrix::BT2020:     coefficients = SWS_CS_BT2020; break;
+        case ColorInfo::Matrix::Fcc:        coefficients = SWS_CS_FCC; break;
+        case ColorInfo::Matrix::Smpte240m:  coefficients = SWS_CS_SMPTE240M; break;
+        case ColorInfo::Matrix::BT709:
+        case ColorInfo::Matrix::Unspecified:
+        default:                            coefficients = SWS_CS_ITU709; break;
+    }
+    applyColorspaceDetails(ctx, coefficients, frame.color.fullRange);
+
+    const uint8_t* srcData[4] = {buffer.data(0), buffer.data(1), buffer.data(2), nullptr};
+    const int srcStride[4] = {buffer.bytesPerLine(0), buffer.bytesPerLine(1),
+                              buffer.bytesPerLine(2), 0};
+    if (!srcData[0] || !srcData[1] || !srcData[2]) {
+        sws_freeContext(ctx);
+        error = QStringLiteral("Frame is missing a plane");
+        return false;
+    }
+
+    uint8_t* dstData[4] = {image.bits(), nullptr, nullptr, nullptr};
+    const int dstStride[4] = {static_cast<int>(image.bytesPerLine()), 0, 0, 0};
+    const int rows = sws_scale(ctx, srcData, srcStride, 0, h, dstData, dstStride);
+    sws_freeContext(ctx);
+
+    if (rows != h) {
+        error = QStringLiteral("Frame conversion failed");
+        return false;
+    }
+    out = image;
+    return true;
+#else
+    Q_UNUSED(frame);
+    error = QStringLiteral("This build has no video support");
+    return false;
+#endif
+}
+
 void VideoDecoderFFmpeg::setPlaybackDirection(int direction) {
 #ifdef TRACE_WITH_FFMPEG
     if (!impl_) return;

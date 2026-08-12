@@ -195,6 +195,14 @@ private:
     // engine is not running.
     void syncPlaybackSpeedActions();
 
+    // Copy the frame currently on screen to the clipboard as an image.
+    //
+    // NOT a clipboard one-liner on the shipping path: since GATE C a full-res
+    // frame on d3d11 is three YUV planes and VideoFrame::toQImage() returns null
+    // for them by construction. This asks the decoder for an RGB copy at the
+    // source's own colorimetry, and refuses a preview-resolution frame rather
+    // than quietly copying a soft one.
+    void copyCurrentFrame();
     // Spec phase 8. Re-evaluates the Share gate ONCE per media open -- the spec
     // forbids filesystem probing in paint or timeline updates and the gate
     // queries the volume, so this follows refreshSourceTimecode()'s shape
@@ -642,6 +650,7 @@ private:
     std::vector<QAction*> speedActions_;
 
     QAction* closeMediaAction_ = nullptr;
+    QAction* copyFrameAction_ = nullptr;
 
     // Help. Keyboard Shortcuts renders ShortcutTable::rows() and nothing is
     // written by hand -- that is the whole reason phase 3 built the table.

@@ -25,6 +25,7 @@
 #include <QResizeEvent>
 #include <QStatusBar>
 
+#include <QClipboard>
 #include <QCoreApplication>
 #include <QGuiApplication>
 #include <QDesktopServices>
@@ -1333,6 +1334,11 @@ void MainWindow::setupSharedActions() {
     connect(closeMediaAction_, &QAction::triggered, this, &MainWindow::closeMedia);
     addAction(closeMediaAction_);
 
+    copyFrameAction_ = new QAction(tr("&Copy Current Frame"), this);
+    copyFrameAction_->setShortcut(QKeySequence(Qt::CTRL | Qt::Key_C));
+    connect(copyFrameAction_, &QAction::triggered, this, &MainWindow::copyCurrentFrame);
+    addAction(copyFrameAction_);
+
     keyboardShortcutsAction_ = new QAction(tr("&Keyboard Shortcuts"), this);
     connect(keyboardShortcutsAction_, &QAction::triggered,
             this, &MainWindow::showKeyboardShortcuts);
@@ -1425,6 +1431,7 @@ void MainWindow::setupShortcuts() {
     // now than it ever has, since this window is the only place the contract is
     // read out loud.
     shortcuts_.addAction(ShortcutGroup::File, closeMediaAction_);
+    shortcuts_.addAction(ShortcutGroup::View, copyFrameAction_);
     // Minimize is NOT listed: it has no shortcut, and the table is the KEYBOARD
     // contract. A row with no key in it would be a menu listing -- the same
     // rule that keeps the three shortcut-less view transforms out of it.
@@ -2862,6 +2869,7 @@ void MainWindow::syncPlaybackSpeedActions() {
 void MainWindow::syncMediaDependentActions() {
     const bool haveMedia = currentMedia_.has_value();
     if (closeMediaAction_) closeMediaAction_->setEnabled(haveMedia);
+    if (copyFrameAction_) copyFrameAction_->setEnabled(haveMedia);
     for (auto* action : speedActions_) action->setEnabled(haveMedia);
     // Deliberately NOT beside the Copy Current Frame line above. Loop and Copy
     // Current Frame are separate commits so either can be reverted alone, and
@@ -2878,6 +2886,60 @@ void MainWindow::syncMediaDependentActions() {
     if (flipHorizontalAction_) flipHorizontalAction_->setEnabled(haveMedia);
     if (flipVerticalAction_) flipVerticalAction_->setEnabled(haveMedia);
     if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(haveMedia);
+}
+// COPY CURRENT FRAME (spec phase 14, Edit menu).
+//
+// The spec hedges this one -- "only if safely supported" -- and the hedge is
+// earned: since GATE C there is no RGB anywhere on the shipping path, so the
+// obvious one-line implementation (put viewer_->frame().toQImage() on the
+// clipboard) puts a NULL image on the clipboard on the default renderer and a
+// real one under TRACE_RENDERER=cpu. That is the worst possible failure -- it
+// works on the control and not on the shipping build.
+//
+// Two refusals, both deliberate:
+//
+//   - A PREVIEW-RESOLUTION FRAME IS REFUSED rather than copied. Mid-drag the
+//     picture is a preview converted to the displayed size, which on 4K is a
+//     fiftieth of the pixels. Copying it would hand the user something that
+//     looks like their frame and is a quarter of its width, with nothing on
+//     screen to say so. The rule is the standing one read the other way round:
+//     fidelity is owed to the frame the user stops on, and a copy is a stop.
+//   - No media, no frame: the action is disabled, and this checks anyway,
+//     because a shortcut reaches an action a menu never showed.
+void MainWindow::copyCurrentFrame() {
+    if (!viewer_) return;
+
+    const auto& frame = viewer_->frame();
+    if (frame.isNull()) {
+        statusBar()->showMessage(tr("No frame to copy"), 2000);
+        return;
+    }
+    if (frame.previewRes) {
+        statusBar()->showMessage(
+            tr("Release the timeline first - the picture is a scrub preview"), 3000);
+        return;
+    }
+
+    QImage image;
+    QString error;
+    if (!videoDecoder_.frameToRgbImage(frame, image, error)) {
+        statusBar()->showMessage(
+            error.isEmpty() ? tr("Could not copy the frame") : error, 3000);
+        return;
+    }
+
+    // The USER's view transform is deliberately NOT applied. A copy is of the
+    // frame, at the resolution and orientation the file stores it in; rotate
+    // and flip are temporary VIEWING state, which is what phase 10 called them
+    // and what "new media resets transforms" means. Baking a session's rotation
+    // into a copied frame would make the clipboard depend on when it was taken.
+    QGuiApplication::clipboard()->setImage(image);
+    statusBar()->showMessage(
+        tr("Copied frame %1 (%2 x %3)")
+            .arg(playback_.state().currentFrame)
+            .arg(image.width())
+            .arg(image.height()),
+        2500);
 }
 
 
@@ -2994,6 +3056,8 @@ void MainWindow::setupMenus() {
 
     // ---- Edit ---------------------------------------------------------------
     auto* editMenu = menuBar()->addMenu(tr("&Edit"));
+    editMenu->addAction(copyFrameAction_);
+    editMenu->addSeparator();
     editMenu->addAction(rotateLeftAction_);
     editMenu->addAction(rotateRightAction_);
     editMenu->addSeparator();
