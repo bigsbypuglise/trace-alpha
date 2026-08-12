@@ -3430,3 +3430,186 @@ runs against a scratch `TRACE_SETTINGS_FILE` so it cannot inherit the machine, a
   background process and must be read back, not assumed; and P/Invoke's default `CharSet.Ansi`
   makes any `...W` call taking a string return nonsense — window titles came back one character
   long, and the run reported a feature missing three times while it was open on screen.
+
+---
+
+## Phase 15 — view scaling: Actual Size, Fit to Window, Zoom, and the pan
+
+**DONE and measured, 2026-08-11** (`aae42bf` render · `55fd965` app · `163c439` harness).
+**NOT SIGNED OFF** — the magnified picture, the pan's feel and the menu wording are owner
+items and nobody has looked at them.
+
+Two owner decisions were taken **before** implementation, at the owner's instruction, because
+both are picture-and-geometry choices that must not be settled quietly inside a phase:
+
+- **Above 1:1 the picture is NEAREST, not bilinear.** Trace is a review tool; at 4:1 someone is
+  inspecting pixels and wants pixels, not a smoothed frame.
+- **Actual Size does NOT resize the window — it pans inside the viewport.** §4's media-shaped
+  window, its 1280x720-equivalent area cap and its 80% work-area rule were signed off on
+  2026-08-11, and letting Actual Size grow the window to fit 4K would break all three.
+
+### The mechanism, and the one thing about it that is not obvious
+
+`trace::render::fitDeviceRect()` was the single fit expression both backends share, with **no
+scale term and no pan origin anywhere in `src/render/`**. `ViewScale` supplies both and
+`viewDeviceRect()` is the one expression that consumes them. **The fit branch is the old
+arithmetic reached by one test**, deliberately: a "unified" version that fitted by computing a
+fit scale and running it through the scale path would be the same answer by a different route,
+and every recorded fit figure in this project would then be comparing against arithmetic it was
+not taken on.
+
+**THE REFERENCE IS THE FULL-RESOLUTION SOURCE, NOT THE DELIVERED FRAME, and that is the whole
+reason `ViewScale::referenceDisplayed` exists.** A backend knows only the frame it is holding,
+and during a drag that frame is a **preview converted to the viewport's size** — 1066x600
+standing in for 3840x2160. Scaling the delivered frame would draw Actual Size at 1066x600
+mid-drag and at 3840x2160 on release: **the picture would jump by a factor of 3.6 at the moment
+the user stopped.** Measured with the button still held (`previewshot.ps1` after `Ctrl+0`):
+`dst RGB32/BGRA 1066x600` while `display 3840x2160 NEAREST zoom 1.00:1 pannable`, and the
+landing `scrub exact | target 56 | shown 56 | delta 0`.
+
+**A consequence of that, stated rather than hidden: at a zoom the preview is under-resolved.**
+The preview is sized to the *viewport*, but a zoomed viewport shows a *crop*, so at Actual Size
+on 4K the mid-drag picture carries 1066x600 for the whole frame while the visible region is
+~296x166 of real source. It is soft during motion and exact on release, which is the standing
+rule — fidelity is owed to the frame you stop on — rather than a new exception. The fix, if it
+is ever wanted, is to crop the conversion rather than to enlarge it; enlarging it is the
+priority-1 risk (§22.8) and is not to be done casually.
+
+**The scale is capped by `maxViewScale()`, and that is a hard backend limit expressed once, not
+a taste judgement.** D3D11 letterboxes by **viewport**, and a `D3D11_VIEWPORT` past
+`D3D11_VIEWPORT_BOUNDS_MAX` is **rejected outright — it draws nothing at all, silently**, rather
+than drawing something wrong. 4K reaches 8:1; a 9K plate stops at 2:1. The CPU backend honours
+the same cap so `TRACE_RENDERER=cpu` cannot zoom further than the shipping renderer — an escape
+hatch that behaves differently is the thing nobody would think to check.
+
+**The ladder doubles and is anchored on 1:1, for a reason that outlives taste:** at an integer
+power of two, point sampling replicates each source sample into an **exact square block**. A
+1.25-step ladder magnifying by 3.2:1 draws some samples three device pixels wide and others
+four — visibly uneven, on the one path whose purpose is showing the samples faithfully. Zoom In
+from fit takes the first rung strictly above the fit's arbitrary ratio, so one press always
+visibly zooms.
+
+### Panning goes through `OverlayHooks`, and that is not where it looks like it belongs
+
+Under the D3D11 backend — the default — the video is a **child HWND that takes every mouse
+message**, and Qt's widget never sees one. A pan written in `ViewerWidget::mousePressEvent`
+would work on `TRACE_RENDERER=cpu` and **do nothing at all on the shipping build**. That is
+exactly why `toggleFullscreen` is already in that struct, and the pan follows it.
+
+`OverlayModel` routes a press that lands on **no control** to `canPan`/`panBy`, **ungated on
+`enabled_`** so the gesture survives `TRACE_TRANSPORT_BAR=1` — the same reason
+`onMouseDoubleClick` has never been gated. The CPU path's three mouse handlers were ungated to
+match. The model owns the drag anchor, as it already does for the timeline, so the host stores
+no second copy of "where was the pointer last".
+
+**No `refreshHud()` on a pan move.** A drag produces one move per pointer sample and the HUD
+line is built from a dozen counters; putting the instrument inside the gesture is phase 12's
+stale-instrument finding in reverse.
+
+### `repaint()`, not `update()` — phase 10's trap, in the second thing that has it
+
+The first build **magnified the picture visibly while `display` still read the fit's
+`1201x676 filtered x2`** — which is precisely what a build whose zoom never reached the renderer
+would print. The fit and the reduction taps are measured **by** the paint and reported after it,
+so refreshing the HUD after a merely *scheduled* repaint prints the previous scale, and on a
+paused file nothing corrects it. **Sixth stale-instrument finding**, and the second time this
+exact mechanism has produced one.
+
+### The magnification filter
+
+The CPU path now filters **only when reducing** — one predicate that **subsumes** the old
+exactly-1:1 special case rather than sitting beside it, so that long-standing behaviour is
+unchanged and magnification joins it. D3D11 gets a second sampler **state**, selected per draw
+by the same predicate `updateReduction()` already gates on, so **one shader still covers every
+subsampling and bit depth** (GATE C) and the signed-off reduction is untouched.
+
+**It point-samples the chroma planes too, and that is the honest reading rather than an
+oversight**: on 4:2:0 media a chroma sample really does cover four luma samples, so at 4:1 it
+really is an 8x8 block of one colour. Filtering chroma while point-sampling luma would draw
+colour detail the file does not carry, at the one magnification where someone is looking for
+exactly that distinction. **Worth an owner eye** — it is the most likely thing in this phase to
+read as a defect while being correct.
+
+**`TRACE_MAG_FILTER=linear` is the control on BOTH backends**, and it is also how this decision
+is reverted without touching the rest of the phase.
+
+### Measured (physical panel, 5120x1440 @ 239.999Hz, `scripts/measure/viewscale.ps1`)
+
+**The ladder, 4K H.264, six presses each way, `win 1201x1083` on every rung:**
+
+| press | zoom in | zoom out |
+|---|---|---|
+| from fit (0.31) | `1920x1080 filtered x1 zoom 0.50:1` | from 8:1 |
+| 2 | `3840x2160 1:1 zoom 1.00:1` | `15360x8640 NEAREST zoom 4.00:1` |
+| 3 | `7680x4320 NEAREST zoom 2.00:1` | `7680x4320 NEAREST zoom 2.00:1` |
+| 4 | `15360x8640 NEAREST zoom 4.00:1` | `3840x2160 1:1 zoom 1.00:1` |
+| 5 | `30720x17280 NEAREST zoom 8.00:1` | `1920x1080 filtered x1 zoom 0.50:1` |
+| 6 | **`8.00:1` again — pinned by the cap** | `960x540 filtered x2 zoom 0.25:1` |
+| 7 | — | `480x270 filtered x4 zoom 0.13:1` |
+
+The **reduction taps track the fit**, which is the check that step 9's gate still holds under a
+scale: x1 at 0.5, x2 at 0.25, x4 at 0.125, and **1 tap with the label `1:1` at exactly 1.00**.
+Repeated on 4:5 ProRes (1080x1350, `win 540x1082` throughout) with the same ladder and the same
+pinning — the window never moves on either shape.
+
+**Both backends agree.** `cpu` in bar mode reads `display 3840x2160 1:1 zoom 1.00:1 pannable`
+and `display 15360x8640 NEAREST zoom 4.00:1 pannable` — the same destination rects for the same
+commands.
+
+**The pan, with its negative control** (`-Mode pan`, banddiff over the video band):
+**drag at fit `0 of 422450 px differ, 0%, max channel delta 0`; the identical drag at Actual
+Size `133988 of 422450, 31.7%, max delta 58`.** The control is what makes the result mean
+something: a build with no pan reads ~0% on both legs.
+
+**Cost.** D3D11 at 4:1 reads `draw 0.01ms` — the picture is a viewport change and the shader is
+already idle. The CPU backend at 4:1 reads `paint 0.30/1.27 tot 1.27 draw 1.18` against a
+41.67ms budget: QPainter clips the blit to the widget, so the cost tracks the **visible** area
+rather than the picture's, and a 15360x8640 destination is affordable there.
+
+### Regression — flat, case for case with phases 12, 13 and 14
+
+| | phase 15 |
+|---|---|
+| 4K H.264 cadence x3 | **100.0 / 100.0 / 100.0%**, 120 frames, `handler>budget 0 of 119`, all 119 gaps in the ~1x bucket |
+| ProRes 4444 cadence x2 | **99.8%**, 261 frames, `handler>budget 0 of 260` |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, full-res planar, **`hitch 0`**, `land 0` |
+| `lifecycle -PlayThroughDrag` | PASS — 83.6% of samples moved |
+| `lifecycle -PausedThroughDrag` | PASS — **0% moved** (the control) |
+| `transitions -All` | **25 of 25 PASS** |
+
+Nothing about the zoom is persisted, so **no later measurement can inherit one** the way phase
+14's first cadence run inherited Loop.
+
+### Two harness findings, and one of them accused a correct build for 25 cases
+
+**`transitions.ps1` WAS SEEING THROUGH THE WINDOW BORDER.** `GetWindowRect` includes Windows
+11's invisible resize border, so the first captured columns are **whatever is behind Trace**.
+With a bright window behind, the control scan found `clusters=4 -> 3,46,107,165` and refused —
+**"groove or controls not located" for all 25 cases**, against a build whose controls were
+exactly where they always are. It is neither clip-dependent nor build-dependent; **it depends on
+what is on the desktop**, which is why the same matrix had passed minutes earlier on another
+file. The scan starts 16px in now, clear of the border and nowhere near a control at 40..50,
+100..114, 157..173.
+
+**AND THE CLIP IS PART OF THE MEASUREMENT, AGAIN.** Run on the 121-frame 422 HQ clip, the matrix
+FAILs `F -> ffBtn` with `moved 0%` — and the harness's **own header** says 121 frames is too
+short and that a forward run reaches the tail inside the observation window. What told that
+apart from a phase 15 regression was **a control binary built from `9db4780` in a worktree,
+which failed the same case with the same `0%` and `5.6%` to the digit.** On
+`M&M_TopGun_1080.mp4`, which the header names, the matrix reads 25 of 25 on the phase 15 build.
+
+### What is open
+
+1. **The magnified picture has not been looked at.** Nearest at 2:1, 4:1 and 8:1, and
+   specifically **the point-sampled chroma** described above. `TRACE_MAG_FILTER=linear` is the
+   side-by-side.
+2. **The pan's feel.** Direction, rate and the clamp at the edges. There is **no cursor change**
+   while a pan is possible — the D3D11 surface owns its own class cursor, so a grab cursor is
+   two mechanisms rather than one, and it was left out rather than half-done.
+3. **Fit to Window is disabled while already fitting**, and shows as ticked-and-greyed. That is
+   the design package's Disabled state, but it is a wording-and-affordance choice nobody has
+   read.
+4. **Fit to Window has no shortcut**, by the phase 10 rule — the spec's Keyboard section names
+   `Ctrl+0` and `Ctrl+plus`/`minus` and nothing else. Say if it should have one.
+5. **The under-resolved preview at a zoom**, described above. Explained and within the standing
+   rule, not measured against an owner's eye.

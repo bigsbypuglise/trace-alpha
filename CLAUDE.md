@@ -1095,6 +1095,100 @@ went there, and the run reported the feature missing; use `AttachThreadInput` an
 read back as UTF-16 — window titles came out **one character long**, and "Keyboard Shortcuts
 window NOT FOUND" was printed three times against a build where it was open on screen.
 
+**PHASE 14 IS PARTLY SIGNED OFF (owner, 2026-08-11): Loop, 0.5× and Copy Current Frame are
+ACCEPTED.** All three behave as intended. That closes the revert question with them — they are
+shipped features, not extractable candidates — so **`kMinPlaybackSpeed`, `audioShouldDrive()`'s
+`== 1.0`, the three loop-wrap sites and `frameToRgbImage`'s own swscale context are settled
+behaviour**, and changing any of them re-opens an owner decision rather than being a tidy-up.
+**STILL PENDING and not covered by that acceptance: the menus and Help wording, and the
+Narrator listen** (plan §31.5 item 4). The proxy tree has been *driven*, never *heard*.
+
+**SPEC PHASE 15 IS DONE AND MEASURED (2026-08-11, `aae42bf` render · `55fd965` app · `163c439`
+harness): the picture has a scale and an origin, and above 1:1 it shows pixels.** Actual Size,
+Fit to Window, Zoom In, Zoom Out and the pan they imply. **NOT SIGNED OFF** — the magnified
+picture, the pan's feel and the menu wording are all owner items.
+
+**Two owner decisions were taken BEFORE implementation, on instruction**, because both are
+picture-and-geometry choices that must not be settled quietly inside a phase: **above 1:1 the
+picture is NEAREST, not bilinear** (a review tool at 4:1 is inspecting samples, and the CPU path
+already had the shape of that rule at exactly 1:1); and **Actual Size does NOT resize the window,
+it pans inside the viewport** — §4's media-shaped window, its 1280x720-equivalent area cap and
+its 80% work-area rule were signed off two days earlier and a window grown to fit 4K would break
+all three.
+
+Six things to carry.
+
+- **THE SCALE'S REFERENCE IS THE FULL-RESOLUTION SOURCE, NOT THE DELIVERED FRAME, and that is
+  the whole of `ViewScale::referenceDisplayed`.** A backend knows only the frame it holds, and
+  during a drag that frame is a **preview converted to the viewport's size** — 1066x600 standing
+  in for 3840x2160. Scaling it would draw Actual Size at 1066x600 mid-drag and 3840x2160 on
+  release: **the picture would jump 3.6× at the moment the user stopped.** Measured with the
+  button still held: `dst RGB32/BGRA 1066x600` while `display 3840x2160 zoom 1.00:1`, landing
+  `target 56 shown 56 delta 0`. **The consequence, stated rather than hidden: at a zoom the
+  preview is under-resolved**, because it is sized to the viewport while a zoomed viewport shows
+  a *crop*. Soft during motion, exact on release — the standing rule, not a new exception. If it
+  is ever worth fixing, **crop the conversion, do not enlarge it**; enlarging is the §22.8 risk.
+- **`viewDeviceRect()` is the one expression, and the FIT BRANCH IS THE OLD ARITHMETIC reached
+  by one test.** A "unified" version that fitted by computing a fit scale and running it through
+  the scale path would be the same answer by a different route, and **every recorded fit figure
+  in this project would then be comparing against arithmetic it was not taken on.**
+- **`maxViewScale()` IS A HARD BACKEND LIMIT, NOT A TASTE JUDGEMENT.** D3D11 letterboxes by
+  **viewport**, and a `D3D11_VIEWPORT` past `D3D11_VIEWPORT_BOUNDS_MAX` is **rejected outright —
+  it draws nothing at all, silently.** 4K reaches 8:1; a 9K plate stops at 2:1. The CPU backend
+  honours the same cap, because an escape hatch that zooms further than the shipping renderer is
+  exactly what nobody would think to check.
+- **The ladder DOUBLES and is anchored on 1:1, for a reason that outlives taste**: at an integer
+  power of two, point sampling replicates each sample into an **exact square block**, while
+  nearest at 3.2:1 draws some samples three device pixels wide and others four. Zoom In from fit
+  takes the first rung strictly above the fit's arbitrary ratio, so one press always visibly
+  zooms. Measured 4K H.264, `win 1201x1083` on every rung: fit 0.31 → **0.50 → 1.00 → 2.00 →
+  4.00 → 8.00 → 8.00 (pinned)**, and back down through 0.50 → 0.25 → 0.13. **The reduction taps
+  track the fit** — x1 at 0.5, x2 at 0.25, x4 at 0.125 — which is the check that step 9's gate
+  still holds under a scale. Same ladder and same pinning on 4:5 ProRes at `win 540x1082`.
+- **PANNING GOES THROUGH `OverlayHooks`, and that is not where it looks like it belongs.** Under
+  the D3D11 backend the video is a **child HWND that takes every mouse message** and Qt's widget
+  never sees one, so a pan written in `ViewerWidget::mousePressEvent` would work on
+  `TRACE_RENDERER=cpu` and **do nothing on the shipping build** — which is exactly why
+  `toggleFullscreen` is already in that struct. `OverlayModel` routes a press landing on no
+  control to `canPan`/`panBy`, **ungated on `enabled_`** so the gesture survives
+  `TRACE_TRANSPORT_BAR=1`. Measured with its negative control: **drag at fit `0%, max delta 0`;
+  the identical drag at Actual Size `31.7%, max delta 58`.**
+- **`repaint()`, NOT `update()` — phase 10's trap in the second thing that has it.** The first
+  build magnified the picture visibly while `display` still read the fit's
+  `1201x676 filtered x2`, which is precisely what a build whose zoom never reached the renderer
+  would print. **Sixth stale-instrument finding**, and the second from this exact mechanism.
+
+**The magnification filter point-samples CHROMA too, and that is the honest reading rather than
+an oversight** — on 4:2:0 a chroma sample really does cover four luma samples, so at 4:1 it
+really is an 8×8 block of one colour. Filtering chroma while point-sampling luma would draw
+colour detail the file does not carry, at the one magnification where someone is looking for
+exactly that distinction. **It is the most likely thing in this phase to read as a defect while
+being correct**, and `TRACE_MAG_FILTER=linear` is the side-by-side on both backends — and also
+how the whole decision is reverted without touching the rest of the phase. The CPU path filters
+**only when reducing** now, one predicate that *subsumes* the old exactly-1:1 case rather than
+sitting beside it, so that long-standing behaviour is unchanged.
+
+**Cost:** D3D11 at 4:1 reads `draw 0.01ms`; the CPU backend reads `draw 1.18ms` of a 41.67ms
+budget, because QPainter clips the blit and the cost tracks the **visible** area rather than a
+15360x8640 destination. **Both backends agree on every rung.** Nothing is persisted, so **no
+later measurement can inherit a zoom** the way phase 14's first cadence run inherited Loop.
+
+**Regression — flat, case for case with phases 12–14** (physical panel, 5120x1440 @ 239.999Hz):
+4K H.264 cadence ×3 **100.0%** with 120 frames, `handler>budget 0 of 119` and all 119 gaps in
+the ~1× bucket; 4444 ×2 **99.8%** at 0 of 260; `-SnapRelease` `target 120 shown 120 delta 0`
+full-res planar with `hitch 0` and `land 0`; both lifecycle legs; **25 of 25 transitions**.
+
+**`transitions.ps1` WAS SEEING THROUGH THE WINDOW BORDER, and it accused a correct build for all
+25 cases.** `GetWindowRect` includes Windows 11's invisible resize border, so the first captured
+columns are **whatever is behind Trace**; with a bright window behind, the control scan found
+`clusters=4 -> 3,46,107,165` and reported "groove or controls not located" 25 times. It is
+neither clip- nor build-dependent — **it depends on what is on the desktop**, which is why the
+same matrix passed minutes earlier on another file. The scan starts 16px in now. **And the clip
+is part of the measurement, again**: on the 121-frame 422 HQ clip the matrix FAILs `F -> ffBtn`
+with `moved 0%`, exactly as that harness's **own header** warns, and **a control binary built
+from `9db4780` failed the same case with the same `0%` and `5.6%` to the digit** — which is what
+told it apart from a regression. `M&M_TopGun_1080.mp4` is the clip the header names.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
@@ -1848,6 +1942,12 @@ back to swscale BGRA on the d3d11 path — the control for any planar measuremen
 `TRACE_GPU_REDUCE=0` (step 9 off, back to a single bilinear tap for the
 downscale — exact rather than approximate, and deliberately separate from
 `TRACE_PLANAR_UPLOAD` so a planar A/B does not change two things at once),
+**`TRACE_MAG_FILTER=linear`** (spec phase 15: back to a bilinear magnification
+above 1:1, on **both** backends. The owner decision is nearest — a review tool at
+4:1 shows pixels — and this is both the side-by-side for judging it and the way
+to revert that decision without touching the rest of the phase. It is a
+*separate* knob from `TRACE_NEAREST_SCALE`, which forces nearest at every ratio
+including reductions and is the step 9 control),
 `TRACE_DEADLINE_SCHED=0` (GATE E step 1 off, back to the fixed integer tick
 and its accumulator gate — the negative control for any cadence measurement),
 `TRACE_REVERSE_ASYNC=0` (reverse shuttle off, back to synchronous UI-thread
@@ -1958,6 +2058,18 @@ popup window, so a `GetWindowRect` capture of the main window shows a closed men
 not it opened. All three navigate menus **by mnemonic, never by counting DOWN arrows**: counting
 has to know the first item is already highlighted and skip separators, and a miscount silently
 activates the item *next* to the one under test.
+
+**View scaling has a harness now** (spec phase 15): `scripts/measure/viewscale.ps1`, four modes.
+`-Mode ladder` presses Ctrl+= and Ctrl+- six times each and **stitches the one HUD line that
+matters into a single strip**, because a ladder is only meaningful as a sequence and reading
+`zoom N:1` off thirteen full-window screenshots is thirteen separate readings. `-Mode actual`
+asserts `display WxH` **equals the source's own pixel size**, which no screenshot can tell you
+by eye. `-Mode filter` reads the magnification filter back (`NEAREST` against `filtered xN`).
+**`-Mode pan` is the only leg with a negative control and it needs one**: it drags twice — once
+at fit where the picture must NOT move, once at Actual Size where it must — so a build with no
+pan at all reads ~0% on both and passes nothing. **Every mode prints `win WxH` before and
+after**, because the owner decision is that Actual Size pans inside the viewport and leaves the
+window alone.
 
 **Window shape has a harness now** (spec phase 12): `scripts/measure/resizecache.ps1` drives a
 real corner drag and reports `resize/chg/drop/sync` and the three Win32 resize messages —
