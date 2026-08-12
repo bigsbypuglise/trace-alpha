@@ -1105,8 +1105,9 @@ Narrator listen** (plan §31.5 item 4). The proxy tree has been *driven*, never 
 
 **SPEC PHASE 15 IS DONE AND MEASURED (2026-08-11, `aae42bf` render · `55fd965` app · `163c439`
 harness): the picture has a scale and an origin, and above 1:1 it shows pixels.** Actual Size,
-Fit to Window, Zoom In, Zoom Out and the pan they imply. **NOT SIGNED OFF** — the magnified
-picture, the pan's feel and the menu wording are all owner items.
+Fit to Window, Zoom In, Zoom Out and the pan they imply. **SIGNED OFF by the owner on
+2026-08-11 after one correction — see the sign-off block below for what was accepted and at
+what width.**
 
 **Two owner decisions were taken BEFORE implementation, on instruction**, because both are
 picture-and-geometry choices that must not be settled quietly inside a phase: **above 1:1 the
@@ -1188,6 +1189,41 @@ is part of the measurement, again**: on the 121-frame 422 HQ clip the matrix FAI
 with `moved 0%`, exactly as that harness's **own header** warns, and **a control binary built
 from `9db4780` failed the same case with the same `0%` and `5.6%` to the digit** — which is what
 told it apart from a regression. `M&M_TopGun_1080.mp4` is the clip the header names.
+
+**PHASE 15 IS SIGNED OFF (owner, 2026-08-11), with one correction applied first.** Four things
+were accepted and each is now settled behaviour rather than a default: **nearest magnification
+above 1:1 stays** — so the **point-sampled chroma is accepted behaviour, not a carried defect**,
+and `TRACE_MAG_FILTER=linear` is a comparison knob rather than a pending revert path; **the
+pan's behaviour is correct**; **Fit to Window takes no default shortcut**; and **the
+under-resolved preview during zoomed scrubbing is accepted**, on the stated condition that the
+exact full-resolution image returns immediately on release **with no position jump** — which is
+precisely the property `ViewScale::referenceDisplayed` exists to guarantee and which was
+measured (`dst RGB32/BGRA 1066x600` mid-drag while `display 3840x2160 zoom 1.00:1`, landing
+`target 56 shown 56 delta 0`). **That is the sixth instance of the motion-over-fidelity rule,
+not a new exception.**
+
+**THE CORRECTION: Fit to Window stays ENABLED while active and shows its checked state.** The
+first cut greyed it while already fitting, on the reasoning that a command which visibly does
+nothing is the `showInfo` failure. **That reasoning does not transfer to a CHECKABLE item** —
+the tick is what states the current state, and greying the row makes "this is what the picture
+is doing" read as "this is unavailable". Actual Size was already enabled while checked, so the
+two rows behave alike now. Verified through the **menu**, not the key: Alt+V then `w` takes
+`display 3840x2160 zoom 1.00:1` back to `display 1201x676 filtered x2` with the `zoom` field
+gone, and **selecting it again from the checked state is a harmless no-op**. Ladder and pan
+re-measured after it and identical **to the digit**; regression flat, 25 of 25 transitions.
+
+**THE PAN CURSOR LEAVES THIS PHASE AS POLISH, WITH ITS CONDITION STATED** (owner): a grab /
+closed-hand cursor would improve discoverability, is **not required**, and is wanted only if it
+can be made trivial **and identical on both backends**. It cannot today — the D3D11 surface owns
+its own window-class cursor and answers `WM_SETCURSOR` itself while the CPU path inherits the
+widget's. That is the same two-mechanism split `setCursorHidden()` already carries, and phase 6
+measured `GetCursorInfo` seeing only one of the two. So it is not a one-liner and must not be
+described as one.
+
+**Read the sign-off at its stated width**: what was accepted is the **scaling behaviour, the
+magnification filter, the pan and the zoomed-scrub trade**. It is **not** a sign-off on the menus
+and Help wording — phase 14 left those open and this phase added four rows to them — and the
+**Narrator listen is still owed** (plan §31.5 item 4).
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across

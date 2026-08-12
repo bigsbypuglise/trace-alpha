@@ -1,13 +1,36 @@
-# PHASE 15 IS BUILT AND MEASURED. PHASE 16 — the full regression — CLOSES THE PASS.
+# PHASE 15 IS SIGNED OFF. PHASE 16 — the full regression — CLOSES THE PASS.
 
-**PHASE 15 SHIPPED (2026-08-11): Actual Size, Fit to Window, Zoom In, Zoom Out and the pan they
-imply.** `aae42bf` render · `55fd965` app · `163c439` harness. Full record in
+**PHASE 15 SHIPPED AND IS ACCEPTED (2026-08-11): Actual Size, Fit to Window, Zoom In, Zoom Out
+and the pan they imply.** `aae42bf` render · `55fd965` app · `163c439` harness · `<signoff>`
+the Fit-to-Window correction and the record. Full record in
 `docs/interface-pass-1-progress.md` under "Phase 15".
 
-**NOTHING IN PHASE 15 IS SIGNED OFF.** Everything is measured; the magnified picture, the pan's
-feel and the menu wording are owner items and nobody has looked at them. See "Owner items
-outstanding" below — it is the *first* thing to get answered, because phase 16 cannot honestly
-close the interface pass over two phases of unaccepted work.
+**What was accepted, at its stated width:** the **scaling behaviour, the magnification filter,
+the pan, and the zoomed-scrub trade**. Four things are now settled rather than default —
+**nearest above 1:1 stays** (so the point-sampled chroma is accepted behaviour, not a carried
+defect, and `TRACE_MAG_FILTER=linear` is a comparison knob rather than a pending revert path);
+**the pan's behaviour is correct**; **Fit to Window takes no default shortcut**; and **the
+under-resolved preview during zoomed scrubbing is accepted** on the stated condition that the
+exact full-resolution image returns immediately on release **with no position jump**. Changing
+any of them re-opens an owner decision.
+
+**It is NOT a sign-off on the menus and Help wording** — phase 14 left those open and phase 15
+added four rows to them — and **the Narrator listen is still owed** (plan §31.5 item 4). Those
+two are the only owner items left in the whole pass, and phase 16 cannot honestly close it over
+them.
+
+**One correction was required and applied before sign-off: Fit to Window stays ENABLED while
+active and shows its checked state.** The first cut greyed it while already fitting, reasoning
+that a command which visibly does nothing is the `showInfo` failure phase 2 deleted. **That
+reasoning does not transfer to a CHECKABLE item** — the tick is what states the current state,
+and greying the row makes "this is what the picture is doing" read as "this is unavailable".
+
+**One item leaves phase 15 as POLISH with its condition stated:** a grab / closed-hand cursor
+while a pan is possible. It would improve discoverability, is **not required**, and is wanted
+only if it can be made trivial **and identical on both backends**. It cannot today — the D3D11
+surface owns its own window-class cursor and answers `WM_SETCURSOR` itself while the CPU path
+inherits the widget's, the same two-mechanism split `setCursorHidden()` already carries. **Do
+not describe it as a one-liner.**
 
 ---
 
@@ -18,9 +41,10 @@ scheduling, responsive *bidirectional scrubbing*, and the *SDR* D3D11 GPU integr
 
 **The shuttle phase (2026-08-10)** — the engine, at 2×/5×/10×/30× in both directions.
 
-**Phases 6, 12 and 13 are signed off** — the floating transport's feel and identity; the
+**Phases 6, 12, 13 and 15 are signed off** — the floating transport's feel and identity; the
 media-shaped window (stills and image sequences re-signed-off on the corrected build at
-`3a38516`); and the Movie Inspector's contents, wording and origin labels.
+`3a38516`); the Movie Inspector's contents, wording and origin labels; and view scaling's
+behaviour, magnification filter, pan and zoomed-scrub trade.
 
 **Phase 14 is PARTLY signed off (2026-08-11): Loop, 0.5× and Copy Current Frame are ACCEPTED.**
 They are shipped features now, not extractable candidates, so `kMinPlaybackSpeed`,
@@ -33,12 +57,14 @@ it.
 
 ---
 
-## Owner items outstanding — phases 14 and 15 together
+## Owner items outstanding — TWO, both from phase 14
 
-**Phase 14, still open:**
+Everything else in the pass is accepted. These are what phase 16 has to close over.
 
-1. **Visual review of the menus and Help.** Trace Help has **real content written for that
-   phase** — four paragraphs, and the only prose in the product. It is worth reading.
+1. **Visual review of the menus and Help.** Trace Help has **real content written for phase 14**
+   — four paragraphs, and the only prose in the product. It is worth reading. Note phase 15 added
+   four rows to the View menu and two to the Window menu since that review was first asked for,
+   so this is now a review of the menus **as they now stand**.
 2. **THE SCREEN READER HAS NOT BEEN LISTENED TO.** `uiatree.ps1` proves the transport is
    *exposed*: five controls, correctly named, correctly typed, on the drawn rects, and
    **invokable** through UI Automation with no focus and no click. **UIA is the interface
@@ -46,29 +72,12 @@ it.
    element present in it can still read badly, in the wrong order, or with a name that is
    nonsense aloud.** Plan §31.5 item 4 stands. Narrator ships with Windows and is on this box;
    this needs ten minutes and a person.
-3. **Loop's persistence.** It survives a file change and a restart, deliberately — a review
-   preference, not a property of the media. Say if that is wrong.
 
-**Phase 15, all of it:**
+**And one question rather than an item: Loop's persistence.** It survives a file change and a
+restart, deliberately — a review preference, not a property of the media. It was accepted with
+the feature, so this is only worth raising if it turns out to surprise anyone.
 
-4. **The magnified picture.** Nearest at 2:1, 4:1 and 8:1. **Look specifically at the chroma**:
-   the magnification sampler point-samples the chroma planes too, so on 4:2:0 media a colour
-   edge steps in 8×8 blocks at 4:1. That is honest — a chroma sample really does cover four luma
-   samples — and it is **the most likely thing in this phase to read as a defect while being
-   correct.** `TRACE_MAG_FILTER=linear` is the side-by-side, on both backends, and it is also
-   how the whole nearest decision gets reverted without touching anything else.
-5. **The pan's feel.** Direction, rate, and the clamp at the edges. **There is no cursor change**
-   while a pan is possible: the D3D11 surface owns its own class cursor, so a grab cursor is two
-   mechanisms rather than one, and it was left out rather than half-done. Say if it is wanted.
-6. **Fit to Window is disabled while already fitting**, showing as ticked-and-greyed. That is the
-   design package's Disabled state, but it is an affordance choice nobody has read.
-7. **Fit to Window has no shortcut**, by the phase 10 rule — the spec's Keyboard section names
-   `Ctrl+0` and `Ctrl+plus`/`minus` and nothing else, and a key claimed here would have to be
-   given up later. Say if it should have one.
-8. **The preview is under-resolved at a zoom.** The preview is sized to the *viewport*, but a
-   zoomed viewport shows a *crop*, so at Actual Size on 4K the mid-drag picture carries 1066x600
-   for the whole frame while the visible region is ~296x166 of real source. Soft during motion,
-   exact on release — the standing rule rather than a new exception, but nobody has watched it.
+**Carried as polish, not as work:** the pan cursor, with the condition in the header above.
 
 ---
 
@@ -83,7 +92,8 @@ and the 25 transitions. The pass has never been re-measured across 1080p, 4K 60f
 which drives the preview size and therefore cache depth (§22.8) — quote `display` **and**
 `win WxH` on everything.
 
-**(b) The owner items above.** Phase 16 cannot close the pass over unaccepted work in 14 and 15.
+**(b) The two owner items above.** Phase 16 cannot close the pass over unread menus and an
+unheard screen reader.
 
 **(c) A read of what the pass actually shipped against the spec.** Fifteen phases have each
 recorded their own scope; nobody has checked the union against `docs/interface-pass-1-spec.md`
@@ -171,8 +181,8 @@ LucidLink read-ahead, EXR/OCIO.
 13. **Movie Inspector** — DONE, signed off.
 14. **Menus, help, accessibility, Loop, 0.5×, Copy Current Frame** — DONE. **Loop, 0.5× and Copy
     Current Frame ACCEPTED; menus, Help and the Narrator listen still pending.**
-15. **View scaling** — Actual Size, Fit to Window, Zoom, pan. **DONE and measured; NOT signed
-    off, every owner item open.**
+15. **View scaling** — Actual Size, Fit to Window, Zoom, pan. **DONE and SIGNED OFF**, after
+    one correction (Fit to Window stays enabled while checked).
 16. **Full regression.** **The open phase.** It can then honestly close the interface pass.
 
 ## Priority 1 is the constraint on all of it
@@ -223,8 +233,8 @@ Remote sessions present **1920x1200 @ 60Hz**; the physical panel is **5120x1440 
 `scripts/measure/refresh.ps1` reports the current one — **run it at the START of a session and
 again before quoting anything.** `stalls` is `2 × refresh`, so its bar moves 33.3ms → 8.3ms and
 **no stall figure crosses that boundary.** `hitch` does. **No subjective smoothness, cadence or
-picture-quality judgement is valid over Parsec at all** — which now includes every phase 15
-owner item above.
+picture-quality judgement is valid over Parsec at all** — which included every phase 15 owner
+item, all of which were therefore taken at the machine.
 
 ## Quote `hitch`, not `stalls`, and quote `win WxH` AND `display` with either
 

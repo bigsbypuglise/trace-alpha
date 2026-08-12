@@ -1945,9 +1945,14 @@ void MainWindow::syncViewScaleActions() {
     if (fitToWindowAction_) {
         QSignalBlocker block(fitToWindowAction_);
         fitToWindowAction_->setChecked(fit);
-        // Disabled while already fitting: it is the state the picture is in,
-        // and a command that visibly does nothing is the showInfo failure.
-        fitToWindowAction_->setEnabled(haveMedia && !fit);
+        // ENABLED WHILE ACTIVE, SHOWING ITS CHECKED STATE (owner, 2026-08-11).
+        // The first cut disabled it while already fitting, reasoning that a
+        // command which visibly does nothing is the showInfo failure. That
+        // reasoning does not apply to a CHECKABLE item: the tick is what it
+        // says, and greying the row makes the current state read as
+        // unavailable. Actual Size is enabled while checked for the same
+        // reason, so the two rows now behave alike -- which they did not.
+        fitToWindowAction_->setEnabled(haveMedia);
     }
     if (zoomInAction_) zoomInAction_->setEnabled(haveMedia);
     if (zoomOutAction_) zoomOutAction_->setEnabled(haveMedia);

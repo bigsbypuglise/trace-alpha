@@ -3598,7 +3598,7 @@ apart from a phase 15 regression was **a control binary built from `9db4780` in 
 which failed the same case with the same `0%` and `5.6%` to the digit.** On
 `M&M_TopGun_1080.mp4`, which the header names, the matrix reads 25 of 25 on the phase 15 build.
 
-### What is open
+### What was open at the end of the phase (all of it is now answered -- see the sign-off below)
 
 1. **The magnified picture has not been looked at.** Nearest at 2:1, 4:1 and 8:1, and
    specifically **the point-sampled chroma** described above. `TRACE_MAG_FILTER=linear` is the
@@ -3613,3 +3613,60 @@ which failed the same case with the same `0%` and `5.6%` to the digit.** On
    `Ctrl+0` and `Ctrl+plus`/`minus` and nothing else. Say if it should have one.
 5. **The under-resolved preview at a zoom**, described above. Explained and within the standing
    rule, not measured against an owner's eye.
+
+### PHASE 15 IS SIGNED OFF (owner, 2026-08-11), with one correction applied first
+
+**Accepted, each at its stated width:**
+
+- **Nearest-neighbour magnification above 1:1 stays.** It reads as intentional pixel inspection.
+  So the point-sampled chroma described above is **accepted behaviour, not a carried defect** —
+  and `TRACE_MAG_FILTER=linear` is now a comparison knob rather than a pending revert path.
+  Changing the magnification filter re-opens an owner decision.
+- **The pan's behaviour is correct.** A grab / closed-hand cursor **would improve discoverability
+  and is NOT required for sign-off**: it is carried as polish, and explicitly only if it can be
+  made trivial and **identical on both backends**. It cannot today — the D3D11 surface owns its
+  own window-class cursor and answers `WM_SETCURSOR` itself while the CPU path inherits the
+  widget's, which is the same two-mechanism split `setCursorHidden()` already has (phase 6
+  measured `GetCursorInfo` seeing only one of them). So it stays polish rather than a one-liner.
+- **The under-resolved preview during zoomed scrubbing is accepted**, on the stated condition
+  that **the exact full-resolution image returns immediately on release with no position jump**.
+  Measured, and it is the property `ViewScale::referenceDisplayed` exists to guarantee: mid-drag
+  `dst RGB32/BGRA 1066x600` while `display 3840x2160 zoom 1.00:1`, landing `target 56 shown 56
+  delta 0` full-res planar. **This is the sixth instance of the standing motion-over-fidelity
+  rule**, not a new exception.
+- **Fit to Window takes no default shortcut.** The phase 10 rule stands: the spec's Keyboard
+  section names `Ctrl+0` and `Ctrl+plus`/`minus` and nothing else.
+
+**One correction was required and applied: Fit to Window stays ENABLED while active and shows
+its checked state.** The first cut disabled it while already fitting, on the reasoning that a
+command which visibly does nothing is the `showInfo` failure phase 2 deleted. **That reasoning
+does not transfer to a CHECKABLE item** — the tick is what states the current state, and greying
+the row makes "this is what the picture is doing" read as "this is unavailable". Actual Size was
+already enabled while checked, so the two rows behave alike now, which they did not before.
+
+Verified through the menu rather than by the key: two rungs up reads `display 3840x2160 1:1 zoom
+1.00:1 pannable`, Alt+V then `w` returns `display 1201x676 filtered x2` with the `zoom` field
+gone, and **selecting it again from the checked state is a harmless no-op** — same line, process
+alive. `win 1201x1083` throughout.
+
+**Re-measured after the correction, and it changed nothing it should not have.** The ladder is
+identical rung for rung (0.50 → 1.00 → 2.00 → 4.00 → 8.00 → pinned, and back through 0.25 →
+0.13) at `win 1201x1083`; the pan legs are identical **to the digit** — fit `0 of 422450 px, 0%,
+max delta 0` and Actual Size `133988 of 422450, 31.7169%, max delta 58`.
+
+**Regression after the correction — flat, case for case with phases 12–14:**
+
+| | phase 15, post-correction |
+|---|---|
+| 4K H.264 cadence x3 | **100.0 / 100.0 / 100.0%**, 120 frames, `handler>budget 0 of 119`, all 119 gaps in the ~1x bucket |
+| ProRes 4444 cadence x2 | **99.8%**, 261 frames, `handler>budget 0 of 260` |
+| `scrub -SnapRelease` | `target 120 shown 120 delta 0`, full-res planar, **`hitch 0`**, `land 0` |
+| `lifecycle -PlayThroughDrag` | PASS — 83.6% of samples moved |
+| `lifecycle -PausedThroughDrag` | PASS — **0% moved** (the control) |
+| `transitions -All` | **25 of 25 PASS** (`M&M_TopGun_1080.mp4`) |
+
+**Read the sign-off at its stated width.** What was accepted is **the scaling behaviour, the
+magnification filter, the pan and the zoomed-scrub trade**. It is **not** a sign-off on the
+menus and Help wording, which phase 14 left open and which this phase added four rows to; and
+the **Narrator listen is still owed** (plan §31.5 item 4). One item leaves this phase as polish
+rather than as work: the pan cursor.
