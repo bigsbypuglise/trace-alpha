@@ -935,6 +935,166 @@ original sign-off is not wrong about what was observed — on 16:9 material the 
 the height — it was taken on material that could not show the fault. The video sign-off from
 phase 12 is untouched and did not need replacing.
 
+
+**SPEC PHASE 14 IS DONE (2026-08-11): the menus are the spec's, the Keyboard Shortcuts window
+is generated, and the composited transport is visible to a screen reader.** Audit first, at
+`docs/interface-pass-1-phase-14-audit.md`. **NOTHING IN THE PHASE IS SIGNED OFF** — owner
+visual and behavioural testing of Loop, 0.5×, Copy Current Frame, the menus, Help and the
+Narrator listen are all **pending**.
+
+**THE THREE CONTESTED FEATURES ARE EACH IN THEIR OWN COMMIT so any of them can be taken back
+out without touching the menu structure** (owner instruction, 2026-08-11): `78bc67b` audit ·
+`bccd21e` menus/shortcuts/Help/window commands · `eeea986` accessibility · **`d9a4840` Loop** ·
+**`a218643` 0.5×** · **`5de3552` Copy Current Frame** · `a78dedc` harness · `f603e22` gitignore.
+The first cut bundled all three into the menu commit; reverting any one of them would have
+taken the menus with it.
+
+**"INDEPENDENTLY REVERTABLE" WAS CHECKED RATHER THAN ASSUMED, AND THE FIRST ATTEMPT FAILED.**
+`git revert` on Loop conflicted twice — not because the features interact, but because Loop's
+one-line `setEnabled` sat directly beside Copy Current Frame's, and `loopWrap()` directly beside
+`copyCurrentFrame()`. **Two independent one-line additions on adjacent lines conflict on
+whichever is reverted second**, because git can only see that they touch. The fix is pure code
+motion: the pre-existing `speedActions_` loop separates the two one-liners, and
+`copyCurrentFrame()` moved past `syncMediaDependentActions()`. Verified as a reordering by
+sorting both files and diffing — identical as a multiset of lines, plus six comment lines — and
+**all three now revert cleanly and the reverted tree builds, checked one at a time.** The rule
+worth keeping: *if two commits must be separately revertable, their edits must not be
+adjacent.*
+
+**THE PHASE WAS SPLIT AND THE OWNER ACCEPTED THE SPLIT.** The spec's "menus, help and
+accessibility polish" names twenty-five entries and they are four kinds of work: **fifteen are
+wiring** over shared `QAction`s that already exist, **four are small net-new behaviour**, **two
+are playback-path work**, and **four are renderer work** — Actual Size, Fit to Window, Zoom In,
+Zoom Out change the *fit*, which drives the scrub preview size and cache depth (§22.8), and
+Actual Size on 4K puts the picture larger than the viewport, needing a pan model Trace has never
+had. So **view scaling is phase 15 with its own regression and full regression is 16.**
+`Ctrl+0` stays unclaimed until phase 15 takes it with Actual Size.
+
+Owner rulings, each at its stated width: **Check for Updates is OMITTED** (the spec conditions
+it on an updater and none exists — absent, not greyed); **Report an Issue is a pre-filled
+`mailto:` to `bigsbypuglise@gmail.com`** carrying the build identity, chosen over the private
+repo because a link there is a dead end for any tester who is not the owner; **the inspector's
+carried Duration row is ADDED**, origin `encoded` because it is the container's claim; and
+**Loop, 0.5× and Copy Current Frame were taken INTO phase 14** against the audit's
+recommendation to defer them — so this phase contains playback-clock work and a decoder-side
+conversion, and priority 1 binds it as hard as any engine phase.
+
+**One correction to the handoff, and it is the ninth premise-expiry.** It said the D3D11
+reduction taps were an open decision for upscaling. `updateReduction()` already gates on
+`fitted < content` on both axes and carries the reasoning verbatim — step 9 covered it. What
+*is* open is the **magnification filter above 1:1**: the sampler is bilinear, and a review tool
+at 4:1 probably wants nearest. That is a picture decision on a step-9-signed-off path and it is
+phase 15's.
+
+Six things to carry.
+
+- **`audioShouldDrive()` READ `speed <= 1.0001`, WHICH IS TRUE AT 0.5×.** Correct for as long
+  as 1× was the slowest rung there was, because "at most 1×" and "exactly 1×" then named the
+  same set. At 0.5× the device would run at real time while the picture ran at half, and the
+  tick would skip frames chasing the audio clock — **§29.3's fault, reproduced by a comparison
+  operator**, and a "never skip a frame" violation outside the sanctioned exception. It is
+  `== 1.0` now. **0.5× is silent, and that is the standing rule applied rather than a new
+  decision.** Verified with its control on a clip with sound: 0.5× reads `audio … idle`,
+  `proc 0ms`, `clk 0.000s`; 1× reads `MASTER`, `proc 2050ms`. The tick's clamp was `max(1.0,…)`
+  too, which would have rounded 0.5× silently back up to 1× — the menu ticking 0.5× over a file
+  playing normally. `kMinPlaybackSpeed` names it once so the two cannot disagree again.
+- **FOUR DUPLICATE MNEMONICS, THREE INTRODUCED HERE AND ONE SHIPPING SINCE PHASE 7.** Two items
+  in one menu sharing an Alt key makes it **cycle the highlight instead of activating either**.
+  Phase 10 hit this once and fixed it by inspection. `warnOnDuplicateMnemonics()` walks the
+  built menu bar at startup and prints to stderr — **a warning, not an assert** — and found
+  `SMPTE &Timecode` against `Go to &Timecode` **on its first run**, a phase 7 defect nobody had
+  noticed. A new menu item that collides now says so.
+- **`syncMediaDependentActions()` WAS NOT CALLED AFTER A SUCCESSFUL OPEN**, so Close Media, Copy
+  Current Frame, Loop and every speed rung stayed disabled for the life of the process. **A
+  disabled `QAction` does not report being triggered**, so Ctrl+C put nothing on the clipboard
+  and the menu item showed no message — which reads exactly like a broken conversion rather
+  than a command that never ran. It is now the one place a command is gated on media.
+- **COPY CURRENT FRAME IS NOT A CLIPBOARD ONE-LINER, and the spec's "only if safely supported"
+  was earned.** Since GATE C a full-res frame on `d3d11` is three YUV planes and
+  `VideoFrame::toQImage()` returns **null** for one *by construction* — `qtFormatFor()` refuses
+  planar on purpose. So the obvious implementation works under `TRACE_RENDERER=cpu` and puts
+  nothing on the clipboard on the shipping build. `VideoDecoderFFmpeg::frameToRgbImage` uses
+  **its own swscale context**, never the four-slot LRU playback depends on, and the **frame's**
+  colorimetry rather than the decoder's current state. It **refuses a preview-resolution frame**
+  rather than copying a soft one. Measured: 1920×1080, correct picture and colour.
+- **ALWAYS ON TOP GOES THROUGH `SetWindowPos(HWND_TOPMOST)`, NEVER `setWindowFlag`.** Changing
+  a top-level widget's window flags makes Qt **destroy and recreate the native window**, and
+  the D3D11 swapchain's surface is a child HWND created once from the viewer's `winId()` — the
+  obvious implementation would orphan the surface the picture is presented into, on the default
+  renderer, the first time anyone ticked the box. Verified by reading `WS_EX_TOPMOST` **off the
+  window** rather than the menu tick (`False → True → False`) and capturing the picture after.
+- **LOOP IS ANSWERED IN ONE PLACE.** Three sites in the tick reach "playback reached the end" —
+  the shuttle off the tail, a `Playback` decode finding nothing left (**only long-GOP media
+  reaches this one**), and the target clamping to `maxFrame`. Before Loop they only had to agree
+  on a flag; **a wrap that happens at two sites of three is a file that loops except when it
+  does not, depending on the codec.** It applies to a shuttle run too. **`loop N wraps N` is on
+  the HUD because a wrap RE-ESTABLISHES the playback timeline and zeroes every cadence counter
+  beside it** — a figure from a looping run is one lap's.
+
+**THE ACCESSIBILITY PROXY TREE IS BUILT AND WAS DRIVEN, AND DRIVING IT FOUND FOUR THINGS.**
+`scripts/measure/uiatree.ps1` walks the same UI Automation tree Narrator consumes.
+
+**It broke the Space bar.** Plan §19.7 asks for proxies "in a real tab chain"; the first cut
+gave them `Qt::TabFocus`, Qt assigns initial focus to the first focusable widget in the window,
+every other transport widget is `NoFocus` by an old rule and so is the viewer — so the **Rewind
+proxy took focus at show time and the first Space press on a fresh launch read `speed -2.00x |
+Reverse Play`**. The rule it broke names the failure exactly: *"Transport widgets must not take
+keyboard focus … if a new widget steals arrows/space, this is why."* Reading that as a rule
+about `QPushButton`s rather than about anything occupying the transport was the mistake.
+**`Qt::NoFocus` now — a narrower claim than §19.7 made, not a workaround for it**: screen
+readers navigate the tree rather than the tab chain, and every command already has a shortcut
+that works from anywhere. Switching it back is not a one-line change; something has to hold
+focus by default first.
+
+**Every proxy had an EMPTY BOUNDING RECTANGLE.** `OverlayModel::layout()` runs inside
+`buildFrame()`, i.e. **during the paint**, so proxies synced from `resizeEvent` read the rects
+from before the layout that resize caused — and at startup before there had been any layout at
+all. All five controls were correctly named, in the right reading order, and **a screen reader
+could not have said where any of them were.** Phase 10's trap in a third costume. Fixed with
+`OverlayModel::layoutRevision()`, the same promise `atlasRevision()` makes, checked once per
+paint. The rects now match phase 6's settled geometry to the pixel: **44×44 play, 34×34
+utility.** **Every control also announced as "group"** (a plain `QWidget` maps to
+`QAccessible::Client`); they are `Button`/`ButtonMenu`/`Slider` now. **And the Button role made
+Qt advertise Invoke, which did NOTHING** — `QAccessibleWidget` presses a `QAbstractButton` and
+these are plain widgets, so it was **a control that appears actionable and is not**, the
+`showInfo` failure phase 2 deleted, hidden where only a screen reader would find it. Invoking
+Fast-forward through UIA now — **no focus, no click** — reads `speed 2.00x | FF`.
+
+**THE NEGATIVE CONTROL INVERTED A CLAIM THIS PROJECT HAS CITED SINCE PHASE 6.** The same walk
+under `TRACE_TRANSPORT_BAR=1` — the escape hatch, described in five documents as the
+accessibility mitigation because it *"restores real widgets"* — found five controls reported as
+**`Group ""`**. The widgets were real and had **no accessible names**, because they are
+icon-only buttons whose `text()` is empty, and `TransportButton` is a plain `QWidget` so it had
+no role either. **The mitigation was announcing almost nothing**, and before it was fixed the
+composited overlay's proxy tree was already strictly better than the bar it was written to make
+up for. Both are fixed, so the claim is now true rather than nearly true.
+
+Read the accessibility result at its stated width: **UIA is the interface Narrator consumes, so
+an element absent from that tree is certainly not announced — but an element present in it can
+still read badly aloud. §31.5 item 4 is not closed: the listening is still owed**, and it is an
+owner item rather than a measurement.
+
+**Regression — flat (physical panel, 5120x1440 @ 239.999Hz):** 4K H.264 cadence ×3 **100.0%**
+with 120 frames, `handler>budget 0 of 119` and all 119 gaps in the ~1× bucket; 4444 ×2 **99.8%**
+at 0 of 260; `-SnapRelease` `target 120 shown 120 delta 0` full-res planar with **`hitch 0`**;
+both lifecycle legs; **25 of 25 transitions**. Case for case with phases 12 and 13.
+
+**THE FIRST CADENCE RUN WAS WRONG AND EVERY FIGURE ON IT LOOKED PERFECT.** It read `frames 30 |
+elapsed 1.25s` against a 119-frame baseline with `presented 24.00/24.00 (100.0% real time)` on
+the same line — **Loop was on, left on by the loop harness's own first run**, and every wrap had
+reset the counters. **`cadence.ps1` now runs against a scratch `TRACE_SETTINGS_FILE`** so it
+cannot inherit the machine, the way `recentfiles.ps1` already did; and the HUD's `loop` field is
+what to read first if a cadence figure is ever questioned. **A persisted preference is an input
+to a measurement.**
+
+**Two harness lessons that generalise past this phase.** `SetForegroundWindow` **fails silently
+from a background process** — a child PowerShell's own terminal takes focus, every `SendKeys`
+went there, and the run reported the feature missing; use `AttachThreadInput` and **read
+`GetForegroundWindow()` back** rather than assuming. And **P/Invoke's default is
+`CharSet.Ansi`**, so a managed string handed to any `...W` function is marshalled as ANSI and
+read back as UTF-16 — window titles came out **one character long**, and "Keyboard Shortcuts
+window NOT FOUND" was printed three times against a build where it was open on screen.
+
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across
 both: cadence 100.0/99.9% of real time with `handler>budget 0 of 119`, scrub reversals
@@ -1718,7 +1878,11 @@ version printed nothing while FFmpeg's own messages came through the same run),
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second
 because which of the three homes is in force is a *path*, and a path is the thing a 15px HUD
-capture is worst at),
+capture is worst at. **`TRACE_SETTINGS_FILE` is no longer only the recent list's**: spec phase
+14 added Loop, which is persisted, and a wrap re-establishes the playback timeline and zeroes
+every cadence counter with it — so `cadence.ps1` passes a scratch INI too, and a cadence figure
+taken on a machine where Loop was left on reports the **last lap** while reading a healthy
+100%. Measured: `frames 30 | elapsed 1.25s` against a 119-frame baseline),
 and ~~`TRACE_VIEW_TRANSFORM`~~ (**gone as of spec phase 10** -- the interim rotate/flip knob; the Edit menu's five actions replaced it and it left with the phase that made it redundant, exactly as `TRACE_SHUTTLE_ENTRY` did at phase 5), **`TRACE_LUCID_LOG=1`** (spec phase 9: one stderr line per LucidLink probe and copy -- the gate is three refusals deep and `disabled` looks identical whichever one fired) and **`TRACE_LUCID_COINIT=1`** (the retained control for the apartment question: `CoInitializeEx` instead of `OleInitialize`, measured identical).
 
 **Experimental / diagnostic gates, all off unless set** — confirmed at runtime,
@@ -1780,6 +1944,20 @@ the modeless window not holding the floating transport revealed. Read its `guard
 `hidden → revealed` must be ~4.2% or nothing below it means anything. Its second leg reports
 **NOT RUN** rather than a number, because Windows refuses `SetForegroundWindow` to a background
 process once the inspector has taken focus.
+
+**Menus, help and accessibility have harnesses now** (spec phase 14).
+**`scripts/measure/uiatree.ps1`** walks the UI Automation tree a screen reader reads and prints
+every element's name, control type, rectangle and description — **run it under
+`TRACE_TRANSPORT_BAR=1` as the negative control**, which is what showed the docked bar
+announcing five unnamed `Group`s. An element absent from that tree is certainly not announced;
+an element present in it can still read badly aloud, so **it does not close §31.5 item 4**.
+**`phase14.ps1`** covers `speed` / `loop` / `copy` / `close` / `shortcuts`; its `loop` leg needs
+a scratch `TRACE_SETTINGS_FILE` or the control is the test run twice, since Loop is persisted.
+**`menushot.ps1`** opens each menu and **asserts the capture changed** — a menu is a separate
+popup window, so a `GetWindowRect` capture of the main window shows a closed menu bar whether or
+not it opened. All three navigate menus **by mnemonic, never by counting DOWN arrows**: counting
+has to know the first item is already highlighted and skip separators, and a miscount silently
+activates the item *next* to the one under test.
 
 **Window shape has a harness now** (spec phase 12): `scripts/measure/resizecache.ps1` drives a
 real corner drag and reports `resize/chg/drop/sync` and the three Win32 resize messages —
