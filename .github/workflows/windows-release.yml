@@ -301,5 +301,11 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           prerelease: true
+          # body_path is the hand-written notes for the CURRENT tag -- what is
+          # new and, more importantly, the known gaps stated plainly. An alpha
+          # with honest limits gets useful bug reports; one without gets reports
+          # about things already known. generate_release_notes appends the
+          # commit log after it, so both are published.
+          body_path: docs/release-body.md
           generate_release_notes: true
           files: dist/trace-alpha-windows-x64.zip
