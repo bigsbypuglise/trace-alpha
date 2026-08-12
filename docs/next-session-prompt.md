@@ -1,7 +1,7 @@
 # PHASE 15 IS SIGNED OFF. PHASE 16 — the full regression — CLOSES THE PASS.
 
 **PHASE 15 SHIPPED AND IS ACCEPTED (2026-08-11): Actual Size, Fit to Window, Zoom In, Zoom Out
-and the pan they imply.** `aae42bf` render · `55fd965` app · `163c439` harness · `<signoff>`
+and the pan they imply.** `aae42bf` render · `55fd965` app · `163c439` harness · `9315af0`
 the Fit-to-Window correction and the record. Full record in
 `docs/interface-pass-1-progress.md` under "Phase 15".
 
