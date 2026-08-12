@@ -192,9 +192,21 @@ function Geometry($h) {
     # runs -- it hangs 12px past the left end of the groove. Measured: controls
     # at 40..50, 100..114, 157..173, handle at 204..215 with the groove starting
     # at 216. Without the margin the scan finds four controls and refuses.
+    # AND STARTING 16px IN, WHICH IS A FIFTH CLUSTER FROM OUTSIDE THE WINDOW.
+    # GetWindowRect includes Windows 11's invisible resize border, so the first
+    # few captured columns are whatever is BEHIND Trace -- desktop, another
+    # window's text, anything. Measured on the M&M clip with a bright window
+    # behind: `clusters=4 -> 3,46,107,165`, and the scan refused, reporting
+    # "groove or controls not located" for all 25 cases against a build whose
+    # controls were exactly where they always are. It is not clip-dependent and
+    # it is not build-dependent -- it depends on what is on the desktop, which
+    # is why the same matrix passed minutes earlier on a different file.
+    #
+    # 16 is clear of the border and nowhere near a control: the recorded
+    # positions are 40..50, 100..114, 157..173.
     $scanTo = $x0 - 24
     $marks = New-Object System.Collections.ArrayList
-    for ($x = 0; $x -lt $scanTo; $x++) {
+    for ($x = 16; $x -lt $scanTo; $x++) {
         $c = $b.GetPixel($x, $grooveY)
         if (($c.R + $c.G + $c.B) / 3 -gt 120) { [void]$marks.Add($x) }
     }
