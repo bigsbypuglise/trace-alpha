@@ -40,6 +40,27 @@ New-Item -ItemType Directory -Force $OutDir | Out-Null
 if (-not $Label) { $Label = [System.IO.Path]::GetFileNameWithoutExtension($Clip) }
 if ($Label.Length -gt 26) { $Label = $Label.Substring(0, 26) }
 
+# A SCRATCH SETTINGS FILE, BECAUSE A PERSISTED PREFERENCE CAN SILENTLY REWRITE
+# WHAT THIS MEASURES. Spec phase 14 added Loop, persisted through
+# trace::app::settings() -- and a looping run RE-ESTABLISHES the playback
+# timeline at every wrap, which zeroes `frames`, `presented`, the cadence
+# histogram and `handler>budget` along with it. A cadence run on a machine where
+# Loop had been left on therefore reports the LAST LAP: measured, before this
+# existed, as `frames 30 | elapsed 1.25s` on a clip whose recorded baseline is
+# 119 frames, with every rate figure reading a healthy 100%.
+#
+# Nothing about that is visible in the figures being compared -- which is the
+# whole shape of the stalls-versus-refresh mistake -- so the fix is to stop the
+# run inheriting the machine at all, the way recentfiles.ps1 already does. The
+# defaults a fresh INI produces (Loop off, aspect lock on) are the ones every
+# recorded baseline was taken under.
+#
+# The HUD's `loop ON wraps N` field is the check on this: if a cadence figure is
+# ever questioned, read it before anything else.
+$scratchIni = Join-Path $OutDir "cadence-scratch.ini"
+Remove-Item $scratchIni -ErrorAction SilentlyContinue
+$Env = @($Env) + @("TRACE_SETTINGS_FILE=$scratchIni")
+
 $shots = @()
 for ($r = 1; $r -le $Repeats; $r++) {
     & "$PSScriptRoot\restart.ps1" -Clip $Clip -Env $Env -SettleSeconds 5 | Out-Null
