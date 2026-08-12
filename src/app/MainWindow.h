@@ -224,6 +224,11 @@ private:
     // Ticks Flip Horizontal / Flip Vertical and enables Reset from the transform
     // actually in force, rather than from what the last press was assumed to do.
     void syncViewTransformActions();
+    // Spec phase 15. Ticks Actual Size / Fit to Window and enables the four
+    // scaling commands from the scale actually in force, for the same reason
+    // the transform has its own: the state lives in the viewer and the menu
+    // reports it rather than remembering what it last asked for.
+    void syncViewScaleActions();
     // Spec phase 9. Runs the installed LucidLink integration's own copy-link
     // command on a worker and reports what it produced. Trace never composes a
     // link; see LucidLinkIntegration.h for why the daemon's REST API is not the
@@ -611,6 +616,13 @@ private:
     QAction* flipHorizontalAction_ = nullptr;
     QAction* flipVerticalAction_ = nullptr;
     QAction* resetViewTransformAction_ = nullptr;
+
+    // Spec phase 15's view scaling. Four commands over one piece of state,
+    // which lives in ViewerWidget beside the transform.
+    QAction* actualSizeAction_ = nullptr;
+    QAction* fitToWindowAction_ = nullptr;
+    QAction* zoomInAction_ = nullptr;
+    QAction* zoomOutAction_ = nullptr;
 
     QAction* fullscreenAction_ = nullptr;
     // Escape, as a second surface onto fullscreenAction_. Its ENABLED state is

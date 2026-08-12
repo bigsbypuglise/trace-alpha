@@ -1000,6 +1000,21 @@ void MainWindow::installOverlayHooks() {
         showShareMenu(viewer_->mapToGlobal(local));
     };
 
+    // Spec phase 15. Both go straight to the viewer, which owns the scale and
+    // the pan; MainWindow is a pass-through here on purpose, because a press
+    // that lands on the picture is not a transport command and nothing in the
+    // playback state has an opinion about it.
+    //
+    // NO refreshHud() ON EVERY MOVE. A pan drag produces a mouse move per
+    // pointer sample and the HUD line is built from a dozen counters -- putting
+    // the instrument inside the gesture is phase 12's fifth stale-instrument
+    // finding in reverse. The `zoom` field is rebuilt on the next refresh, and
+    // the picture itself is the feedback that matters here.
+    hooks.canPan = [this]() { return viewer_ && viewer_->canPan(); };
+    hooks.panBy = [this](int dx, int dy) {
+        if (viewer_) viewer_->panBy(QPointF(dx, dy));
+    };
+
     hooks.requestRepaint = [this]() { if (viewer_) viewer_->update(); };
 
     viewer_->setOverlayHooks(hooks);
@@ -1243,6 +1258,67 @@ void MainWindow::setupSharedActions() {
 
     syncViewTransformActions();
 
+    // ---- spec phase 15: view scaling ----------------------------------------
+    //
+    // Four commands over ONE piece of state, which is why they are built
+    // together and why three of them are the same call with a different
+    // argument. `addViewAction` is reused verbatim: these are view commands in
+    // exactly the sense the transforms are -- no decoder request, no cache
+    // entry, no frame index and no timing changes with any of them.
+    //
+    // CTRL+0 IS CLAIMED HERE, AND THIS IS THE PHASE THE PROJECT SAID WOULD
+    // CLAIM IT. The approved design package puts Ctrl+0 on Reset View
+    // Transform and the interface spec puts it on Actual Size; the spec
+    // governs, its conflict rule is to preserve the existing binding, and at
+    // phase 10 neither existed so phase 10 took neither. Reset stays
+    // shortcut-less.
+    addViewAction(actualSizeAction_, tr("&Actual Size"),
+                  QKeySequence(Qt::CTRL | Qt::Key_0), [this]() {
+        if (viewer_) viewer_->setActualSize();
+        syncViewScaleActions();
+        refreshHud("Actual Size");
+    });
+    // NO SHORTCUT, for the phase 10 reason rather than an oversight: the spec's
+    // Keyboard section names Ctrl+0 and Ctrl+plus/minus and nothing else, and a
+    // key claimed here would have to be given up by whoever the spec later
+    // assigns it to. The route back from a zoom is Ctrl+minus, which is bound.
+    addViewAction(fitToWindowAction_, tr("Fit to &Window"), {}, [this]() {
+        if (viewer_) viewer_->setFitToWindow();
+        syncViewScaleActions();
+        refreshHud("Fit to Window");
+    });
+    // TWO SEQUENCES, AND THE ORDER IS THE PHASE 2 RULE: Qt advertises only the
+    // first in a menu, so the spec's own Ctrl++ is named and Ctrl+= sits behind
+    // it. Ctrl+= is not decoration -- on a US layout the plus is a shifted key,
+    // so the literal Ctrl++ is a three-finger chord and Ctrl+= is what people
+    // actually press.
+    addViewAction(zoomInAction_, tr("Zoom &In"), {}, [this]() {
+        if (viewer_) viewer_->zoomStep(+1);
+        syncViewScaleActions();
+        refreshHud("Zoom In");
+    });
+    zoomInAction_->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Plus),
+                                 QKeySequence(Qt::CTRL | Qt::Key_Equal)});
+    // "&Zoom Out", not "Zoom &Out": L&oop already owns O in the View menu, and
+    // two items sharing a mnemonic makes the key CYCLE the highlight instead of
+    // activating either. Found by warnOnDuplicateMnemonics() rather than by
+    // inspection -- which is the guard phase 14 added doing the job it was
+    // added for, on the first menu built after it.
+    addViewAction(zoomOutAction_, tr("&Zoom Out"), {}, [this]() {
+        if (viewer_) viewer_->zoomStep(-1);
+        syncViewScaleActions();
+        refreshHud("Zoom Out");
+    });
+    zoomOutAction_->setShortcuts({QKeySequence(Qt::CTRL | Qt::Key_Minus),
+                                  QKeySequence(Qt::CTRL | Qt::Key_Underscore)});
+    // Checkable so the menu says which of the two named states is in force.
+    // Written by syncViewScaleActions from the viewer, never by the handler
+    // that set it -- the same rule the flips and the speed rungs follow, and
+    // the reason a zoom reached by Ctrl+minus still unticks Actual Size.
+    actualSizeAction_->setCheckable(true);
+    fitToWindowAction_->setCheckable(true);
+    syncViewScaleActions();
+
     // The dev diagnostics HUD. Owner request, 2026-08-10: a quick way to put the
     // instrument away while judging feel, and back for measuring.
     //
@@ -1432,6 +1508,13 @@ void MainWindow::setupShortcuts() {
     // read out loud.
     shortcuts_.addAction(ShortcutGroup::File, closeMediaAction_);
     shortcuts_.addAction(ShortcutGroup::View, copyFrameAction_);
+    // Spec phase 15, documentation rows for the same reason. Fit to Window is
+    // deliberately absent: it has no shortcut, and the table is the KEYBOARD
+    // contract -- the same rule that keeps Minimize and the three shortcut-less
+    // view transforms out of it.
+    shortcuts_.addAction(ShortcutGroup::View, actualSizeAction_);
+    shortcuts_.addAction(ShortcutGroup::View, zoomInAction_);
+    shortcuts_.addAction(ShortcutGroup::View, zoomOutAction_);
     // Minimize is NOT listed: it has no shortcut, and the table is the KEYBOARD
     // contract. A row with no key in it would be a menu listing -- the same
     // rule that keeps the three shortcut-less view transforms out of it.
@@ -1839,6 +1922,35 @@ void MainWindow::syncViewTransformActions() {
     // the design package's Disabled state -- the action exists and cannot run
     // right now -- rather than Unavailable, which is about the media.
     if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(!vt.isIdentity());
+}
+
+// Spec phase 15. Two ticks and four enables, all read off the viewer.
+//
+// FIT AND ACTUAL SIZE ARE TICKED, ZOOM IN AND ZOOM OUT ARE NOT, and that
+// asymmetry is the honest one: fit and 1:1 are named states a picture can BE
+// in, while the zooms are steps. A checkable "Zoom In" would have to mean
+// something, and there is nothing for it to mean.
+void MainWindow::syncViewScaleActions() {
+    if (!viewer_) return;
+    const bool haveMedia = currentMedia_.has_value();
+    const bool fit = viewer_->isFitToWindow();
+    // Within a thousandth of 1:1 rather than exactly, because the scale can be
+    // reached by the ladder (exactly 1.0) or by the cap (a computed double).
+    const bool actual = !fit && std::abs(viewer_->currentScale() - 1.0) < 0.001;
+    if (actualSizeAction_) {
+        QSignalBlocker block(actualSizeAction_);
+        actualSizeAction_->setChecked(actual);
+        actualSizeAction_->setEnabled(haveMedia);
+    }
+    if (fitToWindowAction_) {
+        QSignalBlocker block(fitToWindowAction_);
+        fitToWindowAction_->setChecked(fit);
+        // Disabled while already fitting: it is the state the picture is in,
+        // and a command that visibly does nothing is the showInfo failure.
+        fitToWindowAction_->setEnabled(haveMedia && !fit);
+    }
+    if (zoomInAction_) zoomInAction_->setEnabled(haveMedia);
+    if (zoomOutAction_) zoomOutAction_->setEnabled(haveMedia);
 }
 
 void MainWindow::copyMediaFilePath() {
@@ -2677,9 +2789,12 @@ void MainWindow::closeMedia() {
         // 16:9 minimum. Leaving a 9:16 floor behind would constrain the empty
         // window to a shape whose media is gone.
         viewer_->setSourceShape(1.0, 0);
+        viewer_->setSourcePixelSize(QSize());
+        viewer_->setFitToWindow();
         viewer_->setMinimumAspect(16.0 / 9.0);
     }
     syncViewTransformActions();
+    syncViewScaleActions();
 
     // The window keeps the size it has. Section 4 shapes the window to the
     // MEDIA, and there is none -- resizing to some default here would move a
@@ -2886,6 +3001,9 @@ void MainWindow::syncMediaDependentActions() {
     if (flipHorizontalAction_) flipHorizontalAction_->setEnabled(haveMedia);
     if (flipVerticalAction_) flipVerticalAction_->setEnabled(haveMedia);
     if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(haveMedia);
+    // Spec phase 15's four, through the function that also decides their ticks,
+    // so "may this run" and "is this the state" are answered in one place.
+    syncViewScaleActions();
 }
 // COPY CURRENT FRAME (spec phase 14, Edit menu).
 //
@@ -3148,12 +3266,32 @@ void MainWindow::setupMenus() {
         refreshHud(on ? "Lock aspect" : "Unlock aspect");
     });
     viewMenu->addAction(lockAspectAction_);
+    viewMenu->addSeparator();
+
+    // Spec phase 15's group, where the spec's own View list puts it: after
+    // Always on Top and before the rest. It lands lower than that here because
+    // the spec's list is an enumeration rather than an ordering, and grouping
+    // the four scaling commands together next to the aspect lock they interact
+    // with reads better than splitting them across the menu.
+    viewMenu->addAction(actualSizeAction_);
+    viewMenu->addAction(fitToWindowAction_);
+    viewMenu->addAction(zoomInAction_);
+    viewMenu->addAction(zoomOutAction_);
+    viewMenu->addSeparator();
     viewMenu->addAction(toggleHudAction_);
 
     // ---- Window -------------------------------------------------------------
     auto* windowMenu = menuBar()->addMenu(tr("&Window"));
     windowMenu->addAction(minimizeAction_);
     windowMenu->addAction(maximizeRestoreAction_);
+    windowMenu->addSeparator();
+    // The SAME two QActions the View menu holds, listed again because the
+    // spec's Window menu names them -- phase 3's rule, and the reason it is a
+    // rule: a second pair of actions doing the same thing would need their
+    // checked state kept in step with the first pair, and the two would
+    // eventually disagree about which one the picture is actually in.
+    windowMenu->addAction(actualSizeAction_);
+    windowMenu->addAction(fitToWindowAction_);
     windowMenu->addSeparator();
     windowMenu->addAction(inspectorAction_);
 
@@ -4246,10 +4384,27 @@ bool MainWindow::openPath(const QString& path) {
                                    ? static_cast<double>(vm.sarNum) / static_cast<double>(vm.sarDen)
                                    : 1.0;
             viewer_->setSourceShape(par, vm.rotationDegrees);
+            viewer_->setSourcePixelSize(QSize(vm.width, vm.height));
         } else {
             viewer_->setSourceShape(1.0, 0);
+            // The still or sequence's own pixel size, from the same place
+            // currentDisplayAspect() reads it. Phase 13's defect is the reason
+            // this is not taken from LoadedImageInfo::image: that QImage is
+            // left default-constructed at both sites that build one, so its
+            // size is an empty QSize and section 4 silently did nothing for
+            // this whole media class until 3a38516.
+            viewer_->setSourcePixelSize(
+                currentImage_.has_value()
+                    ? QSize(currentImage_->width, currentImage_->height)
+                    : QSize());
         }
+        // Back to fit, because opening a file is a media change and a zoom is a
+        // way of looking at ONE piece of media. Beside the transform reset for
+        // the same reason that one is here: visibly part of what opening does,
+        // rather than buried in the setter.
+        viewer_->setFitToWindow();
     }
+    syncViewScaleActions();
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
     // Before the first frame: the decoder sizes scrub previews from this, and a
@@ -6159,6 +6314,17 @@ void MainWindow::refreshHud(const QString& action) {
                 if (vt.quarterTurns) resampleState += QStringLiteral(" rot%1").arg(vt.quarterTurns * 90);
                 if (vt.flipH) resampleState += QStringLiteral(" flipH");
                 if (vt.flipV) resampleState += QStringLiteral(" flipV");
+            }
+            // Spec phase 15, and reported for the same reason `view` is: a zoom
+            // that silently failed to apply looks identical to no zoom from
+            // every other number on this line. Absent while fitting, which is
+            // the state every recorded measurement in this project was taken
+            // in -- so a HUD capture with no `zoom` field is comparable to the
+            // whole existing record, and one with it is not.
+            if (!viewer_->isFitToWindow()) {
+                resampleState += QStringLiteral(" zoom %1:1")
+                                     .arg(QString::number(viewer_->currentScale(), 'f', 2));
+                if (viewer_->canPan()) resampleState += QStringLiteral(" pannable");
             }
             const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9%10")
                 .arg(perf.colorMatrix)
