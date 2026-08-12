@@ -1,5 +1,62 @@
 # PHASE 15 IS SIGNED OFF. PHASE 16 — the full regression — CLOSES THE PASS.
 
+## PHASE 14'S TWO REMAINING OWNER ITEMS PASSED (owner, 2026-08-11). RECORD THEM FIRST.
+
+**The menus and Help wording are ACCEPTED**, including phase 15's scaling entries. That was
+the last wording question in the pass.
+
+**THE NARRATOR LISTEN IS DONE AND PLAN §31.5 ITEM 4 IS CLOSED.** Narrator discovers the
+floating transport; **Play/Pause, Rewind, Fast-forward, Timeline and Share are announced
+clearly and activate with Narrator+Enter**; and ordinary Space play/pause is unaffected. So the
+composited transport is genuinely usable by a screen reader, not merely present in the UIA
+tree — which is the distinction every prior record was careful to keep open, and it is now
+answered by listening rather than by walking.
+
+**Document HOW it is reached, because it is not the obvious way and a future session will
+otherwise read it as a defect.** The renderer-drawn transport is navigated with the **Narrator
+cursor**, not the ordinary Tab chain. That is deliberate: phase 14 made the proxies
+`Qt::NoFocus` after the first cut gave them `Qt::TabFocus` and the Rewind proxy took initial
+focus, so **the first Space press on a fresh launch read `speed -2.00x`**. Screen readers
+navigate the accessibility tree rather than the tab chain, and every command already has a
+shortcut that works from anywhere — so keeping the transport out of the tab chain protects
+playback keyboard focus and costs a screen-reader user nothing. **Do not "fix" this by putting
+the proxies back in the tab chain**; that is the regression `eeea986` folded in.
+
+With these, **every owner item in the interface pass is answered** and phase 16's part (b) is
+already satisfied. Record the sign-offs in `CLAUDE.md`, `docs/interface-pass-1-progress.md` and
+plan §31.5 before starting the regression, each at its stated width.
+
+## AFTER THE REGRESSION PASSES — cut a release, and it STAYS ALPHA
+
+**Owner decision, 2026-08-11: this is not the first beta.** The interface pass is
+feature-complete against the approved spec and every owner item is answered, but **real
+mixed-monitor DPI has never executed** — no `WM_DPICHANGED`, no monitor-to-monitor move, no
+fullscreen on a secondary display; §4's whole window-shaping system takes `dpr` as an argument
+and has only ever been driven synthetically (§20.4). Trace's audience is VFX and motion
+artists, where multi-monitor at mixed scaling is close to universal, so that gap is exactly
+what a wider audience would hit first. **A second display is being set up later in the week**;
+beta follows that, not this release.
+
+**Tag `v0.2.0-alpha.1`.** The newest existing tag is `v0.1.0-alpha.23`, and continuing that
+sequence would understate what shipped — phases 6–15 are an entire new interface surface. The
+minor bump marks the milestone while staying honest about maturity, and it leaves the obvious
+next step legible: **`v0.2.0-beta.1` once mixed-monitor DPI is validated.**
+
+**Write the release notes to name the known gaps plainly**, because an alpha with honest limits
+gets useful bug reports and one without gets reports about things already known. At minimum:
+EXR does not open (`TRACE_WITH_OIIO` is undefined in vcpkg and CI); HDR / BT.2020 has no
+tonemap, so that content looks wrong on both backends; 10-bit **output** is not supported
+(§9 — not to be confused with the high-bit-depth *processing* that shipped at GATE C);
+mixed-monitor DPI is unvalidated; and cold LucidLink delivery is ~600–800 Mbps, so multi-Gbps
+plates will not stream. Note also that Windows ships as a **portable ZIP with no installer** by
+deliberate choice, and that `TRACE_RENDERER=cpu` is the escape hatch if anything about the
+picture looks wrong.
+
+A `v*` tag publishes a real ZIP asset and marks the GitHub release prerelease — that is
+correct here and should stay. Verify the tag build is green before announcing it, the way the
+last few sessions have read the three verification steps individually rather than trusting the
+overall conclusion.
+
 **PHASE 15 SHIPPED AND IS ACCEPTED (2026-08-11): Actual Size, Fit to Window, Zoom In, Zoom Out
 and the pan they imply.** `aae42bf` render · `55fd965` app · `163c439` harness · `9315af0`
 the Fit-to-Window correction and the record. Full record in
@@ -99,6 +156,22 @@ unheard screen reader.
 recorded their own scope; nobody has checked the union against `docs/interface-pass-1-spec.md`
 end to end. Expect at least one item that was deferred by a phase and never picked up —
 `Ctrl+0` was carried for five phases before phase 15 took it.
+
+**AND THERE IS ALREADY ONE CONFIRMED, WHICH IS WHAT MAKES (c) THE HIGHEST-VALUE PART OF THIS
+PHASE RATHER THAN A FORMALITY. THE MOVIE INSPECTOR STILL HAS NO DURATION ROW.** `CLAUDE.md`
+records the phase 14 owner ruling verbatim — *"the inspector's carried Duration row is ADDED,
+origin `encoded` because it is the container's claim"* — and it was never implemented. Verified
+at HEAD: `grep -rni "duration" src/app/MovieInspector.cpp` returns nothing, and the General
+section's labels in `MainWindow.cpp` (~line 2215) run File name, Source path, Resolution, File
+size, Overall data rate with no Duration among them. **`VideoDecoderFFmpeg.h:29` already carries
+`durationSeconds`, read at open**, so it is the one-row addition the ruling predicted.
+
+Note what kind of miss this is. It is not a spec item that was skipped — the spec's own field
+list for the inspector never asked for Duration. It is an **owner ruling made during a phase and
+recorded in three documents without being built**, which no phase record would surface, because
+each record describes what its phase did. So run (c) against **the spec AND the owner rulings**,
+not against the phase records: read `CLAUDE.md`'s decision entries and each progress section's
+sign-off text looking for verbs like *added*, *accepted*, *is ADDED* that no commit implements.
 
 **Known to be OUT of the pass and staying out**: Check for Updates (no updater exists),
 10-bit output (§9, two external gates), mixed-monitor DPI (§20.4, no hardware), BT.2020 tonemap,

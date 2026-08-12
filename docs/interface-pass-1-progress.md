@@ -3254,8 +3254,11 @@ Frame)**, `a78dedc` (harness), `f603e22` (gitignore).
 and `app/`**, so every figure below was taken on a byte-identical source tree. Each of the
 eight commits builds on its own.
 
-**NOTHING IN THIS PHASE IS SIGNED OFF.** Owner visual and behavioural testing of Loop, 0.5×,
-Copy Current Frame, the menus, Help and the Narrator listen all remain **pending**.
+**THIS PHASE IS NOW FULLY SIGNED OFF (owner, 2026-08-11)** — in two parts, recorded separately
+because they were taken on different days against different things. Loop, 0.5× and Copy Current
+Frame were accepted first; **the menus and Help wording, and the Narrator listen, were accepted
+last and are the final owner items in the whole interface pass**. Both sign-offs are written up
+at the end of this section.
 Display: **physical panel, 5120x1440 @ 239.999Hz** throughout, so the figures are comparable
 with phases 11–13 and not with 5–9.
 
@@ -3430,6 +3433,54 @@ runs against a scratch `TRACE_SETTINGS_FILE` so it cannot inherit the machine, a
   background process and must be read back, not assumed; and P/Invoke's default `CharSet.Ansi`
   makes any `...W` call taking a string return nonsense — window titles came back one character
   long, and the run reported a feature missing three times while it was open on screen.
+
+### Owner sign-off, part 1 (2026-08-11): Loop, 0.5× and Copy Current Frame ACCEPTED
+
+All three behave as intended. That closes the revert question with them — they are **shipped
+features, not extractable candidates** — so `kMinPlaybackSpeed`, `audioShouldDrive()`'s `== 1.0`,
+the three loop-wrap sites and `frameToRgbImage`'s own swscale context are **settled behaviour**,
+and changing any of them re-opens an owner decision rather than being a tidy-up.
+
+**Loop's persistence was raised and accepted with the feature**: it survives a file change and a
+restart deliberately, because it is a review preference rather than a property of the media. The
+consequence for measurement stands unchanged — a wrap re-establishes the playback timeline and
+zeroes every cadence counter, so `cadence.ps1` passes a scratch `TRACE_SETTINGS_FILE` and the
+HUD's `loop` field is the first thing to read if a cadence figure is ever questioned.
+
+### Owner sign-off, part 2 (2026-08-11): THE MENUS, HELP AND THE NARRATOR LISTEN
+
+**These were the last two owner items in the interface pass. Both passed.**
+
+**The menus and Help wording are ACCEPTED, as they now stand** — which is a wider read than the
+review first asked for at phase 14, because phase 15 added four rows to the View menu and two to
+the Window menu after that request was made. Trace Help's four paragraphs are the only prose in
+the product, and they were read rather than skimmed past. **That was the last wording question in
+the pass.**
+
+**THE NARRATOR LISTEN IS DONE, AND PLAN §31.5 ITEM 4 IS CLOSED.** Narrator discovers the floating
+transport; **Play/Pause, Rewind, Fast-forward, Timeline and Share are announced clearly and
+activate with Narrator+Enter**; and ordinary Space play/pause is unaffected. So the composited
+transport is **genuinely usable by a screen reader, not merely present in the UIA tree** — which
+is the distinction every prior record in this project was careful to leave open, and it is now
+answered by *listening* rather than by *walking*. `uiatree.ps1` remains the regression check;
+what it could never do is close this item, and it did not.
+
+**Document how it is reached, because it is not the obvious way and a future session will
+otherwise read it as a defect.** The renderer-drawn transport is navigated with the **Narrator
+cursor, not the ordinary Tab chain.** That is deliberate. Phase 14's first cut gave the proxies
+`Qt::TabFocus` exactly as §19.7 described, Qt assigned initial focus to the first focusable widget
+in the window, and **the first Space press on a fresh launch read `speed -2.00x | Reverse Play`**
+— the Rewind proxy had taken focus. They are `Qt::NoFocus` now. Screen readers navigate the
+accessibility tree rather than the tab chain, and every command already has a shortcut that works
+from anywhere, so keeping the transport out of the tab chain **protects playback keyboard focus
+and costs a screen-reader user nothing** — which is what the listen confirms.
+
+**Do not "fix" this by putting the proxies back in the tab chain.** That is the regression
+`eeea986` folded in rather than shipped, and it is not a one-line change in either direction:
+something has to hold focus by default first, and that is a decision about the viewer.
+
+**With these, every owner item in the interface pass is answered**, and phase 16's part (b) is
+satisfied before the regression begins.
 
 ---
 

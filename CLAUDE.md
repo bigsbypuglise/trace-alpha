@@ -1071,8 +1071,10 @@ up for. Both are fixed, so the claim is now true rather than nearly true.
 
 Read the accessibility result at its stated width: **UIA is the interface Narrator consumes, so
 an element absent from that tree is certainly not announced — but an element present in it can
-still read badly aloud. §31.5 item 4 is not closed: the listening is still owed**, and it is an
-owner item rather than a measurement.
+still read badly aloud**, which is why walking the tree could never close §31.5 item 4 and this
+record left it open. **It IS closed now — the owner listened on 2026-08-11 and it passed; see
+the phase 14 sign-off block above.** What remains true here is the *reason* the walk was not
+enough, not the open item.
 
 **Regression — flat (physical panel, 5120x1440 @ 239.999Hz):** 4K H.264 cadence ×3 **100.0%**
 with 120 frames, `handler>budget 0 of 119` and all 119 gaps in the ~1× bucket; 4444 ×2 **99.8%**
@@ -1095,13 +1097,40 @@ went there, and the run reported the feature missing; use `AttachThreadInput` an
 read back as UTF-16 — window titles came out **one character long**, and "Keyboard Shortcuts
 window NOT FOUND" was printed three times against a build where it was open on screen.
 
-**PHASE 14 IS PARTLY SIGNED OFF (owner, 2026-08-11): Loop, 0.5× and Copy Current Frame are
-ACCEPTED.** All three behave as intended. That closes the revert question with them — they are
-shipped features, not extractable candidates — so **`kMinPlaybackSpeed`, `audioShouldDrive()`'s
-`== 1.0`, the three loop-wrap sites and `frameToRgbImage`'s own swscale context are settled
-behaviour**, and changing any of them re-opens an owner decision rather than being a tidy-up.
-**STILL PENDING and not covered by that acceptance: the menus and Help wording, and the
-Narrator listen** (plan §31.5 item 4). The proxy tree has been *driven*, never *heard*.
+**PHASE 14 IS FULLY SIGNED OFF (owner, 2026-08-11), in two parts taken on different days.**
+
+**Part 1 — Loop, 0.5× and Copy Current Frame are ACCEPTED.** All three behave as intended. That
+closes the revert question with them — they are shipped features, not extractable candidates —
+so **`kMinPlaybackSpeed`, `audioShouldDrive()`'s `== 1.0`, the three loop-wrap sites and
+`frameToRgbImage`'s own swscale context are settled behaviour**, and changing any of them
+re-opens an owner decision rather than being a tidy-up. Loop's persistence across a file change
+and a restart was accepted with the feature: it is a review preference, not a property of the
+media.
+
+**Part 2 — THE MENUS AND HELP WORDING ARE ACCEPTED, AND THE NARRATOR LISTEN IS DONE. THESE WERE
+THE LAST TWO OWNER ITEMS IN THE ENTIRE INTERFACE PASS.** The menus were read **as they now
+stand**, which is wider than the review first asked for — phase 15 added four rows to View and
+two to Window afterwards — and Trace Help's four paragraphs, the only prose in the product, were
+read rather than skimmed. That was the last wording question in the pass.
+
+**PLAN §31.5 ITEM 4 IS CLOSED.** Narrator discovers the floating transport; **Play/Pause,
+Rewind, Fast-forward, Timeline and Share are announced clearly and activate with
+Narrator+Enter**; ordinary Space play/pause is unaffected. The composited transport is
+**genuinely usable by a screen reader, not merely present in the UIA tree** — the distinction
+every prior record was careful to keep open, now answered by **listening rather than by
+walking**. `uiatree.ps1` stays the regression check; what it could never do is close this item.
+
+**IT IS REACHED WITH THE NARRATOR CURSOR, NOT THE TAB CHAIN, AND THAT IS DELIBERATE — a future
+session will otherwise read it as a defect.** §19.7 asked for proxies in a real tab chain; phase
+14 built exactly that and it **broke the Space bar**, because Qt gives initial focus to the first
+focusable widget and the Rewind proxy took it. They are `Qt::NoFocus`, which is the narrower and
+correct claim: screen readers navigate the accessibility tree, every command already has a
+shortcut that works from anywhere, and staying out of the tab chain protects playback keyboard
+focus at no cost to a screen-reader user — which is what the listen confirms. **Do not "fix"
+this by restoring the tab chain**; that is the regression `eeea986` folded in, and reversing it
+needs something else to hold focus by default first.
+
+**EVERY OWNER ITEM IN THE INTERFACE PASS IS NOW ANSWERED.**
 
 **SPEC PHASE 15 IS DONE AND MEASURED (2026-08-11, `aae42bf` render · `55fd965` app · `163c439`
 harness): the picture has a scale and an origin, and above 1:1 it shows pixels.** Actual Size,
@@ -1221,9 +1250,11 @@ measured `GetCursorInfo` seeing only one of the two. So it is not a one-liner an
 described as one.
 
 **Read the sign-off at its stated width**: what was accepted is the **scaling behaviour, the
-magnification filter, the pan and the zoomed-scrub trade**. It is **not** a sign-off on the menus
-and Help wording — phase 14 left those open and this phase added four rows to them — and the
-**Narrator listen is still owed** (plan §31.5 item 4).
+magnification filter, the pan and the zoomed-scrub trade**. It was **not** a sign-off on the
+menus and Help wording — phase 14 left those open and this phase added four rows to them — nor
+on the Narrator listen. **Both of those were then accepted separately on 2026-08-11** (phase 14
+sign-off part 2 above), which is what left the pass with no open owner item; they are not
+covered by *this* sign-off and were never meant to be.
 
 **BOTH GPU PREREQUISITES ARE BUILT AND MEASURED (2026-08-10, plan §31), and the spec's own
 phase 1 audit is `docs/interface-pass-1-audit.md`.** Playback and scrub are unchanged across

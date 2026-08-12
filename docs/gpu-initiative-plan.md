@@ -3891,8 +3891,31 @@ d3d11 figures to the digit (99.8%, 0 doubled, 0 over budget, handler 25.22ms, wo
 3. **`src/ui/OverlaySpike.*` is now doubly superseded** — it was the Qt-widget probe §18.4
    closed, and it holds the only `MouseButtonDblClick` in the tree. Retire it during phase 2's
    icon-source reconciliation.
-4. The accessibility proxy tree (§19.7) is still a plan, not a prototype, and the overlay must
-   not be called final until a screen reader has driven one.
+4. ~~The accessibility proxy tree (§19.7) is still a plan, not a prototype, and the overlay must
+   not be called final until a screen reader has driven one.~~
+
+   **CLOSED, 2026-08-11: a screen reader has now driven one, and it works.** Owner listen with
+   Narrator on the shipping build — **Narrator discovers the floating transport, and Play/Pause,
+   Rewind, Fast-forward, Timeline and Share are announced clearly and activate with
+   Narrator+Enter**, while ordinary Space play/pause is unaffected. The composited transport is
+   **genuinely usable by a screen reader, not merely present in the UIA tree.** That distinction
+   is the whole of this item and is exactly what `uiatree.ps1` could not settle: UIA is the
+   interface Narrator consumes, so an element absent from that tree is certainly not announced —
+   but an element present in it can still read badly, in the wrong order, or with a name that is
+   nonsense aloud. Only listening answers that, and it has been done.
+
+   **It is reached with the Narrator cursor, not the Tab chain, and that is deliberate rather
+   than a shortfall against this item as written.** §19.7 asked for proxies "in a real tab
+   chain"; phase 14 built that first and it **broke the Space bar** — Qt gives initial focus to
+   the first focusable widget, so the Rewind proxy took it and the first Space press on a fresh
+   launch read `speed -2.00x`. The proxies are `Qt::NoFocus` now, which is a **narrower claim
+   than §19.7 made and the correct one**: screen readers navigate the accessibility tree, every
+   command already has a shortcut that works from anywhere, and keeping the transport out of the
+   tab chain protects playback keyboard focus at no cost to a screen-reader user. **Do not
+   re-propose the tab chain** — that is the regression `eeea986` folded in, and reversing it
+   needs something else to hold focus by default first.
+
+   The record below is retained as the reasoning that produced the work.
 
    **OWNER DECISION, 2026-08-11: the alpha ships this way, and spec phase 13 BUILDS this
    rather than polishing it.** The item as written above reads as a deferral, and it is more
