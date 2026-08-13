@@ -1,9 +1,10 @@
-# OPEN: large ProRes 4444 playback — MEASURED, one fix shipped, one owner question
+# CLOSED: large ProRes 4444 playback — measured through, two fixes shipped, no open owner question
 
 The interface pass is closed and `v0.2.0-alpha.1` is cut — that record is below and is intact.
-The owner report of 2026-08-12 has been **measured through** on 2026-08-13. Read this section
-before the brief that follows it, which is retained as the record of what was asked for and is
-**wrong in two of its three candidates**.
+The owner report of 2026-08-12 was **measured through** on 2026-08-13, and the product decision
+it raised was taken by the owner the same day and is **shipped**. Read this section before the
+brief that follows it, which is retained as the record of what was asked for and is **wrong in
+two of its three candidates**.
 
 ## What the two files actually are — the brief's premise was off on both
 
@@ -116,42 +117,101 @@ period and is still late is jitter and keeps the grid; one that did not fit is a
 pipeline with nothing to wait for. **Epoch and slot are untouched**, so the timeline does not
 move and the frame index is still the accumulator's or the audio clock's.
 
-## Where the 8K plate now stands
+## THE OWNER DECISION WAS TAKEN, AND PLAYBACK NOW HOLDS MEDIA TIME (2026-08-13)
 
-| config | presented | fps | handler | outside |
-|---|---|---|---|---|
-| as shipped at `v0.2.0-alpha.1` | 33.8–35.4% | 8.2 | 89.7 | 32.2 |
-| **shipping now** (`ee6d525`) | **45.1%** | 10.8 | 89.4 | 1.5 |
-| + `TRACE_INTRA_FRAME_THREADS=1` | **66.8%** | 16.0 | 47.3 | 14.8 |
+**"Optimize playback for real-time presentation. If a heavy source cannot physically sustain
+its native frame rate, Trace should selectively drop playback frames to keep media time
+real-time rather than slowing the entire movie down. Exactness remains mandatory for paused
+inspection, frame stepping, click landing, and scrub release. Frame dropping should engage only
+when required, be clock-driven, and be visible in telemetry."** Shipped at `35d976b`.
 
-`hitch 0` in all three. **66.8% against a decode ceiling of 85%** — the pipeline is well
-overlapped at that point and there is little left in it.
+**This is the fourth deliberate exception to "never skip a frame"**, alongside the drag preview
+on intra-only media (§15), accelerated reverse and accelerated forward. Read it at its stated
+width: it is **1× forward playback only**, it is **off below 1×** (the user asked for slow
+motion), and **nothing about exactness moved** — `scrub -SnapRelease` still lands
+`target 261 shown 261 delta 0`.
 
-## THE OWNER DECISION THIS LEAVES, AND IT IS THE ONLY OPEN ITEM
+Where the 8K plate now stands, `TRACE_NO_AUDIO=1`, physical panel:
 
-**Frame threading cannot be the default and a resolution-conditional default does not help**,
-because the 8K plate needs good scrub as much as good playback. But `thread_type` is a property
-of **what the decoder is being asked to do, not of the file**: playback wants frame threading,
-random access wants slice. Switching it needs an `avcodec_close` + `avcodec_open2` at the
-transition, which is real work and needs care — the decoder is leased to the scrub worker
-during a drag, and the reopen must not land inside a lease. **That is the next piece of work
-and it is worth ~1.5x on large intra-only playback with no cost to scrub.**
+| | presented | media time | drop |
+|---|---|---|---|
+| as shipped at `v0.2.0-alpha.1` | 33.8–35.4% | 34% | — |
+| + the scheduler fix (`ee6d525`) | 45.1% | 45% | — |
+| **+ the real-time drop (`35d976b`)** | **46.0%** | **97.4%** | `67 (ticks 59 max 2)` |
 
-The question for the owner, and it is priority-1 shaped: **is ~11fps on an 8K XQ plate that
-cannot exceed 20fps acceptable, given every frame is shown in order?** Trace's contract is that
-it never drops a frame. The alternative — presenting at real time by dropping — is a product
-decision, not an implementation choice, and the brief's own rule says so.
+**The movie plays at the right speed now** — frame 127 of a due 131 in 5.44s, against frame 60
+of 133 before — showing 11 of every 24 frames, `hitch 0`, against a decode ceiling of 20.5fps.
 
-**Judge it at the machine, not over Parsec.**
+**THE OTHER HALF OF THE FIX WAS NOT THE DROP, IT WAS THE WALK LIMIT, AND THE FIRST CUT MADE
+THINGS WORSE.** With `kPlaybackForwardWalkLimit` at 4 on intra-only, a present that skipped 3
+frames *walked* them and decoded all 3 — `walk 3f`, `dec 215ms`, **14.4% of real time, worse
+than not dropping at all**. It is a runaway as well as a cost: slower playback falls further
+behind, which asks for a bigger jump. On intra-only a seek lands on the target for one decode,
+so the limit is **1**. Long-GOP keeps 48. **A frame-dropping policy and a walk-versus-seek
+policy are one decision, not two**, and neither is safe to change alone.
+
+## PER-MODE THREADING WAS BUILT, MEASURED AND TAKEN BACK OUT — DO NOT REBUILD IT BLIND
+
+The owner authorised frame threading for playback and slice for scrub **"if the measurements
+continue to support that"**. They do not, and the implementation exists in `35d976b`'s history
+if it is ever wanted: a codec reopen at the mode boundary, safe under the scrub lease, with
+two-edge hysteresis.
+
+**The real-time drop is what killed it, and the reason generalises: dropping makes playback ask
+for JUMPS, and on intra-only a jump IS random access — so the mode that would want frame
+threading stops existing exactly when the source is heavy enough to want it.** All four cells
+on the 8K plate:
+
+| | presented | media |
+|---|---|---|
+| frame + seek | 4.2% | 13.5% |
+| slice + walk | 14.4% | 53.5% |
+| frame + walk | 16.7% | 64.4% |
+| **slice + seek** | **46.0%** | **97.3%** |
+
+**It failed on both reported files.** The 8K never earns frame threading, which is correct. The
+marginal 4448×3096 plate *does* earn it and is **worse for it — 92.3% presented with 7 drops
+against 98.4% and none** — because a frame-threaded `avcodec_open2` over that frame size costs
+a **280ms** stall, once, which the drop then catches up. Pinned to slice on the same build it
+reads 98.4% and `drop 0`. `TRACE_INTRA_FRAME_THREADS=1` reproduces every figure here.
+
+**If it is ever revisited** — a long, genuinely marginal source is the case that could still
+justify it, since the reopen amortises — two things from building it are worth keeping. The
+hysteresis must be **two-edged**: losing frame threading on the first drop made the marginal
+file oscillate, `sw 6` in four seconds with `max 331ms`, because a source dropping one frame in
+sixty is a sequential workload with an occasional jump. And **the starting state must be the
+safe one**: starting frame-threaded cost two reopens and `max 892.9ms` on a 5s run, while
+starting in slice let the heavy source discover it could not keep up for `sw 0`.
+
+## What is open
+
+**Nothing is blocked, and there is no open owner question.** The two things worth doing next,
+in the owner's hands:
+
+1. **Judge the 8K plate at the machine.** 11 fps of picture on a plate that cannot exceed 20 is
+   what the contract now produces, and whether that reads as *usable review* or as *a slideshow
+   in time* is a judgement no counter makes. **Not over Parsec.**
+2. **The 4448×3096 file has never been confirmed as genuinely slow.** It measures 98.4% of real
+   time with `drop 0` and `hitch 0` and always has. If the owner still sees it as slow, the next
+   session needs to know what they were doing — it is not playback in a default or maximized
+   window.
+
+Everything below this line is the record of the investigation that produced the two fixes.
 
 ## Two things this session established that outlive it
 
 **AN OUT-OF-APP BENCHMARK IS AN INSTRUMENT AND CAN ACCUSE A CORRECT HYPOTHESIS.** The ffmpeg
 ceiling run said candidate 1 was refuted, on all three files, by a consistent margin. Building
-the knob anyway — because the brief said to — found a 1.7x win. This is the eighth stale-
-instrument finding and the first where the instrument was *out of process*. The rule it adds:
-**a benchmark that removes the work your program does around the thing being measured is
+the knob anyway — because the brief said to — found a 1.7x win in the app. This is the eighth
+stale-instrument finding and the first where the instrument was *out of process*. The rule it
+adds: **a benchmark that removes the work your program does around the thing being measured is
 measuring a different program.**
+
+**AND THAT 1.7x DID NOT SURVIVE EITHER, WHICH IS THE SAME LESSON A THIRD TIME.** Frame threading
+was measured against a build that did not yet drop frames. Once the real-time drop shipped, the
+gain inverted — see the per-mode threading section above — because dropping changes playback's
+access pattern from sequential to random and frame threading is bad at random access. **A
+measurement is taken against a build, and the build moved.**
 
 **A DEFERRED ITEM'S PREMISE EXPIRES — AND SO DOES A REFUTATION'S.** Candidate 1's premise did
 *not* expire, which is the tenth instance read the other way: the July 2026 decision was still

@@ -1658,6 +1658,22 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   Re-measured on the shipping build: **at ~4x the picture ends exactly on the pointer and never trails more than 6 frames, in both directions** (`behind 0/6f`, `p2p 26ms`), on 52–54% supply — the figure §15.1 predicted. The fast sweep reproduces §15.2's `p2p 22ms` to the digit with max lag better than §15.4's `cpu` record (`0/21f` vs `0/48f`). The throughput fact (~23ms/frame, untouched) is still true; **supply below 100% stopped meaning "behind" when sampling shipped.** Fourth premise-expiry in three sessions, after §26.2, §27 and §28.
 
+- **PLAYBACK HOLDS MEDIA TIME REAL-TIME AND DROPS PICTURE WHEN A SOURCE CANNOT KEEP UP — owner decision, 2026-08-13 (`35d976b`). This is a deliberate, bounded exception to "never skip a frame", and it is the fourth.** A source that cannot physically sustain its native rate keeps the *movie* on the clock rather than playing the whole thing slowly. **Exactness is untouched and stays mandatory** for paused inspection, frame stepping, click landing and scrub release. **1× forward playback and nothing else**: reverse and the shuttle carry their speed in a stride and return earlier, and **below 1× every frame is presented** — the user asked for slow motion, and dropping picture to hold a deliberately slowed clock would defeat the request (the same reasoning that makes 0.5× silent).
+
+  **`realtimeDropSteps()` returns 1 unless the run is already behind**, so "engage only when required" is structural rather than a tuned threshold, and **`drop 0` across the validated asset set is the check**. The HUD reads `drop N (ticks M max R, media P%)`: `real time` is how much *picture* arrived, **`media` is whether the *movie* stayed on the clock**, and the second must read ~100% whenever the first reads below it.
+
+  **THE CLOCK IS THE GATE E PRESENTATION TIMELINE, NOT THE WALL-CLOCK ACCUMULATOR.** The accumulator is capped at four periods so a stalled run resumes at rate rather than fast-forwarding through arrears — so `floor(accumulator/period)` **pins at 4** on a source running at half rate and would ask for nearly double speed. The timeline needed an anchor **frame** as well as an epoch (`presentAnchorFrame_`), or Play from the middle of a file maps media time onto the wrong frame.
+
+  **THE FIRST CUT MADE IT WORSE — 14.4% of real time against 34.4% for not dropping at all — AND THE CAUSE IS A SECOND, SEPARATE PREMISE EXPIRY.** `kPlaybackForwardWalkLimit` was **4** on intra-only, so a present that skipped 3 frames *walked* them and decoded all 3 (`walk 3f`, `dec 215ms`). **It is a runaway as well as a cost**: slower playback falls further behind, which asks for a bigger jump. On intra-only a seek lands on the target for one decode, so **the limit is 1** — `+1` still walks as ordinary playback must, and any jump seeks. Long-GOP keeps 48, where a walked frame is ~2.6ms against a ~30ms seek and the trade genuinely inverts. Measured on the 8K plate: `media 97.4%`, `drop 67`, `walk 0f`, `hitch 0`, **frame 127 of a due 131 in 5.44s** against frame 60 of 133 before. `TRACE_RT_DROP=0` is the control.
+
+- **PER-MODE THREADING (FRAME FOR PLAYBACK, SLICE FOR SCRUB) WAS BUILT, MEASURED AND TAKEN BACK OUT — 2026-08-13. The owner authorised it "if the measurements continue to support that", and they do not.** Do not rebuild it without reading this. It was a working implementation: a codec reopen at the mode boundary, safe under the scrub lease, with two-edge hysteresis on the latch.
+
+  **DROPPING IS WHAT KILLED IT, and the reason generalises: the real-time drop makes playback ask for *jumps*, and on intra-only a jump IS random access — so the mode that would want frame threading stops existing exactly when the source is heavy enough to want it.** All four cells on the 8K plate, and three are catastrophic: **frame + seek 4.2%** (`dec 658ms`, a pipeline refill per frame) · **slice + walk 14.4%** (`dec 215ms`, decodes every dropped frame) · **frame + walk 16.7%** (`handler 253ms`) · **slice + seek 46.0%, `media 97.3%`** — and it is not close.
+
+  **It was measured on both reported files and failed on both.** The 8K never earns frame threading, which is correct. The marginal 4448×3096 plate *does* earn it and is **worse for it — 92.3% presented with 7 drops against 98.4% and none** — because a frame-threaded `avcodec_open2` over a 4448×3096 frame costs a **280ms** stall, once, which the drop then has to catch up. Pinned to slice on the same build it reads 98.4% and `drop 0`. **`TRACE_INTRA_FRAME_THREADS=1` reproduces all of it.**
+
+  Two things from building it that are worth keeping. **The hysteresis has to be two-edged and the second edge is not obvious**: losing frame threading on the *first* drop made a marginal file oscillate (`sw 6` in four seconds, `max 331ms`), because a source that drops one frame in sixty is a sequential workload with an occasional jump. And **the starting state must be the safe one** — starting frame-threaded and switching out cost two reopens and `max 892.9ms` on a 5s run, while starting in slice let the heavy source discover it could not keep up for `sw 0`.
+
 - **GATE E's deadline scheduler QUANTISED PLAYBACK TO fps/N ON ANY FILE THAT MISSED ITS BUDGET — FIXED 2026-08-13 (`ee6d525`).** `armNextPresent()`'s rephase branch arms for the next grid slot *strictly after now*. That is right for a **transient** overrun — one long frame costs one slot and the run resumes at rate rather than fast-forwarding through arrears — and wrong for a **sustained** one, because then every arm inserts the remainder of a slot as idle. With `handler 88ms` against a `41.71ms` period (2.11 slots) it armed for slot 3 and played at `23.976/3 = 8.0fps` while the pipeline could supply 11.0. The signature is **`outside 32ms` of a 121ms period with `rephase` firing on every frame**.
 
   The fix is per frame and needs no new state: **`lastHandlerMs_` is valid inside `armNextPresent()` because the `recordHandler` scope guard is declared AFTER the `armNext` guard and so runs BEFORE it.** A handler that fit its period and is still late is jitter and keeps the grid; one that did not fit is a saturated pipeline with nothing to wait for. Epoch and slot are untouched, so the timeline does not move and the frame index is still the accumulator's or the audio clock's — **no frame is skipped, and this is not an exception to that rule.**
@@ -2111,7 +2127,16 @@ intra-only codecs — the **symmetric control** `TRACE_LONGGOP_SLICE_THREADS` ne
 33.8 → 58.0% of real time with the handler 89.7 → 43.3ms, while 4K 4444
 `scrub -SnapRelease` goes `dec 15.9 → 155.6ms` and `release 42.8 → 398ms` with
 `ui gap max 26 → 241ms`, and `-Reversals` `hitch 2 → 7`. The landing stays exact on
-both, so it is responsiveness rather than correctness),
+both, so it is responsiveness rather than correctness. **It is also the control for
+the per-mode threading switch that was built and removed** — see the Decisions
+entry; under it the intra-only walk limit is 48 rather than 1, which is the other
+half of that measurement),
+**`TRACE_RT_DROP=0`** (2026-08-13, `35d976b`: never drop a playback frame, i.e. the
+pre-owner-decision behaviour where a heavy source plays the whole movie slowly
+instead of holding media time. The control for anything about the drop, and the
+thing to set if a `media %` figure is ever questioned. **Note the default engages
+only when a source cannot keep up** — every file in the validated set reads
+`drop 0` either way, so this knob changes nothing on any of them),
 ~~`TRACE_SHUTTLE_ENTRY=2x`~~ (**gone as of
 spec phase 5** — an interim knob added at phase 3 so the Rewind/Fast-forward
 buttons' 2× entry was executable before those buttons existed; both buttons are
