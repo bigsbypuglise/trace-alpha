@@ -985,7 +985,36 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     // Forward playback throughput is what this trades against and is the control
     // for any run with it set.
     const bool forceSliceThreads = envFlagSet("TRACE_LONGGOP_SLICE_THREADS");
-    impl_->codec->thread_type = (intraOnly || forceSliceThreads)
+    // TRACE_INTRA_FRAME_THREADS=1 is the SYMMETRIC control, and it did not exist
+    // until the 8K ProRes report: TRACE_LONGGOP_SLICE_THREADS tests slice-only on
+    // long-GOP, and nothing tested frame threading on intra-only.
+    //
+    // The premise of the intra-only rule above was measured in July 2026, on the
+    // UI thread, before f77d472 moved random-access scrub decode onto a worker
+    // under a lease -- so the ~100ms seek stall it protects against is no longer
+    // on the thread that matters. What it costs is forward throughput, and that
+    // cost scales with frame size, which is invisible at 1080p and 4K.
+    //
+    // A REFERENCE-DECODER BENCHMARK ANSWERS THIS QUESTION WRONG, AND IT ANSWERS
+    // IT CONFIDENTLY. `ffmpeg -f null` on this box makes slice-only look FASTER
+    // than frame+slice on every ProRes file in the set -- 4096x2304 78.2 vs 75.0
+    // fps, 4448x3096 59.1 vs 50.8, 7680x4320 XQ 19.9 vs 17.5 -- which would have
+    // closed this as refuted. In Trace the same switch takes the 8K XQ plate from
+    // 33.8% to 58.0% of real time.
+    //
+    // The inversion is the whole point. `-f null` decodes and discards, so there
+    // is no other work for a frame-threaded decoder to overlap WITH and frame
+    // threading only adds its per-thread state copies. Trace's playback tick
+    // decodes one frame and then converts, uploads and paints it on the same
+    // thread; with frame threading the next frame decodes underneath all of that.
+    // The evidence is the handler, not the rate: 89.7ms -> 43.3ms per frame.
+    //
+    // Measure the pipeline you ship, not the decoder in isolation.
+    //
+    // Off by default only until the scrub, step and reverse checks the original
+    // decision was protecting have been re-run with it on.
+    const bool intraFrameThreads = envFlagSet("TRACE_INTRA_FRAME_THREADS");
+    impl_->codec->thread_type = ((intraOnly && !intraFrameThreads) || forceSliceThreads)
         ? FF_THREAD_SLICE
         : (FF_THREAD_FRAME | FF_THREAD_SLICE);
     metadata_.intraOnly = intraOnly;
