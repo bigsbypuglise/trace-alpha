@@ -623,9 +623,13 @@ MainWindow::MainWindow() {
             avgPresentLatencyMs_ += (lastPresentLatencyMs_ - avgPresentLatencyMs_) / static_cast<double>(presentSamples_);
             maxPresentLatencyMs_ = std::max(maxPresentLatencyMs_, lastPresentLatencyMs_);
 
-            // One frame per presentation, never skipped: ordering over rate.
-            steps = 1;
-            playbackAccumulatorMs_ -= frameDurationMs;
+            // One frame per presentation unless the source cannot sustain its
+            // native rate, in which case MEDIA TIME is held real-time and picture
+            // is dropped (owner decision, 2026-08-13). See realtimeDropSteps():
+            // it returns 1 whenever the run is on time, so a source that keeps up
+            // is on exactly the path it was on before.
+            steps = realtimeDropSteps(direction, playbackState, frameDurationMs);
+            playbackAccumulatorMs_ -= steps * frameDurationMs;
             // Keep the residue: polling for the due time costs up to a tick of
             // latency per frame, and discarding it turns that into permanent
             // rate loss. Carrying it forward makes the next frame due
@@ -764,9 +768,23 @@ MainWindow::MainWindow() {
             // playback walk allowance in VideoDecoderFFmpeg); a larger jump
             // would force a seek and cost far more time than the drift it was
             // correcting, so cap it and let the remainder be caught next tick.
+            //
+            // THIS IS THE REAL-TIME DROP ON THE AUDIO CLOCK, and it predates the
+            // owner decision of 2026-08-13 by a year: holding picture to the
+            // device clock has always meant dropping frames the clock has run
+            // past. It is counted into the same totals as the wall-clock path now,
+            // so `drop` on the HUD is the whole story rather than half of it --
+            // `audioSkippedFrames_` is kept beside it because a drop that is the
+            // audio clock's doing and a drop that is cost overrun are different
+            // conditions and the audio line is where the first one is diagnosed.
             constexpr long long kMaxCatchUpFrames = 3;
             const long long advance = std::min(delta, kMaxCatchUpFrames);
-            if (advance > 1) audioSkippedFrames_ += advance - 1;
+            if (advance > 1) {
+                audioSkippedFrames_ += advance - 1;
+                playbackDroppedFrames_ += advance - 1;
+                ++playbackDropTicks_;
+                maxDropRun_ = std::max(maxDropRun_, advance - 1);
+            }
             unclampedTarget = beforeFrame + advance;
         }
 
@@ -5016,6 +5034,8 @@ void MainWindow::beginPlaybackTimeline() {
     lastDriftMs_ = 0.0;
     lastAvSyncMs_ = maxAvSyncMs_ = 0.0;
     audioRepeatedFrames_ = audioSkippedFrames_ = 0;
+    playbackDroppedFrames_ = playbackDropTicks_ = maxDropRun_ = 0;
+
     lastClockUpdateMark_ = -1;
     lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
     cadenceGapsMs_.clear();
@@ -5288,6 +5308,84 @@ void MainWindow::notePresentedPlaybackFrame(double frameDurationMs) {
                  - playbackRunElapsedS_ * 1000.0;
 }
 
+// How many frames of media time this present should advance, so that a source
+// which cannot sustain its native rate holds real time and drops picture instead
+// of playing the whole movie slowly (owner decision, 2026-08-13).
+//
+// IT RETURNS 1 UNLESS THE RUN IS ALREADY BEHIND, so a source that keeps up is on
+// exactly the path it was on before and `drop` reads 0 through every run in the
+// validated asset set. That is the "engage only when required" requirement made
+// structural rather than tuned: there is no threshold to pick.
+//
+// CLOCK-DRIVEN, and the clock is the GATE E presentation timeline rather than the
+// wall-clock accumulator. The accumulator saturates -- it is capped at four
+// periods so a stalled run resumes at rate rather than fast-forwarding through
+// arrears -- so `floor(accumulator / period)` pins at 4 on a source running at
+// half rate and would ask for four frames of media per present, i.e. nearly
+// double speed. `presentAnchorFrame_ + elapsed/period` is the frame that ought to
+// be on screen now, does not saturate, and cannot drift.
+//
+// THE ONE SANCTIONED CASE IS 1x FORWARD PLAYBACK AND NOTHING ELSE. Reverse and
+// the shuttle carry their speed in a stride and return before this is reached;
+// stepping, scrub, the scrub release and any paused frame never come through this
+// path at all. Exactness there is unchanged and is not negotiable.
+//
+// The cap is the accumulator's own backlog policy, in frames: a long stall -- a
+// resize, a hitch, a window drag -- must resume at rate rather than fast-forward
+// through everything it missed, and four frames of media time per present is
+// already 4x real time on a source that is merely late rather than slow.
+long long MainWindow::realtimeDropSteps(int direction,
+                                        const trace::core::PlaybackState& playbackState,
+                                        double frameDurationMs) {
+    constexpr long long kMaxDropAdvance = 4;
+    static const bool dropEnabled = qgetenv("TRACE_RT_DROP") != "0";
+
+    if (!dropEnabled) return 1;
+    if (direction <= 0) return 1;
+    if (playbackState.mode != trace::core::PlaybackMode::PlayingForward) return 1;
+    // Below 1x the user has asked for slow motion, and dropping picture to hold a
+    // deliberately slowed clock would defeat the request. 0.5x therefore presents
+    // every frame however heavy the source -- the same reasoning that makes it
+    // silent rather than resampled.
+    if (playbackState.speed < 1.0) return 1;
+    if (presentEpochNs_ < 0 || presentPeriodNs_ <= 0.0) return 1;
+    if (!sessionClock_.isValid() || frameDurationMs <= 0.0) return 1;
+
+    const qint64 now = sessionClock_.nsecsElapsed();
+    const long long dueFrame = presentAnchorFrame_
+        + static_cast<long long>(std::floor(static_cast<double>(now - presentEpochNs_)
+                                            / presentPeriodNs_));
+
+    // `+ 1` because presenting the next frame is what being on time looks like.
+    const long long behind = dueFrame - (playbackState.currentFrame + 1);
+    if (behind <= 0) return 1;
+
+    const long long steps = std::min(behind + 1, kMaxDropAdvance);
+    const long long dropped = steps - 1;
+    playbackDroppedFrames_ += dropped;
+    ++playbackDropTicks_;
+    maxDropRun_ = std::max(maxDropRun_, dropped);
+    return steps;
+}
+
+// Tell the decoder whether playback has proved itself SEQUENTIAL, which is what
+// lets it take frame threading. The hysteresis is deliberately one-sided, and the
+// direction is the whole design.
+//
+// SLICE IS THE STARTING STATE AND A HEAVY SOURCE NEVER LEAVES IT. Frame threading
+// is earned by twelve consecutive presents that dropped nothing, and lost on the
+// first one that drops. The reason is that the switch is a codec reopen, and on
+// intra-only at 8K a frame-threaded `avcodec_open2` builds thread_count contexts
+// over a 7680x4320 frame -- measured at up to ~850ms, which is 20 frame periods.
+//
+// The first cut had it the other way round: start frame-threaded, switch out
+// after three drops. Steady state was identical (`p50 89.5ms` either way) but the
+// run paid two reopens on entry and read `max 892.9ms`, so a 5s measurement lost
+// half its span to a transient. Starting in the safe mode means the source that
+// cannot keep up pays NOTHING to discover that -- `sw 0` -- while the source that
+// can afford frame threading is by definition the one whose reopen is cheap and
+// which has half a second of clean presents to spare.
+//
 // GATE E step 1. Establishes the presentation timeline, and re-establishes it
 // when the period changes under it.
 //
@@ -5312,6 +5410,10 @@ void MainWindow::syncPresentTimeline(double frameDurationMs) {
     presentEpochNs_ = sessionClock_.isValid() ? sessionClock_.nsecsElapsed() : 0;
     presentSlot_ = 0;
     presentTargetNs_ = presentEpochNs_;
+    // WHERE the timeline starts, beside when. Play from the middle of a file
+    // epochs here with currentFrame in the middle, and the real-time drop maps
+    // elapsed media time onto a frame index through this anchor.
+    presentAnchorFrame_ = playback_.state().currentFrame;
 }
 
 // GATE E step 1. Advances the grid slot and arms playTimer_ for that slot's
@@ -6452,7 +6554,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(drawPerf.avgUploadMs, 'f', 2))
                 .arg(drawPerf.textureCreates);
 
-            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6%% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19")
+            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6%% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | thr %20")
                 .arg(perf.lastConvertCalls)
                 .arg(perf.lastCtxRebuilds)
                 .arg(perf.lastImageWasShared ? "yes" : "no")
@@ -6471,7 +6573,11 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.drainPacketsSent)
                 .arg(perf.drainFramesRecovered)
                 .arg(perf.staleSuccessPrevented)
-                .arg(perf.recoveredDecodeFailures);
+                .arg(perf.recoveredDecodeFailures)
+                // Threading mode, constant for the life of a media open. It is
+                // here because the walk-versus-seek limit is conditioned on it,
+                // so a `walk`/`seek` figure cannot be read without it.
+                .arg(perf.threadTypeIsFrame ? "frame" : "slice");
 
             // Presented rate from the wall clock: the only number that says
             // whether playback actually held real time.
@@ -6484,13 +6590,35 @@ void MainWindow::refreshHud(const QString& action) {
                 ? 100.0 * presentedFps / vm.fps
                 : 0.0;
 
+            // Real-time frame dropping, made visible (owner requirement,
+            // 2026-08-13). Reads `drop 0` on every source that keeps up, so a
+            // non-zero value is itself the statement that the source could not
+            // sustain its native rate -- and `media` beside it is the check that
+            // the drop did its job: media time covered against wall time, which
+            // must read ~100% whenever `real time` reads below it. The two
+            // together are the whole contract: `real time` is how much PICTURE
+            // arrived, `media` is whether the MOVIE stayed on the clock.
+            const double mediaCoveredS = (vm.fps > 0.0)
+                ? static_cast<double>(playbackFramesPresented_ + playbackDroppedFrames_) / vm.fps
+                : 0.0;
+            const double mediaPct = rateValid && elapsedS > 0.0
+                ? 100.0 * mediaCoveredS / elapsedS
+                : 0.0;
+            const QString dropField =
+                QString(" | drop %1 (ticks %2 max %3, media %4%%)")
+                    .arg(playbackDroppedFrames_)
+                    .arg(playbackDropTicks_)
+                    .arg(maxDropRun_)
+                    .arg(QString::number(mediaPct, 'f', 1));
+
             const QString l4 = rateValid
-                ? QString("presented %1 / %2 fps (%3%% real time) | frames %4 | elapsed %5s")
+                ? QString("presented %1 / %2 fps (%3%% real time) | frames %4 | elapsed %5s%6")
                       .arg(QString::number(presentedFps, 'f', 2))
                       .arg(QString::number(vm.fps, 'f', 2))
                       .arg(QString::number(realTimePct, 'f', 1))
                       .arg(playbackFramesPresented_)
                       .arg(QString::number(elapsedS, 'f', 2))
+                      .arg(dropField)
                 : QString("presented -- / %1 fps | frames %2")
                       .arg(QString::number(vm.fps, 'f', 2))
                       .arg(playbackFramesPresented_);

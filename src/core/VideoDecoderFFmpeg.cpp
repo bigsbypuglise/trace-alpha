@@ -400,6 +400,11 @@ struct VideoDecoderFFmpeg::Impl {
     long long lastDecodedFrame = -1;
     int playbackDirection = 1;
 
+    // Threading mode chosen at open. `thread_type` can only be set before
+    // avcodec_open2, so this cannot change without reopening the codec -- which
+    // was built, measured and taken back out; see kPlaybackForwardWalkLimit.
+    bool threadTypeIsFrame = false;
+
     // Frame-exact seek resolution (long-GOP codecs like H.264): after a
     // seek, the first decoded frame's index is resolved from its PTS instead
     // of being labeled as the requested frame, so decodeUntilTarget keeps
@@ -1011,12 +1016,17 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     //
     // Measure the pipeline you ship, not the decoder in isolation.
     //
-    // Off by default only until the scrub, step and reverse checks the original
-    // decision was protecting have been re-run with it on.
+    // A PER-MODE SWITCH WAS BUILT AND TAKEN BACK OUT -- see the four-cell table
+    // at kPlaybackForwardWalkLimit. Frame threading for playback and slice for
+    // random access is the obvious reading of the trade, and it does not survive
+    // the real-time frame drop: dropping makes playback ask for jumps, which on
+    // intra-only is random access, so the mode that wants frame threading stops
+    // existing exactly when the source is heavy enough to want it.
     const bool intraFrameThreads = envFlagSet("TRACE_INTRA_FRAME_THREADS");
-    impl_->codec->thread_type = ((intraOnly && !intraFrameThreads) || forceSliceThreads)
-        ? FF_THREAD_SLICE
-        : (FF_THREAD_FRAME | FF_THREAD_SLICE);
+    impl_->threadTypeIsFrame = !((intraOnly && !intraFrameThreads) || forceSliceThreads);
+    impl_->codec->thread_type = impl_->threadTypeIsFrame
+        ? (FF_THREAD_FRAME | FF_THREAD_SLICE)
+        : FF_THREAD_SLICE;
     metadata_.intraOnly = intraOnly;
 
     if (avcodec_open2(impl_->codec, impl_->codecDef, nullptr) < 0) {
@@ -1651,6 +1661,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         const double swsMs = static_cast<double>(swsScaleNs) / 1'000'000.0;
         const double memcpyMs = static_cast<double>(memcpyNs) / 1'000'000.0;
 
+        perfStats_.threadTypeIsFrame = impl_->threadTypeIsFrame;
         perfStats_.lastDecodeMs = decodeMs;
         perfStats_.lastConvertMs = convertMs;
         perfStats_.lastTotalMs = totalMs;
@@ -2221,15 +2232,59 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     // is ~2.6ms against a ~30ms seek plus its own walk back up from the
     // keyframe, so anything up to about a GOP is worth walking.
     //
-    // Intra-only keeps 4, and must: there a seek lands directly on the target
-    // for the price of one decode, so walking 30 frames to avoid a free seek
-    // would cost 30 decodes. `intraOnly` is the codec's own answer -- the same
-    // discriminator the scrub sampling gate uses, and the only one of the five
-    // that has ever measured right.
+    // INTRA-ONLY IS 1, WHICH IS THE SAME REASONING TAKEN ONE STEP FURTHER THAN IT
+    // USED TO BE. There a seek lands directly on the target for the price of one
+    // decode, so walking N frames to avoid a free seek costs N decodes -- and
+    // that argument does not stop at 30, it applies at 2. A limit of 1 means
+    // ordinary sequential playback (+1) still walks, as it must, and any jump
+    // seeks.
     //
-    // The audio catch-up path that this limit was originally written for jumps
-    // at most 3 frames, so it is unaffected in either direction.
-    const long long kPlaybackForwardWalkLimit = metadata_.intraOnly ? 4 : 48;
+    // It was 4, chosen when the only thing that jumped was the audio clock
+    // correcting a frame or two of drift and the cost of being wrong was small.
+    // The real-time frame drop (MainWindow::realtimeDropSteps) made it the hot
+    // path instead, and 4 turned every dropped frame into a decoded one: the 8K
+    // ProRes 4444 XQ plate read `walk 3f`, `dec 215ms` and **14.4% of real time**,
+    // WORSE than not dropping at all, because a present that skips 3 frames was
+    // decoding all 3. It is a runaway as well as a cost -- slower playback falls
+    // further behind, which asks for a bigger jump, which is slower still. With
+    // the seek it reads `walk 0f` and holds media time.
+    //
+    // Long-GOP keeps 48 and must: a walked frame there is ~2.6ms against a ~30ms
+    // seek plus its own walk up from the keyframe, so the trade genuinely inverts
+    // between the two codec families. `intraOnly` is the codec's own answer --
+    // the same discriminator the scrub sampling gate uses, and the only one of
+    // the five candidates that has ever measured right.
+    //
+    // IT IS CONDITIONED ON THE THREADING MODE, BECAUSE THAT IS WHAT SETS THE PRICE
+    // OF A SEEK -- and that conditioning is the surviving half of a per-mode
+    // threading switch that was built, measured, and taken back out.
+    //
+    // Frame threading must refill ~thread_count packets after every flush: on the
+    // 8K plate a frame-threaded seek measures 116ms against a slice-threaded
+    // ~30ms. So the two 2026-08-13 changes collide head-on -- frame threading for
+    // playback wants to WALK, and the real-time drop wants to SEEK. All four
+    // cells, 8K ProRes 4444 XQ, and three of them are catastrophic:
+    //
+    //   frame + seek    4.2% of real time, media 13.5%   dec 658ms  refill per frame
+    //   slice + walk   14.4%,              media 53.5%   dec 215ms  decodes every drop
+    //   frame + walk   16.7%,              media 64.4%   handler 253ms
+    //   slice + seek   46.0%,              media 97.3%   dec  60ms   <-- and not close
+    //
+    // WHICH IS WHY FRAME THREADING FOR PLAYBACK DID NOT SHIP, against the obvious
+    // reading of the trade. Dropping makes playback ask for jumps, and on
+    // intra-only a jump IS random access -- so the mode that would want frame
+    // threading stops existing exactly when the source is heavy enough to want it.
+    // The switch was measured on both reported files: the 8K never earned it, and
+    // the marginal 4448x3096 plate earned it and was WORSE for it (92.3% presented
+    // with 7 drops, against 98.4% and none, because the one codec reopen costs a
+    // 280ms stall). See the CLAUDE.md entry; TRACE_INTRA_FRAME_THREADS=1 is the
+    // control that reproduces all of it.
+    //
+    // The condition is retained rather than folded away because it is still live:
+    // TRACE_INTRA_FRAME_THREADS pins frame threading on, and under it the walk is
+    // the right answer for exactly the reason above.
+    const long long kPlaybackForwardWalkLimit =
+        (metadata_.intraOnly && !impl_->threadTypeIsFrame) ? 1 : 48;
     const bool smallPlaybackForwardJump =
         mode == RequestMode::Playback &&
         currentFrame_ >= 0 &&

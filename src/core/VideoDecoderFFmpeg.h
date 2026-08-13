@@ -260,6 +260,11 @@ struct VideoPerfStats {
     // moving currentFrame_ without moving the decoder.
     long long recoveredDecodeFailures = 0;
 
+    // Which threading mode the decoder opened in. Constant for the life of a
+    // media open -- see the four-cell table at kPlaybackForwardWalkLimit for why
+    // it is not switched per request mode.
+    bool threadTypeIsFrame = false;
+
     // Frame cache accounting.
     // cacheCapacity is how many entries of the size currently being stored fit
     // the byte budget, so it moves as a drag fills the cache with half-res

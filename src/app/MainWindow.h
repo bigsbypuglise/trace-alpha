@@ -306,6 +306,12 @@ private:
     // changed under it (a J-K-L speed change), because a new rate against an old
     // epoch is a schedule with a step discontinuity in it.
     void syncPresentTimeline(double frameDurationMs);
+    // Frames of media time this present should advance. 1 unless the run is
+    // already behind, in which case media time is held real-time and the
+    // intervening picture is dropped. 1x forward playback only.
+    long long realtimeDropSteps(int direction,
+                                const trace::core::PlaybackState& playbackState,
+                                double frameDurationMs);
     void refreshHud(const QString& action = {});
     // Tell the decoder how big a scrub preview needs to be, in device pixels.
     void syncScrubPreviewSize();
@@ -789,6 +795,25 @@ private:
     // Non-zero here means cost overrun (cause B), which GATE E does not fix and
     // must not be blamed for -- it is the honest place that shows up now.
     long long presentRephaseCount_ = 0;
+    // The frame that was on screen when the timeline was epoched. Media time is
+    // `presentAnchorFrame_ + (now - presentEpochNs_) / presentPeriodNs_`, which is
+    // the frame that OUGHT to be showing at this instant -- the clock the
+    // real-time drop is driven from. Without an anchor the epoch says when a run
+    // started but not where, and Play from the middle of a file would map media
+    // time onto the wrong frame.
+    long long presentAnchorFrame_ = 0;
+    // Real-time frame dropping (owner decision, 2026-08-13): a source that cannot
+    // sustain its native rate holds MEDIA TIME real-time and drops picture,
+    // rather than playing the whole movie slowly.
+    //
+    // `playbackDroppedFrames_` counts frames never presented; `playbackDropTicks_`
+    // counts presents that dropped anything, so the two together say whether the
+    // dropping is a steady light trickle or occasional lumps; `maxDropRun_` is the
+    // worst single gap. All three are zero on every source that keeps up, which is
+    // what makes "engages only when required" checkable rather than asserted.
+    long long playbackDroppedFrames_ = 0;
+    long long playbackDropTicks_ = 0;
+    long long maxDropRun_ = 0;
     // Reference interval for the jitter metric: the deadline the wake was armed
     // for, so jitter measures the scheduler against its own intent rather than
     // against a nominal rate. Still an int for the HUD's benefit.
