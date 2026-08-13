@@ -1658,6 +1658,24 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   Re-measured on the shipping build: **at ~4x the picture ends exactly on the pointer and never trails more than 6 frames, in both directions** (`behind 0/6f`, `p2p 26ms`), on 52–54% supply — the figure §15.1 predicted. The fast sweep reproduces §15.2's `p2p 22ms` to the digit with max lag better than §15.4's `cpu` record (`0/21f` vs `0/48f`). The throughput fact (~23ms/frame, untouched) is still true; **supply below 100% stopped meaning "behind" when sampling shipped.** Fourth premise-expiry in three sessions, after §26.2, §27 and §28.
 
+- **GATE E's deadline scheduler QUANTISED PLAYBACK TO fps/N ON ANY FILE THAT MISSED ITS BUDGET — FIXED 2026-08-13 (`ee6d525`).** `armNextPresent()`'s rephase branch arms for the next grid slot *strictly after now*. That is right for a **transient** overrun — one long frame costs one slot and the run resumes at rate rather than fast-forwarding through arrears — and wrong for a **sustained** one, because then every arm inserts the remainder of a slot as idle. With `handler 88ms` against a `41.71ms` period (2.11 slots) it armed for slot 3 and played at `23.976/3 = 8.0fps` while the pipeline could supply 11.0. The signature is **`outside 32ms` of a 121ms period with `rephase` firing on every frame**.
+
+  The fix is per frame and needs no new state: **`lastHandlerMs_` is valid inside `armNextPresent()` because the `recordHandler` scope guard is declared AFTER the `armNext` guard and so runs BEFORE it.** A handler that fit its period and is still late is jitter and keeps the grid; one that did not fit is a saturated pipeline with nothing to wait for. Epoch and slot are untouched, so the timeline does not move and the frame index is still the accumulator's or the audio clock's — **no frame is skipped, and this is not an exception to that rule.**
+
+  **It is inert on everything that meets budget, and `rephase 0` across the validated set is why** — the branch never executes there. 4K H.264 ×3 100.0% `0 of 119`, 4444 ×2 99.8% `0 of 260`, 4K 60fps ×2 100.0% `0 of 161` against a 16.67ms budget, both lifecycle legs, case for case with the control. **The cadence gets EVENER as well as faster** on the file that was failing (p50/p99 122.8/131.5 → 91.0/100.5), so there was no steady-cadence argument for the behaviour it replaces. `TRACE_SCHED_FREERUN_LATE=0` is the control **in the same binary**.
+
+  **This is what a GATE E premise looked like when it expired**: the scheduler was validated in Aug 2026 on files that meet budget, where sleeping to the next deadline is exactly right, and no file in the validated set overran until a 7680x4320 plate arrived.
+
+- **INTRA-ONLY SLICE-ONLY THREADING IS A LIVE TRADE, NOT A STALE DECISION — re-measured 2026-08-13 (`ed686a1`), premise INTACT.** The July 2026 rule forcing ProRes/DNxHD/MJPEG to `FF_THREAD_SLICE` was re-examined on the assumption that `f77d472` (async scrub worker) had expired it. **It has not.** `TRACE_INTRA_FRAME_THREADS=1` is now the symmetric control that `TRACE_LONGGOP_SLICE_THREADS` never had, off by default, and both halves are large: forward playback on a 7680x4320 4444 XQ plate **33.8 → 58.0%** of real time with the handler **89.7 → 43.3ms**, against 4K 4444 `scrub -SnapRelease` `dec 15.9 → 155.6ms`, `release 42.8 → **398ms**`, `ui gap max 26 → **241ms**`, and `-Reversals` `hitch 2 → 7`. **The landing stays exact on both legs** (`target 261 shown 261 delta 0`), so this is responsiveness, not correctness. The worker absorbs the *drag*; **the release landing is still synchronous and that is where the pipeline refill is paid.**
+
+  **A REFERENCE-DECODER BENCHMARK ANSWERS THIS QUESTION WRONG AND ANSWERS IT CONFIDENTLY.** `ffmpeg -f null` on this box makes slice-only look *faster* on every ProRes file in the set — 4096x2304 78.2 vs 75.0 fps, 4448x3096 59.1 vs 50.8, 7680x4320 XQ 19.9 vs 17.5 — which would have closed the question as refuted before the knob was built. `-f null` decodes and discards, so there is nothing for a frame-threaded decoder to overlap **with**, and frame threading only adds its per-thread state copies; Trace's tick decodes and then converts, uploads and paints on the same thread. **Eighth stale-instrument finding and the first that is out of process. A benchmark that removes the work your program does around the thing being measured is measuring a different program.**
+
+  **The way out is not a resolution- or codec-conditional default** — a big plate needs good scrub as much as good playback. `thread_type` is a property of **what the decoder is being asked to do**: playback wants frame threading, random access wants slice. Switching it needs `avcodec_close` + `avcodec_open2` at the transition, and the reopen must not land inside a scrub lease. That is its own piece of work, worth ~1.5x on large intra-only playback at no cost to scrub.
+
+- **LARGE ProRes 4444 IS PIXEL-LINEAR AND HAS NO PATHOLOGY — measured 2026-08-13, physical panel.** An owner report of very slow playback on `13_4448x3096_ProRes_4444` and `12_8K_ProRes4444` resolved into two different answers. **The 4448x3096 file does NOT reproduce as slow**: 98.4% of real time at the §4 opening size and 98.3% maximized at `win 5120x1369`, `hitch 0` both, `handler>budget 1 of 106`. **The 7680x4320 file is ProRes 4444 XQ at 5,739 Mbps** (not 8192 wide, not plain 4444) and **cannot be played at real time by anything on this machine** — `ffmpeg -f null`, decode alone with every other stage deleted, reaches **20.5 fps = 85% of real time**. A player that looks smooth on it is dropping frames or running a proxy; that is a contract difference, not a faster decoder.
+
+  Per-frame terms are **linear in pixels with nothing anomalous** — dec/Mpx 1.56 / 1.44 / 1.81, sws/Mpx 0.55 / 0.53 / 0.53, upload/Mpx 0.34 / 0.38 / 0.34 across the 4K control, the 4448 and the 8K. **Do not go looking for a bug in the conversion or the upload.** I/O is refuted by a wide margin: `io play … seq 100.0% | seek 0 | lat 2.696/6.6ms | **44,526 Mbps** | stall 0` against a 5,739 Mbps file on a Samsung 990 PRO. And **GATE C's planar conclusion gets STRONGER at 8K rather than weaker** — `TRACE_PLANAR_UPLOAD=0` takes `sws 17.6 → 57.9ms` to save 4ms of upload, giving 29.2% against the planar default's 34.4%, with `TRACE_RENDERER=cpu` at 32.4%. The byte arithmetic that predicted otherwise was right about bytes and wrong about which term dominates: **the planar win is a memcpy replacing a colour conversion, and the conversion scales with pixels exactly as the copy does.**
+
 - **The integer tick beat is FIXED — GATE E step 1, Aug 2026, plan §24.13.** The playback tick was a fixed integer-millisecond `QTimer` at `floor(1000/fps)`, so presents landed on a 41ms grid and every interval between two of them was 41 or 82ms and never 41.667. It is now **re-armed per frame against an absolute deadline** built from the source's exact rational: `deadline(slot) = epoch + slot × period`, in nanoseconds, never rounded. Only the delay handed to `QTimer` is rounded, and because the next delay comes from the next *absolute* deadline rather than from this one, that rounding cannot accumulate — the arms alternate 41/42 and average the true period.
 
   **`presentSlot_` is a grid slot, not a frame count.** It advances on every wake whether or not a frame was presented, so the heartbeat stays regular and "which frame" stays entirely the audio clock's question. This is the §9 composition rule with the phase half done in software: **the accumulator gate was removed for video, not made conditional** — `cd79d49` is on record for what happens when two clocks each decide half of "when to present".
@@ -2080,7 +2098,21 @@ and its accumulator gate — the negative control for any cadence measurement),
 reverse — its own knob rather than sharing `TRACE_ASYNC_SCRUB`, so a reverse A/B
 does not also change how dragging behaves), `TRACE_LONGGOP_SLICE_THREADS=1`
 (slice-only threading for long-GOP codecs — **measured and refuted**, retained as
-the control for that closed question), ~~`TRACE_SHUTTLE_ENTRY=2x`~~ (**gone as of
+the control for that closed question),
+**`TRACE_SCHED_FREERUN_LATE=0`** (2026-08-13, `ee6d525`: back to arming for the next
+grid slot after a handler overran, instead of re-arming at once. **Default is the
+re-arm**; this is the control, and it is the only knob that changes anything on a file
+that misses its budget — 8K ProRes 4444 XQ reads **45.1% of real time on the default
+against 35.4% with it set**, `outside 1.5 vs 29.4ms`. Inert on everything that meets
+budget, and `rephase 0` is why: the branch never executes there),
+**`TRACE_INTRA_FRAME_THREADS=1`** (2026-08-13, `ed686a1`: frame threading for
+intra-only codecs — the **symmetric control** `TRACE_LONGGOP_SLICE_THREADS` never had.
+**A large trade in both directions, not a dormant win**: 8K 4444 XQ playback
+33.8 → 58.0% of real time with the handler 89.7 → 43.3ms, while 4K 4444
+`scrub -SnapRelease` goes `dec 15.9 → 155.6ms` and `release 42.8 → 398ms` with
+`ui gap max 26 → 241ms`, and `-Reversals` `hitch 2 → 7`. The landing stays exact on
+both, so it is responsiveness rather than correctness),
+~~`TRACE_SHUTTLE_ENTRY=2x`~~ (**gone as of
 spec phase 5** — an interim knob added at phase 3 so the Rewind/Fast-forward
 buttons' 2× entry was executable before those buttons existed; both buttons are
 real now and pass `AtTwoX` as an argument, so nothing needs it), **`H` (not an env knob — the keyboard
