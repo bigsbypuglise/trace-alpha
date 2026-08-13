@@ -207,6 +207,40 @@ bool deadlineScheduleEnabled() {
     return on;
 }
 
+// When a handler overran the frame period, re-arm at once instead of waiting for
+// the next grid slot. Default ON; TRACE_SCHED_FREERUN_LATE=0 restores the pure
+// grid rephase and is the control for every figure below.
+//
+// armNextPresent()'s rephase branch arms for the next slot STRICTLY AFTER now,
+// which is right for a transient overrun: one long frame costs one slot and the
+// run resumes at rate rather than fast-forwarding through arrears. It is wrong
+// when the overrun is SUSTAINED, because then every arm inserts the remainder of
+// a slot as idle and the achieved rate quantises to fps/N for integer N. On the
+// 7680x4320 ProRes 4444 XQ plate the handler is 88ms against a 41.71ms period --
+// 2.11 slots -- so it arms for slot 3 and plays at 23.976/3 = 7.99fps when the
+// pipeline can supply 11.0. Measured: `outside` 32.22ms/frame of a 121ms period,
+// `rephase` firing on all 44 frames, 34.4% of real time against 44.9% with the
+// whole deadline scheduler switched off.
+//
+// The test is per frame and needs no new state: `lastHandlerMs_` is written by
+// the recordHandler guard, which is declared AFTER the armNext guard and so runs
+// BEFORE it. A handler that fit its period and is nonetheless late is jitter and
+// keeps the grid; a handler that did not fit is a saturated pipeline and there is
+// nothing to wait for.
+//
+// It is inert on every file that meets its budget, and that is measured rather
+// than argued: `rephase` reads 0 across the whole validated asset set, so the
+// branch this sits in never executes there. 4K H.264 x3 100.0/100.0/100.0% with
+// `0 of 119`, 4444 x2 99.8% with `0 of 260`, 4K 60fps x2 100.0% with `0 of 161`
+// against a 16.67ms budget -- case for case with the control. On the 8K plate it
+// is 33.8% -> 45.6% of real time, and the cadence gets EVENER as well as faster
+// (p50/p99 123.8/140.4 -> 89.7/100.9), so there is no steady-cadence argument
+// for the quantised behaviour it replaces.
+bool freerunWhenSaturated() {
+    static const bool on = [] { return qgetenv("TRACE_SCHED_FREERUN_LATE") != "0"; }();
+    return on;
+}
+
 // Preview sampling during an active drag. Default on.
 //
 // This is the one place Trace's "never skip a frame" rule is deliberately not
@@ -5324,6 +5358,16 @@ void MainWindow::armNextPresent() {
         target = presentEpochNs_
                + static_cast<qint64>(std::llround(static_cast<double>(presentSlot_) * presentPeriodNs_));
         ++presentRephaseCount_;
+
+        // A saturated pipeline has nothing to wait for. The slot still advances
+        // and the epoch is still untouched, so the timeline is unchanged and the
+        // frame index is still chosen by the accumulator or the audio clock --
+        // this only declines to sit idle until the next grid slot. See
+        // freerunWhenSaturated().
+        if (freerunWhenSaturated() && tickFrameDurationMs_ > 0.0
+            && lastHandlerMs_ > tickFrameDurationMs_) {
+            target = now;
+        }
     }
 
     presentTargetNs_ = target;
