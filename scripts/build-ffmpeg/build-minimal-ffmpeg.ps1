@@ -257,10 +257,22 @@ $flags = @(
     "--enable-optimizations"
     "--enable-asm"
     "--enable-x86asm"
-    # Static libgcc keeps the portable ZIP to av*/sw* DLLs only. Without it the
-    # build depends on libgcc_s_seh-1.dll, which would have to be shipped and
-    # would be a new redistributable with its own notice.
+    # THE PORTABLE ZIP MUST CONTAIN av*/sw* DLLs AND NOTHING ELSE, and one flag is
+    # not enough to get there. `-static-libgcc` removes libgcc_s_seh-1.dll, but
+    # winlibs' GCC is the *posix* threads variant, so libgcc still pulls in
+    # libwinpthread-1.dll -- and it does so even though FFmpeg itself is built
+    # `--enable-w32threads`, which is what made this hard to see: the threading
+    # model in `avutil_configuration()` reads w32threads while the DLL imports
+    # winpthread anyway, because that dependency is the COMPILER RUNTIME's, not
+    # FFmpeg's.
+    #
+    # It cost a CI round trip. The runner failed the renderer self-test with exit
+    # -1073741511 (0xC0000139, STATUS_ENTRYPOINT_NOT_FOUND) while the same binaries
+    # passed on the development box -- because there, gcc's bin was on PATH and
+    # libwinpthread-1.dll was quietly resolving from it. `dumpbin /dependents` on
+    # every produced DLL, not just avcodec, is what found it.
     "--extra-ldflags=-static-libgcc"
+    "--extra-ldflags=-static"
 )
 
 

@@ -148,6 +148,27 @@ jobs:
           # linked codecs Trace never calls. Crossing 40 MB means external
           # libraries have leaked into a build configured to have none.
           if ($mb -gt 40) { throw ("minimal FFmpeg is {0:N1} MB - external libraries have leaked in" -f $mb) }
+
+          # EVERY DLL, NOT JUST avcodec. The portable ZIP ships av*/sw* and nothing
+          # else, so any dependency outside the Windows system set is a file the
+          # release would be missing. This exact check is why it is here: avutil
+          # imported libwinpthread-1.dll from the posix-threads GCC runtime, the
+          # development box resolved it silently because gcc's bin was on PATH, and
+          # the runner failed the renderer self-test with exit -1073741511
+          # (0xC0000139, STATUS_ENTRYPOINT_NOT_FOUND) with nothing to point at.
+          $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+          $vsRoot = & $vswhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+          $vcvars = Join-Path $vsRoot "VC\Auxiliary\Build\vcvars64.bat"
+          $allowed = '^(KERNEL32|USER32|ole32|CRYPT32|ncrypt|Secur32|WS2_32|bcrypt|ADVAPI32|api-ms-win-crt|av|sw)'
+          foreach ($dll in (Get-ChildItem "$out\bin" -Filter *.dll)) {
+            $cmd = '"' + $vcvars + '" >nul && dumpbin /nologo /dependents "' + $dll.FullName + '"'
+            $dep = & "$env:SystemRoot\System32\cmd.exe" /c $cmd
+            $bad = $dep | Select-String -Pattern "^\s+\S+\.dll" |
+                   ForEach-Object { $_.ToString().Trim() } |
+                   Where-Object { $_ -notmatch $allowed }
+            if ($bad) { throw "$($dll.Name) depends on non-system DLLs: $($bad -join ', ')" }
+          }
+          Write-Host "dependency check: all DLLs import only Windows system libraries"
           "FFMIN_ROOT=$out" | Out-File -FilePath $env:GITHUB_ENV -Append
           "FFMPEG_BIN=$out\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
 
