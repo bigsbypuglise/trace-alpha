@@ -1,4 +1,65 @@
-# OPEN: the bounded async sequential decode queue. FFmpeg checkpoint DONE and CI-green.
+# OPEN: the bounded async decode queue. Mixed-monitor DPI is DONE and the beta gate is clear.
+
+**§20.4 CLOSED ON HARDWARE, 2026-08-14 (`8945894` fix · `fb30bb9` harness).** A second display
+was connected and the whole hardware case ran. **It found a real bug, which was the point of
+the exercise.** The last named beta blocker is gone, so **`v0.2.0-beta.1` is now available as
+an owner decision** — but the 8K file is still not signed off, and the owner decides when beta
+happens. Do not cut it unasked.
+
+## What the DPI pass found, in one paragraph
+
+§4 asks the window to *"recalculate correctly when the window moves between monitors with
+different scaling"*. **Nothing did.** A DPI change is not a `QEvent::WindowStateChange`, so
+`changeEvent`'s re-shape never ran; and it is not a drag, so it sends no `WM_SIZING` and
+`constrainSizingRect`'s aspect lock never ran either. A window crossing 100% → 150% lost **147
+logical px of height** while the width was preserved exactly, so the viewer stopped being the
+media's ratio and **the picture pillarboxed** — and the window sat 973 logical tall against a
+672-logical work area, far past §4's 80% rule. Fixed with `reshapeAfterDpiChange()`, armed from
+`WM_DPICHANGED` through a 200ms coalescing timer, **conditional on the scale factor rather than
+on the monitor**. Full record in plan §20.4 and in `CLAUDE.md`'s Decisions section.
+
+**THE LESSON THAT OUTLIVES IT: a pure function cannot notice that nobody called it.**
+`Trace.exe --window-shape-selftest` passed all 11 shapes × 4 scale factors *on the broken
+build*, because `WindowShape.cpp` was correct throughout and the shipping path simply never
+reached it. A green selftest over a pure function says nothing about whether anything invokes
+it. The selftest's printed caveat is narrowed rather than deleted, and now points at
+`scripts/measure/dpimove.ps1`.
+
+## Two traps this box now has that it did not have before — read these before measuring anything
+
+1. **Windows launches a default-positioned window on the monitor the MOUSE CURSOR is on.** A
+   fresh `Trace.exe` opens wherever the last pointer gesture left it. A regression run after any
+   mouse work on the secondary is taken at **1920x1080, 60Hz, 150%, viewer minimum** —
+   `display 960x540` against the baseline's `1226x690` — and window size dominates cache depth
+   and stall counts (§22.8) while refresh rate sets the `stalls` threshold. **It reads exactly
+   like a regression.** Park the cursor on the primary first, and quote the HUD's new `scr`
+   field beside any figure.
+2. **`powershell.exe` is SYSTEM-DPI aware, so every harness in `scripts/measure/` except
+   `dpimove.ps1` virtualizes rects and captures for a window on the 150% monitor.**
+   `GetWindowRect` comes back divided by 1.5 and `CopyFromScreen` grabs a stretched region.
+   The first probe written for the DPI pass reported **both displays at 100%** while one was at
+   150%. If a harness must run on the secondary, make it `PER_MONITOR_AWARE_V2` first.
+
+## What is still untested, stated narrowly so it does not get widened
+
+Three or more displays · scale factors other than 100/150 (**125% and 175% are the fractional
+cases §20.3 cares about**) · a scale factor changed in Settings *while Trace is running on that
+monitor* · display hot-plug. **§20.3's cross-backend band difference at 150% is NOT closed by
+this pass** — that was measured under `QT_SCALE_FACTOR`, and 2026-08-14 compared *framing*
+across backends (identical to the pixel) rather than re-running the band diff at real 150%.
+
+## The regression as re-taken after the fix
+
+Physical panel, 5120x1440 @ 239.999Hz, cursor parked on the primary. **4K H.264 ×3
+100.0/100.0/100.0%** (120 frames, `0 of 119`, all 119 gaps ~1x, `drop 0`, `rephase 0`) ·
+**4444 ×2 99.8%** (261 frames, `0 of 260`) · `scrub -SnapRelease` **`target 261 shown 261
+delta 0`** full-res planar, `hitch 0`, `land 0` · both lifecycle legs (**88.9%** and the **0%
+control**) · **25 of 25 transitions** · both selftests exit 0. Case for case with the phase-16
+baseline below.
+
+---
+
+# THE OPEN WORK: the bounded async sequential decode queue. FFmpeg checkpoint DONE and CI-green.
 
 **The 8K ProRes 4444 XQ file is NOT signed off and must not be described as solved.** The owner
 rejected the frame-drop result on 2026-08-13 — ~11 visible fps reads as visibly poor playback —
@@ -221,13 +282,12 @@ caught it, which would have put the wrong build in every issue report.
 
 ## The likely next items, in no particular order — the owner chooses
 
-1. **Mixed-monitor DPI (§20.4), once the second display exists.** This is the named beta gate
-   and the only thing standing between here and `v0.2.0-beta.1`. What has never run: a real
-   `WM_DPICHANGED`, a monitor-to-monitor move, a swapchain resize across it, fullscreen on a
-   secondary display. `Trace.exe --window-shape-selftest` covers the arithmetic across 11 shapes
-   x 4 scale factors and **prints its own caveat on its last line** precisely so the limit
-   travels with the result. **Synthetic DPR is not mixed-monitor validation and must never be
-   quoted as such.**
+1. ~~**Mixed-monitor DPI (§20.4), once the second display exists.**~~ **DONE 2026-08-14 — see
+   the top of this file.** It was the named beta gate and it is closed, so
+   **`v0.2.0-beta.1` is now an owner decision** rather than a blocked one. It found a real bug
+   (§4 never re-shaped on a scale-factor change) and the fix is `8945894`. What remains untested
+   is narrower and is listed at the top: three or more displays, 125%/175%, a scale change made
+   while Trace is running on that monitor, and hot-plug.
 2. **EXR and image-sequence review, with OCIO.** `TRACE_WITH_OIIO` is undefined in vcpkg and CI,
    so EXR does not open at all today. This is the largest missing *format* capability and it is
    roadmap item 7.
@@ -405,6 +465,18 @@ read `100.0% of real time` on a looping file.
   `menushot.ps1`, `recentfiles.ps1`, `resizecache.ps1`, `swapexe.ps1`, `banddiff.ps1`,
   `abfilter.ps1`/`croprect.ps1`, `stalls_vs_window.ps1`, `make_timecode_fixtures.ps1`,
   `make_shape_fixtures.ps1`.
+
+  *Needs two displays at different scale factors*: **`dpimove.ps1`** (`enum` / `move` /
+  `maximized` / `fullscreen` / `open` / `cadence` / `resize`). **It is the only harness here
+  that is per-monitor-DPI-aware**, and it asserts that on its first line and refuses to run
+  otherwise. `-On primary` is the control on the single-monitor legs; `-HideHud` is the
+  shipping configuration and is what separates a product defect from phase 12's diagnostic
+  limitation.
+- **PARK THE MOUSE CURSOR ON THE PRIMARY BEFORE ANY MEASUREMENT.** Windows launches a
+  default-positioned window on the monitor the cursor is on, so a fresh `Trace.exe` after any
+  pointer work on the secondary opens at 1920x1080 / 60Hz / 150% / viewer minimum. Every
+  baseline in this file was taken on the primary panel, and `display 960x540` against
+  `1226x690` reads exactly like a regression. The HUD's `scr` field names the monitor.
 - **Build a control binary in a `git worktree`, not by stashing**, and **verify every swap by
   hash** (`swapexe.ps1`). `windeployqt` the control and copy the `av*`/`sw*` DLLs across.
 - Update `CLAUDE.md` and the plans at the end of the session.

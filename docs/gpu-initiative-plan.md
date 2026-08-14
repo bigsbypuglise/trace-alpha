@@ -1744,20 +1744,120 @@ Worth flagging as genuinely unexplained: the divergence is *larger* at 1.5x (4x
 downscale) than at dpr 1 (6x downscale), which is the opposite of the expected
 direction. Do not accept a hand-wave about filter quality without re-measuring.
 
-### 20.4 Real mixed-monitor DPI is UNTESTED
+### 20.4 Real mixed-monitor DPI — VALIDATED ON HARDWARE, 2026-08-14
 
-The test box has a single display (`\.\DISPLAY1`, 2560x1440, primary). High-DPI
-was exercised only via `QT_SCALE_FACTOR`, which scales Qt without changing the
-panel. **Untested, and none of it is implied by the passes above:**
+**CLOSED.** A second display was connected on 2026-08-14 and the whole hardware
+case was executed. It had been tabled *for want of hardware* since 2026-08-09 and
+was the named beta gate.
 
-- moving the window between monitors;
-- monitors at different DPI;
-- the per-monitor DPI-change message arriving mid-session;
-- fullscreen on a secondary monitor.
+**The configuration**, and the pair matters: `\\.\DISPLAY1` 5120x1440 @ 239.999Hz
+at **100%** (work area 5120x1392), `\\.\DISPLAY2` 1920x1080 @ 60Hz at **150%**
+(work area 1920x1008 physical = 1280x672 logical). Different scale factor,
+different refresh rate and different work area, which is what makes it a test
+rather than a demonstration.
 
-The code paths exist (`devicePixelRatioF()` is read every paint, the surface is
-resized from it, the overlay atlas invalidates on DPI change) but have never run
-against a real transition.
+**IT FOUND A BUG, AND THE SELFTEST PASSED EVERY ROW WHILE THE BUG WAS LIVE.**
+§4 asks the window to *"recalculate correctly when the window moves between
+monitors with different scaling"*. Nothing did. A DPI change is not a
+`QEvent::WindowStateChange`, so `changeEvent`'s re-shape never ran; and it is not
+a drag, so it sends no `WM_SIZING` and `constrainSizingRect`'s aspect lock never
+ran either. Windows scaled the window rect on its own and Trace accepted whatever
+came out.
+
+Measured on 4K H.264 crossing 100% → 150%: the client lost **147 logical pixels
+of height** (1083 → 936) while the width was preserved exactly, so the viewer
+stopped being the media's ratio and **the picture pillarboxed** — `display
+1201x676` filling the viewer at open became `display 936x527` inside an unchanged
+`win 1201x934` after a round trip. The window was also 973 logical tall against a
+672-logical work area, far past §4's 80% rule, because that rule is applied at
+open and open had happened on the other monitor. Not cumulative: four round trips
+converged to a stable wrong pair rather than ratcheting.
+
+**Reproduced with Windows' own Win+Shift+Arrow**, so it is not an artifact of how
+the harness moved the window.
+
+**The fix is `MainWindow::reshapeAfterDpiChange()`**, armed from `WM_DPICHANGED`
+through a 200ms coalescing timer. Deferred because at message time Qt has not yet
+applied the new scale factor or relaid out, and the shaping pass measures the
+layout — shaping there would read the old dpr and the old chrome, which is the
+same stale-input mistake as shaping before `refreshHud` at open. **The condition
+is the SCALE FACTOR, not the monitor**: two monitors that share one need no
+reshape, and resizing the window because the user dragged it somewhere would be
+its own surprise.
+
+After it, the round trip returns to the opening geometry **exactly**
+(1217x1122 → 982x1207 → 1217x1122, repeatably, both directions), and the picture
+fills the viewer on both monitors.
+
+**THE DURABLE LESSON, and it is why `--window-shape-selftest`'s caveat was
+narrowed rather than deleted: a pure function cannot notice that nobody called
+it.** `WindowShape.cpp` was correct throughout. Every one of its 11 shapes × 4
+scale factors passed on the broken build, because the arithmetic was never the
+problem — the shipping path simply never reached it. A green selftest over a pure
+function says nothing about whether anything invokes it.
+
+**What else was checked, and passed.**
+
+- **The D3D11 swapchain resize across a DPI change is correct**, and so is the
+  CPU path: both backends report `display 960x540 | win 960x1151` on the
+  secondary, identical to the pixel. `TRACE_RENDERER=cpu` was the control that
+  says a fault would be DPI rather than D3D11; there was no such fault.
+- **Fullscreen on the secondary** goes to the monitor containing the window
+  (phase 6's rule, which had only ever had one monitor to obey), covers it
+  exactly 1920x1080, and Escape restores the pre-fullscreen rectangle on the
+  right monitor.
+- **The aspect lock holds during an interactive corner drag at dpr 1.50** —
+  `constrainSizingRect` works in physical pixels and every recorded run of it was
+  taken at dpr 1, where physical and logical are the same number and a missing
+  dpr term would be invisible. Measured 993/558 = **1.779** after the drag.
+- **Cadence on the 60Hz secondary is flat**: 4K H.264 **100.0% of real time**,
+  all 118 gaps in the ~1x bucket, `hitch 0`, `drop 0`, `handler 1.82/2.23`. GATE
+  E's refresh-independence confirmed rather than assumed.
+- **Opening media on the secondary** computes §4 against that monitor's work
+  area: the 4x5 reads `bound minimum | want 460x575 | got 460x575 (0.8000)`,
+  exact aspect, and `bound minimum` correctly pushing past the 80% budget but not
+  past the work area (655 ≤ 672), which is §4's stated precedence.
+- **Crossing while PLAYING** costs nothing measurable: ProRes 4444 crossed twice
+  (`dpiChg 2 reshape 2`) and still finished at **99.8% of real time, 261 frames,
+  `drop 0`, `handler>budget 0 of 260`, `hitch 0`**, landing back on the recorded
+  baseline geometry `display 1226x690 / win 1226x1083`.
+
+**Instrumentation added**: HUD `dpr N scr NAME dpiChg N (a->b) reshape N`.
+`dpiChg` counts the messages and `reshape` counts what was done about them,
+because they are separate claims — before the fix the first read 1 and the second
+would have read 0. `scr` also makes a same-scale-factor monitor move visible,
+where no `WM_DPICHANGED` fires at all.
+
+**The harness is `scripts/measure/dpimove.ps1`** (`enum`/`move`/`maximized`/
+`fullscreen`/`open`/`cadence`/`resize`). It is **not** a CI step: it needs two
+physical displays at different scale factors.
+
+**STILL UNTESTED, and narrower than before**: three or more displays; scale
+factors other than 100/150 (125% and 175% are the fractional cases §20.3 cares
+about); a scale factor changed in Settings *while Trace is running on that
+monitor* (the same `WM_DPICHANGED` path, but with no monitor change under it);
+and display hot-plug.
+
+**A TRAP THIS CONFIGURATION INTRODUCES FOR EVERY OTHER HARNESS IN THE
+DIRECTORY.** Windows places a default-positioned window on the monitor **the
+mouse cursor is on**, so a fresh `Trace.exe` launches wherever the cursor was
+left. A regression run after any pointer gesture on the secondary is taken at
+1920x1080, 60Hz, 150% and at the viewer's minimum size — `display 960x540`
+against the baseline's `1226x690` — and window size dominates cache depth and
+stall counts (§22.8) while refresh rate sets the `stalls` threshold. It reads as
+a regression and is not one. **Park the cursor on the primary before quoting any
+figure**, and quote `scr` from the HUD beside it.
+
+**AND THE FIRST PROBE WRITTEN FOR THIS PASS WAS ITSELF THE STALE INSTRUMENT.**
+It called `SetProcessDPIAware()` — *system*-DPI awareness — and reported **both
+displays at 100%** while one was at 150%. Under system awareness Windows
+virtualizes any monitor whose scale factor differs from the system one, so the
+1920x1080 panel at 150% reported its rect as 1280x720 at 96 DPI, which is
+indistinguishable from a 1280x720 panel at 100%. `dpimove.ps1` sets
+`PER_MONITOR_AWARE_V2`, asserts it on its first line, and **refuses to measure**
+otherwise. Every other harness in this directory runs under powershell.exe's
+system awareness and will virtualize rects and captures for a window on the
+secondary.
 
 ### 20.5 Source-rate audit — preserved verbatim
 
@@ -2572,10 +2672,14 @@ a computed deadline; it does not poll.
   drifting phase, which reads exactly like the fault being removed. Re-read on a
   cheap cadence and on window move; treat a period that has changed by more than
   a small tolerance as a re-acquire, not a filter input.
-- **Multi-monitor.** §20.4 records that real per-monitor DPI transitions have
-  never run on this one-display box. GATE E promotes that from a gap to a
-  load-bearing gap, because a DWM composition clock describes the primary
-  display. Say so at sign-off rather than discovering it.
+- **Multi-monitor.** ~~§20.4 records that real per-monitor DPI transitions have
+  never run on this one-display box.~~ **They ran on 2026-08-14 and §20.4 is
+  closed.** The point this made still stands and is now checkable: a DWM
+  composition clock describes the *primary* display, so a phase source is
+  per-display in a way the deadline scheduler is not. Measured: cadence on the
+  60Hz secondary is **100.0% of real time with every gap in the ~1x bucket**,
+  identical to the 239.999Hz primary, which is what GATE E's
+  refresh-independence predicted. Say so at sign-off rather than discovering it.
 - **Device loss / renderer fallback.** Losing the swapchain must degrade to E1's
   unsnapped deadlines. Never to a wait, never to a hang, never to the old
   integer tick silently — the HUD must say which phase source is live, for the
@@ -3625,13 +3729,17 @@ Neither gate is in the code, so no amount of engineering opens them. §9's warni
 still holds: this is 10-bit **output**, not the high-bit-depth **processing**
 that shipped at GATE C, and the two are routinely confused.
 
-**Mixed-monitor DPI (§20.4) — tabled for hardware.** `AllScreens` returns one
+**~~Mixed-monitor DPI (§20.4) — tabled for hardware.~~ DONE 2026-08-14 — the
+hardware arrived and §20.4 is closed.** The paragraph below is kept as the record
+of why it was tabled, because the tabling was correct: `AllScreens` returned one
 display and Parsec replaces it rather than adding one, so monitor-to-monitor
-moves, per-monitor DPI changes and fullscreen-on-secondary are **not executable
-on this box at all**. That is a stronger statement than "untested" and is the
-reason not to re-propose it. Single-display, what remains reachable is a runtime
-scale change on the primary — a real `WM_DPICHANGED`, swapchain resize,
-video-rect recompute — plus a code audit of that path.
+moves, per-monitor DPI changes and fullscreen-on-secondary were **not executable
+on this box at all** — a stronger statement than "untested" and the reason not to
+re-propose it. **A second display was connected on 2026-08-14**, the whole
+hardware case was executed, and it found a real bug: §4's sizing pass never
+re-ran on a DPI change, so a window crossing a scale-factor boundary came off it
+the wrong shape with the picture pillarboxed. Fixed, measured and regressed —
+see §20.4, which now carries the result rather than the gap.
 
 ### 30.3 The next phase — reverse shuttle
 
