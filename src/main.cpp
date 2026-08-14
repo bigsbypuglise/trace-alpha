@@ -78,16 +78,21 @@ int runRendererSelfTest(const QString& expected) {
 // calculation across the aspect matrix at DPR 1.00, 1.25, 1.50 and 2.00, print
 // every row, and fail on anything that does not hold.
 //
-// IT EXISTS BECAUSE THIS MACHINE CANNOT TEST DPI. Every devicePixelRatioF() term
-// in the sizing arithmetic is the identity at 100%, which is the only scale
-// factor available here, so three quarters of section 4's DPI matrix could never
-// execute. computeViewerSize() takes dpr as an argument precisely so it can.
+// IT EXISTS BECAUSE THIS MACHINE COULD NOT TEST DPI. Every devicePixelRatioF()
+// term in the sizing arithmetic is the identity at 100%, which was the only
+// scale factor available here until 2026-08-14, so three quarters of section 4's
+// DPI matrix could never execute. computeViewerSize() takes dpr as an argument
+// precisely so it can.
 //
-// IT IS NOT MIXED-MONITOR VALIDATION AND MUST NEVER BE QUOTED AS SUCH. It proves
-// the arithmetic. It says nothing about a real WM_DPICHANGED arriving, the
-// swapchain resizing, or a window dragged between two differently-scaled
-// monitors -- all of which remain untested for want of a second display
-// (plan section 20.4).
+// IT IS STILL NOT MIXED-MONITOR VALIDATION AND MUST NEVER BE QUOTED AS SUCH. It
+// proves the arithmetic and nothing else -- and the hardware pass on 2026-08-14
+// is why that distinction is worth keeping rather than a caution: every row here
+// PASSED throughout, while the shipping path was failing on real hardware,
+// because section 4's sizing never re-ran on a DPI change at all. A pure
+// function cannot notice that nobody called it.
+//
+// The hardware case is now covered by scripts/measure/dpimove.ps1, which needs
+// two displays at different scale factors and is therefore not a CI step.
 //
 // The assertions are properties rather than golden numbers, because a golden
 // table would have to be regenerated whenever a policy constant moves and would
@@ -242,8 +247,15 @@ int runWindowShapeSelfTest() {
     }
     out << "trace-shape: OK - " << (sizeof(media) / sizeof(media[0])) << " shapes x "
         << (sizeof(dprs) / sizeof(dprs[0])) << " scale factors" << Qt::endl;
-    out << "trace-shape: NOTE - synthetic DPR only. Real mixed-monitor DPI is "
-           "UNTESTED (plan 20.4, no second display)." << Qt::endl;
+    // THE CAVEAT TRAVELS WITH THE RESULT, and it is narrower than it used to be
+    // rather than gone. Real mixed-monitor DPI was validated on hardware on
+    // 2026-08-14 (plan 20.4) -- but by scripts/measure/dpimove.ps1, not by this,
+    // and this passed every row on the build where that pass found section 4's
+    // sizing never re-running on a DPI change.
+    out << "trace-shape: NOTE - synthetic DPR only: this proves the ARITHMETIC. "
+           "The hardware path (WM_DPICHANGED, swapchain resize, monitor-to-monitor "
+           "moves) is scripts/measure/dpimove.ps1 and needs two displays at "
+           "different scale factors." << Qt::endl;
     return 0;
 }
 

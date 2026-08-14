@@ -21,8 +21,19 @@ namespace trace::app {
 // SYNTHETIC DPR IS NOT MIXED-MONITOR VALIDATION. Injecting 1.25 here proves the
 // arithmetic; it does not prove that a real WM_DPICHANGED arrives, that the
 // swapchain resizes, or that a window dragged between two differently-scaled
-// monitors recomputes. That remains untested for want of a second display
-// (plan section 20.4) and must be recorded as untested rather than covered.
+// monitors recomputes.
+//
+// THE HARDWARE PASS HAPPENED ON 2026-08-14 (plan section 20.4) AND IT FOUND A
+// BUG THIS FILE COULD NOT HAVE. Every row of the selftest passed, on a build
+// where a window crossing a 100% -> 150% boundary came out the wrong shape with
+// the picture pillarboxed inside it -- because section 4's sizing pass was never
+// re-run on a DPI change at all. A DPI change is not a WindowStateChange and
+// sends no WM_SIZING, so neither of the two paths that reshape ever fired. The
+// arithmetic here was correct throughout and nobody was calling it.
+//
+// That is the durable lesson: a pure function cannot notice that it was not
+// invoked, so a green selftest over it says nothing about whether the shipping
+// path reaches it. The hardware case lives in scripts/measure/dpimove.ps1.
 
 // Which constraint decided the answer. Reported rather than inferred, because
 // "the cap bound it" and "the work area bound it" produce the same number on

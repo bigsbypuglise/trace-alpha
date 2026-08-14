@@ -329,6 +329,10 @@ private:
     // was given, which means the chrome it measured was wrong and another pass
     // is worth running. See applyMediaWindowShape for why that can happen.
     bool applyMediaWindowShapePass(double aspect, int pass);
+    // Section 20.4, armed by WM_DPICHANGED through dpiReshapeTimer_. Re-runs the
+    // shaping pass IFF the scale factor actually changed, so a move between two
+    // monitors that share one does nothing.
+    void reshapeAfterDpiChange();
     // Chrome is measured rather than computed: the difference between the window
     // and the viewer is menu bar, status bar, frame, the HUD's own height and
     // the docked transport bar if it is present, and every one of those changes
@@ -709,6 +713,11 @@ private:
     // and the paint that follows it has certainly landed; short enough that the
     // panel is not visibly stale after a gesture ends.
     static constexpr int kInspectorRefreshMs = 150;
+    // Long enough that Qt has certainly applied the new scale factor and relaid
+    // out -- the shaping pass measures chrome from what the layout DID, so a
+    // pass run against the old layout would shape from stale terms and then
+    // converge to the wrong answer rather than failing visibly.
+    static constexpr int kDpiReshapeMs = 200;
     // Size of the file currently open, for media that does NOT go through
     // VideoDecoderFFmpeg -- a still image or a sequence frame. Video takes it
     // from VideoPerfStats::sourceBytes, which MediaIoSource already read as part
@@ -1169,6 +1178,44 @@ private:
     long long wmExitSizeMove_ = 0;
     // The control on the three above -- see the switch in nativeEvent().
     long long wmSize_ = 0;
+    // Section 20.4. This message has never been received by this application:
+    // the box had one display until 2026-08-14, so every devicePixelRatioF()
+    // term in the shipping path had only ever been the identity, and the
+    // --window-shape-selftest that covers the arithmetic drives `dpr` as an
+    // ARGUMENT with no window, renderer or display behind it.
+    //
+    // It is COUNTED rather than inferred from a changed `win WxH`, because the
+    // two are not the same claim: a window can change device size because it
+    // moved to a monitor with a different scale factor, or because something
+    // resized it, and from a screenshot those are identical. `dpiChg` moving is
+    // the only evidence the per-monitor DPI path executed at all.
+    long long wmDpiChanged_ = 0;
+    // The dpr in force when the last DPI change was handled, so a run can say
+    // which direction it went rather than only that it happened.
+    double lastDpiChangeFrom_ = 0.0;
+    double lastDpiChangeTo_ = 0.0;
+    // Section 4: "recalculate correctly when the window moves between monitors
+    // with different scaling". MEASURED on hardware 2026-08-14, and it did not:
+    // a DPI change is not a WindowStateChange and sends no WM_SIZING, so
+    // neither changeEvent's re-shape nor constrainSizingRect's aspect lock ever
+    // ran, and the window came off the crossing the wrong shape with the
+    // picture pillarboxed inside it.
+    //
+    // COALESCED, and it has to be. At WM_DPICHANGED time Qt has not yet applied
+    // the new scale factor or relaid out, so shaping there would read the OLD
+    // dpr and the OLD chrome -- the same stale-input mistake as shaping before
+    // refreshHud at open, which pillarboxed the 4x5. One crossing can also
+    // produce more than one message.
+    QTimer dpiReshapeTimer_;
+    // The scale factor the window was last SHAPED at, which is the thing the
+    // reshape is conditional on -- not the monitor. Two monitors at the same
+    // scale factor need no reshape, and resizing the window on a move between
+    // them would be section 4's "do not move the window unexpectedly" in
+    // spirit: the user moved it, they did not ask for it to be resized.
+    double lastShapeDpr_ = 0.0;
+    // Reshapes actually performed, so the HUD can distinguish "the message
+    // arrived" from "something was done about it".
+    long long dpiReshapes_ = 0;
     // View > Lock Window to Media Aspect Ratio (spec section 4), checked by
     // default and persisted through trace::app::settings() -- the home phase 11
     // built, which this is the second consumer of and must not become a second

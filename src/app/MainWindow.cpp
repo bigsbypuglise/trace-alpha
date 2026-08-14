@@ -1162,6 +1162,12 @@ void MainWindow::setupSharedActions() {
     inspectorRefreshTimer_.setInterval(kInspectorRefreshMs);
     connect(&inspectorRefreshTimer_, &QTimer::timeout, this, &MainWindow::refreshInspector);
 
+    // Section 20.4. Armed from WM_DPICHANGED, never on a schedule. See the
+    // declaration for why it is deferred rather than done in the handler.
+    dpiReshapeTimer_.setSingleShot(true);
+    dpiReshapeTimer_.setInterval(kDpiReshapeMs);
+    connect(&dpiReshapeTimer_, &QTimer::timeout, this, &MainWindow::reshapeAfterDpiChange);
+
     // Time Display (spec phase 7). Four mutually exclusive readouts in one
     // QActionGroup, so "which readout is showing" has one owner and the menu
     // cannot show two ticks. Every one of them goes through setReadoutMode --
@@ -3730,6 +3736,45 @@ bool MainWindow::windowGeometryIsOurs() const {
     return !isFullScreen() && !isMaximized() && !isMinimized();
 }
 
+// SECTION 20.4, AND IT IS A FOUND BUG RATHER THAN A REGRESSION: this path had
+// never executed, because the box had one display until 2026-08-14.
+//
+// Section 4 asks the window to "recalculate correctly when the window moves
+// between monitors with different scaling". Nothing did. A DPI change is not a
+// QEvent::WindowStateChange, so changeEvent's re-shape never ran; and it is not
+// a drag, so it sends no WM_SIZING and constrainSizingRect's aspect lock never
+// ran either. Windows scaled the window rect on its own and Trace accepted
+// whatever came out.
+//
+// Measured on 4K H.264, primary 100% -> secondary 150%: the client lost 147
+// LOGICAL pixels of height (1083 -> 936) while the width was preserved exactly,
+// so the viewer stopped being the media's ratio and the picture pillarboxed --
+// `display 1201x676` filling the viewer at open became `display 936x527` inside
+// an unchanged `win 1201x934` after a round trip. The window was also 973
+// logical tall against a work area of 672, i.e. far past section 4's 80% rule,
+// because that rule is applied at open and open had happened on the other
+// monitor.
+//
+// THE CONDITION IS THE SCALE FACTOR, NOT THE MONITOR. Moving between two
+// monitors that share a scale factor needs no reshape, and resizing the window
+// because the user dragged it somewhere would be its own surprise.
+void MainWindow::reshapeAfterDpiChange() {
+    if (!viewer_) return;
+    const double dpr = viewer_->devicePixelRatioF();
+    if (!(dpr > 0.0)) return;
+    // Below the tolerance a 1.25 and a 1.2499999 are the same scale factor;
+    // above it, any real Windows step (1.25/1.5/1.75/2.0) is caught.
+    if (std::abs(dpr - lastShapeDpr_) < 0.01) return;
+    lastShapeDpr_ = dpr;
+    // Declines while fullscreen, maximized or minimized -- windowGeometryIsOurs.
+    // A maximized window on the new monitor is already the right size for it and
+    // Windows owns that geometry; changeEvent reshapes on the way back to
+    // normal, which is the existing path for exactly this.
+    if (!windowGeometryIsOurs()) return;
+    ++dpiReshapes_;
+    applyMediaWindowShape();
+}
+
 void MainWindow::applyMediaWindowShape() {
     if (!viewer_ || !windowGeometryIsOurs()) return;
     const double aspect = currentDisplayAspect();
@@ -3761,6 +3806,11 @@ void MainWindow::applyMediaWindowShape() {
     for (int pass = 0; pass < 3; ++pass) {
         if (!applyMediaWindowShapePass(aspect, pass)) break;
     }
+    // Section 20.4. Recorded HERE rather than only in reshapeAfterDpiChange, so
+    // that the shape taken at open counts as a shape at this scale factor --
+    // otherwise the first DPI change after launch would compare against 0.0 and
+    // the reshape would look conditional when it is not.
+    lastShapeDpr_ = viewer_->devicePixelRatioF();
 }
 
 // One pass. Returns true when the layout did not give the viewer the size that
@@ -4057,6 +4107,34 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
             // the resize border. The first run of resizecache.ps1 read 0/0/0
             // and could not tell those apart.
             case WM_SIZE: ++wmSize_; break;
+            // Section 20.4, and OBSERVED rather than handled: Qt is per-monitor
+            // DPI aware v2 on Windows and does the whole response itself --
+            // the suggested rect in lParam, the screenChanged signal, the
+            // backing-store rebuild. Taking the message here would be writing a
+            // second implementation of that.
+            //
+            // What it is for is that "a real WM_DPICHANGED has never arrived"
+            // was a claim no number in this application could check. `dpiChg`
+            // makes it a reading. The dpr is sampled BEFORE the default handler
+            // runs, which is why `from` is meaningful -- afterwards there is
+            // only one value and no way to know it moved.
+            case WM_DPICHANGED: {
+                ++wmDpiChanged_;
+                lastDpiChangeFrom_ = viewer_ ? viewer_->devicePixelRatioF()
+                                             : devicePixelRatioF();
+                // LOWORD of wParam is the new DPI for this window, from the
+                // message itself rather than from a widget that has not been
+                // updated yet.
+                lastDpiChangeTo_ = static_cast<double>(LOWORD(msg->wParam)) / 96.0;
+                // Section 4's "recalculate correctly when the window moves
+                // between monitors with different scaling". Deferred, because
+                // Qt has not applied the new scale factor or relaid out yet and
+                // the shaping pass measures the layout -- see the timer's
+                // declaration. Restarted rather than started, so a crossing that
+                // produces more than one message still reshapes once.
+                dpiReshapeTimer_.start();
+                break;
+            }
             default: break;
         }
     }
@@ -6521,7 +6599,38 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(wmSizing_)
                 .arg(wmEnterSizeMove_)
                 .arg(wmExitSizeMove_)
-                .arg(wmSize_);
+                .arg(wmSize_)
+              // Section 20.4. `win` and `display` are both DEVICE pixels, so on
+              // their own they cannot say whether a change came from a resize
+              // or from a scale-factor change -- and that is precisely the
+              // distinction this validation pass exists to make. `dpr` is the
+              // scale factor actually in force, `scr` names the monitor the
+              // window is on (so a monitor-to-monitor move is visible even
+              // between two monitors at the SAME scale factor, where no
+              // WM_DPICHANGED fires at all), and `dpiChg` counts the messages.
+              //
+              // `dpiChg 0` across a run that visibly crossed monitors is a
+              // result, not a gap: it says the two monitors share a scale
+              // factor.
+              // `dpiChg` counts the MESSAGES and `reshape` counts what was done
+              // about them, and they are separate fields because they are
+              // separate claims. Before the section 20.4 fix the first read 1
+              // and the second would have read 0 -- the message arrived, was
+              // observed, and nothing recomputed. `reshape` lagging `dpiChg` is
+              // also the correct reading for a move between two monitors that
+              // share a scale factor.
+              + QString(" | dpr %1 scr %2 dpiChg %3%4 reshape %5")
+                .arg(QString::number(hudDpr, 'f', 2))
+                .arg(windowHandle() && windowHandle()->screen()
+                         ? windowHandle()->screen()->name()
+                         : QStringLiteral("?"))
+                .arg(wmDpiChanged_)
+                .arg(wmDpiChanged_ > 0
+                         ? QString(" (%1->%2)")
+                               .arg(QString::number(lastDpiChangeFrom_, 'f', 2))
+                               .arg(QString::number(lastDpiChangeTo_, 'f', 2))
+                         : QString())
+                .arg(dpiReshapes_);
 
             // `upload` is the CPU -> GPU transfer for one frame and `tex` is how
             // many GPU textures have been created since launch. Both read 0 on
