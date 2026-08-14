@@ -1,0 +1,8 @@
+cmake_minimum_required(VERSION 3.21)
+project(decbench CXX)
+set(CMAKE_CXX_STANDARD 20)
+find_package(FFMPEG REQUIRED)
+add_executable(decbench main.cpp)
+target_include_directories(decbench PRIVATE ${FFMPEG_INCLUDE_DIRS})
+target_link_directories(decbench PRIVATE ${FFMPEG_LIBRARY_DIRS})
+target_link_libraries(decbench PRIVATE ${FFMPEG_LIBRARIES})

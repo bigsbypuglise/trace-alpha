@@ -975,7 +975,17 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     // keep frame threading for playback throughput.
     const AVCodecDescriptor* codecDesc = avcodec_descriptor_get(par->codec_id);
     const bool intraOnly = codecDesc && (codecDesc->props & AV_CODEC_PROP_INTRA_ONLY);
-    impl_->codec->thread_count = 0;
+    // THREAD COUNT IS NOT FREE AND 0 IS NOT "ALL OF THEM". FFmpeg's automatic
+    // count caps at 16 and warns above it, which on a 32-thread box leaves half
+    // the machine idle on a source that needs all of it. Measured decode-only
+    // against these exact libraries on the 7680x4320 ProRes 4444 XQ plate:
+    // auto 16.19 fps, t=8 10.52, t=16 16.12, t=32 **21.29** -- a 31% gain over
+    // the default, and the same sweep on a GCC-built FFmpeg reads 20.16 auto
+    // against 29.00 at t=32.
+    //
+    // Left at 0 by default until the owner has seen the evidence; the knob is how
+    // it was measured and is what a future default would be set from.
+    impl_->codec->thread_count = envInt("TRACE_DECODE_THREADS", 0);
     // TRACE_LONGGOP_SLICE_THREADS=1 applies the intra-only rule to long-GOP too.
     // Measurement scaffolding, off by default.
     //
