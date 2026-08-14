@@ -2352,3 +2352,32 @@ groove rather than trying to find it mid-clip.
 - Commit style follows the existing log: `playback:`, `perf:`, `ci:`, `docs:`, `fix(windows):` prefixes with imperative subjects.
 - Keep changes conservative and testable per push — Anj can only validate via CI ZIP builds on Windows, so each push should be a coherent, revertable step.
 - Update this file's Roadmap/Decisions sections at the end of each working session so the next session starts current.
+
+### Traps this project has paid for more than once
+
+- **`git add` succeeding is NOT evidence a file was added.** `.gitignore`'s build-tree patterns
+  are anchored (`/build/`, `/build-*/`) precisely because an unanchored `build-*/` matched
+  `scripts/build-ffmpeg/` at depth and swallowed a whole directory: `git add -A scripts` reported
+  success, pushed nothing, and CI failed with "the term … is not recognized". **Run
+  `git ls-files <path>` after adding anything under a new directory.**
+- **PowerShell 5.1 promotes a native command's stderr to a TERMINATING error under
+  `$ErrorActionPreference = 'Stop'`, even when the process exited 0.** A build that merely warns
+  looks exactly like a build that failed — it aborted three separate steps in one session, once
+  on a completed FFmpeg build. Demote to `'Continue'` around native calls and read
+  `$LASTEXITCODE`, or redirect inside bash rather than in the PowerShell pipeline.
+- **The FFmpeg build needs msys2's `make`, never `mingw32-make`.** The native make spawns each
+  recipe through `cmd.exe` and inherits its ~32K command-line limit, and FFmpeg hands `makedef`
+  every object file of a library as one argv. It fails as
+  `Object does not exist: libavcodec/h261_parser.` — a filename truncated mid-word, which reads
+  like a corrupt source tree and is not.
+- **Run `dumpbin /dependents` over EVERY produced DLL, not one of them.** A dependency that
+  resolves from your own toolchain directory is not a dependency you have satisfied:
+  `avutil-60.dll` imported `libwinpthread-1.dll`, passed locally because gcc's bin was on PATH,
+  and failed CI with exit **-1073741511** (`0xC0000139`, STATUS_ENTRYPOINT_NOT_FOUND). To
+  reproduce that class locally, launch with `PATH` reduced to `System32`.
+- **A stride-unaware `LockBits` pixel diff walks row padding and invents differences.** It
+  reported 399 differing pixels at max delta 171 on four unrelated files — **identical figures
+  across unrelated inputs is the tell.** Compare only the first `width*4` bytes of each row.
+- **Benchmark the libraries you ship, at the settings you ship, and subtract what your harness
+  serializes that the reference overlaps.** Two 8K figures in this repo were wrong for the first
+  reason and one for the second.

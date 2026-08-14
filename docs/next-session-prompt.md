@@ -1,89 +1,102 @@
-# OPEN: 8K ProRes 4444 XQ playback — owner REJECTED the frame-drop result (2026-08-13)
+# OPEN: the bounded async sequential decode queue. FFmpeg checkpoint DONE and CI-green.
 
-**The 8K file is NOT solved and must not be described as solved.** The real-time drop holds
-media time and the owner has rejected the result: **~11 visible fps reads as visibly poor
-playback.** The same file plays perfectly in QuickTime on a *less powerful* macOS machine.
-`TRACE_RT_DROP` stays as an experimental fallback and control; **frame dropping is not the
-final solution.** The acceptance target is ~100% media time at 24fps source cadence with
-`drop 0`, full quality, no recurring hitches, and exact pause / scrub release / stepping.
+**The 8K ProRes 4444 XQ file is NOT signed off and must not be described as solved.** The owner
+rejected the frame-drop result on 2026-08-13 — ~11 visible fps reads as visibly poor playback —
+and the same file plays perfectly in QuickTime on a *less powerful* macOS machine.
+**`TRACE_RT_DROP` is an emergency comparison/fallback only, never the accepted behaviour.**
 
-## THE DECISION GATE IS ANSWERED: DECODE-ONLY EXCEEDS 24 fps, SO THE BOTTLENECK IS INSIDE TRACE
+Acceptance for that file, unchanged and owner-stated:
 
-Decode-only, no conversion, no upload, no render, no seek, one persistent decoder per
-configuration over the whole file (`scripts/measure/decbench/`, plus the same sweep on the
-GCC-built reference). 7680x4320, ProRes **4444 XQ** (profile 5), `yuva444p12le`, **12-bit,
-4:4:4 with alpha** (4 planes, log2chroma 0/0), **24000/1001**, 5,739 Mbps, 145 frames.
+- full-quality, full-resolution playback, no proxy and no quality reduction;
+- correct colour and alpha;
+- **every one of the 145 frames presented**;
+- sustained **24000/1001**, `drop 0`, `hitch 0`;
+- stable cadence with no startup or shutdown flashes;
+- exact final frame and clean replay;
+- no thermal decline over repeated loops; bounded memory;
+- the complete existing regression suite unchanged.
 
-| build | threads | fps | % of real time |
-|---|---|---|---|
-| vcpkg / MSVC (**what Trace links**) | auto (0) | 16.19 | 67.5 |
-| vcpkg / MSVC | 16 | 16.12 | 67.2 |
-| vcpkg / MSVC | **32** | **21.29** | **88.8** |
-| GCC (gyan 9.0) | auto (0) | 20.16 | 84.1 |
-| GCC (gyan 9.0) | 24 | 25.59 | 106.7 |
-| **GCC (gyan 9.0)** | **32** | **29.00** | **121.0** |
+---
 
-**Two independent multipliers, and neither is a Trace algorithm.** `thread_count = 0` is not
-"all of them" — FFmpeg's automatic count caps at 16 and warns above it, leaving half a
-32-thread box idle. And the **MSVC build is 27% slower than the GCC build at the same thread
-count** (21.29 vs 29.00). Together they are **1.79x**.
+## What is DONE: checkpoint 1, the minimal FFmpeg dependency (2026-08-14)
 
-**THE FIRST 8K CEILING FIGURE IN THIS REPO WAS WRONG AND THIS IS WHY.** "20.5 fps = 85%, the
-machine cannot do it" was measured with the winget `ffmpeg.exe` — a **GCC** build — while Trace
-links an **MSVC** one, and at the default thread count. It substituted a different program for
-the one being asked about. **Benchmark the libraries you ship, at the settings you ship.**
+Built, integrated behind its own commits, and **green in CI on a run that compiled it from
+scratch** — `Cache not found for input keys: ffmin-…`, not a restored artifact. Commits
+`70cb389` · `9f24730` · `24f43ce` · `7c9530e` · `06baa39`.
 
-## WHERE THE TIME GOES IN TRACE, AND IT IS STRICT SERIALIZATION
+| | |
+|---|---|
+| artifact | **20.8 MB** of DLLs (vcpkg 17.3, the rejected BtbN prebuilt 104.3) |
+| version | avcodec **62.28.102**, `av_version_info` **8.1.2** — sonames match vcpkg, so it is a drop-in swap |
+| licence | **LGPL v2.1 or later**, read from `avutil_license()` on the built binary. No `--enable-gpl`, no `--enable-version3`, **zero `--enable-lib*`** |
+| thread default | **`av_cpu_count()` clamped to 64, intra-only only**; long-GOP keeps FFmpeg's automatic count |
+| pins | winlibs GCC 16.2.0 (mingw-w64 UCRT 14.0.0-r1) · NASM 2.16.03 · FFmpeg n8.1.2 · msys2 2026-06-11, all SHA256-checked |
+| output | **bit-identical** to vcpkg on 4K 4444, 8K XQ, 4448x3096, 422 HQ and H.264 — 0 pixels, max delta 0 |
 
-Sequential 1x playback, `TRACE_RT_DROP=0`, physical panel, `win 1226x1083 / display 1226x690`:
+`scripts/build-ffmpeg/build-minimal-ffmpeg.ps1` builds it; `TRACE_FFMPEG_ROOT` selects it.
+**The vcpkg path is untouched and still builds** — the hint is unset by default and deleting one
+line of the workflow returns CI to it.
 
-| | dec | sws | upload+handoff | handler | outside | presented |
-|---|---|---|---|---|---|---|
-| default threads | 61.11 | 17.07 | 12.25 | **90.11** | 2.49 | 44.7% |
-| `TRACE_DECODE_THREADS=32` | 45.08 | 17.21 | 12.03 | **74.55** | 1.84 | 54.2% |
+**In Trace, 8K sequential no-drop: `dec 45.08 → 39.68ms`, `handler 74.55 → 69.50ms`, 54.2% →
+56.7% of real time, `drop 0`, `hitch 0`.** Regression flat across the validated set.
 
-`handler` is the sum of its parts to within 0.3ms and **`outside` is under 2.5ms**, so nothing
-is waiting: decode, conversion and upload run strictly one after another on the UI thread.
-Latency distribution at t=32: p50 75.4 / p95 82.2 / p99 83.2 / max 118.5ms against a 41.71ms
-budget.
+---
 
-**Item 7 is answered and clean: ordinary 1x playback does NOT seek, flush or rebuild.**
-`walk 0f`, `seek n=1` (the open), `io play | seq 100.0% | seek 0 | stall 0`, `recov 0`,
-`ctx-rebuilds 0`, `drop 0`. The pipeline is doing the right work; it is doing it in series.
+## What is OPEN: checkpoint 2, the bounded async sequential decode queue — NOT STARTED
 
-## THE PROPOSED FIX, AND WHY IT NEEDS BOTH HALVES
+**The arithmetic that says it closes the gap, from measured in-app numbers:**
 
-Neither half reaches 24fps alone, and the arithmetic says so before any code is written:
+- decode (including its demux read) **39.68 ms**
+- conversion + upload **30.3 ms**
+- serial today: 70 ms = 14.3 fps
+- **overlapped: `max(39.7, 30.3)` = 39.7 ms = 25.2 fps**, against a 41.71 ms budget
+- with the demux read also inside the decode thread: ~32 ms ≈ **31 fps**
 
-- **Async sequential decode alone**: decode moves to a worker and overlaps conversion+upload, so
-  the rate becomes `max(decode, convert+upload)` = `max(45.1, 29.2)` = 45.1ms = **22.2 fps.
-  Still short.**
-- **A faster FFmpeg build alone**: decode 45.1 -> ~33ms, but still in series with 29.2ms of
-  conversion and upload = 62ms = **16 fps. Worse than the other half.**
-- **Both**: `max(33, 29.2)` = 33ms = **~30 fps**, comfortably clear of the 41.71ms budget with
-  `drop 0`. **That is the target and it has margin.**
+Margin is real but thin at ~2 ms/frame, **so the queue should overlap the read as well as the
+decode** — do not assume decode alone is enough.
 
-So the order is: **(1) establish a faster FFmpeg build** — the MSVC/GCC gap is the single
-largest unexplained factor and needs confirming as a build property rather than a measurement
-artefact; **(2) prototype the bounded async sequential decode queue** the owner conditionally
-authorised, now that UI-thread serialization is measured rather than assumed. Its contract:
-sequential only, bounded queue, **no routine seeking, no stale-frame delivery**, and it must not
-touch the scrub lease, the exact release landing, stepping or reverse.
+**Owner requirements, verbatim in substance:**
 
-**`TRACE_DECODE_THREADS=32` is worth +21% in Trace today** (dec 61.11 -> 45.08ms, 44.7 -> 54.2%)
-and is one line, but it is left at the default because it is not the fix and a default should be
-set once, from the build that ships.
+- ordinary **1× forward playback only** initially;
+- overlap demux/read and decode with conversion, upload and presentation;
+- **deliberately shallow queue** — a full-resolution 8K 12-bit 4:4:4+alpha frame is ~199 MB;
+- report **queue depth, peak working-set increase, allocation behaviour, starvation count and
+  high-water mark**;
+- reuse buffers where safe; **no unbounded growth**;
+- **deterministic cancellation and draining** on pause, stop, seek, scrub, stepping, shuttle,
+  file change, end-of-media and shutdown;
+- **generation protection** so no stale frame can ever be presented;
+- **do not modify** the validated scrub worker, the decoder lease, exact landing, reverse
+  playback or frame stepping;
+- keep the **synchronous path available** as comparison and rollback control;
+- **validate with `TRACE_RT_DROP=0`** — dropping must not hide starvation or missed deadlines;
+- measure **demux/read, decode, conversion/upload, queue wait and presentation separately**.
+  **Do not infer overlap from the final frame rate alone.**
+- its own commit, measurements reported **before** it becomes the default;
+- rerun the complete playback, scrub, lifecycle, shuttle and transition regression suite.
 
-## What is NOT established
+**Do not begin CUDA work.** The measurements establish the target is reachable through the
+optimised CPU decoder plus pipeline overlap.
 
-- **VLC was attempted and produced no usable number** — `-I dummy --benchmark` returns
-  immediately on this box. Item 8 is open. The vcpkg-vs-GCC pair on one machine already
-  separates *build* from *Trace pipeline*, which is the substantive half of what item 8 was for.
-- **The QuickTime comparison has not been explained and must not be hand-waved.** Apple Silicon
-  carries a hardware ProRes decoder and that is the obvious hypothesis, but it is a hypothesis;
-  it is also irrelevant to the gate, which is already answered against Trace.
-- **Nothing here has been signed off.** No image quality was reduced, no proxy, no resolution
-  change.
+**Design constraints already established that the queue must respect:** there is exactly one
+`VideoDecoderFFmpeg` and one owner of it at any instant (plan §14's lease); playback currently
+decodes synchronously on the UI thread and the scrub worker holds the lease only during a drag;
+`supersedeInFlightRequests()` deliberately does **not** tell the scrub worker; and the reverse
+shuttle already queues results and pops one per tick — **read `startShuttleRun`/`endShuttleRun`
+before designing this, because a bounded sequential forward queue is the same shape and must not
+collide with it.**
+
+---
+
+## Working state on the box
+
+- `build/` is vcpkg-configured — the local shipping default. `build-ffci/` is the same tree
+  configured with `-DTRACE_FFMPEG_ROOT=C:/tw_ffci/out`, i.e. the minimal FFmpeg. Both pass
+  `--renderer-selftest=d3d11`.
+- `C:\tw_ffci\out` is the built minimal FFmpeg (bin/, lib/, include/). `C:\tw_bench` holds
+  `decbench`, the captures, and **`vcpkg_backup\` — the original vcpkg DLLs**, which is how the
+  dependency A/B is reversed without a rebuild.
+- The BtbN prebuilt is **the validated performance control only** and must never ship.
 
 ---
 
