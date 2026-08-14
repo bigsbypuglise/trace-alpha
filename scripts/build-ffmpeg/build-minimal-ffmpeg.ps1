@@ -134,11 +134,18 @@ if ($env:VCPKG_ROOT) {
 }
 $bashCandidates += (Get-ChildItem "C:\vcpkg\downloads\tools\msys2" -Directory -ErrorAction SilentlyContinue |
     ForEach-Object { Join-Path $_.FullName "usr\bin\bash.exe" })
-$bash = $bashCandidates | Where-Object { $_ -and (Test-Path $_) } | Select-Object -First 1
-if (-not $bash) {
+$bashCandidates = @($bashCandidates | Where-Object { $_ -and (Test-Path $_) })
+if (-not $bashCandidates) {
     throw "no msys2 bash found. Run without -NoFetch so the pinned msys2 is downloaded; " +
           "Git for Windows' bash cannot build libavcodec (argv limit) and is not used."
 }
+# PICK BY CAPABILITY, NOT BY ORDER: prefer an msys2 that already has `make`.
+# msys2-base does not ship one and vcpkg's msys2 does, so this uses whichever
+# install is actually complete and only falls back to installing make when no
+# candidate has it. It also removes a network round trip on any box or runner
+# where vcpkg has already been provisioned.
+$bash = $bashCandidates | Where-Object { Test-Path (Join-Path (Split-Path $_ -Parent) "make.exe") } | Select-Object -First 1
+if (-not $bash) { $bash = $bashCandidates[0] }
 $shellBin = Split-Path $bash -Parent
 
 # `-c`, NOT `-lc`. A login shell sources /etc/profile, which REBUILDS PATH from
@@ -182,9 +189,16 @@ if (-not (Test-Path $msysMake)) {
     Write-Host "installing make into the pinned msys2"
     $prev = $ErrorActionPreference
     $ErrorActionPreference = 'Continue'
-    & $bash -c "pacman -Sy --noconfirm --needed make" 2>&1 | Out-Null
+    $pacLog = Join-Path $Root "logs\pacman.log"
+    New-Item -ItemType Directory -Force (Split-Path $pacLog -Parent) | Out-Null
+    & $bash -c "pacman -Sy --noconfirm --needed make" *> $pacLog
     $ErrorActionPreference = $prev
-    if (-not (Test-Path $msysMake)) { throw "pacman did not produce make.exe at $msysMake" }
+    if (-not (Test-Path $msysMake)) {
+        # Print it rather than swallow it. The first CI run failed here with the
+        # output discarded, which made a one-line diagnosis into a round trip.
+        if (Test-Path $pacLog) { Get-Content $pacLog -Tail 25 | ForEach-Object { Write-Host "  $_" } }
+        throw "pacman did not produce make.exe at $msysMake (log: $pacLog)"
+    }
 }
 
 Write-Host "gcc   : $gccBin"
