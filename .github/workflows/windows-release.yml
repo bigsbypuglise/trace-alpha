@@ -96,6 +96,61 @@ jobs:
           "FFMPEG_BIN=$ffmpegBin" | Out-File -FilePath $env:GITHUB_ENV -Append
           "CMAKE_PREFIX_PATH=$qtRoot" | Out-File -FilePath $env:GITHUB_ENV -Append
 
+      # The MINIMAL MinGW/GCC LGPL FFmpeg that Trace actually ships. Built from
+      # pinned source with a pinned compiler and assembler, all SHA256-checked by
+      # the script, so the artifact is reproducible on a runner that has none of
+      # them installed.
+      #
+      # WHY NOT vcpkg's: same avcodec version, same feature set, same LGPL v2.1
+      # licence -- but built with MSVC, and on large ProRes that costs ~18% of
+      # decode throughput. The vcpkg install above is KEPT: it still supplies the
+      # toolchain, and dropping the -DTRACE_FFMPEG_ROOT line below returns the
+      # build to it, which is what makes this dependency swap revertable.
+      - name: Restore minimal FFmpeg cache
+        id: ffmin-cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}\ffmin
+          # Keyed on the build script: its pins ARE the identity of the output, so
+          # editing a pinned URL or flag invalidates the cache by construction and
+          # nobody has to remember to bump a version string.
+          key: ffmin-${{ hashFiles('scripts/build-ffmpeg/build-minimal-ffmpeg.ps1') }}-windows-2022-x64
+
+      - name: Build minimal FFmpeg (only on cache miss)
+        if: steps.ffmin-cache.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          & .\scripts\build-ffmpeg\build-minimal-ffmpeg.ps1 `
+              -Root "$env:RUNNER_TEMP\ffmin\work" `
+              -OutDir "$env:RUNNER_TEMP\ffmin\out"
+          if ($LASTEXITCODE -ne 0) { throw "minimal FFmpeg build failed ($LASTEXITCODE)" }
+
+      - name: Verify minimal FFmpeg output
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $out = "$env:RUNNER_TEMP\ffmin\out"
+          # DLLs, MSVC import libraries and headers must all be present: a build
+          # that produced .dll.a but no .lib links fine with mingw and not at all
+          # with link.exe, and that failure would surface much later.
+          foreach ($f in @('bin\avcodec-62.dll','bin\avformat-62.dll','bin\avutil-60.dll',
+                           'bin\swresample-6.dll','bin\swscale-9.dll',
+                           'lib\avcodec.lib','lib\avformat.lib','lib\avutil.lib',
+                           'lib\swresample.lib','lib\swscale.lib',
+                           'include\libavformat\avformat.h')) {
+            if (-not (Test-Path (Join-Path $out $f))) { throw "minimal FFmpeg missing $f" }
+          }
+          $mb = ((Get-ChildItem "$out\bin" -Filter *.dll | Measure-Object Length -Sum).Sum / 1MB)
+          Write-Host ("minimal FFmpeg DLLs: {0:N1} MB" -f $mb)
+          # A size gate, because the whole reason this is built rather than
+          # downloaded is that a prebuilt LGPL artifact was 104 MB of statically
+          # linked codecs Trace never calls. Crossing 40 MB means external
+          # libraries have leaked into a build configured to have none.
+          if ($mb -gt 40) { throw ("minimal FFmpeg is {0:N1} MB - external libraries have leaked in" -f $mb) }
+          "FFMIN_ROOT=$out" | Out-File -FilePath $env:GITHUB_ENV -Append
+          "FFMPEG_BIN=$out\bin" | Out-File -FilePath $env:GITHUB_ENV -Append
+
       - name: Configure CMake (Release, VS2022 x64)
         shell: pwsh
         run: |
@@ -105,7 +160,8 @@ jobs:
             -A x64 `
             -DCMAKE_BUILD_TYPE=Release `
             -DCMAKE_PREFIX_PATH="$env:CMAKE_PREFIX_PATH" `
-            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake" `
+            -DTRACE_FFMPEG_ROOT="$env:FFMIN_ROOT"
           if ($LASTEXITCODE -ne 0) { throw "CMake configure failed ($LASTEXITCODE)" }
 
       # Fail loudly if FFmpeg wasn't detected: the app compiles without it but

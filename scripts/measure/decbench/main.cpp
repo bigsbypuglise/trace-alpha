@@ -165,6 +165,11 @@ int main(int argc, char** argv) {
         {"single",       0, 1, 0},
     };
 
+    // The config sweep is the survey; the sustained phase is the answer. Skip the
+    // survey when a thread count was named, so a thread-count sweep does not pay
+    // eleven unrelated configurations per sample.
+    const bool sweep = (argc <= 3);
+    if (sweep) {
     std::printf("\n%-14s %7s %7s %8s %8s %8s %8s %8s %8s\n",
                 "config", "frames", "wall s", "fps", "%RT", "p50 ms", "p95 ms", "max ms", "read ms");
     std::printf("%s\n", std::string(96, '-').c_str());
@@ -181,6 +186,36 @@ int main(int argc, char** argv) {
                     pct(r.perFrameMs, 0.50), pct(r.perFrameMs, 0.95),
                     pct(r.perFrameMs, 1.00), r.readMs);
         std::fflush(stdout);
+    }
+    } // sweep
+
+    // SUSTAINED PHASE. One 145-frame pass says what the decoder can do cold; it
+    // says nothing about whether the box holds that rate once it is warm. A
+    // 7680x4320 decode at 32 threads saturates every core, and a clock that drops
+    // under sustained load turns an accepted measurement into a number that only
+    // ever reproduces on the first run. Each pass is a fresh persistent decoder
+    // over the whole file, back to back, with nothing in between.
+    const int sustainThreads = (argc > 3) ? atoi(argv[3]) : 32;
+    const int sustainPasses  = (argc > 4) ? atoi(argv[4]) : 6;
+    std::printf("\nsustained: slice t=%d, %d consecutive passes\n",
+                sustainThreads, sustainPasses);
+    std::printf("%-8s %8s %8s %8s %8s %8s\n", "pass", "wall s", "fps", "%RT", "p50 ms", "max ms");
+    std::printf("%s\n", std::string(52, '-').c_str());
+    double first = 0.0, worst = 1e9;
+    for (int i = 1; i <= sustainPasses; ++i) {
+        Result r;
+        if (!runOne(path, FF_THREAD_SLICE, sustainThreads, 0, r)) { std::printf("pass %d FAILED\n", i); continue; }
+        const double fps = r.frames / r.wallS;
+        if (i == 1) first = fps;
+        if (fps < worst) worst = fps;
+        std::printf("%-8d %8.2f %8.2f %8.1f %8.2f %8.2f\n",
+                    i, r.wallS, fps, 100.0 * fps / srcFps,
+                    pct(r.perFrameMs, 0.50), pct(r.perFrameMs, 1.00));
+        std::fflush(stdout);
+    }
+    if (first > 0.0) {
+        std::printf("\nsustained worst %.2f fps = %.1f%% of real time, %.1f%% of the first pass\n",
+                    worst, 100.0 * worst / srcFps, 100.0 * worst / first);
     }
     return 0;
 }

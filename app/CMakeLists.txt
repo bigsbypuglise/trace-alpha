@@ -12,12 +12,35 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 find_package(Qt6 QUIET COMPONENTS Multimedia)
 find_package(OpenImageIO QUIET)
 
-find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h)
-find_library(FFMPEG_AVFORMAT_LIBRARY avformat)
-find_library(FFMPEG_AVCODEC_LIBRARY avcodec)
-find_library(FFMPEG_AVUTIL_LIBRARY avutil)
-find_library(FFMPEG_SWSCALE_LIBRARY swscale)
-find_library(FFMPEG_SWRESAMPLE_LIBRARY swresample)
+# TRACE_FFMPEG_ROOT selects the minimal MinGW/GCC LGPL FFmpeg built by
+# scripts/build-ffmpeg/build-minimal-ffmpeg.ps1 instead of whatever the toolchain
+# (vcpkg) supplies. Unset by default, so the existing MSVC/vcpkg dependency path
+# is untouched and remains available until the replacement has passed every gate.
+#
+# It exists because the two builds differ by ~18% of decode throughput on large
+# ProRes and by nothing else: same avcodec version, same sonames, same feature
+# set, bit-identical output. Pointing CMake at a directory is what makes that an
+# A/B rather than a migration.
+set(TRACE_FFMPEG_ROOT "" CACHE PATH
+    "Root of a prebuilt FFmpeg (bin/, include/, lib/) to use instead of the toolchain's")
+
+if(TRACE_FFMPEG_ROOT)
+  find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h
+            PATHS "${TRACE_FFMPEG_ROOT}/include" NO_DEFAULT_PATH)
+  foreach(_ff avformat avcodec avutil swscale swresample)
+    string(TOUPPER ${_ff} _FF)
+    find_library(FFMPEG_${_FF}_LIBRARY ${_ff}
+                 PATHS "${TRACE_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
+  endforeach()
+  message(STATUS "Trace: FFmpeg from TRACE_FFMPEG_ROOT=${TRACE_FFMPEG_ROOT}")
+else()
+  find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h)
+  find_library(FFMPEG_AVFORMAT_LIBRARY avformat)
+  find_library(FFMPEG_AVCODEC_LIBRARY avcodec)
+  find_library(FFMPEG_AVUTIL_LIBRARY avutil)
+  find_library(FFMPEG_SWSCALE_LIBRARY swscale)
+  find_library(FFMPEG_SWRESAMPLE_LIBRARY swresample)
+endif()
 
 set(TRACE_FFMPEG_FOUND FALSE)
 if(FFMPEG_INCLUDE_DIR AND FFMPEG_AVFORMAT_LIBRARY AND FFMPEG_AVCODEC_LIBRARY AND FFMPEG_AVUTIL_LIBRARY AND FFMPEG_SWSCALE_LIBRARY)

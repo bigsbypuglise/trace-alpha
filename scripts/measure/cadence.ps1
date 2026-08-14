@@ -32,7 +32,13 @@ param(
     [int]$Repeats = 2,
     # NAME=VALUE pairs passed to restart.ps1, e.g. TRACE_RENDERER=d3d11
     [string[]]$Env = @(),
-    [string]$OutDir = "$env:TEMP\trace_cadence"
+    [string]$OutDir = "$env:TEMP\trace_cadence",
+    # Which binary to measure. Empty = build\app\Release, i.e. the shipping one.
+    # Added for the FFmpeg dependency A/B: the candidate lives in its own build
+    # tree so that the current vcpkg path stays intact and buildable, and an A/B
+    # that had to overwrite the shipping binary would destroy exactly the control
+    # it is being compared against.
+    [string]$Exe = ""
 )
 
 Add-Type -AssemblyName System.Drawing
@@ -63,7 +69,9 @@ $Env = @($Env) + @("TRACE_SETTINGS_FILE=$scratchIni")
 
 $shots = @()
 for ($r = 1; $r -le $Repeats; $r++) {
-    & "$PSScriptRoot\restart.ps1" -Clip $Clip -Env $Env -SettleSeconds 5 | Out-Null
+    $restartArgs = @{ Clip = $Clip; Env = $Env; SettleSeconds = 5 }
+    if ($Exe) { $restartArgs.Exe = $Exe }
+    & "$PSScriptRoot\restart.ps1" @restartArgs | Out-Null
     & "$PSScriptRoot\play.ps1" -Seconds $Seconds | Out-Null
     $png = Join-Path $OutDir ("{0}_r{1}.png" -f ($Label -replace '[^\w\-]', '_'), $r)
     & "$PSScriptRoot\capture.ps1" -Out $png | Out-Null

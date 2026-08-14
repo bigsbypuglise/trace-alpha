@@ -12,6 +12,9 @@ extern "C" {
 // stream side data, and av_display_rotation_get is the only thing that should
 // ever interpret it.
 #include <libavutil/display.h>
+// av_cpu_count(): the decode thread default is the machine's logical CPU count
+// on intra-only sources, not FFmpeg's automatic count, which caps at 16.
+#include <libavutil/cpu.h>
 }
 #endif
 
@@ -976,16 +979,32 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     const AVCodecDescriptor* codecDesc = avcodec_descriptor_get(par->codec_id);
     const bool intraOnly = codecDesc && (codecDesc->props & AV_CODEC_PROP_INTRA_ONLY);
     // THREAD COUNT IS NOT FREE AND 0 IS NOT "ALL OF THEM". FFmpeg's automatic
-    // count caps at 16 and warns above it, which on a 32-thread box leaves half
-    // the machine idle on a source that needs all of it. Measured decode-only
-    // against these exact libraries on the 7680x4320 ProRes 4444 XQ plate:
-    // auto 16.19 fps, t=8 10.52, t=16 16.12, t=32 **21.29** -- a 31% gain over
-    // the default, and the same sweep on a GCC-built FFmpeg reads 20.16 auto
-    // against 29.00 at t=32.
+    // count caps at 16 and warns above it, so on a 32-thread box half the machine
+    // sits idle on a source that needs all of it. Swept on the FINAL minimal GCC
+    // build, decode-only, 7680x4320 ProRes 4444 XQ, worst of two sustained passes:
     //
-    // Left at 0 by default until the owner has seen the evidence; the knob is how
-    // it was measured and is what a future default would be set from.
-    impl_->codec->thread_count = envInt("TRACE_DECODE_THREADS", 0);
+    //   t=16 19.05 fps | t=20 21.09 | t=24 22.68 | t=28 24.08
+    //   t=32 25.24     | t=40 25.24 | t=48 25.45 | t=64 25.32
+    //
+    // It knees at the machine's logical CPU count and is flat beyond it, so the
+    // default is that count rather than a literal 32 -- a four-core box must not
+    // inherit this machine's answer.
+    //
+    // RAISED FOR INTRA-ONLY AND NOWHERE ELSE, because thread_count means two
+    // different things. Under slice threading it is how many threads share ONE
+    // frame, so more of them is simply more of the machine; under frame threading
+    // it is how many frames are IN FLIGHT, and a deeper pipeline costs a longer
+    // refill after every seek and flush -- which is the exact mechanism that makes
+    // frame threading unusable for random access (see applyThreadTypeFor's
+    // successor note at kPlaybackForwardWalkLimit). Long-GOP therefore keeps
+    // FFmpeg's automatic count, and the discriminator is the same `intraOnly` the
+    // rest of this file already trusts.
+    //
+    // Verified harmless where it now applies: 4K ProRes 4444 cadence 99.8% both
+    // with and without, `0 of 260` both, while `dec` falls 13.00 -> 9.30ms.
+    const int cpuThreads = std::min(av_cpu_count(), 64);
+    impl_->codec->thread_count =
+        envInt("TRACE_DECODE_THREADS", intraOnly ? cpuThreads : 0);
     // TRACE_LONGGOP_SLICE_THREADS=1 applies the intra-only rule to long-GOP too.
     // Measurement scaffolding, off by default.
     //
