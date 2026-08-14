@@ -1658,6 +1658,16 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   Re-measured on the shipping build: **at ~4x the picture ends exactly on the pointer and never trails more than 6 frames, in both directions** (`behind 0/6f`, `p2p 26ms`), on 52–54% supply — the figure §15.1 predicted. The fast sweep reproduces §15.2's `p2p 22ms` to the digit with max lag better than §15.4's `cpu` record (`0/21f` vs `0/48f`). The throughput fact (~23ms/frame, untouched) is still true; **supply below 100% stopped meaning "behind" when sampling shipped.** Fourth premise-expiry in three sessions, after §26.2, §27 and §28.
 
+- **THE 8K ProRes 4444 XQ FILE IS NOT SOLVED — OWNER REJECTED THE FRAME-DROP RESULT (2026-08-13).** ~11 visible fps reads as visibly poor playback, and the same file plays perfectly in QuickTime on a *less powerful* macOS machine. **Do not describe it as solved and do not use frame dropping as the answer.** `TRACE_RT_DROP` is an experimental fallback and control only.
+
+  **THE DECODE-ONLY GATE IS ANSWERED AND THE BOTTLENECK IS INSIDE TRACE.** Decode-only, no conversion/upload/render/seek, one persistent decoder per configuration (`scripts/measure/decbench/`): vcpkg/MSVC — the build Trace links — reads **16.19 fps at the default thread count and 21.29 at t=32**, while a GCC build reads **20.16 auto and 29.00 at t=32 = 121% of real time.** Two independent multipliers, neither of them a Trace algorithm: **`thread_count = 0` is not "all of them"** (FFmpeg's automatic count caps at 16 and warns above it, idling half a 32-thread box), and **the MSVC build is 27% slower than GCC at the same thread count**. Together 1.79x.
+
+  **THE FIRST 8K CEILING FIGURE IN THIS REPO WAS WRONG.** "20.5 fps = 85%, the machine cannot do it" was taken with the winget `ffmpeg.exe`, a **GCC** build, at the default thread count — against a Trace that links **MSVC**. It substituted a different program for the one being asked about. **Ninth stale-instrument finding, and the second in two sessions that is out of process: benchmark the libraries you ship, at the settings you ship.**
+
+  **THE COST IS STRICT SERIALIZATION, MEASURED RATHER THAN ASSUMED.** Sequential 1x, `TRACE_RT_DROP=0`, `TRACE_DECODE_THREADS=32`: `dec 45.08 + sws 17.21 + upload/handoff 12.03 = handler 74.55ms` against a 41.71ms budget, with **`outside 1.84ms`** — nothing is waiting, the three stages simply run one after another on the UI thread. And **ordinary 1x playback is clean**: `walk 0f`, `seek n=1`, `io play seq 100.0% seek 0`, `recov 0`, `ctx-rebuilds 0`.
+
+  **NEITHER HALF OF THE FIX REACHES 24fps ALONE.** Async sequential decode alone gives `max(45.1, 29.2)` = 45.1ms = **22.2 fps**; a faster build alone leaves 33 + 29.2 = 62ms in series = **16 fps**. **Both** give `max(33, 29.2)` = 33ms = **~30 fps** with margin. So the order is a faster FFmpeg build first, then the bounded async sequential decode queue — sequential only, no routine seeking, no stale-frame delivery, and not touching the scrub lease or the exact release landing. `TRACE_DECODE_THREADS=32` is worth +21% today (44.7 -> 54.2%) and is left at the default because it is not the fix.
+
 - **PLAYBACK HOLDS MEDIA TIME REAL-TIME AND DROPS PICTURE WHEN A SOURCE CANNOT KEEP UP — owner decision, 2026-08-13 (`35d976b`). This is a deliberate, bounded exception to "never skip a frame", and it is the fourth.** A source that cannot physically sustain its native rate keeps the *movie* on the clock rather than playing the whole thing slowly. **Exactness is untouched and stays mandatory** for paused inspection, frame stepping, click landing and scrub release. **1× forward playback and nothing else**: reverse and the shuttle carry their speed in a stride and return earlier, and **below 1× every frame is presented** — the user asked for slow motion, and dropping picture to hold a deliberately slowed clock would defeat the request (the same reasoning that makes 0.5× silent).
 
   **`realtimeDropSteps()` returns 1 unless the run is already behind**, so "engage only when required" is structural rather than a tuned threshold, and **`drop 0` across the validated asset set is the check**. The HUD reads `drop N (ticks M max R, media P%)`: `real time` is how much *picture* arrived, **`media` is whether the *movie* stayed on the clock**, and the second must read ~100% whenever the first reads below it.
@@ -2131,6 +2141,11 @@ both, so it is responsiveness rather than correctness. **It is also the control 
 the per-mode threading switch that was built and removed** — see the Decisions
 entry; under it the intra-only walk limit is 48 rather than 1, which is the other
 half of that measurement),
+**`TRACE_DECODE_THREADS=N`** (2026-08-13: the decoder's `thread_count`, default 0 =
+FFmpeg's automatic count, **which caps at 16 and leaves half a 32-thread box idle**.
+`=32` is worth +21% on the 8K plate — `dec 61.11 -> 45.08ms`, 44.7 -> 54.2% of real
+time — and is **not** the fix, so the default is unchanged until the FFmpeg build
+question is settled and a default can be set once from the build that ships),
 **`TRACE_RT_DROP=0`** (2026-08-13, `35d976b`: never drop a playback frame, i.e. the
 pre-owner-decision behaviour where a heavy source plays the whole movie slowly
 instead of holding media time. The control for anything about the drop, and the

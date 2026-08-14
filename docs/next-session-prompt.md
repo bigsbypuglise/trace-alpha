@@ -1,230 +1,93 @@
-# CLOSED: large ProRes 4444 playback — measured through, two fixes shipped, no open owner question
+# OPEN: 8K ProRes 4444 XQ playback — owner REJECTED the frame-drop result (2026-08-13)
 
-The interface pass is closed and `v0.2.0-alpha.1` is cut — that record is below and is intact.
-The owner report of 2026-08-12 was **measured through** on 2026-08-13, and the product decision
-it raised was taken by the owner the same day and is **shipped**. Read this section before the
-brief that follows it, which is retained as the record of what was asked for and is **wrong in
-two of its three candidates**.
+**The 8K file is NOT solved and must not be described as solved.** The real-time drop holds
+media time and the owner has rejected the result: **~11 visible fps reads as visibly poor
+playback.** The same file plays perfectly in QuickTime on a *less powerful* macOS machine.
+`TRACE_RT_DROP` stays as an experimental fallback and control; **frame dropping is not the
+final solution.** The acceptance target is ~100% media time at 24fps source cadence with
+`drop 0`, full quality, no recurring hitches, and exact pause / scrub release / stepping.
 
-## What the two files actually are — the brief's premise was off on both
+## THE DECISION GATE IS ANSWERED: DECODE-ONLY EXCEEDS 24 fps, SO THE BOTTLENECK IS INSIDE TRACE
 
-`ffprobe`, not assumed. Physical panel throughout, 5120x1440 @ 239.999Hz.
+Decode-only, no conversion, no upload, no render, no seek, one persistent decoder per
+configuration over the whole file (`scripts/measure/decbench/`, plus the same sweep on the
+GCC-built reference). 7680x4320, ProRes **4444 XQ** (profile 5), `yuva444p12le`, **12-bit,
+4:4:4 with alpha** (4 planes, log2chroma 0/0), **24000/1001**, 5,739 Mbps, 145 frames.
 
-| file | encoded | profile | pix_fmt | bitrate | frames |
-|---|---|---|---|---|---|
-| `13_4448x3096_ProRes_4444` | 4448x3096 | 4444 | `yuv444p12le` (no alpha) | 1,773 Mbps | 108 @ 23.976 |
-| `12_8K_ProRes4444` | **7680x4320** | **4444 XQ** | `yuva444p12le` | **5,739 Mbps** | 145 @ 23.976 |
-| `1_4K_ProRes_4444` (control) | 4096x2304 | 4444 | `yuva444p12le` | 1,267 Mbps | 262 @ 24.000 |
-
-Not 8192x4320, and **XQ rather than plain 4444** — a higher-bitrate profile, which is why its
-decode is 16% dearer per megapixel than the control's. Pixel ratios against the control are
-**1.46x and 3.52x**, not the 4.5x/7.5x the brief estimated.
-
-## THE CONTRACT QUESTION IS ANSWERED FOR ONE FILE AND DOES NOT ARISE FOR THE OTHER
-
-Answered **machine-side**, without needing to know which player the owner used, by measuring
-what this box can decode at all: `ffmpeg -f null`, real FFmpeg ProRes decoder, no conversion,
-no upload, no display. That is a hard ceiling on what *any* player could present.
-
-| file | decode ceiling | of real time |
-|---|---|---|
-| 4K 4444 control | 78.2 fps | 326% |
-| 4448x3096 | **59.1 fps** | **246%** |
-| 7680x4320 XQ | **20.5 fps** | **85%** |
-
-**The 8K plate cannot be played at real time by anything on this machine.** Decode alone,
-with every other stage deleted, reaches 85%. So a player that looks smooth on it is dropping
-frames, or running a proxy — a different product decision, not a faster decoder. That is the
-brief's "contract versus contract" case and it is now a measurement rather than a hypothesis.
-
-**The 4448x3096 file has 2.5x the decode headroom it needs and DOES NOT REPRODUCE AS SLOW.**
-Shipping build, `TRACE_NO_AUDIO=1`: **98.4%** of real time at `win 991x1083 / display 991x690
-filtered x3`, and **98.3%** maximized at `win 5120x1369 / display 1402x976 filtered x2`, with
-`hitch 0` and `handler>budget 1 of 106` in both. Window size is not the variable; **neither
-file has an audio track**, so the scheduler is not the variable either.
-
-**THE ONE THING ONLY THE OWNER CAN ANSWER: which player, and was file 13 really slow?** Two
-files were reported together and only one reproduces. Ask before spending anything on 13.
-
-## The per-frame breakdown, 4K 4444 as the control
-
-`TRACE_NO_AUDIO=1`, d3d11 planar default. `total` is `dec + sws + convertWrap + alloc + upload
-+ paint`; `handoff` is not in it and is ~`upload`, because the D3D11 backend uploads inside
-`setFrame`.
-
-| | dec | sws | upload | total | budget | presented |
-|---|---|---|---|---|---|---|
-| 4K 4444 control | 14.74 | 5.19 | 3.21 | 23.28 | 41.67 | **99.6%** |
-| 4448x3096 | 19.82 | 7.25 | 5.25 | 32.73 | 41.71 | **98.4%** |
-| 7680x4320 XQ | 60.20 | 17.64 | 11.43 | 80.14 | 41.71 | **34.4%** |
-
-**Every term is linear in pixels and nothing is anomalous.** Per megapixel: dec 1.56 / 1.44 /
-1.81, sws 0.55 / 0.53 / 0.53, upload 0.34 / 0.38 / 0.34. There is no pathology to find in the
-pipeline — the 8K frame is simply 3.5x the control against a fixed budget. Do not go looking
-for a bug in the conversion or the upload; it is not there.
-
-## The three candidates: one right, two refuted, and a fourth found by measuring
-
-**(3) I/O — REFUTED OUTRIGHT, and it is not close.** `src local (fixed local volume) | C:\
-NTFS | 5739.3 Mbps`, `io play | rd 90 | avg 14651 KB | seq 100.0% | seek 0 | lat 2.696/6.6ms |
-**44,526 Mbps** | stall 0 (0ms)`, `uiblock play 6.3ms`. C: is a Samsung 990 PRO NVMe; a
-streamed cold read of the 4.1 GB file measures 3,918 MB/s. Delivery exceeds demand by 7.8x.
-
-**(2) PLANAR UPLOAD — REFUTED AND INVERTED. GATE C's conclusion gets STRONGER at 8K, not
-weaker.** The brief's byte arithmetic was right and named the wrong term: the planar path's win
-is that a **memcpy replaces a colour conversion**, and the conversion scales with pixels exactly
-as the copy does. On the 8K plate — `TRACE_PLANAR_UPLOAD=0` gives `sws 17.6 -> 57.9ms` for an
-upload saving of 4ms:
-
-| config | presented | sws | upload | total |
-|---|---|---|---|---|
-| d3d11 planar (**shipping**) | **34.4%** | 17.6 | 11.4 | 80.1 |
-| d3d11 BGRA | 29.2% | 57.9 | 7.2 | 125.1 |
-| `TRACE_RENDERER=cpu` | 32.4% | 57.8 | — | 111.9 |
-
-The shipping default is the fastest of the three. **The GPU path is not implicated.**
-
-**(1) INTRA-ONLY SLICE-ONLY THREADING — THE BRIEF WAS RIGHT THAT IT COSTS THROUGHPUT AND WRONG
-THAT ITS PREMISE HAD EXPIRED.** `TRACE_INTRA_FRAME_THREADS=1` is now the symmetric control
-(`ed686a1`), off by default. It is a **large trade in both directions**:
-
-- Forward playback, 8K plate: **33.8% -> 58.0%** of real time, `handler 89.7 -> 43.3ms`.
-- Scrub `-SnapRelease` on 4K 4444: `dec 15.9 -> 155.6ms`, `release 42.8 -> **398ms**`,
-  `ui gap max 26 -> **241ms**`, `behind 3/13f -> 151/151f`, `supply 27% -> 3%`.
-- Scrub `-Reversals`: `hitch 2 -> 7`, `ui gap max 247ms`, `p2p 1994ms`.
-
-The landing stays exact on both legs (`target 261 shown 261 delta 0`) — this is
-responsiveness, not correctness. `f77d472` did move the *drag* onto a worker, but **the release
-landing is still synchronous**, and that is where the ~thread-count pipeline refill is paid.
-
-**A REFERENCE-DECODER BENCHMARK ANSWERS THIS WRONG, AND CONFIDENTLY.** `ffmpeg -f null` makes
-slice-only look *faster* on every ProRes file in the set (78.2 vs 75.0 / 59.1 vs 50.8 / 19.9 vs
-17.5 fps) — which would have closed candidate 1 as refuted before the knob existed. `-f null`
-decodes and discards, so there is nothing for a frame-threaded decoder to overlap **with**.
-Trace's tick decodes, then converts, uploads and paints on the same thread, and frame threading
-decodes the next frame underneath all of it. **Measure the pipeline you ship.**
-
-**(4) FOUND BY MEASURING, AND IT IS THE ONE THAT SHIPPED (`ee6d525`).** `armNextPresent()`
-rephases to the next grid slot strictly after now. Correct for a transient overrun; wrong for a
-sustained one, where **every arm inserts the rest of a slot as idle and the achieved rate
-quantises to fps/N for integer N**. At `handler 88ms` against a `41.71ms` period — 2.11 slots —
-it armed for slot 3 and played at `23.976/3 = 8.0fps` while the pipeline could supply 11.0.
-The signature was `outside 32.2ms` of a 121ms period with `rephase` firing on **all 44 frames**.
-
-Fixed per frame with no new state: `lastHandlerMs_` is written by the `recordHandler` guard,
-declared *after* the `armNext` guard and therefore running *before* it. A handler that fit its
-period and is still late is jitter and keeps the grid; one that did not fit is a saturated
-pipeline with nothing to wait for. **Epoch and slot are untouched**, so the timeline does not
-move and the frame index is still the accumulator's or the audio clock's.
-
-## THE OWNER DECISION WAS TAKEN, AND PLAYBACK NOW HOLDS MEDIA TIME (2026-08-13)
-
-**"Optimize playback for real-time presentation. If a heavy source cannot physically sustain
-its native frame rate, Trace should selectively drop playback frames to keep media time
-real-time rather than slowing the entire movie down. Exactness remains mandatory for paused
-inspection, frame stepping, click landing, and scrub release. Frame dropping should engage only
-when required, be clock-driven, and be visible in telemetry."** Shipped at `35d976b`.
-
-**This is the fourth deliberate exception to "never skip a frame"**, alongside the drag preview
-on intra-only media (§15), accelerated reverse and accelerated forward. Read it at its stated
-width: it is **1× forward playback only**, it is **off below 1×** (the user asked for slow
-motion), and **nothing about exactness moved** — `scrub -SnapRelease` still lands
-`target 261 shown 261 delta 0`.
-
-Where the 8K plate now stands, `TRACE_NO_AUDIO=1`, physical panel:
-
-| | presented | media time | drop |
+| build | threads | fps | % of real time |
 |---|---|---|---|
-| as shipped at `v0.2.0-alpha.1` | 33.8–35.4% | 34% | — |
-| + the scheduler fix (`ee6d525`) | 45.1% | 45% | — |
-| **+ the real-time drop (`35d976b`)** | **46.0%** | **97.4%** | `67 (ticks 59 max 2)` |
+| vcpkg / MSVC (**what Trace links**) | auto (0) | 16.19 | 67.5 |
+| vcpkg / MSVC | 16 | 16.12 | 67.2 |
+| vcpkg / MSVC | **32** | **21.29** | **88.8** |
+| GCC (gyan 9.0) | auto (0) | 20.16 | 84.1 |
+| GCC (gyan 9.0) | 24 | 25.59 | 106.7 |
+| **GCC (gyan 9.0)** | **32** | **29.00** | **121.0** |
 
-**The movie plays at the right speed now** — frame 127 of a due 131 in 5.44s, against frame 60
-of 133 before — showing 11 of every 24 frames, `hitch 0`, against a decode ceiling of 20.5fps.
+**Two independent multipliers, and neither is a Trace algorithm.** `thread_count = 0` is not
+"all of them" — FFmpeg's automatic count caps at 16 and warns above it, leaving half a
+32-thread box idle. And the **MSVC build is 27% slower than the GCC build at the same thread
+count** (21.29 vs 29.00). Together they are **1.79x**.
 
-**THE OTHER HALF OF THE FIX WAS NOT THE DROP, IT WAS THE WALK LIMIT, AND THE FIRST CUT MADE
-THINGS WORSE.** With `kPlaybackForwardWalkLimit` at 4 on intra-only, a present that skipped 3
-frames *walked* them and decoded all 3 — `walk 3f`, `dec 215ms`, **14.4% of real time, worse
-than not dropping at all**. It is a runaway as well as a cost: slower playback falls further
-behind, which asks for a bigger jump. On intra-only a seek lands on the target for one decode,
-so the limit is **1**. Long-GOP keeps 48. **A frame-dropping policy and a walk-versus-seek
-policy are one decision, not two**, and neither is safe to change alone.
+**THE FIRST 8K CEILING FIGURE IN THIS REPO WAS WRONG AND THIS IS WHY.** "20.5 fps = 85%, the
+machine cannot do it" was measured with the winget `ffmpeg.exe` — a **GCC** build — while Trace
+links an **MSVC** one, and at the default thread count. It substituted a different program for
+the one being asked about. **Benchmark the libraries you ship, at the settings you ship.**
 
-## PER-MODE THREADING WAS BUILT, MEASURED AND TAKEN BACK OUT — DO NOT REBUILD IT BLIND
+## WHERE THE TIME GOES IN TRACE, AND IT IS STRICT SERIALIZATION
 
-The owner authorised frame threading for playback and slice for scrub **"if the measurements
-continue to support that"**. They do not, and the implementation exists in `35d976b`'s history
-if it is ever wanted: a codec reopen at the mode boundary, safe under the scrub lease, with
-two-edge hysteresis.
+Sequential 1x playback, `TRACE_RT_DROP=0`, physical panel, `win 1226x1083 / display 1226x690`:
 
-**The real-time drop is what killed it, and the reason generalises: dropping makes playback ask
-for JUMPS, and on intra-only a jump IS random access — so the mode that would want frame
-threading stops existing exactly when the source is heavy enough to want it.** All four cells
-on the 8K plate:
+| | dec | sws | upload+handoff | handler | outside | presented |
+|---|---|---|---|---|---|---|
+| default threads | 61.11 | 17.07 | 12.25 | **90.11** | 2.49 | 44.7% |
+| `TRACE_DECODE_THREADS=32` | 45.08 | 17.21 | 12.03 | **74.55** | 1.84 | 54.2% |
 
-| | presented | media |
-|---|---|---|
-| frame + seek | 4.2% | 13.5% |
-| slice + walk | 14.4% | 53.5% |
-| frame + walk | 16.7% | 64.4% |
-| **slice + seek** | **46.0%** | **97.3%** |
+`handler` is the sum of its parts to within 0.3ms and **`outside` is under 2.5ms**, so nothing
+is waiting: decode, conversion and upload run strictly one after another on the UI thread.
+Latency distribution at t=32: p50 75.4 / p95 82.2 / p99 83.2 / max 118.5ms against a 41.71ms
+budget.
 
-**It failed on both reported files.** The 8K never earns frame threading, which is correct. The
-marginal 4448×3096 plate *does* earn it and is **worse for it — 92.3% presented with 7 drops
-against 98.4% and none** — because a frame-threaded `avcodec_open2` over that frame size costs
-a **280ms** stall, once, which the drop then catches up. Pinned to slice on the same build it
-reads 98.4% and `drop 0`. `TRACE_INTRA_FRAME_THREADS=1` reproduces every figure here.
+**Item 7 is answered and clean: ordinary 1x playback does NOT seek, flush or rebuild.**
+`walk 0f`, `seek n=1` (the open), `io play | seq 100.0% | seek 0 | stall 0`, `recov 0`,
+`ctx-rebuilds 0`, `drop 0`. The pipeline is doing the right work; it is doing it in series.
 
-**If it is ever revisited** — a long, genuinely marginal source is the case that could still
-justify it, since the reopen amortises — two things from building it are worth keeping. The
-hysteresis must be **two-edged**: losing frame threading on the first drop made the marginal
-file oscillate, `sw 6` in four seconds with `max 331ms`, because a source dropping one frame in
-sixty is a sequential workload with an occasional jump. And **the starting state must be the
-safe one**: starting frame-threaded cost two reopens and `max 892.9ms` on a 5s run, while
-starting in slice let the heavy source discover it could not keep up for `sw 0`.
+## THE PROPOSED FIX, AND WHY IT NEEDS BOTH HALVES
 
-## What is open
+Neither half reaches 24fps alone, and the arithmetic says so before any code is written:
 
-**Nothing is blocked, and there is no open owner question.** The two things worth doing next,
-in the owner's hands:
+- **Async sequential decode alone**: decode moves to a worker and overlaps conversion+upload, so
+  the rate becomes `max(decode, convert+upload)` = `max(45.1, 29.2)` = 45.1ms = **22.2 fps.
+  Still short.**
+- **A faster FFmpeg build alone**: decode 45.1 -> ~33ms, but still in series with 29.2ms of
+  conversion and upload = 62ms = **16 fps. Worse than the other half.**
+- **Both**: `max(33, 29.2)` = 33ms = **~30 fps**, comfortably clear of the 41.71ms budget with
+  `drop 0`. **That is the target and it has margin.**
 
-1. **Judge the 8K plate at the machine.** 11 fps of picture on a plate that cannot exceed 20 is
-   what the contract now produces, and whether that reads as *usable review* or as *a slideshow
-   in time* is a judgement no counter makes. **Not over Parsec.**
-2. **The 4448×3096 file has never been confirmed as genuinely slow.** It measures 98.4% of real
-   time with `drop 0` and `hitch 0` and always has. If the owner still sees it as slow, the next
-   session needs to know what they were doing — it is not playback in a default or maximized
-   window.
+So the order is: **(1) establish a faster FFmpeg build** — the MSVC/GCC gap is the single
+largest unexplained factor and needs confirming as a build property rather than a measurement
+artefact; **(2) prototype the bounded async sequential decode queue** the owner conditionally
+authorised, now that UI-thread serialization is measured rather than assumed. Its contract:
+sequential only, bounded queue, **no routine seeking, no stale-frame delivery**, and it must not
+touch the scrub lease, the exact release landing, stepping or reverse.
 
-Everything below this line is the record of the investigation that produced the two fixes.
+**`TRACE_DECODE_THREADS=32` is worth +21% in Trace today** (dec 61.11 -> 45.08ms, 44.7 -> 54.2%)
+and is one line, but it is left at the default because it is not the fix and a default should be
+set once, from the build that ships.
 
-## Two things this session established that outlive it
+## What is NOT established
 
-**AN OUT-OF-APP BENCHMARK IS AN INSTRUMENT AND CAN ACCUSE A CORRECT HYPOTHESIS.** The ffmpeg
-ceiling run said candidate 1 was refuted, on all three files, by a consistent margin. Building
-the knob anyway — because the brief said to — found a 1.7x win in the app. This is the eighth
-stale-instrument finding and the first where the instrument was *out of process*. The rule it
-adds: **a benchmark that removes the work your program does around the thing being measured is
-measuring a different program.**
-
-**AND THAT 1.7x DID NOT SURVIVE EITHER, WHICH IS THE SAME LESSON A THIRD TIME.** Frame threading
-was measured against a build that did not yet drop frames. Once the real-time drop shipped, the
-gain inverted — see the per-mode threading section above — because dropping changes playback's
-access pattern from sequential to random and frame threading is bad at random access. **A
-measurement is taken against a build, and the build moved.**
-
-**A DEFERRED ITEM'S PREMISE EXPIRES — AND SO DOES A REFUTATION'S.** Candidate 1's premise did
-*not* expire, which is the tenth instance read the other way: the July 2026 decision was still
-protecting something real, and the check was to re-run the gesture it protected rather than to
-reason about whether the mechanism had moved.
+- **VLC was attempted and produced no usable number** — `-I dummy --benchmark` returns
+  immediately on this box. Item 8 is open. The vcpkg-vs-GCC pair on one machine already
+  separates *build* from *Trace pipeline*, which is the substantive half of what item 8 was for.
+- **The QuickTime comparison has not been explained and must not be hand-waved.** Apple Silicon
+  carries a hardware ProRes decoder and that is the obvious hypothesis, but it is a hypothesis;
+  it is also irrelevant to the gate, which is already answered against Trace.
+- **Nothing here has been signed off.** No image quality was reduced, no proxy, no resolution
+  change.
 
 ---
 
-## The original brief, retained as the record of what was asked for
-
-Opened 2026-08-12 by the owner test report. **Candidates (2) and (3) are refuted above
-and candidate (1) is a trade rather than a fix** — read it for the reasoning, not for the
-conclusions.
+## The record of the 2026-08-12 report and the first investigation
 
 ## The report
 
