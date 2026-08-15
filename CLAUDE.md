@@ -2332,7 +2332,50 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
 
    **The overlay question is settled and that work is stopped** (plan §19, §20.1). Ordinary Qt child widgets over the child HWND are neither visible nor hit-testable; every native-window variant loses translucency. **Renderer-composited translucency works** — real alpha over the video, full native input, keyboard staying with Qt via `MA_NOACTIVATE`, and **no measured playback cost** (98.3%, 120/120 with the overlay held visible through a 9s 4K run). The child HWND stays; **`WA_PaintOnScreen` is not promoted** — it works on this build but Qt documents it X11-only. `TRACE_OVERLAY_COMPOSITED=1` is a **disposable spike with placeholder art**, off by default, and it announces itself on stderr. No further overlay/interface work until GPU integration is complete.
 
-4. **LucidLink read-ahead — optional follow-up, not started work.** See the read-ahead section above: two designs measured worse. First try full-request buffered serving instead of partial reads, then benchmark. Do not treat as in-progress.
+4. **LucidLink read-ahead — a third design is BUILT, default off, correctness-verified, and
+   explicitly NOT validated against real remote storage (2026-08-15, unattended session, no live
+   remote access). Full writeup: `docs/lucidlink-readahead-v3.md`.** `TRACE_IO_READAHEAD=1` in
+   `MediaIoSource`: a fill-ahead buffer, full-request-or-wait serving (never fragmented except
+   when a single read exceeds capacity), the exact "next experiment" the two prior (reverted,
+   uncommitted) attempts' postmortem proposed. Two new synthetic knobs for reproducing a slow-link
+   read pattern on **local** media: `TRACE_IO_INJECT_KBPS` (bandwidth cap) and
+   `TRACE_IO_INJECT_DELAY_MS` (fixed per-read latency — the model that actually matches what
+   read-ahead is for, and what a prior session's "injected per-read delay" note describes).
+
+   **Two hang-class bugs were found by testing small-capacity-vs-large-packet cases, not by
+   review**, and both are fixed: the default 256KB fill chunk cost 7.7s to fill a 24MB buffer
+   under an 80ms/call latency (fixed: 4MB default, `TRACE_IO_READAHEAD_CHUNK_KB` to tune); and a
+   single FFmpeg read bigger than the buffer's capacity could wait forever for room the paused
+   fill loop would never free, with a second boundary case surviving the first fix when
+   `raChunkBytes == raCapacityBytes` exactly (both fixed; reproduced and confirmed closed with
+   `TRACE_IO_READAHEAD_MB=1` against ProRes 4444's ~2.4MB packets — 8s+ hang before, 300ms clean
+   close after).
+
+   **Correctness confirmed pixel-identical** (`abdiff.ps1`, 0% differing) against the legacy path
+   at a stepped frame and across a mixed forward/backward sequence exercising multiple buffer
+   rebases under injected latency. **One harness lesson**: the first mixed-direction attempt used
+   a rapid 15ms key-press cadence and read 99.998% different — a timing artifact (rapid presses
+   coalesce, and differing I/O latency between configurations resolved a different number of them
+   before landing), not a correctness bug; a 300ms cadence made both land on the identical frame
+   and the diff read 0%.
+
+   **Synthetic results, `TRACE_RT_DROP=0`, 4K ProRes 422 HQ, 10s play**: at 20ms injected
+   per-read latency, read-ahead cuts average read latency 22.4 → 0.79ms (98.6% instant buffer
+   hits) with the file already finishing inside the window either way; at 80ms, read-ahead
+   delivers roughly double the data in the same wall-clock window (458.8MB vs 230.9MB) by hiding
+   most read latency behind decode/paint. `TRACE_RT_DROP=0` was necessary to isolate this from a
+   real, separate interaction: without it, the real-time drop mechanism's jump-ahead on a missed
+   deadline is genuine random access on intra-only media, and a read-ahead rebase correctly
+   discards the buffer on every one of those jumps, which is a compound of two mechanisms rather
+   than what this experiment measures.
+
+   **Do not quote any of the above as LucidLink performance.** No live remote access this session;
+   the absolute latency/bandwidth figures are a relative on/off comparison under an injected delay
+   this session had no way to calibrate against a real cold read (a prior session's calibration —
+   "11.63 vs 11.35 fps, 3% off" — is recorded in this file but was not reproducible without a live
+   mount). Closing this out needs either a nominated file on the read-only `V:\` mount or a real
+   cold-read figure from Anj to calibrate the synthetic knobs. `TRACE_IO_READAHEAD` stays off by
+   default; flipping it is an owner decision that should follow real validation.
 5. ~~**Audio, first pass — needs validation on Windows**~~ **Validated and fixed 2026-08-07**, on the local Windows toolchain against the `Trace_Testing_Assets` set. The three open questions are answered: (a) the device-latency correction is adequate — a fixed term measured neutral against the EMA, and residual sync is ≤62ms worst case at a 100ms buffer; (b) no underruns during playback on any file including 4K ProRes 422 HQ — the only silence padding is at end of stream once the audio track runs out, and the ring is now derived at ≥2x the device buffer rather than a fixed 0.5s; (c) the bounded catch-up no longer fires at all in normal playback — **skips are 0** on every file measured. Results: 1080p H.264 **99.1%** of real time (240/240 frames), 4K H.264 **98.3%** (120/120), 4K ProRes 422 HQ **98.4%** (168/168, against a recorded baseline of 164 frames / 95.0%), 4K ProRes 4444 no-audio control **98.3%** (261/261). Remaining residual is 3–5 *holds* per 10s clip with no frame dropped, which is the 41ms tick against a 41.667ms frame — a presentation-clock problem, and item 3's to solve. **Still not done: the LucidLink regression** (`start()` now takes a bounded ≤150ms UI-thread wait to prime the ring; ~10–13ms locally, unmeasured on a cold remote source) and J-K-L off-speed audio, then scrub audio.
 6. ~~**4K scrub throughput — the cache is sized in the wrong currency**~~ **Resolved 2026-08-07** (`b5a56af`), except for ProRes 4444. Eviction is by bytes now and previews convert to the displayed size; see the scrub entries in Decisions for the measured table. 4K H.264 backward went 31.3 → 0.69ms/frame, ProRes 422 backward 13.1 → 7.5ms, and everything except 4444 reaches `lag 0-1f` on a 1.5s full-clip sweep.
 
@@ -2533,6 +2576,15 @@ perfectly on lag while stalling for 100ms.
    shown 3`. Worth remembering *why* it was only ever called a nuisance: the
    values were not wrong, they were **old**, which is harder to notice and worse
    in a line whose entire job is to say which frame is on screen.
+
+**`TRACE_IO_READAHEAD=1`** (2026-08-15: the third LucidLink read-ahead design in `MediaIoSource`,
+default off, correctness-verified but NOT validated against real remote storage — see
+`docs/lucidlink-readahead-v3.md`. `TRACE_IO_READAHEAD_MB` (default 24) and
+`TRACE_IO_READAHEAD_CHUNK_KB` (default 4096) tune capacity and fill granularity.
+`TRACE_IO_INJECT_KBPS` (bandwidth cap) and `TRACE_IO_INJECT_DELAY_MS` (fixed per-read latency,
+the model that matches what read-ahead is for) are synthetic link simulators for A/B'ing it on
+local media — never a substitute for a real remote measurement. `TRACE_IO_LOG=1` appends
+per-close read/seek stats including `bufferHits`/`raRebases` to `%TEMP%\trace_iolog.txt`.
 
 **Tuning knobs**, all defaulting to shipped behaviour: `TRACE_ASYNC_SCRUB=0`
 (back to the synchronous walk), `TRACE_SCRUB_WALK_MS` / `TRACE_SCRUB_REARM_MS`

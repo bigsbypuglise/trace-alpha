@@ -39,6 +39,17 @@ struct IoPhaseStats {
     long long bufferingEvents = 0;    // waits long enough to be user-visible
     double bufferingMsTotal = 0.0;
 
+    // Read-ahead only (TRACE_IO_READAHEAD=1; zero on every other path,
+    // including the legacy per-request async path). `bufferHits` is a
+    // request fully satisfied from data already sitting in the fill-ahead
+    // buffer -- no wait on the worker at all. `raRebases` is the buffer
+    // being discarded and refilled from a new position, which is what a real
+    // seek costs under read-ahead: the same event a plain seek always cost,
+    // just named so it is not confused with a demuxer re-read inside the
+    // buffered range.
+    long long bufferHits = 0;
+    long long raRebases = 0;
+
     double avgReadBytes() const {
         return reads > 0 ? static_cast<double>(bytes) / static_cast<double>(reads) : 0.0;
     }

@@ -32,6 +32,7 @@ extern "C" {
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 
 namespace trace::core {
 
@@ -47,6 +48,38 @@ bool envSet(const char* name, bool* value) {
     if (v.isEmpty()) return false;
     *value = (v != "0" && v.compare("false", Qt::CaseInsensitive) != 0);
     return true;
+}
+
+qint64 envInt64(const char* name, qint64 fallback) {
+    const QByteArray v = qgetenv(name);
+    if (v.isEmpty()) return fallback;
+    bool ok = false;
+    const qint64 parsed = v.toLongLong(&ok);
+    return ok ? parsed : fallback;
+}
+
+// TRACE_IO_LOG=1 appends one line per closed file to %TEMP%\trace_iolog.txt,
+// covering Playback and Seek (Open is uninteresting for this knob). Exists
+// for the same reason TRACE_OPEN_LOG does: reading the read-ahead counters
+// off a screenshot of the HUD would need OCR and would still miss whichever
+// field scrolled off, where a file gives exact values a script can diff.
+bool ioLogEnabled() {
+    static const bool on = !qgetenv("TRACE_IO_LOG").isEmpty()
+                        && qgetenv("TRACE_IO_LOG") != "0";
+    return on;
+}
+
+void ioLogLine(const QString& line) {
+    static QFile* f = [] {
+        auto* file = new QFile(QDir::tempPath() + "/trace_iolog.txt");
+        file->open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text);
+        return file;
+    }();
+    if (f && f->isOpen()) {
+        f->write(line.toUtf8());
+        f->write("\n");
+        f->flush();
+    }
 }
 
 } // namespace
@@ -95,11 +128,105 @@ struct MediaIoSource::Impl {
     unsigned generation = 1;
     bool lastStale = false;
 
+    // --- read-ahead (diagnostic, default off: TRACE_IO_READAHEAD=1) ---
+    //
+    // A fill-ahead buffer replacing the one-request-at-a-time worker above.
+    // The worker reads sequentially ahead of wherever the demuxer has
+    // consumed to, instead of waiting to be asked; a read is served only once
+    // the FULL requested range is sitting in the buffer, never fragmented
+    // (except at true EOF) -- that is the fix over the two prior attempts,
+    // whose postmortem is in CLAUDE.md: v1 opened a second reader and
+    // corrupted its own buffer; v2 served whatever partial amount was
+    // available and fragmented every FFmpeg read into several, which dropped
+    // sequentiality and drove up demuxer seeks. Every field below is set once
+    // in open() before the worker starts and never mutated after, so reading
+    // it from the worker without the lock is safe.
+    //
+    // These fields are set only when readAheadEnabled and the worker exists
+    // (remote or TRACE_REMOTE_IO=1); the plain synchronous local path and the
+    // legacy per-request async path never touch them.
+    bool readAheadEnabled = false;
+    int raCapacityBytes = 24 * 1024 * 1024;
+    // Fill granularity. Matters a lot more than it looks: under a per-call
+    // latency model (TRACE_IO_INJECT_DELAY_MS), a small chunk pays the fixed
+    // round-trip cost once per chunk, so filling the whole buffer in many
+    // small chunks can cost far more wall time than one big chunk would --
+    // measured, a 256KB default under an 80ms/call delay took 7.7s just to
+    // fill 24MB once. Default is a few MB, comfortably above the largest
+    // ordinary FFmpeg read (~11.5MB on a 9K plate is the outlier; this is
+    // sized for the common case and is a knob, not a constant, for exactly
+    // that reason.
+    int raChunkBytes = 4 * 1024 * 1024;
+
+    // Mutable, protected by ioMutex.
+    QByteArray raData;   // buffered bytes, contiguous from raBase
+    qint64 raBase = 0;   // absolute file offset of raData[0]
+    bool raEof = false;  // raBase + raData.size() is the end of the file
+    unsigned raEpoch = 0; // bumped whenever raData is discarded and rebased
+
+    // TRACE_IO_INJECT_KBPS=N: throttles the worker's own file reads to N
+    // kbit/s, i.e. a bandwidth CAP -- the file itself cannot be made to
+    // stream faster than this whatever the read pattern. Read-ahead cannot
+    // beat this; it is here to reproduce a link that is genuinely too slow
+    // for the file, not the case read-ahead targets.
+    //
+    // TRACE_IO_INJECT_DELAY_MS=N: a fixed per-read-call delay, independent
+    // of bytes -- a round-trip/seek LATENCY, the thing a serialized
+    // one-request-at-a-time reader cannot hide and a continuously-filling
+    // worker can, because the round trip is paid once by the fill instead of
+    // once per FFmpeg read. This is the knob CLAUDE.md's prior sessions
+    // describe using ("an injected per-read delay to reproduce the cold
+    // profile repeatably") and is the more honest model of what read-ahead
+    // is actually for. Both are SYNTHETIC comparison tools, not a substitute
+    // for measuring real remote storage. Set once in open().
+    qint64 injectBytesPerSec = 0;
+    qint64 injectDelayUs = 0;
+
+    void throttleForBytes(qint64 bytes) const {
+        if (injectDelayUs > 0) QThread::usleep(static_cast<unsigned long>(injectDelayUs));
+        if (injectBytesPerSec <= 0 || bytes <= 0) return;
+        const double seconds = static_cast<double>(bytes) / static_cast<double>(injectBytesPerSec);
+        const qint64 us = static_cast<qint64>(seconds * 1'000'000.0);
+        if (us > 0) QThread::usleep(static_cast<unsigned long>(us));
+    }
+
     bool useAsyncReads() const { return worker != nullptr; }
 
     void workerLoop() {
         QMutexLocker lock(&ioMutex);
         while (!workerStop) {
+            if (readAheadEnabled) {
+                const bool full = raEof || raData.size() >= raCapacityBytes;
+                if (full) {
+                    ioRequested.wait(&ioMutex, 50);
+                    continue;
+                }
+                const qint64 fillAt = raBase + raData.size();
+                const qint64 want = std::min<qint64>(raChunkBytes, raCapacityBytes - raData.size());
+                const unsigned myEpoch = raEpoch;
+                lock.unlock();
+
+                QByteArray chunk(want, Qt::Uninitialized);
+                bool seekOk = true;
+                if (file.pos() != fillAt) seekOk = file.seek(fillAt);
+                qint64 got = seekOk ? file.read(chunk.data(), want) : -1;
+                throttleForBytes(got);
+
+                lock.relock();
+                if (myEpoch != raEpoch) {
+                    // Rebased onto a new position while this fill was in
+                    // flight -- these bytes belong to an offset nobody wants.
+                    continue;
+                }
+                if (got <= 0) {
+                    raEof = true;
+                } else {
+                    raData.append(chunk.constData(), got);
+                }
+                ioComplete.wakeAll();
+                continue;
+            }
+
             if (!request.submitted) {
                 ioRequested.wait(&ioMutex, 50);
                 continue;
@@ -117,6 +244,7 @@ struct MediaIoSource::Impl {
             if (file.seek(offset)) {
                 got = file.read(reinterpret_cast<char*>(dst), size);
             }
+            throttleForBytes(got);
             ioMutex.lock();
 
             request.got = got;
@@ -332,6 +460,35 @@ bool MediaIoSource::open(const QString& path, QString& error) {
         return false;
     }
 
+    // Diagnostic knobs, read once here: TRACE_IO_READAHEAD enables the
+    // fill-ahead worker in place of the one-request-at-a-time path, and
+    // TRACE_IO_INJECT_KBPS throttles the worker's own reads so a local file
+    // can stand in for a slow remote link. Both are inert unless a worker
+    // actually exists (remote storage, or TRACE_REMOTE_IO=1 forcing it).
+    {
+        bool ra = false;
+        envSet("TRACE_IO_READAHEAD", &ra);
+        impl_->readAheadEnabled = ra;
+    }
+    impl_->injectBytesPerSec = 0;
+    const qint64 injectKbps = envInt64("TRACE_IO_INJECT_KBPS", 0);
+    if (injectKbps > 0) impl_->injectBytesPerSec = (injectKbps * 1000) / 8;
+    impl_->injectDelayUs = std::max<qint64>(0, envInt64("TRACE_IO_INJECT_DELAY_MS", 0)) * 1000;
+    // Default comfortably exceeds the largest single read observed in this
+    // project (~11.5MB, one packet on a 9K ProRes 4444 plate) -- a request
+    // bigger than the capacity is still served correctly (see readPacket),
+    // just fragmented, so this is headroom for the common case rather than a
+    // hard requirement.
+    const qint64 raMb = envInt64("TRACE_IO_READAHEAD_MB", 24);
+    impl_->raCapacityBytes = static_cast<int>(std::max<qint64>(1, raMb) * 1024 * 1024);
+    const qint64 raChunkKb = envInt64("TRACE_IO_READAHEAD_CHUNK_KB", 4096);
+    impl_->raChunkBytes = static_cast<int>(std::min<qint64>(
+        std::max<qint64>(64, raChunkKb) * 1024, impl_->raCapacityBytes));
+    impl_->raData.clear();
+    impl_->raBase = 0;
+    impl_->raEof = false;
+    impl_->raEpoch = 0;
+
     // Only remote sources get the worker. A local read completes in tens of
     // microseconds; routing it through a thread handoff would add cost to the
     // one path that was never at fault, and Phase 5 asks explicitly that the
@@ -383,10 +540,41 @@ void MediaIoSource::close() {
         QMutexLocker lock(&impl_->ioMutex);
         impl_->request = Impl::IoRequest{};
         impl_->lastStale = false;
+        impl_->raData.clear();
+        impl_->raBase = 0;
+        impl_->raEof = false;
+        ++impl_->raEpoch;
         // stallPump deliberately survives: it is the owner's policy for how to
         // wait, not per-file state, and open() calls close() first -- clearing
         // it here would silently disarm the pump for every file after the
         // first.
+    }
+
+    if (ioLogEnabled() && (impl_->stats[static_cast<int>(IoPhase::Playback)].reads > 0
+                        || impl_->stats[static_cast<int>(IoPhase::Seek)].reads > 0)) {
+        // Skip closes with nothing read at all -- a spare or probe-only
+        // decoder that never touched a byte, of which there are several per
+        // launch. Without this a script tailing the last line can land on
+        // one of those instead of the session that actually played.
+        const auto& p = impl_->stats[static_cast<int>(IoPhase::Playback)];
+        const auto& sk = impl_->stats[static_cast<int>(IoPhase::Seek)];
+        ioLogLine(QString(
+            "readahead=%1 injectKbps=%2 injectDelayMs=%3 capMB=%4 | "
+            "play rd=%5 MB=%6 seq=%7%% hits=%8 rebases=%9 seeks=%10 stall=%11 avgLat=%12ms activeMs=%13 | "
+            "seek rd=%14 MB=%15 seq=%16%% hits=%17 rebases=%18 seeks=%19 stall=%20 avgLat=%21ms")
+            .arg(impl_->readAheadEnabled ? "1" : "0")
+            .arg(impl_->injectBytesPerSec > 0 ? (impl_->injectBytesPerSec * 8) / 1000 : 0)
+            .arg(impl_->injectDelayUs / 1000)
+            .arg(impl_->raCapacityBytes / (1024 * 1024))
+            .arg(p.reads).arg(QString::number(p.bytes / (1024.0 * 1024.0), 'f', 1))
+            .arg(QString::number(p.sequentialFraction() * 100.0, 'f', 1))
+            .arg(p.bufferHits).arg(p.raRebases).arg(p.seeks).arg(p.stalls)
+            .arg(QString::number(p.avgLatencyMs(), 'f', 3))
+            .arg(QString::number(p.activeMs, 'f', 0))
+            .arg(sk.reads).arg(QString::number(sk.bytes / (1024.0 * 1024.0), 'f', 1))
+            .arg(QString::number(sk.sequentialFraction() * 100.0, 'f', 1))
+            .arg(sk.bufferHits).arg(sk.raRebases).arg(sk.seeks).arg(sk.stalls)
+            .arg(QString::number(sk.avgLatencyMs(), 'f', 3)));
     }
 
     if (impl_->avio) {
@@ -432,8 +620,95 @@ int MediaIoSource::readPacket(void* opaque, uint8_t* buf, int size) {
         // Local volumes keep the plain synchronous read: no worker, no
         // handoff, no added latency on a path that was never the problem.
         got = impl->file.read(reinterpret_cast<char*>(buf), size);
+    } else if (impl->readAheadEnabled) {
+        // Remote, read-ahead. Serve from the fill-ahead buffer -- the full
+        // request or nothing, never fragmented, except at true EOF.
+        QMutexLocker lock(&impl->ioMutex);
+        const unsigned myGeneration = impl->generation;
+        const qint64 want = size;
+        // The worker stops filling once raData reaches raCapacityBytes, so a
+        // single FFmpeg request bigger than that could otherwise wait for an
+        // amount the buffer will never hold -- a hang, not a slowdown. Cap
+        // what this read waits for at the buffer's ceiling; only a request
+        // that itself exceeds the configured capacity is served fragmented.
+        const qint64 target = std::min<qint64>(want, impl->raCapacityBytes);
+
+        // Outside what is buffered (or about to be) is a real seek from
+        // read-ahead's point of view: the buffer is stale for this position,
+        // so discard it and refill from here rather than trying to patch a
+        // gap. This also covers the very first read of a file (raData empty,
+        // raBase 0): if pos is already 0 it is a no-op; if not, it rebases
+        // exactly as any other seek would.
+        if (impl->pos < impl->raBase || impl->pos > impl->raBase + impl->raData.size()) {
+            impl->raData.clear();
+            impl->raBase = impl->pos;
+            impl->raEof = false;
+            ++impl->raEpoch;
+            ++s.raRebases;
+            impl->ioRequested.wakeAll();
+        }
+
+        const qint64 haveAtStart = impl->raBase + impl->raData.size() - impl->pos;
+        const bool hitImmediately = haveAtStart >= target;
+
+        qint64 lastServicedNs = t.nsecsElapsed();
+        for (;;) {
+            const qint64 avail = impl->raBase + impl->raData.size() - impl->pos;
+            if (avail >= target) break;
+            if (impl->raEof) break; // whatever is left is all there will ever be
+            if (impl->stallPump) {
+                const double waited = static_cast<double>(t.elapsed());
+                lock.unlock();
+                impl->stallPump(waited);
+                lock.relock();
+                const qint64 nowNs = t.nsecsElapsed();
+                unservicedMaxMs = std::max(
+                    unservicedMaxMs,
+                    static_cast<double>(nowNs - lastServicedNs) / 1'000'000.0);
+                lastServicedNs = nowNs;
+            } else {
+                impl->ioComplete.wait(&impl->ioMutex, 20);
+            }
+        }
+
+        const qint64 avail = impl->raBase + impl->raData.size() - impl->pos;
+        got = std::min<qint64>(want, avail);
+        if (got > 0) {
+            const qint64 offsetInBuffer = impl->pos - impl->raBase;
+            std::memcpy(buf, impl->raData.constData() + offsetInBuffer, static_cast<size_t>(got));
+        }
+        if (hitImmediately) ++s.bufferHits;
+        stale = (myGeneration != impl->generation);
+
+        // Compact once the consumed prefix is worth the memmove -- normal
+        // case, amortizes the memmove over a chunk's worth of reads. `pos`
+        // (about to advance by `got`) is the oldest byte anything could
+        // still want, so nothing before it is ever dropped early.
+        //
+        // The second condition is load-bearing, not an optimisation: if the
+        // buffer is sitting at capacity, the worker's fill loop is paused
+        // (raData.size() >= raCapacityBytes) until something frees room. A
+        // single fragmented read (want > capacity, see `target` above) can
+        // consume the ENTIRE buffer in one shot, and when raChunkBytes ==
+        // raCapacityBytes that lands exactly on the first condition's
+        // boundary and never fires -- the worker stays paused forever
+        // waiting for room only compaction can create, and playback hangs.
+        // Measured: a 1MB TRACE_IO_READAHEAD_MB against ~2.4MB ProRes 4444
+        // packets reproduces it every time without this.
+        const qint64 consumedAfter = (impl->pos + got) - impl->raBase;
+        const bool bufferAtCapacity = impl->raData.size() >= impl->raCapacityBytes;
+        if (consumedAfter > 0 && (consumedAfter >= impl->raChunkBytes || bufferAtCapacity)) {
+            impl->raData.remove(0, consumedAfter);
+            impl->raBase += consumedAfter;
+            // The worker's fill loop only re-checks "is there room" on its
+            // own 50ms poll otherwise; waking it here is the difference
+            // between resuming a stalled fill immediately and up to 50ms
+            // later, on every compaction, not just the capacity-hang case.
+            if (bufferAtCapacity) impl->ioRequested.wakeAll();
+        }
     } else {
-        // Remote. Hand the blocking syscall to the worker and stay awake.
+        // Remote, legacy one-request-at-a-time path. Hand the blocking
+        // syscall to the worker and stay awake.
         QMutexLocker lock(&impl->ioMutex);
         impl->request = Impl::IoRequest{};
         impl->request.offset = impl->pos;
