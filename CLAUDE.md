@@ -1774,6 +1774,106 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   `delta 0` on all four legs. 4K H.264 cadence x3 **100.0%** with `0 of 119`, `drop 0`,
   `rephase 0`; reverse 1x **100.0%** at 114 frames / 4.75s; both lifecycle legs.
 
+- **THE 4K 9:16 SEEDANCE/ComfyUI FILE HAS ONE KEYFRAME FOR ALL 97 FRAMES, AND THAT IS THE WHOLE
+  SCRUB REPORT — measured 2026-08-14, `docs/comfyui-4k-hevc-scrub-measurement.md`, nothing
+  built.** Owner report: scrubbing poor, playback fine. **Playback measures 100.0% of real time
+  ×2** with `handler 3.55/4.43ms` of 41.67 and all 95 gaps in the ~1× bucket, so the split in
+  the report is exactly right.
+
+  **It is not the file the handoff described.** `16_4kSeedance_9x16_Comfyui_MP4` is **hevc
+  Main 10, yuv420p10le, 2160x3840, B-frames (reorder depth 2), 97 frames, 34.2 Mbps** — not
+  `libx264`, not 8-bit, not H.264. And it carries **exactly one keyframe: frame 0.** The whole
+  clip is a single GOP, against 5–9 keyframes on every other H.264 file in the pool and 7 on the
+  720p ComfyUI export.
+
+  **Every random-access miss therefore decodes from the head of the file, and a walked frame
+  costs 8.9ms.** Two-point solve from single clicks (`clickland.ps1`): 28 frames → **261ms**,
+  57 frames → **520ms**, so **8.9ms a frame with an ~11ms intercept**. That intercept is a
+  result in itself — the reverse-shuttle work costed a keyframe-aligned sample at ~30ms fixed
+  and suspected 20–24ms of frame-thread refill; **here the seek and the flush are free and the
+  walk is the entire cost.** Confirmed from inside: `dec 552.50ms | walk 82f` on a click at 85%.
+
+  **The walk is synchronous on the UI thread for a click, a step and a landing**, so:
+  **click at 30% → 261ms of dead window, at 60% → 431–520ms, at 85% → 585ms**, against **59–94ms
+  on 4K H.264** and 19–54ms on the 720p file. **Stepping backward reads `2 3 2 4 2 4 2 2 2 411
+  2 2 3 …`** — cheap while the cache covers, then a full re-walk. `TRACE_SEEK_LOG=1` names it:
+  `reason=DecoderBehindOrAtTarget requested=54 current=55 lastDecoded=58`.
+
+  **The cache cannot cover it, and the limit is a byte budget rather than a policy**: a full-res
+  entry here is **23.7MB**, so 384MB holds **16 frames of 97** (`cache 2/16 (47.8/384 MB)` read
+  off the HUD). Preview entries are 1.5–3.6MB and 100+ fit — `rev-hit 90–98%` through a drag —
+  but **a preview entry cannot serve a step or a landing**, by design.
+
+  **Forward dragging is clean** (`behind 0/0f`, `p2p 4/8ms`, supply 127%, `hitch 0`, landing
+  `delta 0`): a forward drag never leaves the walked run. **The batch fix cannot help and does
+  not harm** — `batch cap 4 last 1 max 1` forward, confirmed before anything else was looked at.
+
+  **`TRACE_SCRUB_FILL_MS=240` fixes the drag and not the press**: `hitch 2 → 0`, `smooth max
+  480.7 → 4.9ms`, `dec 42.7 → 54.1 f/s`, while `ui gap max` stays at ~440ms. **600 is
+  indistinguishable from 240**, so the budget saturates. `TRACE_SEEK_CACHE_WINDOW=16` costs
+  **+22ms on a 431ms landing** and moves the next step freeze from step 11 to step 16; 16 is a
+  hard ceiling because `entriesThatFit` = 384MB / 23.7MB. The documented discrepancy is
+  confirmed in passing: `scrubWalkCacheBudgetMs` initialises to 240.0 and `open()` overwrites it
+  with `envInt("TRACE_SCRUB_FILL_MS", 60)`, so **60 ships**.
+
+  **THE HANDOFF'S PROPOSED GENERALISATION DOES NOT SURVIVE, AND THE REPLACEMENT IS A PRODUCT OF
+  TWO TERMS.** It proposed one class — a default `libx264` keyint, with resolution deciding
+  whether the cache covers a GOP. The encoder half is wrong and the cache half is not what bit.
+  What predicts the failure is **(frames back to the previous keyframe) × (per-frame decode
+  cost)**: 720p 98 × 0.36ms = **35ms** (harmless, its fault was the round trip); 4K H.264
+  29 × 2.8ms = **81ms** (the recorded 90–125ms press landing); **this file 96 × 8.9ms = 855ms.**
+  **A keyframe count alone would have condemned the 720p file equally.** The 720p control makes
+  it legible: it walks 64 frames on one click for **23ms**, and caches **all 64** of them
+  (`64cv/15.40ms`) where this file caches **3 of 82** — same 18ms budget, conversions 0.24ms
+  against 5.07ms.
+
+  **Do not reach for sampling** (§15's gate is `AV_CODEC_PROP_INTRA_ONLY` and HEVC is not; one
+  keyframe makes strided steps worse, not better) **or for more cache bytes** (§26.5, 768MB past
+  the knee). Options ranked in the doc, **none built**: the exact landing off the UI thread
+  (roadmap 2b), a fill budget proportional to the walk it is keeping instead of a constant 18ms,
+  and `skip_frame = AVDISCARD_NONREF` while walking. **The contract question is open and is the
+  owner's** — showing frame 57 of a single-GOP file requires decoding 58 frames in any player
+  ever written, so a player that feels instant is either alive during the wait or showing an
+  approximate frame.
+
+  **Three instruments added, and one of them lied first.** `widen.ps1` widens the window without
+  changing the video rect — a portrait fit is height-bound, so width is pure letterbox, `display
+  460x818` is identical either side, and **this is what makes phase 12's clipped-HUD limitation
+  cost nothing on 9:16/4:5/1:1 material**; it is also the only reason `scrub.ps1` runs on this
+  file at all, since at the §4 width the groove is under its 300px minimum. `clickland.ps1` and
+  `stepcost.ps1` measure a bare click and a bare step, which no drag harness reaches.
+  **`clickland.ps1`'s first version sent ONE `SendMessageTimeout` after the click**; a sent
+  message is serviced ahead of posted mouse input, so it reported **3ms for a landing that
+  blocked for 450** — consistently enough to "show" that `TRACE_SEEK_CACHE_WINDOW=16` removed
+  the freeze. It does not. **Eighth instrument to accuse or exonerate a build wrongly, and the
+  first where the wrong answer was the flattering one.**
+
+- **CHECKPOINT 2's ARITHMETIC PUT CONVERSION ON THE WRONG SIDE, AND ONE QUEUE STAGE CANNOT REACH
+  THE 8K TARGET — design at `docs/async-decode-queue-design.md`, 2026-08-14, nothing built.**
+  The scoping read *decode 39.68ms · conversion + upload 30.3ms · overlapped `max(39.7, 30.3)` =
+  25.2 fps*. **`convertCurrentFrame` is called from inside `decodeFrameAt`**
+  (`VideoDecoderFFmpeg.cpp:2185`, `:2200`) and the worker's only decoder call **is**
+  `decodeFrameAt` (`ScrubDecodeWorker.cpp:217`) — which is already visible in shipping
+  behaviour, because a drag's `sws` figure comes off the worker's own perf snapshot. **Moving
+  decode to a worker moves conversion with it.**
+
+  Measured this session, 8K plate, `TRACE_RT_DROP=0`, vcpkg build: **`dec 49.33 + sws 17.02 +
+  upload 12.10 = 78.45` against `handler 78.25`, `outside 2.08ms`** — strictly serial, nothing
+  waiting, `handler>budget 88 of 88`, 51.6% of real time. So one stage gives
+  **`max(56.7, 13.2)` = 17.6 fps** on the minimal FFmpeg build against 14.4 today: **+22%, and
+  short of the 24 the file is accepted at.** Building against 25.2 would have produced a correct
+  implementation that measured as a failure.
+
+  **The 25.2 figure is reachable and needs a design nobody has described**: conversion in a
+  *second* stage, decode N+2 while converting N+1 while uploading N. That changes the decoder's
+  output boundary (`VideoFrame` is post-conversion, and `VideoFrame.h` admits no FFmpeg type
+  because the image-sequence path must compile without FFmpeg), and both stages then contend for
+  the cores each was measured with alone — against a **~2ms per frame** margin. **Owner
+  decision.** The rest of the design stands and is unaffected: a bounded lookahead **cache** and
+  never a schedule (the tick still picks the frame; `cd79d49` is the scar), draining
+  **inside `reclaimDecoder()`** so cancellation is one choke point rather than an enumeration,
+  byte-bounded shallow depth justified by measured starvation, default off.
+
 - **MIXED-MONITOR DPI IS VALIDATED ON HARDWARE AND §4 NEVER RE-SHAPED ON A SCALE-FACTOR CHANGE — FOUND AND FIXED 2026-08-14 (`8945894`), plan §20.4.** A second display was connected, closing the item that had been **tabled for want of hardware** since 2026-08-09 and was the named beta gate. Configuration: `\\.\DISPLAY1` 5120x1440 @ 239.999Hz at **100%**, `\\.\DISPLAY2` 1920x1080 @ 60Hz at **150%** — different scale factor, different refresh rate, different work area.
 
   **The bug.** §4 asks the window to *"recalculate correctly when the window moves between monitors with different scaling"*. Nothing did. **A DPI change is not a `QEvent::WindowStateChange`**, so `changeEvent`'s re-shape never ran; and **it is not a drag**, so it sends no `WM_SIZING` and `constrainSizingRect`'s aspect lock never ran either. Windows scaled the rect on its own and Trace accepted the result. Measured on 4K H.264 crossing 100% → 150%: the client lost **147 logical px of height** (1083 → 936) while the width was preserved exactly, so **the picture pillarboxed** — `display 1201x676` filling the viewer at open became `display 936x527` inside an unchanged `win 1201x934` after a round trip, and the window was 973 logical tall against a **672**-logical work area, far past §4's 80% rule. **Not cumulative**: four round trips converged on a stable wrong pair. Reproduced with **Win+Shift+Arrow**, so it is not an artifact of how the harness moved the window.
@@ -2465,6 +2565,17 @@ landing-exactness gesture and **both its legs must be read**: the `-1` leg is th
 result, the `+1` leg is the control proving the comparison can see a moved picture
 (4K H.264 reads `+1 moved 7.5%, -1 returned 0%`). Reverse is silent, so no
 `TRACE_NO_AUDIO` control is needed -- every file is already on the same scheduler.
+
+**A bare click and a bare step have harnesses now** (2026-08-14): `clickland.ps1` times one
+groove click as the longest stretch during which the window stops answering messages, and
+`stepcost.ps1` does the same per step for N steps. Neither is reachable from a drag harness —
+`scrub.ps1` presses and immediately sweeps, so the press cost is folded into the gesture, and
+stepping never involves the scrub worker at all. **`widen.ps1` is what lets any of the groove-
+scanning harnesses run on portrait media**: at the §4 width a 9:16 window's slider is under
+`scrub.ps1`'s 300px minimum run and it reports `groove not found`. Widening is **free** on
+portrait media because the fit is height-bound, and the script prints `display` either side so
+the run carries its own proof; it steps +1/-1 afterwards because `refreshHud()` is not called on
+`resizeEvent`.
 
 **Quote `hitch`, not `stalls`, and quote `win WxH` with either.** `stalls` is
 `gap > 2 x refresh` and this box has been observed at both 239.999Hz and 60Hz,
