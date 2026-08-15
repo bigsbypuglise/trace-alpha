@@ -386,7 +386,10 @@ private:
 
     // One step of the async shuttle. Posts the next walk frame if nothing is
     // already in flight; the chain continues from onScrubResult.
-    void postScrubStep(long long frame, int direction);
+    // `batch` is how many consecutive frames from `frame` the one request
+    // covers. Defaulted so the reverse shuttle and every other caller keep the
+    // original one-frame behaviour without naming it.
+    void postScrubStep(long long frame, int direction, long long batch = 1);
     void onScrubResult();
     // Which way the request currently in flight was walking. 0 when nothing is
     // outstanding. Compared against the direction the pointer now implies, so
@@ -1060,6 +1063,10 @@ private:
     // strict: on an all-intra file the true mean is a small fraction.
     static constexpr double kRandomAccessWalkLimit = 1.0;
     long long computeScrubStride(long long gap) const;
+    // How many consecutive frames one asynchronous request should cover. Takes
+    // the stride as an argument rather than recomputing it, because the two
+    // must be decided together: a stride above 1 forces this to 1.
+    long long computeScrubBatch(long long gap, long long stride) const;
     bool suppressSliderSignal_ = false;
     // Set when a playback run stopped because there was nothing further to
     // show -- either the playhead reached the last frame, or the decoder ran

@@ -173,6 +173,46 @@ double scrubWalkBudgetMs() {
     return ms;
 }
 
+// The most frames one asynchronous shuttle request may cover.
+//
+// WHY THERE IS A BATCH AT ALL. The async chain posts one frame per cross-thread
+// round trip. On a 1280x720 H.264 source a frame decodes in 0.12ms and was
+// being delivered every 3.56ms -- 97% of the interval is the round trip -- so
+// the picture ran 76 frames and 236ms behind the pointer on a fast drag while
+// the decoder sat idle. The synchronous walk never showed this because one
+// slice covered `ceil(gap * kScrubEase)` frames inside a single call. That ease
+// was dropped from the async path on the reasoning that the pipeline would
+// supply the same acceleration by itself, which holds only while the round trip
+// is small against a frame: true at 4K (3.87ms a frame) and at 1080p (0.68),
+// false at 0.12.
+//
+// WHY 4. Effective cost per frame is roundTrip/N + decode, so on that file
+// N=1 is 3.56ms (281 f/s), N=2 is 1.84ms (543 f/s) and N=4 is 0.98ms
+// (1020 f/s). The fastest pointer demand measured anywhere in the asset set is
+// 479 f/s, so 4 clears the worst measured gesture by roughly 2x while 2 barely
+// clears it; above 4 the headroom is against nothing that has been observed.
+// Two costs grow with it and both bind before any benefit does. The conversion
+// pool's floor is `clamp(maxEntries, 4, 128) + 4`, i.e. 8 slots on the largest
+// media, and a batch holds its frames alive simultaneously -- 4 is half that
+// floor, so it cannot reintroduce a per-frame allocation during a drag, which
+// is when it is least affordable. And a batch delays its own first frame, which
+// is bounded separately by the budget below.
+//
+// 0 or 1 restores one frame per request, i.e. the behaviour this replaces. It
+// is the negative control in the same binary rather than a build.
+long long scrubBatchCap() {
+    static const long long n = [] {
+        const QByteArray raw = qgetenv("TRACE_SCRUB_BATCH");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const int v = raw.toInt(&ok);
+            if (ok && v >= 0 && v <= 64) return static_cast<long long>(v);
+        }
+        return 4LL;
+    }();
+    return n;
+}
+
 // Whether random-access scrub decode runs on the worker. Default on; the
 // switch exists because the synchronous walk is the validated path and a
 // regression should be one env var away from being isolated, not a revert.
@@ -5753,6 +5793,28 @@ long long MainWindow::computeScrubStride(long long gap) const {
     return std::min(stride, gap);
 }
 
+long long MainWindow::computeScrubBatch(long long gap, long long stride) const {
+    const long long cap = scrubBatchCap();
+    if (cap <= 1) return 1;
+    if (gap <= 1) return 1;
+
+    // BATCHING AND SAMPLING MUST NOT COMPOUND, and the reason is not caution.
+    // A batch covers CONSECUTIVE frames; a stride above 1 means the frames
+    // wanted are not consecutive, so the two cannot describe the same set. They
+    // also address different deficits: sampling exists because a frame is
+    // expensive to DECODE on intra-only media, and no amount of amortised round
+    // trip reaches that. Whenever section 15's gate has opened, this stays at 1.
+    if (stride > 1) return 1;
+
+    // The synchronous walk's ease, unchanged: cover a constant fraction of the
+    // remaining distance, so the chain accelerates when far behind and settles
+    // onto the target rather than arriving with a jolt. ceil(gap * 0.5) never
+    // exceeds gap for gap >= 1, so a batch cannot step past the pointer.
+    const long long eased = static_cast<long long>(
+        std::ceil(static_cast<double>(gap) * kScrubEase));
+    return std::clamp<long long>(eased, 1, cap);
+}
+
 void MainWindow::notePointerTarget(long long frame) {
     if (!scrubGestureClock_.isValid()) return;
     const qint64 nowNs = scrubGestureClock_.nsecsElapsed();
@@ -5885,7 +5947,7 @@ void MainWindow::queueVideoScrubFrame(long long frameIndex) {
     scrubTimer_.start(kScrubCoalesceMs);
 }
 
-void MainWindow::postScrubStep(long long frame, int direction) {
+void MainWindow::postScrubStep(long long frame, int direction, long long batch) {
     if (!isVideoScrubActive() || frame < 0) return;
     // One request in flight at a time. This is not a queue depth limit for its
     // own sake: the shuttle's next target is derived from the frame that was
@@ -5910,6 +5972,17 @@ void MainWindow::postScrubStep(long long frame, int direction) {
     // target only changes when the direction reverses. Testing the counter
     // itself would abandon a perfectly good walk step on every mouse move.
     request.generation = requestGeneration_;
+    // Consecutive frames from `frame`, all of them decoded and all of them
+    // presented in order. The budget is the synchronous walk's, deliberately:
+    // it is the same quantity -- how long one shuttle slice may spend decoding
+    // -- and reusing the number keeps the two paths comparable under
+    // TRACE_ASYNC_SCRUB rather than each having its own. What it bounds differs,
+    // and that difference is why it is safe here: on the UI thread it capped
+    // occupancy, on the worker it caps how long the picture waits for the first
+    // frame of a batch. On ProRes 4444 a frame is ~23ms, so the first one
+    // exhausts it and the batch collapses to 1 with no media-conditional branch.
+    request.batch = std::max<long long>(1, batch);
+    request.batchBudgetMs = scrubWalkBudgetMs();
     scrubInFlightDir_ = direction;
     // What this step actually skipped over, recorded where the decision is
     // made rather than recomputed from the result -- the two can differ if the
@@ -6060,9 +6133,10 @@ void MainWindow::onScrubResult() {
             if (!scrubTimer_.isActive()) scrubTimer_.start(kScrubCoalesceMs);
         } else {
             const int dir = pendingScrubFrame_ > activeScrubFrame_ ? 1 : -1;
-            const long long stride =
-                computeScrubStride(std::llabs(pendingScrubFrame_ - activeScrubFrame_));
-            postScrubStep(activeScrubFrame_ + dir * stride, dir);
+            const long long gap = std::llabs(pendingScrubFrame_ - activeScrubFrame_);
+            const long long stride = computeScrubStride(gap);
+            postScrubStep(activeScrubFrame_ + dir * stride, dir,
+                          computeScrubBatch(gap, stride));
         }
     }
 
@@ -6156,16 +6230,26 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         // pointer, never a jump -- but the decode happens on the worker and
         // this thread returns to the event loop immediately.
         //
-        // The ease and the walk budget are gone from this path rather than
-        // ported. Both existed only to decide when the synchronous loop should
-        // yield: `desired` capped how many consecutive frames one slice
-        // covered and `kScrubWalkBudgetMs` capped its time, but neither
-        // changed WHICH frames were shown, because the loop always stepped by
-        // one. Yielding is now free and happens after every frame, so there is
-        // nothing left for them to schedule. What they were really buying --
-        // "accelerate when far behind, settle gently on arrival" -- falls out
-        // of the pipeline by itself: the chain runs as fast as frames can be
-        // decoded and stops when it reaches the pointer.
+        // THE EASE AND THE WALK BUDGET ARE BACK, AND THE REASONING THAT
+        // DROPPED THEM WAS WRONG IN ONE TERM. It ran: both existed only to
+        // decide when the synchronous loop should yield, yielding is now free
+        // and happens after every frame, so "accelerate when far behind,
+        // settle gently on arrival" falls out of the pipeline by itself --
+        // the chain runs as fast as frames can be decoded.
+        //
+        // The chain does not run as fast as frames can be decoded. It runs at
+        // one CROSS-THREAD ROUND TRIP per frame, and that is a fixed cost the
+        // frame does not pay for. Measured on a 1280x720 H.264 source: 0.12ms
+        // to decode a frame, 3.56ms to deliver one, so 97% of the interval was
+        // the round trip and the picture ran 76 frames and 236ms behind the
+        // pointer while the decoder was idle. It held at 4K (3.87ms a frame)
+        // and at 1080p (0.68) purely because the frame was expensive enough to
+        // hide it, and those are the two files it was checked on.
+        //
+        // So `ceil(gap * kScrubEase)` decides how many CONSECUTIVE frames one
+        // request covers, and `kScrubWalkBudgetMs` bounds it in time. Every
+        // frame is still decoded, delivered and presented individually and in
+        // order; what is batched is the asking. Nothing is sampled or skipped.
         const int dir = targetFrame > walkFrom ? 1 : -1;
 
         // The pointer has crossed the picture. Whatever is in flight is now a
@@ -6183,8 +6267,9 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         if (scrubWorker_.busy() && scrubInFlightDir_ != 0 && scrubInFlightDir_ != dir) {
             scrubWorker_.supersede(supersedeInFlightRequests());
         }
-        const long long stride = computeScrubStride(std::llabs(targetFrame - walkFrom));
-        postScrubStep(walkFrom + dir * stride, dir);
+        const long long gap = std::llabs(targetFrame - walkFrom);
+        const long long stride = computeScrubStride(gap);
+        postScrubStep(walkFrom + dir * stride, dir, computeScrubBatch(gap, stride));
         refreshHud("Scrub");
         return;
     }
@@ -7131,7 +7216,15 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(loopEnabled_ ? "ON" : "off")
                 .arg(loopWraps_);
 
-            const QString l7f = QString("sample %1 | stride %2 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
+            // `batch` sits beside `stride` because they are the two ways one
+            // request can cover more than one frame and they are mutually
+            // exclusive by construction -- reading them together is what says
+            // which mechanism is in force. `cap` is what was allowed, `last`
+            // what the most recent request actually produced and `max` the
+            // high-water mark: on heavy media the budget cuts a batch of 4 to
+            // 1, and `cap 4 last 1` is how that is told apart from a rule that
+            // never ran.
+            const QString l7f = QString("sample %1 | stride %2 | batch cap %8 last %9 max %10 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
                 .arg(!scrubSamplingEnabled() ? "OFF"
                      : !videoDecoder_.metadata().intraOnly ? "GATED"
                      : scrubStride_ > 1 ? "ON" : "idle")
@@ -7140,7 +7233,10 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(scrubSampledSteps_)
                 .arg(QString::number(ctrlPointerFps_, 'f', 1))
                 .arg(QString::number(scrubDecodeFps_, 'f', 1))
-                .arg(QString::number(mediaWalkPerSeek(), 'f', 2));
+                .arg(QString::number(mediaWalkPerSeek(), 'f', 2))
+                .arg(scrubBatchCap())
+                .arg(scrubWorker_.lastBatchDecoded())
+                .arg(scrubWorker_.maxBatchDecoded());
 
             const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3%% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
                 .arg(QString::number(scrubPointerFps_, 'f', 1))

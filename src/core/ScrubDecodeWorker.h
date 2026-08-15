@@ -3,6 +3,7 @@
 #include <QString>
 #include <atomic>
 #include <condition_variable>
+#include <deque>
 #include <functional>
 #include <mutex>
 #include <optional>
@@ -35,6 +36,32 @@ struct ScrubRequest {
     // reverse fills on the Playback fill budget rather than the drag's, which
     // is the honest place for that decision to be made.
     VideoDecoderFFmpeg::RequestMode mode = VideoDecoderFFmpeg::RequestMode::Scrub;
+
+    // How many CONSECUTIVE frames this request covers, starting at `frame` and
+    // advancing by `direction`. 1 is the original behaviour and is what every
+    // caller except the drag chain uses, so the reverse shuttle is untouched by
+    // this field existing.
+    //
+    // It exists because the chain's cost is a cross-thread round trip per
+    // frame, and on cheap frames that round trip is the whole cost: a 1280x720
+    // H.264 frame decodes in 0.12ms and was being delivered every 3.56ms. The
+    // synchronous walk never had this problem because one slice covered
+    // `ceil(gap * kScrubEase)` frames inside a single call; that ease was
+    // dropped from the async path on the reasoning that "yielding is now free",
+    // which is true of the yield and false of the round trip.
+    //
+    // Frames are decoded, delivered and presented individually and in order --
+    // this batches the ASKING, never the showing. It is not sampling and it
+    // does not skip.
+    long long batch = 1;
+    // Wall-clock ceiling on one batch, checked after each frame. This is what
+    // makes the batch safe on heavy media without a codec- or size-conditional
+    // branch: at 23ms a frame, ProRes 4444 exceeds any sane budget on its first
+    // frame and the batch collapses to 1 by itself. On the worker the budget
+    // bounds DELIVERY LATENCY -- how long the picture waits for the first frame
+    // of a batch -- rather than UI-thread occupancy, which is what the same
+    // number bounds on the synchronous path.
+    double batchBudgetMs = 0.0;
 };
 
 struct ScrubResult {
@@ -71,6 +98,12 @@ struct ScrubResult {
 // Depth 1, latest wins. A newer target OVERWRITES the pending one rather than
 // queueing behind it, and a walk already running is abandoned at the decoder's
 // cancellation checkpoint instead of being decoded to completion first.
+//
+// One REQUEST may cover several consecutive frames (ScrubRequest::batch), and
+// the results of one batch are published together. That does not weaken any of
+// the above: cancellation is re-tested between frames of a batch, so a revoked
+// lease still comes back within one frame's decode rather than one batch's, and
+// every result still carries the generation it was asked under.
 class ScrubDecodeWorker {
 public:
     ScrubDecodeWorker();
@@ -98,6 +131,8 @@ public:
     // the chain re-posts on delivery instead.
     bool busy() const;
 
+    // Pops the oldest undelivered result. Callers already loop on this, so a
+    // batch drains in the order it was decoded without any of them changing.
     bool takeResult(ScrubResult& out);
 
     // Raise cancellation, drop pending work, and block until the worker is
@@ -113,6 +148,13 @@ public:
     long long requestsPosted() const { return requestsPosted_.load(); }
     long long requestsCoalesced() const { return requestsCoalesced_.load(); }
     long long resultsStale() const { return resultsStale_.load(); }
+    // What the batching actually achieved, as distinct from what was asked
+    // for. `lastBatchDecoded` is frames produced by the most recent request and
+    // `maxBatchDecoded` the high-water mark: a request that asks for 4 and is
+    // cut to 1 by the budget reports 1 here, which is how heavy media shows
+    // that the budget collapsed the batch rather than that the rule never ran.
+    long long lastBatchDecoded() const { return lastBatchDecoded_.load(); }
+    long long maxBatchDecoded() const { return maxBatchDecoded_.load(); }
 
 private:
     void run();
@@ -141,8 +183,10 @@ private:
     bool leaseRevoked_ = false;
     bool stop_ = false;
 
-    ScrubResult result_;
-    bool hasResult_ = false;
+    // Undelivered results, oldest first. A deque rather than the original
+    // single slot because one batched request produces several frames; depth is
+    // bounded by ScrubRequest::batch, which the UI thread caps.
+    std::deque<ScrubResult> results_;
     // Touched only by the worker thread, and only while it holds the lease.
     // Held across requests so the conversion pool sees a steady number of
     // outstanding references rather than one that collapses between frames --
@@ -157,6 +201,8 @@ private:
     std::atomic<long long> requestsPosted_{0};
     std::atomic<long long> requestsCoalesced_{0};
     std::atomic<long long> resultsStale_{0};
+    std::atomic<long long> lastBatchDecoded_{0};
+    std::atomic<long long> maxBatchDecoded_{0};
     double lastCancelWaitMs_ = 0.0;
     double maxCancelWaitMs_ = 0.0;
 };

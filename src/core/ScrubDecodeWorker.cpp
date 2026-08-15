@@ -5,6 +5,7 @@
 #include <QObject>
 
 #include <algorithm>
+#include <deque>
 #include <utility>
 
 namespace trace::core {
@@ -26,8 +27,7 @@ void ScrubDecodeWorker::start(VideoDecoderFFmpeg* decoder, QObject* notifyTarget
     {
         std::lock_guard<std::mutex> lock(mutex_);
         pending_.reset();
-        hasResult_ = false;
-        result_ = ScrubResult{};
+        results_.clear();
         leaseRevoked_ = false;
         stop_ = false;
         inDecoder_ = false;
@@ -39,6 +39,8 @@ void ScrubDecodeWorker::start(VideoDecoderFFmpeg* decoder, QObject* notifyTarget
     requestsPosted_.store(0);
     requestsCoalesced_.store(0);
     resultsStale_.store(0);
+    lastBatchDecoded_.store(0);
+    maxBatchDecoded_.store(0);
     lastCancelWaitMs_ = 0.0;
     maxCancelWaitMs_ = 0.0;
 
@@ -77,8 +79,7 @@ void ScrubDecodeWorker::stop() {
     workerActive_.store(false);
     std::lock_guard<std::mutex> lock(mutex_);
     stop_ = false;
-    hasResult_ = false;
-    result_ = ScrubResult{};
+    results_.clear();
 }
 
 void ScrubDecodeWorker::post(const ScrubRequest& request) {
@@ -104,15 +105,26 @@ void ScrubDecodeWorker::supersede(long long generation) {
 
 bool ScrubDecodeWorker::busy() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return inDecoder_ || pending_.has_value();
+    // UNDELIVERED RESULTS COUNT AS BUSY, and with a batch that is load-bearing
+    // rather than tidiness. The caller derives its next target from the frame
+    // last PRESENTED, so between the worker publishing a batch and the UI
+    // thread draining it there is a window where the decoder has advanced N
+    // frames and activeScrubFrame_ has not. A request posted inside that window
+    // asks for a frame the decoder has already passed, which is a BACKWARD
+    // move: a seek plus a GOP walk, in the middle of a forward drag.
+    //
+    // At batch 1 the window was one frame wide and re-asking for it was a cache
+    // hit, so nothing showed. At batch 4 it cost `seeks 1 -> 13`,
+    // `ra-walk 0.00 -> 44.85` and `ins 371 -> 986` on the 720p file, and ate
+    // most of the gain the batch was supposed to deliver.
+    return inDecoder_ || pending_.has_value() || !results_.empty();
 }
 
 bool ScrubDecodeWorker::takeResult(ScrubResult& out) {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (!hasResult_) return false;
-    out = std::move(result_);
-    result_ = ScrubResult{};
-    hasResult_ = false;
+    if (results_.empty()) return false;
+    out = std::move(results_.front());
+    results_.pop_front();
     return true;
 }
 
@@ -156,44 +168,83 @@ void ScrubDecodeWorker::run() {
         // cleared below. The UI thread does not touch it in this window. ---
         activeGeneration_.store(request.generation, std::memory_order_release);
         workerActive_.store(true, std::memory_order_release);
-
-        ScrubResult result;
-        result.requestedFrame = request.frame;
-        result.generation = request.generation;
-
-        QElapsedTimer decodeTimer;
-        decodeTimer.start();
         decoder_->setPlaybackDirection(request.direction);
-        QString error;
-        // The frame is decoded into a member so the conversion pool sees a
-        // steady number of outstanding references across requests, exactly as
-        // the UI thread's videoFrameBuffer_ does. Copying it into the result
-        // is a refcount bump.
-        const bool ok = decoder_->decodeFrameAt(
-            request.frame, workerFrame_, error, request.mode);
-        result.decodeMs = static_cast<double>(decodeTimer.nsecsElapsed()) / 1'000'000.0;
 
-        result.ok = ok;
-        result.abandoned = !ok && decoder_->lastRequestWasAbandoned();
-        result.error = ok ? QString() : error;
-        if (ok) result.frame = workerFrame_;
-        result.perf = decoder_->perfStats();
-        for (int i = 0; i < static_cast<int>(IoPhase::Count); ++i) {
-            result.io[i] = decoder_->ioStats(static_cast<IoPhase>(i));
+        // One request, up to `batch` CONSECUTIVE frames. Every frame is decoded
+        // and published individually and in order; what the batch removes is
+        // the round trip between them, which on cheap frames was 30x the cost
+        // of the frame itself.
+        const long long wanted = std::max<long long>(1, request.batch);
+        std::deque<ScrubResult> produced;
+        QElapsedTimer batchTimer;
+        batchTimer.start();
+
+        for (long long i = 0; i < wanted; ++i) {
+            // Re-tested BETWEEN frames, which is what keeps every guarantee the
+            // single-frame version made. revokeLease() raises cancel_ and then
+            // waits on inDecoder_, so without this the lease would come back in
+            // one BATCH rather than in one frame; with it the worst case is
+            // unchanged. It also means a reversal stops a batch that is now
+            // heading the wrong way instead of decoding it out.
+            if (i > 0 && cancelRequested()) break;
+
+            ScrubResult result;
+            result.requestedFrame = request.frame + request.direction * i;
+            result.generation = request.generation;
+
+            QElapsedTimer decodeTimer;
+            decodeTimer.start();
+            QString error;
+            // The frame is decoded into a member so the conversion pool sees a
+            // steady number of outstanding references across requests, exactly
+            // as the UI thread's videoFrameBuffer_ does. Copying it into the
+            // result is a refcount bump.
+            const bool ok = decoder_->decodeFrameAt(
+                result.requestedFrame, workerFrame_, error, request.mode);
+            result.decodeMs =
+                static_cast<double>(decodeTimer.nsecsElapsed()) / 1'000'000.0;
+
+            result.ok = ok;
+            result.abandoned = !ok && decoder_->lastRequestWasAbandoned();
+            result.error = ok ? QString() : error;
+            if (ok) result.frame = workerFrame_;
+            result.perf = decoder_->perfStats();
+            for (int j = 0; j < static_cast<int>(IoPhase::Count); ++j) {
+                result.io[j] = decoder_->ioStats(static_cast<IoPhase>(j));
+            }
+
+            const bool keepGoing = ok;
+            produced.push_back(std::move(result));
+            // A failure or an abandonment ends the batch. Continuing would ask
+            // for frames past one that could not be produced, and the caller
+            // re-posts from what was actually presented anyway.
+            if (!keepGoing) break;
+            // Budget checked AFTER the frame, so a batch always delivers at
+            // least one -- the same shape as the synchronous walk, where
+            // `steps >= 1` and the budget is tested at the end of the body.
+            if (request.batchBudgetMs > 0.0
+                && static_cast<double>(batchTimer.nsecsElapsed()) / 1'000'000.0
+                       >= request.batchBudgetMs) {
+                break;
+            }
         }
 
         workerActive_.store(false, std::memory_order_release);
         // --- decoder released ---
 
-        if (result.generation != latestGeneration_.load(std::memory_order_acquire)) {
-            ++resultsStale_;
+        const long long decoded = static_cast<long long>(produced.size());
+        lastBatchDecoded_.store(decoded);
+        if (decoded > maxBatchDecoded_.load()) maxBatchDecoded_.store(decoded);
+
+        const long long latest = latestGeneration_.load(std::memory_order_acquire);
+        for (const auto& r : produced) {
+            if (r.generation != latest) ++resultsStale_;
         }
 
         {
             std::lock_guard<std::mutex> lock(mutex_);
             inDecoder_ = false;
-            result_ = std::move(result);
-            hasResult_ = true;
+            for (auto& r : produced) results_.push_back(std::move(r));
         }
         idle_.notify_all();
 
