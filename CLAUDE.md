@@ -1848,6 +1848,14 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   the freeze. It does not. **Eighth instrument to accuse or exonerate a build wrongly, and the
   first where the wrong answer was the flattering one.**
 
+  **OWNER RULING, 2026-08-14: VLC STRUGGLES WITH THIS FILE TOO, so the contract question is
+  closed in the useful direction.** Nobody is showing frame 57 of a single-GOP file instantly,
+  so there is **no evidence any player is displaying an approximate frame during the gesture**,
+  and exactness is not what costs Trace anything here. **Do not weaken the landing.** What is
+  left is entirely the synchronous walk on the UI thread — **the fix is to get it off that
+  thread, and it costs nothing in exactness.** Option 1 is the accepted one and is scheduled
+  **first**, ahead of both decode-queue stages.
+
 - **CHECKPOINT 2's ARITHMETIC PUT CONVERSION ON THE WRONG SIDE, AND ONE QUEUE STAGE CANNOT REACH
   THE 8K TARGET — design at `docs/async-decode-queue-design.md`, 2026-08-14, nothing built.**
   The scoping read *decode 39.68ms · conversion + upload 30.3ms · overlapped `max(39.7, 30.3)` =
@@ -1873,6 +1881,22 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   never a schedule (the tick still picks the frame; `cd79d49` is the scar), draining
   **inside `reclaimDecoder()`** so cancellation is one choke point rather than an enumeration,
   byte-bounded shallow depth justified by measured starvation, default off.
+
+  **OWNER RULING, 2026-08-14: FUND THE TWO-STAGE PIPELINE — the 8K plate is wanted close to real
+  time, so 17.6 fps is not the destination. BUILD THE SINGLE STAGE FIRST ANYWAY**, because it is
+  real headroom everywhere, it is the prerequisite for two, and it is the honest way to find out
+  whether the second stage's ~2ms/frame margin survives two stages contending for the cores each
+  was measured with alone. **Report after stage one, before starting stage two.**
+
+  **Carried, and it is a real signal rather than a puzzle:** the owner observes that *scrubbing*
+  the 8K plate feels better than playing it. The candidate explanation is that they are not doing
+  the same work per presented frame — a scrub preview converts to the **display size** rather
+  than full resolution, ProRes is intra-only so a seek **lands on the target** with no walk, and
+  **§15's sampling is active on intra-only media** so a fast drag legitimately skips source
+  frames — against playback's every frame, full resolution, strictly serial 78.45ms. **Confirm it
+  from the HUD rather than asserting it** (`dst` and the preview size, `sample stride`,
+  sampled-vs-presented on a fast 8K drag, against the playback figures); it is the clearest
+  available statement of what the pipeline has to buy back.
 
 - **MIXED-MONITOR DPI IS VALIDATED ON HARDWARE AND §4 NEVER RE-SHAPED ON A SCALE-FACTOR CHANGE — FOUND AND FIXED 2026-08-14 (`8945894`), plan §20.4.** A second display was connected, closing the item that had been **tabled for want of hardware** since 2026-08-09 and was the named beta gate. Configuration: `\\.\DISPLAY1` 5120x1440 @ 239.999Hz at **100%**, `\\.\DISPLAY2` 1920x1080 @ 60Hz at **150%** — different scale factor, different refresh rate, different work area.
 

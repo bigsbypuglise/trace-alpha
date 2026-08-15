@@ -1,8 +1,51 @@
-# OPEN: two owner decisions, then the decode-queue work they gate.
+# OPEN: BOTH DECISIONS ARE ANSWERED (owner, 2026-08-14). Build in the stated order.
 
-Both open items were **measured this session and neither was built**, because each turned on a
-question only the owner can answer. Read the two decisions first; everything below them is
-context.
+The previous session measured both items and built neither, because each turned on a question
+only the owner could answer. **Both are now answered. The measurement records below stand as
+context; the decisions at the top of this section govern.**
+
+## THE OWNER'S ANSWERS
+
+**DECISION 1 — the Seedance file. ANOTHER PLAYER DOES NOT DO IT WELL EITHER.** The owner tested
+it in **VLC and VLC also struggles badly with scrubbing it.** That settles the question the
+measurement pass raised and it settles it in the useful direction: nobody is showing frame 57
+of a single-GOP file instantly, so **there is no evidence anyone is displaying an approximate
+frame during the gesture**, and the exactness contract is not what is costing Trace anything
+here. **Do not weaken the landing.** What is left is entirely branch (a): **the walk is
+synchronous on the UI thread, so the window is dead for 261–585ms.** Getting it off the UI
+thread costs nothing in exactness and is the whole fix.
+
+**DECISION 2 — fund the two-stage pipeline.** The owner wants the 8K plate **close to real
+time**, so +22% to 17.6 fps is not the destination. **Build the single stage first anyway** —
+it is real headroom everywhere, it is the prerequisite for two, and it is the honest way to
+find out whether the second stage's ~2ms/frame margin survives two stages contending for cores
+each was measured with alone. Report after stage one, before starting stage two.
+
+**ORDER — the previous session's recommendation is accepted: the exact landing off the UI
+thread FIRST.** It is the fix for decision 1, it is smaller than either queue stage, and it is
+the same ownership machinery checkpoint 2 needs. Then queue stage one, then stage two.
+
+## AND ANSWER THIS, BECAUSE THE OWNER RAISED IT AND IT IS A REAL SIGNAL
+
+**"Scrubbing the 8K plate feels better than real-time playback, which I find strange."** It is
+not strange and it should be confirmed rather than assumed, because if the explanation is right
+it is also the argument for the pipeline. Scrub and playback are not doing the same work per
+presented frame on that file:
+
+- a scrub preview converts **to the display size**, not full resolution — the expensive half of
+  the frame, and on an 8K plate in a windowed viewer that is a very large reduction;
+- ProRes is intra-only, so a seek **lands on the target** with no GOP walk — the opposite of the
+  Seedance file;
+- **§15's adaptive sampling is active on intra-only media**, so a fast drag legitimately skips
+  source frames, and the standing motion-over-fidelity rule says that is correct;
+- playback may do none of those: every frame, in order, at full resolution, through the serial
+  `dec 49.33 + sws 17.02 + upload 12.10 = 78.45ms` measured this session.
+
+So the gap the owner is feeling is roughly the difference between *sampled, display-resolution,
+seek-lands-exactly* and *every frame, full resolution, strictly serial*. **Verify that from the
+HUD** — quote `dst`, the preview size, `sample stride` and the sampled-vs-presented counts on a
+fast 8K drag against the playback figures — and record it, because it is the clearest available
+statement of what the pipeline has to buy back.
 
 ---
 
