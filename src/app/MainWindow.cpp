@@ -225,6 +225,28 @@ bool asyncScrubEnabled() {
     return on;
 }
 
+// Whether the EXACT landing -- a groove click, a slider release, a frame step --
+// is decoded on the worker instead of on the UI thread. Default on;
+// TRACE_ASYNC_LANDING=0 restores the synchronous landing in the same binary and
+// is the negative control for every figure this change is judged on.
+//
+// It changes WHERE the decode runs and nothing else. The request is still
+// RequestMode::Step, still one frame, still full resolution with the accurate
+// conversion, and the frame that arrives is still the frame that was asked for.
+// The owner's ruling of 2026-08-14 is what scopes it that narrowly: VLC
+// struggles with the single-GOP Seedance file too, so no player is showing an
+// approximate frame during that gesture and exactness is not what costs Trace
+// anything there. What costs it is that showing frame 57 of a 97-frame,
+// one-keyframe file requires decoding 58 frames -- 8.9ms each -- and Trace was
+// doing all 58 inside the mouse handler. The window was dead for 261-585ms.
+//
+// So this makes 520ms not a freeze. It does not make it shorter, and nothing
+// here claims to.
+bool asyncLandingEnabled() {
+    static const bool on = [] { return qgetenv("TRACE_ASYNC_LANDING") != "0"; }();
+    return on;
+}
+
 // GATE E step 1. Default on; TRACE_DEADLINE_SCHED=0 restores the pre-GATE-E
 // fixed-interval tick and its wall-clock accumulator gate.
 //
@@ -2834,6 +2856,17 @@ void MainWindow::releaseCurrentMedia() {
     scrubLastPresentNs_ = -1;
     pendingScrubFrame_ = -1;
     activeScrubFrame_ = -1;
+    // reclaimDecoder() above already cleared landingPending_, but it counted a
+    // supersede while doing it and left the per-media figures standing. These
+    // are per file, like the keyframe grid below: a landing latency carried
+    // across an open would be a figure from the outgoing media.
+    landingPending_ = false;
+    landingKind_ = LandingKind::None;
+    landingFrame_ = -1;
+    landingGeneration_ = -1;
+    landingStepDelta_ = 0;
+    landingLatencyMs_ = landingLatencyMaxMs_ = 0.0;
+    landingsAsync_ = landingsSync_ = landingsSuperseded_ = 0;
     // Per file: a keyframe grid learned from the outgoing media would snap the
     // incoming one onto positions that are not keyframes in it.
     shuttleGop_ = 0;
@@ -3590,6 +3623,19 @@ void MainWindow::setupTransportControls() {
             // After the landing, never before it: the exact frame is on screen,
             // full-res, and the decoder lease is back -- which playback needs,
             // because playback decodes synchronously on this thread.
+            //
+            // WHEN THE LANDING IS ASYNCHRONOUS, "after the landing" IS NO LONGER
+            // HERE. The ordering rule is unchanged and its meaning is unchanged;
+            // what moved is the moment it names. onScrubResult() reclaims and
+            // resumes when the frame arrives. Returning here without resuming is
+            // therefore the rule being obeyed, not skipped -- and the guard is
+            // explicit rather than leaning on resumePlaybackAfterScrub()'s
+            // pendingScrubFrame_ test, which happens to cover this case today
+            // and would stop covering it the moment that test changed.
+            if (landingPending_) {
+                refreshHud("Scrub Release");
+                return;
+            }
             resumePlaybackAfterScrub();
             refreshHud("Scrub Release");
             return;
@@ -4398,6 +4444,21 @@ void MainWindow::grantDecoderLease() {
 
 double MainWindow::reclaimDecoder() {
     if (!decoderLeased_) return 0.0;
+    // A landing in flight is superseded by whatever is taking the decoder back,
+    // and this is the one place that can be true. Clearing it HERE rather than
+    // at the delivery boundary is what stops it dangling: a superseded result
+    // is dropped by the generation test at the top of onScrubResult and never
+    // reaches the landing branch, so a flag cleared only there would stay set
+    // forever and the next landing would be filed against a stale generation.
+    //
+    // The gesture's completion is dropped with it, deliberately. A release
+    // whose landing was superseded does not restore playback, because something
+    // newer than that release now owns the state.
+    if (landingPending_) {
+        landingPending_ = false;
+        landingKind_ = LandingKind::None;
+        ++landingsSuperseded_;
+    }
     // Order matters. Bump the generation FIRST: anything the worker publishes
     // between here and it parking is then already stale by construction, which
     // is what makes "no older preview can appear after the exact landing" a
@@ -4412,6 +4473,176 @@ double MainWindow::reclaimDecoder() {
     // live decoder now that reading it is this thread's business again.
     captureDecoderTelemetry();
     return waitMs;
+}
+
+// The exact landing, posted to the worker instead of decoded here.
+//
+// EXACTNESS IS UNCHANGED AND THAT IS THE WHOLE POINT OF THE OWNER'S RULING.
+// The request carries RequestMode::Step, batch 1 and no time budget, so the
+// worker calls the same decodeFrameAt with the same mode the UI thread called
+// it with: full resolution, accurate conversion, the frame that was asked for.
+// A landing is never cut short by the batch budget the way a drag slice is --
+// `batchBudgetMs` is deliberately 0 here, because a budget on one frame could
+// only ever mean "give up", and giving up on a landing is the one thing that
+// is not allowed.
+//
+// LATEST-TARGET-WINS COMES FROM prepareVideoRequest, WHICH CALLS
+// reclaimDecoder(). That bumps requestGeneration_ AND pushes it at the worker,
+// so a preview mid-walk, a queued batch and an older landing are all stale from
+// this line onward. It is the identical guarantee the synchronous landing got,
+// taken at the identical moment -- loadCurrentFrame()'s own reclaimDecoder()
+// was the first thing it did. Nothing about the ordering is new; only the
+// thread that decodes afterwards is.
+bool MainWindow::requestExactFrameAsync(long long frame, int direction, LandingKind kind) {
+    if (!asyncLandingEnabled()) return false;
+    // Shares the worker, so the drag's own control switch turns this off too.
+    // Two knobs that can disagree about whether the worker is in use would be a
+    // configuration in which the lease has no owner.
+    if (!asyncScrubEnabled()) return false;
+    // Video files only. An image sequence has no decoder, no worker and no
+    // GOP -- its landing is a file read and was never the problem.
+    if (!isVideoScrubActive()) return false;
+    if (frame < 0) return false;
+    // The UI thread is inside a decode of its own, because a remote read pumped
+    // the event loop and something re-entered. Posting now would hand the
+    // decoder to the worker while FFmpeg is mid-read on this thread. The caller
+    // takes its existing deferral path instead.
+    if (storageBusy_) return false;
+
+    // ALREADY ON ITS WAY -- ADOPT IT RATHER THAN ASKING AGAIN.
+    //
+    // A click is press+release on the same value. Synchronously the press
+    // landed before the release was delivered, so the release took
+    // flushVideoScrub's scrubShownExact_ skip and cost nothing. With the
+    // landing on the worker the release arrives while the press's walk is still
+    // running, so that skip cannot fire -- and re-posting means
+    // prepareVideoRequest's reclaimDecoder() CANCELS the walk and the fresh
+    // request starts it again from the head of the file.
+    //
+    // Measured on the single-GOP Seedance clip before this: the click decoded
+    // frame 82 twice, `sup 1`, `cancel max 128.43ms` of UI-thread wait at a
+    // `ckpt 135.37ms` checkpoint granularity, and the picture arrived at 570ms
+    // against the synchronous path's 555. The freeze was fixed and the latency
+    // was made worse.
+    //
+    // The skip is the same skip, resting on the same fact -- the press asked
+    // for this exact frame, at full resolution, through Step -- and differs only
+    // in the frame being in flight rather than on screen. What transfers is
+    // ownership of the completion: the release's resume now runs when this
+    // lands.
+    if (landingPending_ && landingFrame_ == frame) {
+        landingKind_ = kind;
+        landingStepDelta_ = 0;
+        return true;
+    }
+
+    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step,
+                        direction, true);
+    // The playhead moves at POST time, not on delivery, and the two disagree
+    // for as long as the walk takes. That is deliberate and it matches what the
+    // synchronous landing already did -- flushVideoScrub set the frame before
+    // decoding it -- but it is worth naming, because this project treats
+    // "display one frame and name it another" as a defect. The honest pair is
+    // `target N | shown M`, which is written only on delivery, and the HUD's
+    // `landing` field says a landing is outstanding. The counter states where
+    // the user asked to be; target/shown state what arrived.
+    playback_.setCurrentFrame(frame);
+
+    grantDecoderLease();
+
+    trace::core::ScrubRequest request;
+    request.frame = frame;
+    request.direction = direction;
+    request.generation = requestGeneration_;
+    request.mode = trace::core::VideoDecoderFFmpeg::RequestMode::Step;
+    request.batch = 1;
+    request.batchBudgetMs = 0.0;
+
+    landingPending_ = true;
+    landingFrame_ = frame;
+    landingGeneration_ = request.generation;
+    landingKind_ = kind;
+    landingClock_.start();
+    scrubInFlightDir_ = direction;
+    ++landingsAsync_;
+    scrubWorker_.post(request);
+    return true;
+}
+
+// Present the landed frame. The reclaim and the gesture's completion action are
+// the CALLER's, immediately after the drain loop -- reclaimDecoder() clears the
+// result deque, and calling it from inside the loop that is draining that deque
+// would silently discard anything else the worker had published.
+void MainWindow::completeExactLanding(const trace::core::ScrubResult& result) {
+    landingPending_ = false;
+    if (landingClock_.isValid()) {
+        landingLatencyMs_ =
+            static_cast<double>(landingClock_.nsecsElapsed()) / 1'000'000.0;
+        landingLatencyMaxMs_ = std::max(landingLatencyMaxMs_, landingLatencyMs_);
+        // `release` MUST KEEP MEANING "HOW LONG UNTIL THE EXACT FRAME APPEARED".
+        // sliderReleased times its own lambda, and with the landing on the
+        // worker that lambda now returns in microseconds -- so left alone the
+        // HUD would report a 520ms landing as 0.1ms and every harness reading
+        // it would record a spectacular improvement that did not happen. It is
+        // the same quantity as before, measured across the boundary the work
+        // actually crossed. The win is in `ui gap max`, which is a different
+        // field because it is a different claim.
+        if (landingKind_ == LandingKind::ScrubRelease) {
+            scrubReleaseLatencyMs_ = landingLatencyMs_;
+        }
+    }
+
+    if (!result.ok) {
+        if (!result.error.isEmpty()) statusBar()->showMessage(result.error, 3000);
+        // A step that could not be decoded must not leave the counter claiming a
+        // frame the viewer is not showing. The synchronous path put the playhead
+        // back and re-landed; this puts it back and leaves the picture alone,
+        // which is the same end state without a second decode in front of it.
+        if (landingKind_ == LandingKind::Step && landingStepDelta_ != 0) {
+            if (landingStepDelta_ < 0) playback_.stepForward();
+            else                       playback_.stepBackward();
+        }
+        syncTransportBar();
+        landingKind_ = LandingKind::None;
+        landingStepDelta_ = 0;
+        return;
+    }
+
+    videoFrameBuffer_ = result.frame;
+    lastRequestedFrame_ = result.requestedFrame;
+    lastDeliveredFrame_ = result.frame.frameIndex;
+    playback_.setCurrentFrame(result.frame.frameIndex);
+    viewer_->setFrame(videoFrameBuffer_);
+    // repaint(), not update(). A landing is the frame the user stopped on and
+    // it must be on screen when this returns, not whenever Qt next coalesces --
+    // and the HUD's `display` and the view scale are measured BY the paint, so
+    // a merely-scheduled one reports the previous state.
+    viewer_->repaint();
+
+    activeScrubFrame_ = result.frame.frameIndex;
+    // Exact by construction: Step mode, full resolution, accurate conversion.
+    // This is the flag the release reads to skip re-decoding a frame the press
+    // already landed, so setting it on anything less would put a soft picture
+    // on screen and call it the landing.
+    scrubShownExact_ = true;
+
+    // The tail of the synchronous landing, mirrored rather than simplified.
+    //
+    // Clearing pendingScrubFrame_ unconditionally looks right and is wrong: a
+    // PRESS landing is not the end of the gesture. The pointer can move while
+    // the landing is in flight -- which on this file is a third of a second --
+    // and queueVideoScrubFrame will have recorded where it went. Dropping that
+    // target would strand the picture on the press point with the button still
+    // down and the hand somewhere else. The synchronous path re-armed the
+    // coalescing timer in exactly this case and so does this.
+    if (landingKind_ == LandingKind::ScrubRelease || !scrubbing_) {
+        pendingScrubFrame_ = -1;
+    } else if (pendingScrubFrame_ != activeScrubFrame_) {
+        scrubTimer_.start(kScrubCoalesceMs);
+    }
+    syncTransportBar();
+    landingKind_ = LandingKind::None;
+    landingStepDelta_ = 0;
 }
 
 void MainWindow::captureDecoderTelemetry() {
@@ -5096,6 +5327,30 @@ void MainWindow::stepOneFrame(int delta, const char* hudLabel) {
         playbackAccumulatorMs_ = 0.0;
     }
 
+    // A step is a landing: one frame, exact, full resolution. On long-GOP media
+    // a BACKWARD step that leaves the walked run pays a seek and a fresh GOP
+    // walk, and on the single-keyframe Seedance clip that walk starts at frame
+    // 0 -- measured as `2 3 2 4 2 4 2 2 2 411 2 2 3`, one step in thirteen
+    // freezing the window for 411ms. Off the UI thread it is the same 411ms of
+    // decoding with the window alive through it.
+    //
+    // Rapid presses now COALESCE, and that is a real behaviour change worth
+    // stating. Each press advances the playhead and supersedes the landing in
+    // flight, so five fast presses move five frames and decode the fifth. Every
+    // frame in between used to be decoded and drawn, serially, which is why
+    // holding an arrow key on heavy media felt like wading. The contract is
+    // unharmed: the arithmetic is identical, +5 then -5 returns to the same
+    // frame, and the frame the user stops on is exact. This is latest-target-
+    // wins applied to a gesture that always had it in the pointer path.
+    if (requestExactFrameAsync(playback_.state().currentFrame,
+                               delta < 0 ? -1 : 1, LandingKind::Step)) {
+        landingStepDelta_ = delta;
+        landingHudLabel_ = hudLabel;
+        refreshHud(hudLabel);
+        return;
+    }
+
+    ++landingsSync_;
     QString error;
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
         if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
@@ -6002,6 +6257,8 @@ void MainWindow::onScrubResult() {
     trace::core::ScrubResult result;
     bool presentedAny = false;
     bool hardError = false;
+    bool landed = false;
+    LandingKind landedKind = LandingKind::None;
     scrubInFlightDir_ = 0;
 
     while (scrubWorker_.takeResult(result)) {
@@ -6029,6 +6286,19 @@ void MainWindow::onScrubResult() {
             ++supersededResults_;
             continue;
         }
+        // The exact landing. Taken before the failure branch below, not after,
+        // because a landing owns its own failure: a step that could not be
+        // decoded has a playhead to put back, and `hardError` means something
+        // else entirely -- it re-arms the drag's coalescing timer, which a
+        // landing has no business doing.
+        if (landingPending_ && result.generation == landingGeneration_
+            && result.requestedFrame == landingFrame_) {
+            landedKind = landingKind_;
+            completeExactLanding(result);
+            landed = true;
+            continue;
+        }
+
         if (!result.ok) {
             if (!result.error.isEmpty()) statusBar()->showMessage(result.error, 3000);
             hardError = true;
@@ -6121,6 +6391,33 @@ void MainWindow::onScrubResult() {
         // collapse the stride back to 1 just as a heavy run begins.
     }
 
+    // The landing is complete, so the decoder comes home. Outside the drain
+    // loop because reclaimDecoder() clears the result deque that loop is
+    // iterating; and before resumePlaybackAfterScrub() because playback decodes
+    // synchronously on this thread and cannot run under a lease.
+    //
+    // That is the same ordering the synchronous release had -- land, reclaim,
+    // resume -- and it is the reason the resume could not simply stay where it
+    // was in sliderReleased(). Moving the landing off this thread moved the
+    // moment the landing FINISHES with it, and the resume is pinned to the
+    // finish rather than to the release.
+    if (landed) {
+        reclaimDecoder();
+        if (landedKind == LandingKind::ScrubRelease) {
+            resumePlaybackAfterScrub();
+            refreshHud("Scrub Release");
+        } else if (landedKind == LandingKind::Step) {
+            if (currentMedia_.has_value()
+                && currentMedia_->kind == MediaKind::ImageSequence) {
+                prefetchNeighbors();
+            }
+            refreshHud(landingHudLabel_);
+        } else {
+            refreshHud("Scrub");
+        }
+        return;
+    }
+
     // Chain. Any outcome that did not advance the picture re-posts the same
     // frame, so a dropped or abandoned result resumes the shuttle rather than
     // silently ending it -- which would leave the picture stranded behind a
@@ -6160,6 +6457,30 @@ void MainWindow::flushVideoScrub(bool forceExact) {
     }
 
     if (pendingScrubFrame_ < 0) {
+        return;
+    }
+
+    // A LANDING IS IN FLIGHT AND THIS IS NOT THE RELEASE. Wait for it.
+    //
+    // The hole this closes is specific and it re-freezes the window on exactly
+    // the file the change is for. A press posts its landing and returns with
+    // activeScrubFrame_ still at -1, because that field means "what is on
+    // screen" and nothing has arrived yet. If the pointer then moves before the
+    // landing lands -- a third of a second on the Seedance clip, so most drags
+    // that begin with a click -- the drag branch below requires walkFrom >= 0,
+    // fails that test, and falls through to the synchronous block. That block
+    // calls reclaimDecoder(), which CANCELS the landing, and then decodes the
+    // same walk on this thread. Everything this change removed comes straight
+    // back, in the middle of a gesture rather than at its start.
+    //
+    // Deferring costs the drag nothing it was not already going to pay: the
+    // landing is decoding a frame, the window stays alive through it, and
+    // completeExactLanding() re-arms this timer so the walk resumes from the
+    // frame that actually arrived. The release is exempt because it must always
+    // be able to move the target -- it adopts an in-flight landing for the same
+    // frame and supersedes one for any other.
+    if (landingPending_ && !forceExact) {
+        if (!scrubTimer_.isActive()) scrubTimer_.start(kScrubCoalesceMs);
         return;
     }
 
@@ -6419,6 +6740,30 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         return;
     }
 
+    // The exact landing -- a groove click's press, a release, or a jump made
+    // while not dragging. This is the block the owner's 2026-08-14 ruling is
+    // about: it decoded on this thread, and on a file whose every miss walks
+    // from the head of the clip that is 261-585ms during which the window
+    // answers nothing. Posted to the worker now; the frame is presented and the
+    // gesture finished in onScrubResult().
+    //
+    // The direction handed over is which way the playhead is MOVING, so a
+    // backward click reaches the decoder as a backward request exactly as the
+    // synchronous path's prepareVideoRequest(mode, 1, true) never did -- that
+    // passed a hard 1 regardless. Kept honest here because the worker sets the
+    // decoder's playback direction from it.
+    if (mode == trace::core::VideoDecoderFFmpeg::RequestMode::Step) {
+        const int dir = (activeScrubFrame_ >= 0 && targetFrame < activeScrubFrame_) ? -1 : 1;
+        const LandingKind kind = forceExact ? LandingKind::ScrubRelease
+                                            : LandingKind::ScrubPress;
+        if (requestExactFrameAsync(targetFrame, dir, kind)) {
+            landingStepDelta_ = 0;
+            refreshHud(forceExact ? "Scrub Release" : "Scrub");
+            return;
+        }
+    }
+
+    ++landingsSync_;
     playback_.setCurrentFrame(targetFrame);
     prepareVideoRequest(mode, 1, true);
     if (loadCurrentFrame(error, mode)) {
@@ -7147,13 +7492,30 @@ void MainWindow::refreshHud(const QString& action) {
             // decode that is meant to be there.
             const double uiGapAvg = uiServiceSamples_ > 0
                 ? uiServiceGapSumMs_ / static_cast<double>(uiServiceSamples_) : 0.0;
-            const QString l7c = QString("ui | gap %1/%2ms (avg/max) | over %3ms: %4 of %5 | release %6ms")
+            // `landing` is where the exact landing went. `async/sync` says which
+            // path a click, a release and a step took, so a build that silently
+            // fell back -- no video, storage busy, TRACE_ASYNC_LANDING=0 -- is
+            // visible rather than inferred; `sup` counts landings superseded
+            // before they arrived, which is the user moving on and not an error.
+            // The two latency figures are the same quantity as `release`: post
+            // to on-screen. NONE of them is UI-thread occupancy -- that is
+            // `gap max`, immediately to the left, and it is the field this
+            // change is judged on.
+            const QString l7c = QString("ui | gap %1/%2ms (avg/max) | over %3ms: %4 of %5 | release %6ms"
+                                        " | landing %7 async %8 sync %9 sup %10 (%11ms max %12ms)")
                 .arg(QString::number(uiGapAvg, 'f', 2))
                 .arg(QString::number(uiServiceGapMaxMs_, 'f', 1))
                 .arg(QString::number(kUiServiceGapMs, 'f', 0))
                 .arg(uiServiceGapsOver_)
                 .arg(uiServiceSamples_)
-                .arg(QString::number(scrubReleaseLatencyMs_, 'f', 1));
+                .arg(QString::number(scrubReleaseLatencyMs_, 'f', 1))
+                .arg(!asyncLandingEnabled() ? "OFF"
+                                            : (landingPending_ ? "PENDING" : "idle"))
+                .arg(landingsAsync_)
+                .arg(landingsSync_)
+                .arg(landingsSuperseded_)
+                .arg(QString::number(landingLatencyMs_, 'f', 1))
+                .arg(QString::number(landingLatencyMaxMs_, 'f', 1));
 
             // The worker. `cancel` is the number that decides whether
             // cooperative cancellation is worth having: a 100ms walk that is

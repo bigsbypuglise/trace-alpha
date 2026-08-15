@@ -1110,6 +1110,54 @@ private:
     long long pendingScrubFrame_ = -1;
     long long activeScrubFrame_ = -1;
 
+    // ---- The exact landing, off the UI thread ----------------------------
+    //
+    // A landing is one frame, decoded through RequestMode::Step at full
+    // resolution with the accurate conversion, and it is the frame the user
+    // stopped on. That contract is unchanged; what changed is which thread pays
+    // for it. On a file whose every random-access miss walks from the head --
+    // the 97-frame single-GOP Seedance clip is the measured case -- the walk is
+    // 261-585ms, and inside the mouse handler that is a dead window rather than
+    // a slow one.
+    //
+    // Which gesture is outstanding matters, because each has a different thing
+    // to do once the frame is on screen: a release restores the play intent, a
+    // step reverts the playhead if the decode failed, a press does neither.
+    enum class LandingKind { None, ScrubPress, ScrubRelease, Step };
+    // Post the exact frame to the worker. Returns true if it was posted, in
+    // which case the caller returns and the completion runs from
+    // onScrubResult(); false means the synchronous landing must be taken, which
+    // is every non-video path, a storage-busy re-entry, and TRACE_ASYNC_LANDING=0.
+    bool requestExactFrameAsync(long long frame, int direction, LandingKind kind);
+    // Present the landed frame and run whatever the gesture owed. Called from
+    // the onScrubResult drain loop; the reclaim and the completion action run
+    // after the loop, because reclaimDecoder() clears the result queue it is
+    // iterating.
+    void completeExactLanding(const trace::core::ScrubResult& result);
+    bool landingPending_ = false;
+    long long landingFrame_ = -1;
+    long long landingGeneration_ = -1;
+    LandingKind landingKind_ = LandingKind::None;
+    // What stepOneFrame passed, so a failed landing can put the playhead back
+    // the way the synchronous path did. Zero for the scrub landings, which do
+    // not revert.
+    int landingStepDelta_ = 0;
+    const char* landingHudLabel_ = "Scrub";
+    QElapsedTimer landingClock_;
+    // Wall-clock from posting the landing to the frame being on screen. This is
+    // the same QUANTITY the synchronous path reported as `release` -- how long
+    // until the exact frame appeared -- so the two remain comparable. What is no
+    // longer the same is that it is not UI-thread occupancy: read `ui gap max`
+    // for that, which is where this change is supposed to show.
+    double landingLatencyMs_ = 0.0;
+    double landingLatencyMaxMs_ = 0.0;
+    long long landingsAsync_ = 0;
+    long long landingsSync_ = 0;
+    // Landings posted and then superseded before they arrived. Not an error --
+    // it is the user moving on -- but a non-zero count on a gesture that should
+    // have settled is how a chain that never completes would show.
+    long long landingsSuperseded_ = 0;
+
     double lastFrameHandoffMs_ = 0.0;
     double avgFrameHandoffMs_ = 0.0;
     long long frameHandoffSamples_ = 0;
