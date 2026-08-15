@@ -1671,7 +1671,11 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   Re-measured on the shipping build: **at ~4x the picture ends exactly on the pointer and never trails more than 6 frames, in both directions** (`behind 0/6f`, `p2p 26ms`), on 52–54% supply — the figure §15.1 predicted. The fast sweep reproduces §15.2's `p2p 22ms` to the digit with max lag better than §15.4's `cpu` record (`0/21f` vs `0/48f`). The throughput fact (~23ms/frame, untouched) is still true; **supply below 100% stopped meaning "behind" when sampling shipped.** Fourth premise-expiry in three sessions, after §26.2, §27 and §28.
 
-- **THE 8K ProRes 4444 XQ FILE IS NOT SOLVED — OWNER REJECTED THE FRAME-DROP RESULT (2026-08-13).** ~11 visible fps reads as visibly poor playback, and the same file plays perfectly in QuickTime on a *less powerful* macOS machine. **Do not describe it as solved and do not use frame dropping as the answer.** `TRACE_RT_DROP` is an emergency comparison/fallback only. Acceptance is full-quality 24000/1001 with **every frame presented, `drop 0`**, correct colour and alpha, and no regression to scrub, stepping, reverse or exact landing.
+- **THE 8K ProRes 4444 XQ FILE IS NOT SOLVED — OWNER REJECTED THE FRAME-DROP RESULT (2026-08-13).
+  THE INVESTIGATION WAS CLOSED UNSOLVED ON 2026-08-15** — see the closure entry below and
+  `docs/8k-decode-threads-sweep.md`. Everything in this entry still holds; what changed is that
+  the remaining levers were measured and none of them reaches real time, so no further work is
+  scheduled. **The acceptance bar below is unchanged and unmet.** ~11 visible fps reads as visibly poor playback, and the same file plays perfectly in QuickTime on a *less powerful* macOS machine. **Do not describe it as solved and do not use frame dropping as the answer.** `TRACE_RT_DROP` is an emergency comparison/fallback only. Acceptance is full-quality 24000/1001 with **every frame presented, `drop 0`**, correct colour and alpha, and no regression to scrub, stepping, reverse or exact landing.
 
   **THE BOTTLENECK IS TRACE'S SHIPPING STACK — ITS FFmpeg BUILD *PLUS* ITS SERIALIZED PIPELINE — NOT SOLELY ITS APPLICATION CODE.** That correction matters because the first write-up said "inside Trace" and pointed at application code alone. Two independent deficits, each measured, and **neither is reachable by scheduling work**:
 
@@ -1897,6 +1901,32 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   from the HUD rather than asserting it** (`dst` and the preview size, `sample stride`,
   sampled-vs-presented on a fast 8K drag, against the playback figures); it is the clearest
   available statement of what the pipeline has to buy back.
+
+- **THE 8K ProRes 4444 XQ INVESTIGATION IS CLOSED (owner, 2026-08-15).** Not solved — closed.
+  **Best full-quality decode and display is 13.64 fps = 56.9% of real time** (minimal FFmpeg
+  build, default threads, `drop 0`, every frame presented), or **62.0% with stage one at depth
+  2**. **Decode is the binding term**: `dec 39.08ms` against a `41.71ms` budget, 94% of the whole
+  frame before conversion or upload, and **flat in thread count from 32 to 64**. **Stage two is
+  not justified by the measured margin** — a perfect three-stage pipeline ceilings at
+  `max(39.08, 18.01, ~13.5)` = **25.6 fps, a 6% margin over 23.976**, against contention stage
+  one measured at **+24% on `sws` and +91% on `upload`**; a 10% inflation of decode puts it below
+  24. **`TRACE_RT_DROP` remains an EMERGENCY FALLBACK and never the answer** — the owner rejected
+  the frame-drop outcome on 2026-08-13 and the acceptance bar is unchanged and unmet (full
+  quality, every frame presented, sustained 24000/1001, `drop 0`, `hitch 0`). **Do not begin
+  stage two, and do not begin CUDA/NVDEC work.**
+
+- **STANDALONE DECODE THROUGHPUT IS NOT PRESENTATION THROUGHPUT, and three numbers for this file
+  differ by 2x.** `decbench` standalone on the minimal build at t=32 reads **25.24 fps** (decode
+  only, demux subtracted); Trace's own in-process `dec` term reads **39.08ms = 25.6 fps
+  equivalent**; Trace's **presentation throughput is 13.64 fps**. **The first two agreeing within
+  1.5% is the useful result** — Trace's decoder is not slower than a standalone harness, and the
+  entire gap to 13.64 is the rest of the pipeline being serial. Two recorded instances of getting
+  this wrong: the first 8K ceiling figure here (**"20.5 fps"**) was the winget GPL/GCC
+  `ffmpeg.exe` at default threads substituted for the LGPL/MSVC libraries Trace links, and
+  `ffmpeg -f null` made slice-only threading look *faster* on every ProRes file because it
+  decodes and discards, so there is nothing for a frame-threaded decoder to overlap with. **A
+  benchmark that removes the work your program does around the thing being measured is measuring
+  a different program.**
 
 - **DECODE THREADING IS ALREADY AT ITS KNEE BY DEFAULT, AND THE NOTE THAT SAID OTHERWISE WAS
   WRITTEN LAST SESSION (2026-08-15, `docs/8k-decode-threads-sweep.md`).** The stage-one report
