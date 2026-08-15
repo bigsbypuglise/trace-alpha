@@ -1898,6 +1898,50 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   sampled-vs-presented on a fast 8K drag, against the playback figures); it is the clearest
   available statement of what the pipeline has to buy back.
 
+- **DECODE THREADING IS ALREADY AT ITS KNEE BY DEFAULT, AND THE NOTE THAT SAID OTHERWISE WAS
+  WRITTEN LAST SESSION (2026-08-15, `docs/8k-decode-threads-sweep.md`).** The stage-one report
+  recommended raising `TRACE_DECODE_THREADS` as "the cheapest remaining lever, still at FFmpeg's
+  automatic count, which caps at 16". **It has been `av_cpu_count()` for intra-only since
+  checkpoint 1** — 32 on this 16-core/32-thread box — and the "+21%" it quoted was measured
+  before that default landed. **Thirteenth premise expiry, and the first written by this
+  project's own previous session.** The guard is now in the product: the HUD reads **`thr slice
+  x32` / `thr frame x16`**, taken off the codec context rather than recomputed from the env, so
+  "the default is N" is an observation. It earned itself on its first run by confirming 4K H.264
+  is still `frame x16`, i.e. the long-GOP split is live.
+
+  **The knee is the logical CPU count and the curve is FLAT beyond it to 64.** 8K plate, vcpkg,
+  `dec` avg: t=1 **661.23** · 8 98.14 · 16 62.29 · 20 56.90 · 24 52.42 · 28 48.88 · **32 45.95** ·
+  40 45.11 · 48 45.10 · 64 45.12. Minimal GCC FFmpeg: 16 55.53 · 24 46.10 · **32 39.08** · 40
+  39.19. **CPU never exceeds ~50% of the machine (15.8 of 32 cores) at any setting from 32 up**,
+  so the box is neither thread-starved nor saturated — past 16 threads you are on SMT siblings for
+  ~26%, and past 32 there is nothing left to ask for. Amdahl on t=1/t=32 gives a **3.9% serial
+  fraction** whose asymptote is ~26ms against a measured floor of 45ms, so **the limit is per-core
+  throughput and memory traffic, not parallelism.**
+
+  **DECODE ALONE CANNOT REACH 23.976 AND IS NOT CLOSE.** At the knee on the fastest build `dec` is
+  **39.08ms against a 41.71ms budget — 94% of the whole frame** before conversion (18.01), upload
+  (12.33) or paint. Ceiling if everything else were free: **25.6 fps.** Best measured throughput
+  **13.64 fps / 56.9%** (minimal build, default threads, `drop 0`); with stage one at depth 2,
+  **62.0%**. In the shipping drop-enabled config, `presented 13.46`, **`drop 62`, `media 98.1%`**.
+
+  **KEEP THE DEFAULT POLICY EXACTLY AS IT SHIPS** — `av_cpu_count()` for intra-only, FFmpeg's
+  automatic for long-GOP. It is derived from the machine rather than hard-coded, so a four-core
+  box gets 4 where a literal 32 would break it. **The raised count also HELPS random access**,
+  which is worth recording because the opposite was plausible: 4444 `scrub -SnapRelease` at
+  default against `TRACE_DECODE_THREADS=8` reads shuttle **29.63 → 15.89ms/f**, `hitch` **2 → 0**,
+  paints **48 → 84**, `delta 0` and full-res planar on both. Slice threading makes `thread_count`
+  threads *per frame*, so a seek needs no pipeline refill and there is no scrub penalty to trade.
+
+  **STAGE TWO IS NOT JUSTIFIED FOR THE PURPOSE IT WAS FUNDED FOR, on these numbers.** A *perfect*
+  two-stage pipeline gives `max(39.08, 18.01, ~13.5)` = **25.6 fps at zero contention**, and stage
+  one measured the contention that arrangement meets (`sws` +24%, `upload` +91%) against 2.4ms of
+  margin. Realistic landing zone is **~22–25 fps, below 24 in the likely case**, in exchange for
+  changing the decoder's output boundary. What is left is outside both stages: closing a 1.6x gap
+  on ProRes 4444 XQ needs a faster decoder, and hardware decode is excluded by the owner. **The
+  honest position is that this file is not reachable at 23.976 on this machine with this decoder**
+  — the same conclusion `ffmpeg -f null` reached independently at 20.5 fps with every other stage
+  deleted.
+
 - **THE EXACT LANDING IS OFF THE UI THREAD — a click, a release and a frame step no longer
   freeze the window (2026-08-14, `cc8e638`).** Owner ruling of 2026-08-14: VLC struggles with
   the single-GOP Seedance clip too, so no player is showing an approximate frame during that

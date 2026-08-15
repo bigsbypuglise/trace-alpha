@@ -264,6 +264,13 @@ struct VideoPerfStats {
     // media open -- see the four-cell table at kPlaybackForwardWalkLimit for why
     // it is not switched per request mode.
     bool threadTypeIsFrame = false;
+    // How many threads the codec was actually opened with. Reported because the
+    // default is COMPUTED -- av_cpu_count() for intra-only, FFmpeg's automatic
+    // count otherwise -- so without it every statement about "the default" is an
+    // inference from the source rather than an observation of the run. A stale
+    // note in this repo already claimed the intra-only default was FFmpeg's
+    // automatic 16 when the code had been av_cpu_count() since checkpoint 1.
+    int threadCount = 0;
 
     // Frame cache accounting.
     // cacheCapacity is how many entries of the size currently being stored fit

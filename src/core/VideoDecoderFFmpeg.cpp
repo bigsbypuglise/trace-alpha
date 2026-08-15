@@ -1691,6 +1691,10 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         const double memcpyMs = static_cast<double>(memcpyNs) / 1'000'000.0;
 
         perfStats_.threadTypeIsFrame = impl_->threadTypeIsFrame;
+        // Read back off the codec context rather than recomputed from the env,
+        // so it reports what FFmpeg is actually running with. A requested count
+        // and an applied count are not the same claim.
+        perfStats_.threadCount = impl_->codec ? impl_->codec->thread_count : 0;
         perfStats_.lastDecodeMs = decodeMs;
         perfStats_.lastConvertMs = convertMs;
         perfStats_.lastTotalMs = totalMs;

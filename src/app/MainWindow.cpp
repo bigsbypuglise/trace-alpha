@@ -7486,7 +7486,9 @@ void MainWindow::refreshHud(const QString& action) {
                 // Threading mode, constant for the life of a media open. It is
                 // here because the walk-versus-seek limit is conditioned on it,
                 // so a `walk`/`seek` figure cannot be read without it.
-                .arg(perf.threadTypeIsFrame ? "frame" : "slice");
+                .arg(QString("%1 x%2")
+                         .arg(perf.threadTypeIsFrame ? "frame" : "slice")
+                         .arg(perf.threadCount));
 
             // Presented rate from the wall clock: the only number that says
             // whether playback actually held real time.
