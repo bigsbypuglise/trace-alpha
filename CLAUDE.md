@@ -1898,6 +1898,99 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   sampled-vs-presented on a fast 8K drag, against the playback figures); it is the clearest
   available statement of what the pipeline has to buy back.
 
+- **THE EXACT LANDING IS OFF THE UI THREAD — a click, a release and a frame step no longer
+  freeze the window (2026-08-14, `cc8e638`).** Owner ruling of 2026-08-14: VLC struggles with
+  the single-GOP Seedance clip too, so no player is showing an approximate frame during that
+  gesture and **exactness is not what costs Trace anything there — do not weaken the landing.**
+  What cost it is that showing frame 57 of a 97-frame one-keyframe file requires decoding 58
+  frames at 8.9ms each, and Trace did all 58 inside the mouse handler.
+
+  The request is unchanged — `RequestMode::Step`, one frame, full resolution, accurate
+  conversion, `batch 1` and **`batchBudgetMs` deliberately 0**, because a budget on one frame
+  could only mean "give up". Only the thread changed. Measured on the Seedance clip with
+  **`TRACE_ASYNC_LANDING=0` as the in-binary control**: click at 30/60/85% **267/424/589 → 0/0/0ms
+  frozen**; backward step x16 **max 410 avg 29 → max 31 avg 14ms**; forward drag **`ui gap max`
+  227.7 → 8.3ms** and `over 16ms 1 of 1139 → 0 of 1516`. **`release` 597.7 → 595.2ms — the walk
+  is the same walk.** This makes 520ms not a freeze; it does not make it shorter.
+
+  **Three faults the first cut had, each found by measuring.** **(a) A CLICK DECODED THE SAME
+  FRAME TWICE.** A click is press+release on the same value; synchronously the press landed
+  before the release arrived so the release took `scrubShownExact_`'s skip, but with the landing
+  on the worker the release arrives mid-walk and re-posting *cancels* the walk and restarts it
+  from the head — `sup 1`, `cancel max 128.43ms` at a `ckpt 135.37ms` granularity, picture at
+  570ms against the synchronous 555. `requestExactFrameAsync` now **adopts** an in-flight landing
+  for the same frame. **(b) A MID-DRAG FLUSH RE-FROZE THE WINDOW**: `activeScrubFrame_` means
+  "what is on screen", so it is still -1 while the press landing walks, and a pointer move inside
+  that window failed the drag branch's `walkFrom >= 0` test and fell through to the synchronous
+  block. `flushVideoScrub` defers while a landing is pending unless this is the release, which
+  must always be able to move the target. **(c) `release` WOULD HAVE READ 0.1ms AND FLATTERED THE
+  BUILD** — it is set from the landing's own post-to-on-screen clock now, so it keeps meaning
+  "how long until the exact frame appeared". **The win belongs to `ui gap max`, a separate field
+  because it is a separate claim.**
+
+  **RAPID STEPS NOW COALESCE, and that is a stated behaviour change rather than a side effect.**
+  Each press advances the playhead and supersedes the landing in flight, so five fast presses
+  move five frames and decode the fifth. The arithmetic is identical and the frame the user stops
+  on is exact — `lifecycle -StepCycle` lands on frame 62 and returns to frame 62 through
+  3 x (Right x5 / Left x5), with `landing async 32 sync 1` showing all 30 steps landing
+  individually at 120ms spacing. What it replaces is worse by every measure: held arrow keys used
+  to queue one full decode per press and run the playhead away from the user after they let go.
+  **HUD `landing PENDING|idle async N sync N sup N (Xms max Yms)`** makes a silent fallback to the
+  synchronous path visible. Note **`display` after a release now reports the LANDED frame** rather
+  than the previous preview, because the async landing repaints explicitly where `loadCurrentFrame`
+  only called `update()` — a HUD-accuracy change, not a regression.
+
+- **CHECKPOINT 2 STAGE ONE IS BUILT, DEFAULT OFF, AND MEASURED — +10%, NOT +22%, AND THE REASON
+  IS THE STAGE-TWO DECISION (2026-08-14, `d8beba8`; report in
+  `docs/async-decode-queue-stage-one.md`).** `TRACE_PLAYBACK_QUEUE=N`, **default 0**. A bounded
+  lookahead **cache and never a schedule**: the tick's target arithmetic is untouched, a starve
+  **holds and counts** rather than taking the decoder back, and draining lives **inside
+  `reclaimDecoder()`** so every transition drains it by construction.
+
+  8K plate, `TRACE_RT_DROP=0`: vcpkg **off 53.6% · d1 48.3% · d2 58.2% · d3 clamps to 2**;
+  minimal GCC FFmpeg **off 56.5% · d2 62.0%**. **Depth 1 is WORSE than off** because a depth-1
+  queue cannot overlap — the worker only starts N+1 after the tick consumes N — so **depth 2 is
+  the minimum that overlaps**, and the byte bound already caps 8K there (512MB / ~199MB).
+  **Overlap is confirmed on the design's own terms rather than on the frame rate**: `handler`
+  70.42 → 16.28 while `dec` stayed 38.55 → 41.08 and `outside` rose 3.13 → 28.32.
+
+  **WHY IT IS +10%: both overlapped stages get SLOWER concurrently** — `sws` +24%, `upload` +91%.
+  The binding term is the worker's own serial `dec + sws`, because **conversion rides with
+  decode**; `41.08 + 22.74 = 63.8ms = 15.7 fps` predicted against 14.87 measured. **The design
+  flagged contention as a stage-two risk against a ~2ms/frame margin and it is already material
+  at ONE stage** — so stage two, which would take the worker to `dec` alone at 41.08ms = 24.3 fps,
+  lands *near but under* 24 rather than at it. **`dec` is the binding term in every arrangement
+  and is the one thing neither stage touches**; `TRACE_DECODE_THREADS` is already known to be
+  worth +21% here and still sits at FFmpeg's automatic count, which caps at 16 on a 32-thread box.
+  Recorded as a recommendation, not taken.
+
+  **Two faults found by measuring.** **The playhead advanced on a starve, and that is a runaway** —
+  the target ran ahead at 24 fps while the pipeline supplied 20, so every arriving frame was
+  already behind and was discarded: `posted 94, drop 93, starve 146, reseed 50`, **one frame in
+  6.14s, 0.7% of real time.** A starve is not a failure and now leaves the playhead where it was,
+  exactly as an audio hold does. And **`wait` was measuring the upload and read 52.01ms on a run
+  where nothing had waited** — `setFrame()` is where the 24.58ms D3D11 upload happens; timed to
+  the queue decision only it reads **0.01ms**. Ninth stale instrument, and the second in two
+  sessions where the wrong answer was the alarming one rather than the flattering one.
+
+- **WHY THE 8K PLATE SCRUBS BETTER THAN IT PLAYS — confirmed 2026-08-14,
+  `docs/8k-scrub-vs-playback.md`.** The owner raised it and two of the four predicted reasons
+  needed correcting. **Confirmed:** the preview converts to the **display size**
+  (`dst RGB32/BGRA 1090x614` against full-res `YUV444P12 planar`), taking `sws+upload` from 28.91
+  to 13.05ms and the frame from 82.55 to 52.72. **Corrected:** "intra-only, so a seek lands on the
+  target" is true and is **not a difference versus playback on this file** — both read `walk 0f`;
+  and sampling is gated on but **only engages on demand** — a slow drag reads `sample idle |
+  stride 1 | skipped 0`, only a 0.4s sweep reads `sample ON | stride 3 | skipped 92 over 7 steps`.
+  **THE DECISIVE ONE WAS UNSTATED: a drag has no deadline and playback does.** The decoder
+  supplies the same ~13 fps either way — `presented 12.86` in playback, `dec 13.0` slow drag,
+  `dec 13.6` fast drag. Playback is judged against 23.976 and misses on **every** frame
+  (`handler>budget 143 of 143`, 53.6%); a drag is judged against the pointer, which asked for
+  13.8 f/s and was **met** (`supply 94%`, `behind 0/1f`) or asked for 163.9 f/s and was
+  legitimately allowed to trail and sample (`supply 8%`, `behind 0/90f`) with the landing still
+  exact. **Scrubbing feels better because nothing promised it 24.** What the pipeline has to buy
+  back is therefore **13 → 24 fps at full resolution**, and the drag shows which lever moves which
+  term: the preview cuts `sws+upload` 44x while `dec` does not move at all.
+
 - **MIXED-MONITOR DPI IS VALIDATED ON HARDWARE AND §4 NEVER RE-SHAPED ON A SCALE-FACTOR CHANGE — FOUND AND FIXED 2026-08-14 (`8945894`), plan §20.4.** A second display was connected, closing the item that had been **tabled for want of hardware** since 2026-08-09 and was the named beta gate. Configuration: `\\.\DISPLAY1` 5120x1440 @ 239.999Hz at **100%**, `\\.\DISPLAY2` 1920x1080 @ 60Hz at **150%** — different scale factor, different refresh rate, different work area.
 
   **The bug.** §4 asks the window to *"recalculate correctly when the window moves between monitors with different scaling"*. Nothing did. **A DPI change is not a `QEvent::WindowStateChange`**, so `changeEvent`'s re-shape never ran; and **it is not a drag**, so it sends no `WM_SIZING` and `constrainSizingRect`'s aspect lock never ran either. Windows scaled the rect on its own and Trace accepted the result. Measured on 4K H.264 crossing 100% → 150%: the client lost **147 logical px of height** (1083 → 936) while the width was preserved exactly, so **the picture pillarboxed** — `display 1201x676` filling the viewer at open became `display 936x527` inside an unchanged `win 1201x934` after a round trip, and the window was 973 logical tall against a **672**-logical work area, far past §4's 80% rule. **Not cumulative**: four round trips converged on a stable wrong pair. Reproduced with **Win+Shift+Arrow**, so it is not an artifact of how the harness moved the window.
@@ -2450,6 +2543,18 @@ term of the calculation **and what the layout actually did with it** — the two
 the failure mode there and is invisible from `win WxH`. Through `fprintf`, not `qWarning`: in
 this GUI-subsystem build Qt's handler does not reliably reach a console's stderr, and the first
 version printed nothing while FFmpeg's own messages came through the same run),
+**`TRACE_ASYNC_LANDING=0`** (2026-08-14, `cc8e638`: back to decoding the exact landing --
+a groove click, a slider release, a frame step -- on the UI thread. **Default is the worker**;
+this is the negative control for every landing figure and the rollback. It changes WHERE the
+decode runs and nothing else: still `RequestMode::Step`, one frame, full resolution, accurate
+conversion. It also restores per-press stepping, since the async path coalesces rapid presses),
+**`TRACE_PLAYBACK_QUEUE=N`** and **`TRACE_PLAYBACK_QUEUE_MB`** (2026-08-14, `d8beba8`,
+checkpoint 2 stage one: how many frames ahead ordinary 1x forward playback may decode on the
+worker, and the byte budget bounding it. **DEFAULT 0 = OFF**, so nothing ships enabled and the
+synchronous path is the comparison. **Depth 1 is worse than off** -- a depth-1 queue cannot
+overlap -- and **depth 2 is the minimum that overlaps**; the byte budget clamps 8K to 2 by
+itself. Worth ~+10% on the 8K plate and nothing on a file that already meets budget, where it
+simply moves the decode off the UI thread),
 **`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second

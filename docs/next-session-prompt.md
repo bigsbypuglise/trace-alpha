@@ -1,228 +1,128 @@
-# OPEN: BOTH DECISIONS ARE ANSWERED (owner, 2026-08-14). Build in the stated order.
+# OPEN: ONE OWNER DECISION — stage two was funded on a margin that stage one has now measured away
 
-The previous session measured both items and built neither, because each turned on a question
-only the owner could answer. **Both are now answered. The measurement records below stand as
-context; the decisions at the top of this section govern.**
+Both of the previous session's decisions were answered and **all three items in the stated order
+are built, measured and committed**: the exact landing off the UI thread (`cc8e638`), the
+scrub-versus-playback confirmation (`94e0c13`), and checkpoint 2 stage one (`d8beba8`). Stage two
+is **not started, by instruction** — the owner asked to be reported to first, and the report
+changes the premise stage two rests on.
 
-## THE OWNER'S ANSWERS
+## THE DECISION
 
-**DECISION 1 — the Seedance file. ANOTHER PLAYER DOES NOT DO IT WELL EITHER.** The owner tested
-it in **VLC and VLC also struggles badly with scrubbing it.** That settles the question the
-measurement pass raised and it settles it in the useful direction: nobody is showing frame 57
-of a single-GOP file instantly, so **there is no evidence anyone is displaying an approximate
-frame during the gesture**, and the exactness contract is not what is costing Trace anything
-here. **Do not weaken the landing.** What is left is entirely branch (a): **the walk is
-synchronous on the UI thread, so the window is dead for 261–585ms.** Getting it off the UI
-thread costs nothing in exactness and is the whole fix.
+**Stage two was funded to take the 8K plate close to real time. Stage one measured the margin it
+depends on and the margin is not there.**
 
-**DECISION 2 — fund the two-stage pipeline.** The owner wants the 8K plate **close to real
-time**, so +22% to 17.6 fps is not the destination. **Build the single stage first anyway** —
-it is real headroom everywhere, it is the prerequisite for two, and it is the honest way to
-find out whether the second stage's ~2ms/frame margin survives two stages contending for cores
-each was measured with alone. Report after stage one, before starting stage two.
+Full report: **`docs/async-decode-queue-stage-one.md`**.
 
-**ORDER — the previous session's recommendation is accepted: the exact landing off the UI
-thread FIRST.** It is the fix for decision 1, it is smaller than either queue stage, and it is
-the same ownership machinery checkpoint 2 needs. Then queue stage one, then stage two.
+Stage one works and is real. Overlap is confirmed on the design's own terms rather than on the
+frame rate — `handler` collapses 70.42 → 16.28ms while `dec` stays 38.55 → 41.08 and `outside`
+rises 3.13 → 28.32. But it is **+9.7% relative, not the +22% it was scoped at**, and the reason is
+the whole of this decision: **both overlapped stages get slower when run concurrently.** `sws`
++24%, `upload` +91%, on a 199MB frame. The design flagged contention as a *stage-two* risk against
+a **~2ms per frame** margin; it is **already material at one stage**.
 
-## AND ANSWER THIS, BECAUSE THE OWNER RAISED IT AND IT IS A REAL SIGNAL
+| 8K plate, `TRACE_RT_DROP=0` | off | d1 | d2 | d3 |
+|---|---|---|---|---|
+| vcpkg | **53.6%** | 48.3% | **58.2%** | clamps to 2 |
+| minimal GCC FFmpeg | **56.5%** | — | **62.0%** | — |
 
-**"Scrubbing the 8K plate feels better than real-time playback, which I find strange."** It is
-not strange and it should be confirmed rather than assumed, because if the explanation is right
-it is also the argument for the pipeline. Scrub and playback are not doing the same work per
-presented frame on that file:
+Stage two would split conversion off the worker onto a third thread, taking the worker's stage to
+`dec` alone — **41.08ms = 24.3 fps on the minimal build, nominally at the 23.976 target with no
+margin at all**, before that third thread's own contention, which stage one has just measured at
++24% and +91% on the two terms it would touch. On the numbers in hand **stage two lands short of
+24 rather than at it.**
 
-- a scrub preview converts **to the display size**, not full resolution — the expensive half of
-  the frame, and on an 8K plate in a windowed viewer that is a very large reduction;
-- ProRes is intra-only, so a seek **lands on the target** with no GOP walk — the opposite of the
-  Seedance file;
-- **§15's adaptive sampling is active on intra-only media**, so a fast drag legitimately skips
-  source frames, and the standing motion-over-fidelity rule says that is correct;
-- playback may do none of those: every frame, in order, at full resolution, through the serial
-  `dec 49.33 + sws 17.02 + upload 12.10 = 78.45ms` measured this session.
+**The three options, and the third is not in the funded plan and is what the numbers point at:**
 
-So the gap the owner is feeling is roughly the difference between *sampled, display-resolution,
-seek-lands-exactly* and *every frame, full resolution, strictly serial*. **Verify that from the
-HUD** — quote `dst`, the preview size, `sample stride` and the sampled-vs-presented counts on a
-fast 8K drag against the playback figures — and record it, because it is the clearest available
-statement of what the pipeline has to buy back.
+1. **Stop after stage one.** Ship the queue at depth 2 (default-on is its own decision), take the
+   ~10%, accept the plate at ~62%.
+2. **Build stage two anyway**, knowing the prediction now has measured contention in it.
+3. **Attack decode.** `dec` is the binding term in *every* arrangement and is the one thing
+   neither stage touches. **`TRACE_DECODE_THREADS` is already known to be worth +21% on this
+   plate** and still sits at FFmpeg's automatic count, **which caps at 16 on a 32-thread box**.
+   Cheapest of the three. Recorded as a recommendation, not taken.
+
+**The 8K acceptance is unchanged and the file is NOT signed off**: full quality, full resolution,
+every frame presented, sustained 24000/1001, `drop 0`, `hitch 0`, exact final frame, bounded
+memory, regression unchanged. **`TRACE_RT_DROP` is an emergency comparison only. Do not begin CUDA
+work.**
 
 ---
 
-## DECISION 1 — the 4K 9:16 Seedance/ComfyUI scrub report
+## What shipped this session
 
-Full record: **`docs/comfyui-4k-hevc-scrub-measurement.md`** (commit `48af17e`).
+### The exact landing is off the UI thread (`cc8e638`)
 
-**The file has exactly one keyframe — frame 0 — for all 97 frames.** It is HEVC Main 10,
-yuv420p10le, 2160x3840, B-frames, 34.2 Mbps; **not** `libx264` and not the class the handoff
-assumed. Playback measures **100.0% of real time**, exactly as the owner reported. Every
-random-access miss decodes from the head of the file at **8.9 ms a walked frame**, synchronously
-on the UI thread for a click, a step and a landing:
+The fix for decision 1. **Exactness is untouched** — `RequestMode::Step`, one frame, full
+resolution, accurate conversion, `batch 1`, `batchBudgetMs` **deliberately 0** because a budget on
+one frame could only mean "give up". Only the thread changed.
 
-| gesture | this file | 4K H.264 control |
+Seedance clip, **`TRACE_ASYNC_LANDING=0` as the in-binary control**:
+
+| gesture | control | async |
 |---|---|---|
-| click at 30% | **261 ms** frozen | 59 ms |
-| click at 60% | **431–520 ms** | 94 ms |
-| click at 85% | **585 ms** (`dec 552.50ms`, `walk 82f`) | — |
-| backward steps | `2 3 2 4 2 4 2 2 2 **411** 2 2 3 …` | max 3 ms |
+| click at 30/60/85% | **267/424/589 ms frozen** | **0/0/0 ms** |
+| backward step x16 | max **410** avg **29 ms** | max **31** avg **14 ms** |
+| forward drag `ui gap max` | **227.7 ms** | **8.3 ms** |
+| `ui over 16ms` | 1 of 1139 | **0 of 1516** |
+| `release` (time to picture) | 597.7 ms | 595.2 ms |
 
-**The question for the owner:** *does another player scrub this file well, and is it showing the
-exact frame?* It is sharper here than in the previous two reports. Showing frame 57 of a
-single-GOP file **requires decoding 58 frames, in any player ever written.** A player that feels
-instant is doing one of two things:
+**The last row is the point: the walk is the same walk.** This makes 520ms not a freeze; it does
+not make it shorter.
 
-1. **decoding off its UI thread**, so the window stays alive and the slider keeps tracking while
-   the picture catches up — **Trace can copy this and give up nothing**; or
-2. **showing an approximate frame during the gesture** and the exact one on release — a product
-   decision. The project has taken that trade six times for frames *in motion*, and **never for
-   a click**, which is a landing.
+**RAPID STEPS NOW COALESCE and that is a stated behaviour change, not a side effect.** Five fast
+presses move five frames and decode the fifth. The arithmetic is identical, `+5` then `-5` returns
+to the same frame (`lifecycle -StepCycle`: landed 62, ended 62, with `landing async 32 sync 1`
+showing all 30 steps landing individually at 120ms spacing), and the frame the user stops on is
+exact. What it replaces is worse by every measure. **If the owner dislikes it, `TRACE_ASYNC_LANDING=0`
+is the revert and it takes the freeze back with it.**
 
-Answer that and the fix follows. Options, ranked, none built:
+Three faults the first cut had, all in `CLAUDE.md`: a click decoded the same frame **twice** until
+`requestExactFrameAsync` learned to **adopt** an in-flight landing; a mid-drag flush **re-froze the
+window** because `activeScrubFrame_` is still -1 while the press landing walks; and **`release`
+would have read 0.1ms and flattered the build**.
 
-1. **The exact landing off the UI thread** (roadmap item 2b, already written down). Does not
-   make 520 ms shorter; makes it not a freeze. Same ownership machinery as decision 2 — sequence
-   them together.
-2. **A fill budget proportional to the walk it is keeping**, instead of the constant 18 ms.
-   Measured: **+22 ms on a 431 ms landing**, next step freeze from step 11 to step 16. Capped at
-   16 entries by the byte budget, so it is a 60% improvement to stepping, not an order of
-   magnitude. **More cache bytes is not the answer** (§26.5, 768 MB past the knee).
-3. **`skip_frame = AVDISCARD_NONREF` while walking**, restored before the last frames so the
-   landing stays exact. Roughly half this file's frames are non-reference. Real upside, most
-   invasive, decoder surgery on the one path that must never be approximate.
-4. **Ship `TRACE_SCRUB_FILL_MS=240`** — measured here (`hitch 2 → 0`, `smooth max 480.7 → 4.9
-   ms`) and recorded as the intended value at §15.2 all along. Re-measure on 4444 and 4K H.264
-   first; it is a shared path.
+### Why the 8K plate scrubs better than it plays (`94e0c13`)
 
-**Do not reach for sampling** (§15's gate is `AV_CODEC_PROP_INTRA_ONLY`; HEVC is not, and one
-keyframe makes strided steps worse) **or for the async batch** (`batch cap 4 last 1 max 1` here —
-confirmed before anything else was looked at).
-
-**The generalisation that replaces the handoff's:** cost of a miss = **(frames back to the
-previous keyframe) × (per-frame decode cost)**, and both terms must be large. 720p ComfyUI
-98 × 0.36 ms = 35 ms, harmless; 4K H.264 29 × 2.8 ms = 81 ms, tolerable; **this file 96 × 8.9 ms
-= 855 ms.** A keyframe count alone would have condemned the 720p file equally.
+`docs/8k-scrub-vs-playback.md`. Two of the four predicted reasons needed correcting, and **the
+decisive one was not on the list: a drag has no deadline and playback does.** The decoder supplies
+the same **~13 fps** either way. Playback is judged against 23.976 and misses on *every* frame;
+a drag is judged against the pointer, which either asked for 13.8 f/s and was met, or asked for
+163.9 f/s and was legitimately allowed to trail and sample. **Scrubbing feels better because
+nothing promised it 24.** What the pipeline has to buy back is **13 → 24 fps at full resolution**.
 
 ---
 
-## DECISION 2 — checkpoint 2 was scoped from arithmetic that puts conversion on the wrong side
+## Regression baseline (physical panel, 5120x1440 @ 239.999Hz) — re-taken this session
 
-Full record: **`docs/async-decode-queue-design.md`** (commit `6d3b5cd`).
+| file | cadence | `display` / `win` |
+|---|---|---|
+| 4K H.264 x3 | **99.9 / 100.0 / 100.0%**, 120 frames, `0 of 119`, all gaps ~1x, `drop 0`, `rephase 0` | `1066x600 filtered x2` / `1066x1083` |
+| ProRes 4444 x2 | **99.8%**, 261 frames, `0 of 260` | `1066x600 filtered x2` / `1066x1083` |
+| reverse 1x | **100.0%**, 114 frames / 4.75s, `0 of 114`, `hitch 0` | — |
 
-The scoping read *decode 39.68 ms · conversion + upload 30.3 ms · overlapped `max(39.7, 30.3)` =
-**25.2 fps***. **`convertCurrentFrame` is called from inside `decodeFrameAt`**
-(`VideoDecoderFFmpeg.cpp:2185`, `:2200`) and the scrub worker's only decoder call **is**
-`decodeFrameAt` (`ScrubDecodeWorker.cpp:217`). Moving decode to a worker **moves conversion with
-it** — which is already visible in shipping behaviour, since a drag's `sws` figure comes off the
-worker's own perf snapshot.
+`scrub -SnapRelease` `target 120 shown 120 delta 0` and `target 261 shown 261 delta 0`, both
+full-res planar, **`hitch 0`**, `land 0` · both lifecycle legs (81.8% and the **0% control**) plus
+all seven other legs · **25 of 25 transitions** · `pq OFF 0/0 … posted 0` proving the queue inert
+at its default.
 
-Measured this session, 8K plate, `TRACE_RT_DROP=0`, vcpkg build, `display 1091x614`:
+**Window geometry differs from the previous baseline** (`1066x1083` against `1226x1083`) because
+these runs were taken with the transport bar; §22.8's window-size effect applies, so compare like
+with like before calling anything a regression.
 
-```
-dec 49.33 + sws 17.02 + upload 12.10 = 78.45   against   handler 78.25, outside 2.08ms
-handler>budget 88 of 88 (max 87.1) | presented 12.38 / 23.98 fps (51.6%) | drop 0 | thr slice
-```
-
-Strictly serial; nothing is waiting on anything. So **one queue stage gives
-`max(56.7, 13.2)` = 17.6 fps** on the minimal FFmpeg build against 14.4 today — **+22%, and
-short of the 24 the file is accepted at.** Building against 25.2 would have produced a correct
-implementation that measured as a failure.
-
-**The 25.2 figure is reachable, by a design nobody has described**: conversion in a **second**
-stage — decode N+2 while converting N+1 while uploading N. That changes the decoder's output
-boundary (`VideoFrame` is post-conversion, and `VideoFrame.h` admits no FFmpeg type because the
-image-sequence path must compile without FFmpeg), and the two stages then contend for the cores
-each was measured with alone, against a **~2 ms per frame** margin.
-
-**The question for the owner:** *fund the two-stage pipeline, or take the +22% and accept that
-the 8K plate is not reachable this way?* The single stage is worth having either way — it is
-real headroom on every file and it is the prerequisite for two.
-
-**The design otherwise stands and does not change with the answer:** a bounded lookahead
-**cache** and never a schedule (the tick still picks the frame — `cd79d49` is the scar);
-draining **inside `reclaimDecoder()`** so cancellation and every transition the requirements
-enumerate is one choke point; `requestGeneration_` stamped on every post and checked at the
-delivery boundary in `onScrubResult()`; the lease granted before the first post and returned
-only through `reclaimDecoder()`, which `loadCurrentFrame()` already calls; byte-bounded shallow
-depth justified by the measured starvation count; **default off**, so the synchronous path is
-the comparison and the rollback.
-
-**The 8K acceptance is unchanged and the file is NOT signed off.** Full-quality, full-resolution,
-every one of the 145 frames presented, sustained 24000/1001, `drop 0`, `hitch 0`, exact final
-frame, bounded memory, regression unchanged. **`TRACE_RT_DROP` is an emergency comparison only,
-never the accepted behaviour.** Do not begin CUDA work.
-
----
-
-## Recommended sequence once both are answered
-
-1. **The exact landing off the UI thread.** It is the fix for decision 1, it is smaller than
-   either queue, and it is the same ownership machinery as decision 2.
-2. **Single-stage queue**, default off, measured and reported before it becomes the default.
-3. **Two-stage pipeline**, only if decision 2 goes that way.
-
----
-
-## Harness added this session
-
-- **`widen.ps1`** — widens the window without changing the video rect. Portrait media is
-  height-bound, so width is pure letterbox and `display` is identical either side (the script
-  prints both, so a run carries its own proof). **This is what makes phase 12's clipped-HUD
-  limitation cost nothing on 9:16, 4:5 and 1:1 material**, and it is the only reason `scrub.ps1`
-  runs on a 9:16 file at all — at the §4 width the groove is under its 300 px minimum run and
-  the harness reports `groove not found`. It steps +1/-1 afterwards, because `refreshHud()` is
-  not called on `resizeEvent`.
-- **`clickland.ps1`** — one groove click, timed from outside as the longest stretch during which
-  the window stops answering messages.
-- **`stepcost.ps1`** — per-step freeze for N steps in one direction.
-
-**`clickland.ps1`'s first version was a stale instrument and it flattered the build.** A single
-`SendMessageTimeout` after the click is serviced ahead of the posted mouse input, so it reported
-**3 ms for a landing that went on to block for 450** — consistently enough to "show" that
-`TRACE_SEEK_CACHE_WINDOW=16` removed the freeze entirely. It does not. Polling with a 5 ms
-timeout and reporting the longest contiguous dead stretch now agrees with the HUD's own
-`ui gap max`. **Eighth instrument in this project to accuse or exonerate a build wrongly, and
-the first where the wrong answer was the flattering one.**
-
----
-
-## What is DONE and needs no further work
-
-- **The 720p ComfyUI scrub report** — `docs/comfyui-720p-scrub-measurement.md`, commits
-  `efda50c` · `be9f7ec` · `8838c26`. The async chain posted one frame per cross-thread round
-  trip; one request now covers up to 4 consecutive frames under the same 8 ms walk budget.
-  `TRACE_SCRUB_BATCH=0` is the in-binary control. **Its subjective comparison against QuickTime
-  has still not been taken**, and must be **at the machine, not over Parsec**.
-- **Mixed-monitor DPI (§20.4)** — closed on hardware 2026-08-14, `8945894` fix · `fb30bb9`
-  harness. It found a real bug: §4's sizing never re-ran on a scale-factor change.
-  **`v0.2.0-beta.1` is now an owner decision rather than a blocked one.** Still untested, stated
-  narrowly: three or more displays · 125% and 175% · a scale change made while Trace is running
-  on that monitor · hot-plug. **§20.3's cross-backend band difference at 150% is not closed by
-  it.**
-- **Checkpoint 1, the minimal FFmpeg dependency** — built, integrated, CI-green from scratch.
-  20.8 MB of DLLs, avcodec 62.28.102, LGPL v2.1+, bit-identical output to vcpkg on five files.
-  `TRACE_FFMPEG_ROOT` selects it; the vcpkg path is untouched and one deleted workflow line
-  returns CI to it.
-
-## Working state on the box
-
-- `build/` is vcpkg-configured (the local shipping default). `build-ffci/` is the same tree with
-  `-DTRACE_FFMPEG_ROOT=C:/tw_ffci/out`. Both pass `--renderer-selftest=d3d11`.
-- `C:\tw_ffci\out` is the built minimal FFmpeg. `C:\tw_bench` holds `decbench`, the captures and
-  **`vcpkg_backup\`**, which is how the dependency A/B is reversed without a rebuild.
-- The BtbN prebuilt is the validated performance control only and must never ship.
+`revplay -StepCheck` reports **`+1 moved 0%`** on 4K H.264 and **the control reads the same** — the
+reverse run lands on a static opening frame. Not attributable to any change here; pick a different
+position if that leg is ever needed as a real control.
 
 ---
 
 ## Standing priorities (owner) — these outrank anything above
 
 1. **Performance is priority #1.** No feature may ever compromise lightweight, fast, smooth
-   playback. If a feature and playback smoothness conflict, the feature loses.
+   playback.
 2. **Smooth, responsive motion beats matching final-frame fidelity during motion.** Fidelity is
-   owed to the frame the user stops on. **Six instances**: the drag preview, §15's scrub
-   sampling, accelerated reverse, accelerated forward, phase 4's shuttle-press decision, and
-   phase 15's under-resolved preview at a zoom. **Do not re-open any of them on picture-quality
-   grounds alone.** Note decision 1 asks whether it extends to a *click*, which is a landing and
-   has never been covered by it.
+   owed to the frame the user stops on. **Six instances**, and **decision 1 of the last session
+   deliberately did NOT add a seventh** — a click is a landing, and the owner's ruling was that
+   exactness is not what costs anything there. **Do not weaken the landing.**
 3. **`V:\` is live client production storage and is strictly read-only.**
 
 ## Settled behaviour — changing any of these re-opens an owner decision
@@ -238,17 +138,16 @@ the accessibility proxies staying `Qt::NoFocus` and **out of the tab chain**.
 
 ## The rules this project keeps re-learning
 
-**A deferred item's premise expires. Re-derive it before building it.** Now eleven instances,
-and **decision 2 above is the twelfth** — the first where the expired premise was a scoping
-arithmetic rather than a note or a line of code.
+**A deferred item's premise expires. Re-derive it before building it.** Twelve instances.
 
 **A validated PREDICTION is not a validated MECHANISM.**
 
-**Check what a number is measured against before believing it.**
+**Check what a number is measured against before believing it.** `release` would have read 0.1ms
+on a 595ms landing, and `wait` read 52.01ms on a run where nothing waited — both this session.
 
 **A harness that cannot fail is not a check — and one that cannot PASS is worse.**
 
-**An instrument can accuse a correct build.** Eight times now — and the eighth *exonerated* one,
+**An instrument can accuse a correct build.** Nine times now — and two of those *exonerated* one,
 which is harder to notice.
 
 **Names lie; read the definition.** `isVideoScrubActive()` means "the media is a video file".
@@ -265,18 +164,18 @@ which is harder to notice.
   `git remote -v` and `git rev-list --count @{u}..HEAD` rather than assuming. **`gh` is NOT
   installed**; the git credential helper holds a usable token.
 - **A `v*` tag publishes a real ZIP and marks the release prerelease.** The body comes from
-  **`docs/release-body.md`**. Rewrite it when cutting a release and name the known gaps plainly.
+  **`docs/release-body.md`**.
 - **CI asserts the renderer initializes** (`--renderer-selftest`, exit 3 = failed to init, exit
   4 = never built) **and the window-shape geometry across DPI** (`--window-shape-selftest`).
-- Build with the VS2022 / Qt 6.10.2 / vcpkg commands in `CLAUDE.md`. Check the configure lines
-  for `audio output enabled` and `D3D11 renderer enabled`. **Stop a running `Trace.exe` first**
-  or the link fails with LNK1104.
+- Build with the VS2022 / Qt 6.10.2 / vcpkg commands in `CLAUDE.md`. **Stop a running `Trace.exe`
+  first** or the link fails with LNK1104. `build/` is vcpkg; **`build-ffci/` is the same tree with
+  `-DTRACE_FFMPEG_ROOT=C:/tw_ffci/out`** and is the minimal GCC FFmpeg — both build clean and both
+  were measured this session.
 - **`windows.h` arrives through the D3D11 backend's header and defines `max()`/`min()`**, so use
   `qMax`/`qMin` in `src/render/VideoRenderer.cpp`.
 - PowerShell 5.1 `Get-Content` reads as ANSI, so appending a UTF-8 doc through it mangles every
   `§` — use the Write tool. **A `git commit -m` here-string containing `>` or `->` fails**; write
-  the message to a file and use `git commit -F`. **Do not pipe a measurement script through
-  `Select-Object -First N`.**
+  the message to a file and use `git commit -F`.
 - **XML comments cannot contain `--`.** `app/resources.qrc` is XML.
 - **Run `scripts/measure/refresh.ps1` at the start of a session and again before quoting
   anything.** Parsec presents 1920x1200 @ 60Hz; the physical panel is 5120x1440 @ 239.999Hz.
@@ -284,6 +183,7 @@ which is harder to notice.
 - **PARK THE MOUSE CURSOR ON THE PRIMARY BEFORE ANY MEASUREMENT.** Windows launches a
   default-positioned window on the monitor the cursor is on. Quote the HUD's `scr` field.
 - **Quote `hitch`, not `stalls`, and quote `win WxH` AND `display` with either.**
+- The asset set is at **`C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets`**.
 - Harness, and **which half needs `-Env TRACE_TRANSPORT_BAR=1`**:
 
   *Needs the docked bar* (they scan for its groove colour): `revplay.ps1`, `transitions.ps1`
@@ -298,35 +198,12 @@ which is harder to notice.
   *Mode-independent*: `cadence.ps1` (**scratch `TRACE_SETTINGS_FILE`; needs `TRACE_NO_AUDIO=1`
   for controls**), `playhud.ps1`, `refresh.ps1`, `capture.ps1`, `widen.ps1`, `viewscale.ps1`,
   `inspector.ps1`, `uiatree.ps1`, `phase14.ps1`, `menushot.ps1`, `recentfiles.ps1`,
-  `resizecache.ps1`, `swapexe.ps1`, `banddiff.ps1`, `abfilter.ps1`/`croprect.ps1`,
-  `stalls_vs_window.ps1`, `make_timecode_fixtures.ps1`, `make_shape_fixtures.ps1`.
+  `resizecache.ps1`, `swapexe.ps1`, `banddiff.ps1`, `abfilter.ps1`/`croprect.ps1`.
 
-  *Needs two displays at different scale factors*: **`dpimove.ps1`**. It is the only
-  per-monitor-DPI-aware harness here and refuses to run otherwise.
+  *Needs two displays at different scale factors*: **`dpimove.ps1`**.
 - **Do not run `transitions.ps1` on a 9:16 clip.** Its own header records that pillarboxing
-  produces PASSes that mean nothing; `M&M_TopGun_1080.mp4` is the clip for that matrix.
+  produces PASSes that mean nothing.
 - **Build a control binary in a `git worktree`, not by stashing**, and **verify every swap by
-  hash** (`swapexe.ps1`).
+  hash** (`swapexe.ps1`) — though note both changes this session shipped with an **in-binary**
+  control, which is better: the two runs differ in one branch rather than in a compile.
 - Update `CLAUDE.md` and the plans at the end of the session.
-
----
-
-## The regression baseline (physical panel, 5120x1440 @ 239.999Hz)
-
-| file | cadence | `display` / `win` |
-|---|---|---|
-| 4K H.264 x3 | **100.0 / 100.0 / 100.0%**, 120 frames, `0 of 119`, all gaps ~1x | `1226x690 filtered x2` / `1226x1083` |
-| ProRes 4444 x2 | **99.8%**, 261 frames, `0 of 260` | `1226x690 filtered x2` / `1226x1083` |
-| 1080p H.264 x2 | **100.0%**, 240 frames, `0 of 239` | `1226x690 filtered x1` / `1226x1083` |
-| 4K 60fps x2 | **100.0%**, 162 frames, `0 of 161`, **16.67ms budget** | `1226x690 filtered x2` / `1226x1083` |
-| ProRes 422 HQ x2 | **99.9%**, 168 frames, `0 of 167` | `1226x690 filtered x2` / `1226x1083` |
-| 1x1 ProRes x2 | **100.0%**, all gaps ~1x, `hitch 0` | `690x690 filtered x1` / `690x1083` |
-| 4x5 ProRes x2 | **100.0%**, all gaps ~1x, `hitch 0` | `552x690 filtered x1` / `552x1083` |
-| **4K 9:16 Seedance (new)** | **100.0% x2**, 96 frames, all 95 gaps ~1x, `handler 3.55/4.43` | `460x818 filtered x3` / `496x1287` |
-
-`scrub -SnapRelease` `target 120 shown 120 delta 0` full-res planar, **`hitch 0`**, `land 0` ·
-both lifecycle legs (83.6% and the **0% control**) · **25 of 25 transitions** · still and image
-sequence both §4-shaped and zero-based · `uiatree.ps1` five named, correctly typed controls.
-
-**No code changed this session**, so this baseline is carried rather than re-taken; the Seedance
-row is new and was measured directly.
