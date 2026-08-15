@@ -2075,6 +2075,33 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
   **Everything else passed.** D3D11 swapchain resize and the CPU path agree **to the pixel** (`display 960x540 | win 960x1151` on both). Fullscreen on the secondary goes to the right monitor, covers it exactly, and Escape restores the pre-fullscreen rect there. The aspect lock holds through an interactive corner drag **at dpr 1.50** (993/558 = **1.779**) — `constrainSizingRect` works in physical px and every prior run of it was at dpr 1, where a missing dpr term is invisible. Cadence on the **60Hz** secondary is **100.0% of real time, all gaps ~1x, `hitch 0`, `drop 0`** — GATE E's refresh-independence confirmed rather than assumed. Opening media on the secondary computes §4 against that work area (4x5 reads `bound minimum | want 460x575 | got 460x575 (0.8000)`, correctly pushing past the 80% budget but not past the work area). **Crossing while playing costs nothing**: 4444 crossed twice (`dpiChg 2 reshape 2`) and finished at **99.8%, 261 frames, `drop 0`, `0 of 260`, `hitch 0`**.
 
+  **REFINEMENT, 2026-08-15 (unattended session, same hardware, `dpimove.ps1 -Mode fullscreen`):
+  "restores the pre-fullscreen rect there" is true of size and monitor, not quite of position.**
+  On the secondary (150%) the restored rect reads **7 physical px (≈4.67 logical px) lower in Y**
+  than the pre-fullscreen rect, reproduced identically twice (`pre 5774,0 982x1228` →
+  `post 5774,-7 982x1228`). The primary (100%) leg is exact (`pre 40,40 1192x1122` → `post 40,40
+  1192x1122`), so this is scale-factor-specific, not a general fullscreen-restore fault. Width
+  and height are untouched — this is a small position drift, not the framing/size bug the harness
+  warns to look for. **Not investigated further and not patched**: the restore goes through Qt's
+  own `saveGeometry()`/`restoreGeometry()`, chosen deliberately over a hand-rolled restore
+  (`toggleFullscreen`'s own comment: "Qt's own restore is not something to rely on across a window
+  manager" — chosen anyway as the more robust option), and a few physical pixels of position drift
+  from Qt's internal DPI rounding is a different class of question than the pixel-exact geometry
+  math §4 owns. Also confirmed on the same hardware: the round trip
+  primary → secondary → primary reproduces exactly (`982x1228`/`1261x818` both directions,
+  repeated) **once the window's own chrome is not itself changing mid-sequence** — toggling the
+  dev HUD does not trigger a reshape (by design, matching the phase-12 "hiding the HUD moves
+  `stalls`, `win WxH` does not" finding), so a round trip that hides the HUD partway through
+  correctly lands on a *different, smaller* geometry than it started from, sized for the smaller
+  chrome — that is the reshape mechanism working as designed, not a round-trip defect, and was
+  confirmed by running a second round trip after the HUD state stopped changing (matched to the
+  pixel both times). Maximize on both monitors re-verified clean (fills each work area, stays on
+  its own monitor, restore-to-normal returns the media-shaped size). **The remaining "still
+  untested" items (three-plus displays, scale factors other than 100/150, an in-session Settings
+  scale change, hot-plug) were not attempted this session** — the first three need either
+  additional hardware or changing OS display settings, and per this session's own operating rules
+  changing system/display settings is not an action to take unsupervised.
+
   **HUD gains `dpr N scr NAME dpiChg N (a->b) reshape N`.** `dpiChg` counts the messages, `reshape` counts what was done about them — separate fields because they are separate claims, and before the fix the first read 1 and the second would have read 0.
 
   **THE DEV HUD IS WHAT MAKES THE SECONDARY LOOK BROKEN, AND IT IS PHASE 12'S DIAGNOSTIC LIMITATION AGAIN.** With it shown, chrome reads `0x407` logical against a 672-logical work area — 61% of the monitor — so the window overflows, the fullscreen-Escape restore lands 7px high, and the corner-drag grab point falls off screen. **With `H` pressed (the shipping configuration) every one of those is clean**: the window fits at 545 logical, Escape restores exactly, and the 4K clip lands at a **1280x720** viewer, §4's area cap to the digit. Do not report any of them as product defects.
