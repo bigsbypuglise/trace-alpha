@@ -1,74 +1,43 @@
-# OPEN: (1) poor scrubbing on an AI-generated 720p MP4, then (2) the async decode queue.
+# OPEN: checkpoint 2, the bounded async decode queue. The 720p scrub report is CLOSED.
 
-## NEW OWNER REPORT, 2026-08-14 — scrubbing is poor on a small 720p file
+## DONE 2026-08-14 — the 720p ComfyUI scrub report, diagnosed and fixed
 
-`C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets\14_720P_Comfyui_mp4\video_ComfyUI_0000Fly8.mp4`
+`14_720P_Comfyui_mp4\video_ComfyUI_0000Fly8.mp4`. Full record in
+**`docs/comfyui-720p-scrub-measurement.md`**; commits `efda50c` (measurement) · `be9f7ec`
+(the batch) · `8838c26` (the lease fix the batch exposed).
 
-**Take this first.** It should be an hour of measurement before it is any implementation at
-all, and it is likely to be cheap to diagnose. The decode queue is below and is unchanged.
+**The owner confirmed the file scrubs perfectly in QuickTime**, which is what made this an
+implementation question rather than the contract question the 8K plate turned out to be.
 
-**Why it matters more than one file: this is a target format class, not an outlier.** Trace's
-stated audience in `CLAUDE.md` is *"editors, VFX artists, motion designers, AI video
-creators"*. A ComfyUI export is the AI-video case, and AI tools export through ffmpeg with
-whatever `libx264` defaults or explicit flags the workflow happened to set. If those settings
-produce a structure Trace scrubs badly, the report is about a whole segment of the intended
-users.
+**The GOP was the leading hypothesis and was NOT the cause.** It is genuinely coarse — 7
+keyframes, gaps 24/98/77/45/77/34 against a flat 30 on every other H.264 file in the pool — but
+a 720p entry is 1.32MB, so the 384MB cache holds 291 of the clip's 361 frames and warm the file
+reads the *best* of the three H.264 files (`rev-hit 99.2%`, `seeks 3`, `ra-walk 7.67`,
+`hitch 1`). Playback was always 100.0%.
 
-**The symptom is the opposite of what size predicts, which is the useful clue.** 720p is the
-smallest video in the pool. Frames are tiny — a `yuv420p` 1280x720 plane set is ~1.4MB, so the
-384MB reverse cache should hold on the order of 270 entries against 24 at 4K. Previews are
-*not* halved below 1920 (`> 1920`, deliberately, §the preview-threshold entry), so conversion
-is cheap and full-res. Every mechanism that usually explains a bad drag predicts this file
-should be the *best* case. **So the cause is almost certainly structural in the file, not
-dimensional.**
+**The cause was that the async drag chain posted one frame per cross-thread round trip**, and a
+frame on this file costs 0.12ms against a 3.56ms delivery interval. The synchronous walk's ease
+(`ceil(gap * kScrubEase)` frames per slice) had been dropped from the async path on the
+reasoning that the chain "runs as fast as frames can be decoded" — it runs at one round trip per
+frame. Fixed by porting the ease: one request now covers up to 4 consecutive frames, bounded by
+the same 8ms walk budget. **`TRACE_SCRUB_BATCH=0` is the in-binary control.**
 
-### Characterise the file BEFORE proposing anything
+**`dec 269/285/269 -> 344/344/343 f/s`, `behind max 93/73/91f -> 6/6/8f`, pointer-to-picture max
+`292/221/293ms -> 26/26/26ms`.** Release lands exact on both legs. ProRes 4444 reports
+`batch max 1` (the budget collapses it) and is unchanged at `ui gap over 16ms 1 of 841`.
 
-`TRACE_OPEN_LOG=1` first — it writes fps to 6dp, exact frame count, time base and colour
-metadata per open, and exists so probe experiments are validated against exact values rather
-than assumptions. Then, with `ffprobe`:
+**THE THING TO CARRY: `busy()` had to start counting undelivered results, and `revokeLease()`
+had to start dropping them.** Both windows are exactly one frame wide at batch 1, so neither was
+reachable before. The second **froze the next shuttle run** and presented as *one random
+"expected moving" case failing per full transitions matrix, passing in isolation every time* —
+`R -> ffBtn`, then `F -> J`, then `F -> rewBtn`. It reads exactly like harness flake. **A
+control binary built from `efda50c` is the only reason it was found: 0 failures in 50 cases
+against 2 in 50.** After the fix, 75 of 75 across three matrices.
 
-1. **The GOP structure, and this is the leading hypothesis.** Count keyframes and their spacing
-   (`ffprobe -select_streams v -show_packets -show_entries packet=pts_time,flags`). AI exports
-   frequently carry a very long `keyint`, and a short clip can easily contain **exactly one
-   IDR, at frame 0**. If that is true, every backward step that misses the cache seeks to frame
-   0 and walks the entire clip forward — which is precisely "scrubbing is terrible" on a file
-   whose every other property says it should be fast. Compare against the pool's other H.264
-   files, whose GOPs are 30 and 48.
-2. **Trace's own empirical check agrees or disagrees with the container.** The HUD's `ra-walk`
-   is frames walked per seek — recorded as 0.00 on ProRes and **10–16 on H.264**. On this file
-   it may read in the hundreds. That number is the fastest confirmation available and needs no
-   external tool.
-3. **Time base, PTS sanity and frame rate.** Seeks are frame-exact because the first decoded
-   frame's index is resolved from its PTS (`seekResolvePending`), with a documented fallback to
-   label-as-target for files without PTS. An unusual timebase, VFR, or missing/duplicated PTS
-   would make `frameFromPts` and its monotonic bump behave differently than on any validated
-   file. Check whether the container's frame count, `avg_frame_rate` and the real packet count
-   agree.
-4. **B-frames and whether the GOP is open or closed.**
-
-### Then measure the drag with the existing instruments
-
-`scrub.ps1` (with `-Env TRACE_TRANSPORT_BAR=1`) and `-SnapRelease`, plus a reversal drag.
-Quote `hitch`, `win WxH`, `display`, `rev-hit %`, `seeks`, `ra-walk` and `walk max`. **Compare
-against 1080p H.264 in the same window size** — that is the file this one should resemble and
-does not.
-
-### Two things not to jump to
-
-- **Sampling is correctly refused here.** §15's gate is `AV_CODEC_PROP_INTRA_ONLY`, asked of the
-  codec, and H.264 is not intra-only. Four inferred gates were measured wrong before that one
-  was chosen; do not reach for a fifth because one long-GOP file scrubs badly.
-- **More cache bytes is not the first answer.** §26 already took 192 → 384MB and §26.5 verified
-  it; §15.5 item 1 was closed as answered-no. If the GOP is the whole clip, depth is not the
-  binding term — *distance to the nearest keyframe* is.
-
-**A legitimate outcome is that the file is pathological and Trace should handle it better
-anyway.** If the clip is small enough that the whole decoded thing fits inside the existing
-byte budget, "on a file with no usable keyframe grid, fill the cache once" is a bounded and
-defensible answer. So is deciding this is an encoder problem and documenting it. **Establish
-which before choosing**, and say plainly whether other players scrub it well — the same
-contract question the 8K report needed.
+**Still open on this file, and it is an owner judgement rather than work:** the subjective
+comparison against QuickTime has **not** been taken. 26ms of pointer-to-picture latency is 0.6
+of a frame at 24fps and matches what the synchronous walk achieves, but smoothness and feel are
+owner calls and must be taken **at the machine, not over Parsec**.
 
 ---
 

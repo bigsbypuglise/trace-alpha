@@ -1685,6 +1685,95 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 
 - **THE FIRST 8K CEILING FIGURE IN THIS REPO WAS WRONG, AND SO WAS ITS REPLACEMENT'S ATTRIBUTION.** "20.5 fps = 85%, the machine cannot do it" was measured with the winget `ffmpeg.exe` — a **GPL, GCC, statically-linked FFmpeg 9.0** — at the default thread count, against a Trace that links **LGPL MSVC 8.x**. It substituted a different program for the one being asked about. **Ninth stale-instrument finding and the second out-of-process one.** The rule now has two halves: *benchmark the libraries you ship, at the settings you ship* — and **subtract what your harness serializes that the reference overlaps.** The apparent "FFmpeg 9.0 is faster" gap was entirely `av_read_frame` running inline in `decbench` while the ffmpeg CLI demuxes on its own thread; removing it made both GCC builds land on 29.3 fps.
 
+- **THE ASYNC SCRUB CHAIN PAID ONE CROSS-THREAD ROUND TRIP PER FRAME, AND ON CHEAP FRAMES THAT
+  WAS THE WHOLE COST — FIXED 2026-08-14 (`be9f7ec` + `8838c26`, record in
+  `docs/comfyui-720p-scrub-measurement.md`).** Owner report: poor scrubbing on
+  `14_720P_Comfyui_mp4\video_ComfyUI_0000Fly8.mp4`, a ComfyUI/`libx264` export — **and the same
+  file scrubs perfectly in QuickTime**, which is what made it an implementation question rather
+  than the contract question the 8K plate turned out to be.
+
+  **THE LEADING HYPOTHESIS WAS THE GOP AND IT WAS NOT THE CAUSE.** The file is 1280x720 H.264
+  High, `yuv420p` 8-bit, **no B-frames**, **CFR 24.000000** (`24/1`, tb `1/12288`), 361 frames,
+  untagged colour, no audio, ~120KB of embedded ComfyUI workflow JSON that costs nothing
+  (`streaminfo 5.07ms`). Its GOP really is coarse and irregular — **7 keyframes, gaps
+  24/98/77/45/77/34** against a flat 30 on every other H.264 file in the pool — but a 720p
+  entry is 1.32MB, so **the 384MB cache holds 291 of the clip's 361 frames** and warm it reads
+  the *best* of the three H.264 files: `rev-hit 99.2%`, `seeks 3`, `ra-walk 7.67`, `hitch 1`
+  against 1080p's 98.3% / 5 / 18.40 / `hitch 4`. Cold it walks 97 frames exactly as the
+  container predicts and the 1080p control **still** hitches more (5 vs 8). Playback was always
+  clean: 100.0% x2, `0 of 275`, `drop 0`.
+
+  **THE CAUSE: `flushVideoScrub`'s async branch posted one frame per round trip, and a frame
+  here costs 0.12ms against a 3.56ms delivery interval** — 97% of it round trip, with `dec`,
+  `sws` and `paint` summing to 0.25ms. The synchronous walk never showed it because one slice
+  covered `ceil(gap * kScrubEase)` frames inside a single call. That ease was dropped from the
+  async path with the comment *"the chain runs as fast as frames can be decoded"*; **it runs at
+  one round trip per frame**, and with the ease gone there was no way to close a gap faster than
+  one frame per round trip. **Eleventh premise-expiry, and the first where the expired premise
+  is a comment asserting that a removed mechanism was redundant.** It held at 4K (3.87ms a
+  frame) and 1080p (0.68) purely because the frame was expensive enough to hide it, and those
+  are the two files it was checked on.
+
+  **This file is the pool's only instance of the failing combination**: frame-*densest* (361
+  frames, 1.5x the next) and frame-*cheapest* (0.12ms, 6x under 1080p, 32x under 4K). Density
+  sets the demand rate, cost decides whether the round trip is amortised, and every other file
+  fails one half. **It is a format class, not one file** — a 10-20s 720p/1080p AI export at
+  24fps lands squarely in it.
+
+  **The fix is the sync walk's ease, ported.** One `ScrubRequest` covers
+  `clamp(ceil(gap * kScrubEase), 1, 4)` **consecutive** frames, bounded by the same 8ms
+  `scrubWalkBudgetMs()`. **What is batched is the ASKING, never the showing** — every frame is
+  decoded, delivered and presented individually and in order, nothing is sampled and nothing is
+  skipped. **A §15 stride above 1 forces batch 1**, because a batch covers consecutive frames
+  and a stride means the wanted frames are not consecutive; they also address different
+  deficits, and per-frame decode cost on intra-only media is not reachable by amortising a round
+  trip. **The budget is what makes heavy media safe with no size- or codec-conditional branch**:
+  checked *after* each frame so a batch always delivers one, and at ~23ms a frame ProRes 4444
+  exhausts it immediately and reports `batch cap 4 last 1 max 1`.
+
+  **Cap 4, and it is bounded by measurement at both ends.** Effective cost is
+  `roundTrip/N + decode`: N=2 is 543 f/s, N=4 is 1020 f/s, against the fastest pointer demand
+  measured anywhere in the set (**479 f/s**) — so 2 barely clears it and above 4 the headroom is
+  against nothing observed. Below, the conversion pool's floor is `clamp(maxEntries,4,128)+4` =
+  **8 slots** on the largest media and a batch holds its frames alive at once, so 4 is half the
+  floor and cannot reintroduce a per-frame allocation during a drag.
+
+  **Result, 720p 1.0s forward sweep, three repeats each, `TRACE_SCRUB_BATCH=0` as the control:
+  `dec 269/285/269 -> 344/344/343 f/s`, `behind max 93/73/91f -> 6/6/8f`, pointer-to-picture
+  max `292/221/293ms -> 26/26/26ms`.** An ~11x reduction, and the async path now equals the
+  synchronous walk it was losing to (`p2p 22/23/22ms`) **while keeping the worker's UI-thread
+  protection**. Release lands exact on both (`target 360 shown 360 delta 0`, full-res planar)
+  and the batched release is *cheaper* — `walk 5f -> 0f`, `release 11.5 -> 0.3ms` — because the
+  picture was already at the pointer.
+
+  **TWO BUGS THE BATCH EXPOSED, BOTH AROUND `busy()`, BOTH INVISIBLE AT BATCH 1** because the
+  window they open is exactly one frame wide there.
+
+  **(a) A request posted between publish and drain asked for a frame the decoder had passed.**
+  The caller derives its next target from the frame last *presented*, so in that window the
+  decoder has advanced N frames and `activeScrubFrame_` has not. At batch 1 re-asking was a
+  cache hit; at batch 4 it is a **backward move — a seek plus a GOP walk in the middle of a
+  forward drag**: `seeks 1 -> 13`, `ra-walk 0.00 -> 44.85`, `ins 371 -> 986`. `busy()` counts
+  undelivered results now.
+
+  **(b) That made `revokeLease()` incomplete and it FROZE THE NEXT SHUTTLE RUN.** It dropped the
+  pending target but not results already produced, so `busy()` still read true after
+  `reclaimDecoder()` handed the decoder back; `startShuttleRun()`'s `pumpShuttleQueue()` returns
+  early on `busy()`, so **the new run never posted its first request** and the tick starved —
+  and the run-is-over test reads `busy()` too, so it could not even end. It presented as **one
+  random "expected moving" case failing per full transitions matrix** (`R -> ffBtn`, then
+  `F -> J`, then `F -> rewBtn`) and **every one passed when run in isolation**, which reads
+  exactly like harness flake. **A control binary built from `efda50c` is what settled it: 0
+  failures in 50 cases against 2 in 50.** Reaching for the control rather than accepting "it
+  passes on its own" is the only reason it was found. After: **75 of 75 across three matrices.**
+
+  **Controls flat.** ProRes 4444 `batch max 1`, `ui gap over 16ms 1 of 841` against `1 of 820`,
+  `behind 18 vs 20f`, `p2p 67 vs 68ms`, `delta 0` both — for scale the *synchronous* path on
+  that file reads **69 of 84** and ends **196 frames** behind, which is what is being protected.
+  1080p identical (`behind 9f`, `p2p 49 vs 54ms`). 4K H.264 reversal drag `hitch 1`, `seeks 3`,
+  `delta 0` on all four legs. 4K H.264 cadence x3 **100.0%** with `0 of 119`, `drop 0`,
+  `rephase 0`; reverse 1x **100.0%** at 114 frames / 4.75s; both lifecycle legs.
+
 - **MIXED-MONITOR DPI IS VALIDATED ON HARDWARE AND §4 NEVER RE-SHAPED ON A SCALE-FACTOR CHANGE — FOUND AND FIXED 2026-08-14 (`8945894`), plan §20.4.** A second display was connected, closing the item that had been **tabled for want of hardware** since 2026-08-09 and was the named beta gate. Configuration: `\\.\DISPLAY1` 5120x1440 @ 239.999Hz at **100%**, `\\.\DISPLAY2` 1920x1080 @ 60Hz at **150%** — different scale factor, different refresh rate, different work area.
 
   **The bug.** §4 asks the window to *"recalculate correctly when the window moves between monitors with different scaling"*. Nothing did. **A DPI change is not a `QEvent::WindowStateChange`**, so `changeEvent`'s re-shape never ran; and **it is not a drag**, so it sends no `WM_SIZING` and `constrainSizingRect`'s aspect lock never ran either. Windows scaled the rect on its own and Trace accepted the result. Measured on 4K H.264 crossing 100% → 150%: the client lost **147 logical px of height** (1083 → 936) while the width was preserved exactly, so **the picture pillarboxed** — `display 1201x676` filling the viewer at open became `display 936x527` inside an unchanged `win 1201x934` after a round trip, and the window was 973 logical tall against a **672**-logical work area, far past §4's 80% rule. **Not cumulative**: four round trips converged on a stable wrong pair. Reproduced with **Win+Shift+Arrow**, so it is not an artifact of how the harness moved the window.
@@ -2158,6 +2247,12 @@ perfectly on lag while stalling for 100ms.
 (back to the synchronous walk), `TRACE_SCRUB_WALK_MS` / `TRACE_SCRUB_REARM_MS`
 (the synchronous walk's budget and re-arm, for the control A/B),
 `TRACE_SCRUB_FILL_MS` (seek-walk cache fill budget during a drag, default 60ms),
+**`TRACE_SCRUB_BATCH=N`** (2026-08-14: how many CONSECUTIVE frames one asynchronous scrub
+request may cover, **default 4**; `0` or `1` restores one frame per request, which is the
+behaviour it replaces and the in-binary negative control. It is *not* a sampling knob — every
+frame is still decoded, delivered and presented individually and in order, and a §15 stride
+above 1 forces it to 1. On heavy media the 8ms walk budget collapses it to 1 by itself, so
+ProRes 4444 reads `batch cap 4 last 1 max 1` and is unchanged),
 `TRACE_PREVIEW_DISPLAY_SIZE=0` (back to plain half-res previews),
 `TRACE_REVERSE_CACHE_MB` (reverse-cache byte budget, **default 384**; the
 control for any hitch measurement and the one number to change if the memory
