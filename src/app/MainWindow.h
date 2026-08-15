@@ -526,6 +526,74 @@ private:
     long long shuttleStarves_ = 0;
     long long shuttleQueueMaxSeen_ = 0;
 
+    // ---- Checkpoint 2 stage one: the bounded playback prefetch ------------
+    //
+    // IT IS A LOOKAHEAD CACHE AND NEVER A SCHEDULE. The tick's target
+    // arithmetic is untouched: the audio clock or the deadline scheduler still
+    // decides which frame and when, and this only answers "do I already have
+    // it". A queue that assumed the next frame is current+1 would be a second
+    // mechanism owning half of "which frame, when", which is exactly the fault
+    // cd79d49 removed.
+    //
+    // Ordinary 1x forward playback only. Reverse and every shuttle rung are
+    // already queued by startShuttleRun, and below 1x every frame is presented
+    // by owner decision so there is nothing to run ahead of.
+    //
+    // Default OFF (TRACE_PLAYBACK_QUEUE=0), so the synchronous path is the
+    // comparison and the rollback. It is not a second implementation kept in
+    // sync -- it is the path that runs when the queue cannot answer.
+    struct PlaybackFrame {
+        long long requested = -1;
+        trace::core::VideoFrame frame;
+    };
+    std::deque<PlaybackFrame> playbackQueue_;
+    // Whether the prefetch owns the decoder for this run. Distinct from the
+    // queue being non-empty: the queue is empty at the start of every run and
+    // whenever it starves.
+    bool playbackPrefetchActive_ = false;
+    // The next frame to ask the worker for, or -1 once the arithmetic has run
+    // off the end of the media. The shuttle's shuttleNextTarget_ in every
+    // respect except the stride, which here is always 1.
+    long long playbackPrefetchNext_ = -1;
+    // The worker reported it could not produce a frame. Long-GOP media reaches
+    // the real end before the frame count says it should, and on the prefetch
+    // path that arrives as a result rather than as a return value.
+    bool playbackPrefetchExhausted_ = false;
+    long long pqStarves_ = 0;
+    long long pqAheadDrops_ = 0;
+    long long pqReseeds_ = 0;
+    long long pqPosted_ = 0;
+    long long pqMaxDepth_ = 0;
+    long long pqBytes_ = 0;
+    long long pqPeakBytes_ = 0;
+    // Time the TICK spent blocked on the queue. It must read 0: a non-zero
+    // value means something is waiting, and the whole design is that a starve
+    // holds rather than waits.
+    double pqWaitMaxMs_ = 0.0;
+
+    // Depth for this media, from the byte budget and the count cap. Learned
+    // from a real frame rather than predicted, so an 8K plate gets 2 and a
+    // 1080p clip gets the count.
+    int playbackQueueDepthForMedia() const;
+    // Begin/end prefetching for a run. Starting is refused while a shuttle run,
+    // a drag or a storage read owns the decoder -- and it tests `scrubbing_`,
+    // not isVideoScrubActive(), which means "the media is a video file".
+    void startPlaybackPrefetch();
+    // Drop the queue and the lookahead position. Called from reclaimDecoder(),
+    // which is the single choke point every transition already funnels through.
+    void stopPlaybackPrefetch();
+    // Keep the pipeline full: post the next sequential frame while the queue is
+    // under depth and nothing is in flight. Chained from onScrubResult.
+    void pumpPlaybackQueue();
+    // Answer this slot's target from the queue if it can be answered. Discards
+    // entries the target has moved past (an audio catch-up or a real-time drop)
+    // and re-seeds if the target has jumped clear of everything held. Returns
+    // false to mean "starve": the caller HOLDS and must not decode.
+    bool presentQueuedPlaybackFrame(long long targetFrame);
+    // Bytes currently held, recomputed rather than tracked incrementally so it
+    // cannot drift away from the deque it describes.
+    long long playbackQueueBytes() const;
+
     // What endShuttleRun's landing branch costs THE UI THREAD, measured rather
     // than reasoned about. Added at spec phase 4 to settle `landPreviousExactly`
     // -- the branch is a synchronous Step decode of the frame already on screen,

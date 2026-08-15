@@ -247,6 +247,46 @@ bool asyncLandingEnabled() {
     return on;
 }
 
+// Checkpoint 2 stage one. How many frames ahead of the presentation point
+// ordinary 1x forward playback may decode. DEFAULT 0 = OFF, so this commit
+// changes nothing until it is measured and reported.
+//
+// Depth is shallow on purpose and is bounded by BYTES as well as by count -- a
+// full-resolution 8K 12-bit 4:4:4 frame is ~199MB, so a depth of 3 would be
+// ~600MB on top of the 384MB reverse cache and a working set already near
+// 900MB at 4K. The two budgets do not know about each other and this
+// deliberately does not make them: the reverse cache is bounded and verified
+// independently (plan section 26.5) and coupling them would put a second policy
+// inside a settled one. They are summed and reported instead.
+//
+// THE NUMBER IS TO BE JUSTIFIED BY THE MEASURED STARVATION COUNT, NOT CHOSEN.
+int playbackQueueRequestedDepth() {
+    static const int n = [] {
+        const QByteArray raw = qgetenv("TRACE_PLAYBACK_QUEUE");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const int v = raw.toInt(&ok);
+            if (ok && v >= 0 && v <= 16) return v;
+        }
+        return 0;
+    }();
+    return n;
+}
+
+// Byte budget for the prefetch, separate from TRACE_REVERSE_CACHE_MB.
+int playbackQueueBudgetMb() {
+    static const int n = [] {
+        const QByteArray raw = qgetenv("TRACE_PLAYBACK_QUEUE_MB");
+        if (!raw.isEmpty()) {
+            bool ok = false;
+            const int v = raw.toInt(&ok);
+            if (ok && v >= 16 && v <= 4096) return v;
+        }
+        return 512;
+    }();
+    return n;
+}
+
 // GATE E step 1. Default on; TRACE_DEADLINE_SCHED=0 restores the pre-GATE-E
 // fixed-interval tick and its wall-clock accumulator gate.
 //
@@ -853,8 +893,103 @@ MainWindow::MainWindow() {
         const long long minFrame = 0;
         const long long maxFrame = playbackState.maxFrame >= 0 ? playbackState.maxFrame : beforeFrame;
         const long long targetFrame = std::clamp(unclampedTarget, minFrame, maxFrame);
-        playback_.setCurrentFrame(targetFrame);
 
+        // THE PREFETCH ANSWERS THIS SLOT, OR THE SLOT HOLDS. It never decodes
+        // here.
+        //
+        // THE PLAYHEAD IS NOT MOVED BEFORE ASKING, and that is not a tidiness
+        // choice -- moving it first is a runaway. The synchronous path can set
+        // the frame up front because it then decodes it and reverts on failure;
+        // the prefetch cannot, because a starve is not a failure and happens
+        // every slot the decoder is slower than the clock. Measured on the 8K
+        // plate with the playhead advanced before asking: the target ran ahead
+        // at 24 fps while the pipeline supplied 20, so every frame that arrived
+        // was already behind the target and was discarded on arrival --
+        // `posted 94 | drop 93 | starve 146 | reseed 50` and ONE frame
+        // presented in 6.14 seconds, 0.7% of real time against the synchronous
+        // path's 53.6%.
+        //
+        // A starve therefore leaves the playhead exactly where it was, which is
+        // the same thing an audio hold does a hundred lines above. The playhead
+        // is set from the delivered frame's own index inside
+        // presentQueuedPlaybackFrame().
+        //
+        // Placed AFTER the target arithmetic, which is untouched: the audio
+        // clock or the deadline scheduler has already decided which frame and
+        // when, and the queue only answers "do I have it". Deciding the target
+        // from the queue instead would be two mechanisms each owning half of
+        // "which frame, when" -- cd79d49, and plan section 24.3 forbids
+        // re-introducing it under a different name.
+        //
+        // A starve HOLDS and does not take the decoder back. reclaimDecoder()
+        // costs a revokeLease() wait of up to one cancellation checkpoint and
+        // would turn the pipeline into a synchronous walk with a stall in front
+        // of it. This is the decision the reverse shuttle already took, in the
+        // same words: a starve is a cadence event worth counting, not an excuse
+        // to take the work back.
+        if (playbackPrefetchActive_) {
+            if (presentQueuedPlaybackFrame(targetFrame)) {
+                notePresentedPlaybackFrame(frameDurationMs);
+            } else {
+                ++pqStarves_;
+                // Exhausted AND drained: this is the prefetch's form of the
+                // second end-of-media site, the one only long-GOP media
+                // reaches. Fall through to the shared end-of-media block by
+                // pretending the target clamped, rather than writing a fourth
+                // copy of stop-playback-and-maybe-loop.
+                if ((playbackPrefetchExhausted_ || playbackPrefetchNext_ < 0)
+                    && playbackQueue_.empty() && !scrubWorker_.busy()) {
+                    if (direction > 0 && loopWrap(direction)) {
+                        refreshHud("Play loop");
+                        return;
+                    }
+                    playTimer_.stop();
+                    stopAudio();
+                    playback_.pause();
+                    userPlayIntent_ = false;
+                    playbackClock_.invalidate();
+                    playbackAccumulatorMs_ = 0.0;
+                    if (direction > 0) {
+                        playbackAtEnd_ = true;
+                        playbackEndFrame_ = playback_.state().currentFrame;
+                    }
+                    syncPlaybackSpeedActions();
+                }
+                refreshHud("Play");
+                return;
+            }
+            if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+                prefetchNeighbors();
+            }
+            // Straight to the shared end-of-media check below, which the
+            // synchronous path also reaches -- there is exactly one of those
+            // and both paths use it.
+            if (targetFrame == beforeFrame
+                || (direction > 0 && targetFrame >= maxFrame)
+                || (direction < 0 && targetFrame <= minFrame)) {
+                const bool atEnd = (direction > 0 && targetFrame >= maxFrame)
+                                || (direction < 0 && targetFrame <= minFrame);
+                if (atEnd && loopWrap(direction)) {
+                    refreshHud(direction > 0 ? "Play loop" : "Reverse loop");
+                    return;
+                }
+                playTimer_.stop();
+                stopAudio();
+                playback_.pause();
+                userPlayIntent_ = false;
+                playbackClock_.invalidate();
+                playbackAccumulatorMs_ = 0.0;
+                if (direction > 0 && targetFrame >= maxFrame) {
+                    playbackAtEnd_ = true;
+                    playbackEndFrame_ = targetFrame;
+                }
+                syncPlaybackSpeedActions();
+            }
+            refreshHud("Play");
+            return;
+        }
+
+        playback_.setCurrentFrame(targetFrame);
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction);
         QString error;
         if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Playback)) {
@@ -2867,6 +3002,13 @@ void MainWindow::releaseCurrentMedia() {
     landingStepDelta_ = 0;
     landingLatencyMs_ = landingLatencyMaxMs_ = 0.0;
     landingsAsync_ = landingsSync_ = landingsSuperseded_ = 0;
+    // reclaimDecoder() above already drained the queue. These are the per-media
+    // figures beside it: a starvation count carried across an open would be the
+    // outgoing file's.
+    stopPlaybackPrefetch();
+    pqStarves_ = pqAheadDrops_ = pqReseeds_ = pqPosted_ = 0;
+    pqMaxDepth_ = pqBytes_ = pqPeakBytes_ = 0;
+    pqWaitMaxMs_ = 0.0;
     // Per file: a keyframe grid learned from the outgoing media would snap the
     // incoming one onto positions that are not keyframes in it.
     shuttleGop_ = 0;
@@ -4459,6 +4601,20 @@ double MainWindow::reclaimDecoder() {
         landingKind_ = LandingKind::None;
         ++landingsSuperseded_;
     }
+    // THE PLAYBACK PREFETCH DRAINS HERE AND NOWHERE ELSE, and putting it here
+    // rather than at each transition is the whole of "deterministic
+    // cancellation". Pause, stop, seek, scrub, step, shuttle start, file change,
+    // end of media and shutdown all already funnel through this function --
+    // loadCurrentFrame() calls it on entry, so every synchronous decode in the
+    // application drains the queue automatically. A list of transitions would
+    // have to stay complete; this cannot become incomplete.
+    //
+    // Section 29.2's lesson applied in advance: GATE E was validated on the Play
+    // action alone, and for weeks every other path that started the timer
+    // without establishing the timeline kept compiling silently.
+    //
+    // Clearing an empty queue is free, which is what makes it safe here.
+    stopPlaybackPrefetch();
     // Order matters. Bump the generation FIRST: anything the worker publishes
     // between here and it parking is then already stale by construction, which
     // is what makes "no older preview can appear after the exact landing" a
@@ -5133,6 +5289,19 @@ void MainWindow::startPlaybackRun() {
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Playback, direction, false);
     startAudioForPlayback();
     beginPlaybackTimeline();
+    // Checkpoint 2 stage one, and it goes LAST because prepareVideoRequest calls
+    // reclaimDecoder(), which drains the prefetch. Starting it any earlier in
+    // this function would grant the lease and then immediately revoke it, and
+    // the run would look exactly like one where the queue never engaged.
+    //
+    // Ordinary 1x forward only, and the direction test is the whole gate: a
+    // reverse run is already queued by startShuttleRun, and anything off 1x is
+    // a shuttle run rather than this path. startPlaybackPrefetch() refuses on
+    // its own if a shuttle, a drag or a storage read owns the decoder.
+    const auto st = playback_.state();
+    if (direction > 0 && std::abs(st.speed - 1.0) < 1e-4) {
+        startPlaybackPrefetch();
+    }
 }
 
 // Everything a shuttle press does, in the one order that works.
@@ -5609,6 +5778,184 @@ void MainWindow::pumpShuttleQueue() {
     const long long next = shuttleNextTarget_ + shuttleDir_ * step;
     shuttleNextTarget_ = shuttleTargetInRange(next) ? next : -1;
     scrubWorker_.post(request);
+}
+
+long long MainWindow::playbackQueueBytes() const {
+    long long bytes = 0;
+    for (const auto& e : playbackQueue_) {
+        if (e.frame.buffer) bytes += static_cast<long long>(e.frame.sizeInBytes());
+    }
+    return bytes;
+}
+
+// Depth from the byte budget and the count cap, with the entry size taken from
+// a frame that actually exists rather than predicted from the container.
+//
+// Predicting it is the mistake plan section 11a records in live code:
+// reverseCacheCapacity is still `384MB / (w*h*4)`, the BGRA footprint, so since
+// GATE C it reads 11 at 4K where planar entries really give 32 -- and it
+// silently clamped an experiment to nothing while looking like a refuted
+// hypothesis. Measuring one entry cannot drift that way.
+int MainWindow::playbackQueueDepthForMedia() const {
+    const int requested = playbackQueueRequestedDepth();
+    if (requested <= 0) return 0;
+    long long entryBytes = 0;
+    if (!playbackQueue_.empty() && playbackQueue_.front().frame.buffer) {
+        entryBytes = static_cast<long long>(playbackQueue_.front().frame.sizeInBytes());
+    } else if (videoFrameBuffer_.buffer) {
+        entryBytes = static_cast<long long>(videoFrameBuffer_.sizeInBytes());
+    }
+    if (entryBytes <= 0) return requested;
+    const long long budget =
+        static_cast<long long>(playbackQueueBudgetMb()) * 1024LL * 1024LL;
+    const long long fits = std::max<long long>(1, budget / entryBytes);
+    return static_cast<int>(std::min<long long>(requested, fits));
+}
+
+void MainWindow::startPlaybackPrefetch() {
+    if (playbackQueueRequestedDepth() <= 0) return;
+    if (!asyncScrubEnabled()) return;
+    // Video files only, and nobody else may be holding the decoder. These
+    // mirror startShuttleRun's guards, including that the drag test is
+    // `scrubbing_` and NOT isVideoScrubActive() -- that one means "the media is
+    // a video file" and guarding on it disabled the whole reverse pipeline once
+    // while every other counter looked healthy.
+    if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::VideoFile) return;
+    if (shuttleRunActive_ || scrubbing_ || storageBusy_) return;
+    if (landingPending_) return;
+
+    playbackQueue_.clear();
+    playbackPrefetchExhausted_ = false;
+    playbackPrefetchActive_ = true;
+    // The frame AFTER the one on screen. The tick's first target under ordinary
+    // playback is current+1, and if it is not -- an audio catch-up on the very
+    // first slot -- the consume path re-seeds rather than presenting the wrong
+    // frame.
+    playbackPrefetchNext_ = playback_.state().currentFrame + 1;
+    pumpPlaybackQueue();
+}
+
+void MainWindow::stopPlaybackPrefetch() {
+    playbackQueue_.clear();
+    playbackPrefetchActive_ = false;
+    playbackPrefetchNext_ = -1;
+    playbackPrefetchExhausted_ = false;
+    pqBytes_ = 0;
+}
+
+void MainWindow::pumpPlaybackQueue() {
+    if (!playbackPrefetchActive_) return;
+    if (playbackPrefetchNext_ < 0 || playbackPrefetchExhausted_) return;
+    // One request in flight at a time. Depth comes from the QUEUE, not from
+    // stacking requests at the worker, so the worker's depth-1 latest-wins
+    // contract keeps meaning one thing for all three of its callers.
+    if (scrubWorker_.busy()) return;
+    if (static_cast<int>(playbackQueue_.size()) >= playbackQueueDepthForMedia()) return;
+    if (storageBusy_) return;
+    const long long maxFrame = playback_.state().maxFrame;
+    if (maxFrame >= 0 && playbackPrefetchNext_ > maxFrame) {
+        playbackPrefetchNext_ = -1;
+        return;
+    }
+
+    grantDecoderLease();
+    trace::core::ScrubRequest request;
+    request.frame = playbackPrefetchNext_;
+    request.direction = 1;
+    request.generation = requestGeneration_;
+    // Playback, not Scrub. A drag preview is deliberately reduced-resolution
+    // above 1920px, and this frame is going on screen as the picture rather
+    // than as a preview of it.
+    request.mode = trace::core::VideoDecoderFFmpeg::RequestMode::Playback;
+    // One frame per request, always. The scrub batch exists to amortise a
+    // cross-thread round trip against a cheap frame during a drag; here the
+    // queue itself is what hides the round trip, and a batch would only make
+    // the depth bound harder to reason about.
+    request.batch = 1;
+    request.batchBudgetMs = 0.0;
+    scrubInFlightDir_ = 1;
+    ++playbackPrefetchNext_;
+    ++pqPosted_;
+    scrubWorker_.post(request);
+}
+
+bool MainWindow::presentQueuedPlaybackFrame(long long targetFrame) {
+    QElapsedTimer waitClock;
+    waitClock.start();
+
+    // THE TARGET HAS MOVED PAST FRAMES WE ARE HOLDING. An audio catch-up
+    // advances up to 3, and the real-time drop advances by whatever the run is
+    // behind, so entries below the target are frames nobody is going to ask for
+    // again. Discard them and count it -- this is the queue obeying the clock,
+    // not the queue being wrong.
+    while (!playbackQueue_.empty()
+           && playbackQueue_.front().frame.frameIndex < targetFrame) {
+        playbackQueue_.pop_front();
+        ++pqAheadDrops_;
+    }
+
+    const bool haveTarget = !playbackQueue_.empty()
+        && playbackQueue_.front().frame.frameIndex == targetFrame;
+
+    if (!haveTarget) {
+        // Either the queue is empty (a genuine starve) or its head is AHEAD of
+        // the target. The second is the defensive branch the design names: an
+        // audio hold returns before reaching here, so a head in the future means
+        // the target jumped backward, and nothing held answers it.
+        //
+        // Re-seed whenever the lookahead position no longer tracks the target,
+        // or the run would starve for ever: the position only ever advances,
+        // so a target that jumped clear of it is never reached by waiting.
+        const bool headAhead = !playbackQueue_.empty()
+            && playbackQueue_.front().frame.frameIndex > targetFrame;
+        if (headAhead || playbackPrefetchNext_ < targetFrame) {
+            playbackQueue_.clear();
+            playbackPrefetchNext_ = targetFrame;
+            playbackPrefetchExhausted_ = false;
+            ++pqReseeds_;
+        }
+        pumpPlaybackQueue();
+        pqWaitMaxMs_ = std::max(
+            pqWaitMaxMs_,
+            static_cast<double>(waitClock.nsecsElapsed()) / 1'000'000.0);
+        return false;
+    }
+
+    // STOPPED HERE, BEFORE THE PRESENT. `wait` is time the tick spent waiting on
+    // the QUEUE, and everything below is the present itself -- setFrame() is
+    // where the D3D11 upload happens, 24.58ms of it on an 8K plate. Timing to
+    // the end of the function folded that in and the field read `wait 52.01ms`
+    // on a run where nothing had waited for anything: it was reporting the
+    // upload under a name that means "the pipeline blocked me". A field that
+    // must read 0 has to be measured over only the thing that could make it
+    // non-zero.
+    pqWaitMaxMs_ = std::max(
+        pqWaitMaxMs_,
+        static_cast<double>(waitClock.nsecsElapsed()) / 1'000'000.0);
+
+    const PlaybackFrame queued = playbackQueue_.front();
+    playbackQueue_.pop_front();
+    videoFrameBuffer_ = queued.frame;
+    // Identity off the frame, never off the arithmetic that asked for it --
+    // presentQueuedShuttleFrame's rule, for the e76eabb reason. A frame that
+    // landed off-target is visibly off-target in target/shown/delta rather than
+    // silently relabelled.
+    lastRequestedFrame_ = queued.requested;
+    lastDeliveredFrame_ = videoFrameBuffer_.frameIndex;
+    playback_.setCurrentFrame(videoFrameBuffer_.frameIndex);
+    viewer_->setFrame(videoFrameBuffer_);
+    // update(), not repaint(): one frame per slot, so there is no chain of
+    // paints to coalesce, and blocking on the paint here would put it inside
+    // the handler measurement this change is judged by.
+    viewer_->update();
+
+    // Refill behind the frame just consumed.
+    pumpPlaybackQueue();
+    pqMaxDepth_ = std::max<long long>(pqMaxDepth_,
+                                      static_cast<long long>(playbackQueue_.size()));
+    pqBytes_ = playbackQueueBytes();
+    pqPeakBytes_ = std::max(pqPeakBytes_, pqBytes_);
+    return true;
 }
 
 bool MainWindow::presentQueuedShuttleFrame() {
@@ -6300,8 +6647,31 @@ void MainWindow::onScrubResult() {
         }
 
         if (!result.ok) {
+            // The playback prefetch reaching the real end of the media. Only
+            // long-GOP media gets here -- the decoder is exhausted before the
+            // frame count says it should be -- and on this path it arrives as a
+            // result rather than as a return value. Mark it and stop asking; the
+            // tick's end-of-media branch does the rest once the queue drains.
+            if (playbackPrefetchActive_) {
+                playbackPrefetchExhausted_ = true;
+                playbackPrefetchNext_ = -1;
+                continue;
+            }
             if (!result.error.isEmpty()) statusBar()->showMessage(result.error, 3000);
             hardError = true;
+            continue;
+        }
+
+        // Playback prefetch results are QUEUED, not presented -- the same rule
+        // and the same reason as the shuttle below. The tick owns when a frame
+        // goes on screen; this callback only owns keeping the pipeline fed.
+        if (playbackPrefetchActive_) {
+            playbackQueue_.push_back({result.requestedFrame, result.frame});
+            pqMaxDepth_ = std::max<long long>(
+                pqMaxDepth_, static_cast<long long>(playbackQueue_.size()));
+            pqBytes_ = playbackQueueBytes();
+            pqPeakBytes_ = std::max(pqPeakBytes_, pqBytes_);
+            pumpPlaybackQueue();
             continue;
         }
 
@@ -7578,6 +7948,41 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(loopEnabled_ ? "ON" : "off")
                 .arg(loopWraps_);
 
+            // Checkpoint 2 stage one. The terms are separate because they are
+            // separate claims and the owner asked for them that way.
+            //
+            // `wait` MUST READ 0. It is time the TICK spent inside the queue,
+            // and the whole design is that a starve holds rather than waits --
+            // a non-zero value means something is blocking on the pipeline.
+            //
+            // `starve` is what justifies the depth: the number is to come from
+            // the measured starvation count rather than be chosen, so a depth
+            // sweep reports this at each setting.
+            //
+            // `drop` is entries the audio clock or the real-time drop moved
+            // past, and `reseed` is the queue re-anchoring after the target
+            // jumped clear of it. Both are the queue obeying the clock rather
+            // than the queue being wrong, which is why neither is an error.
+            //
+            // DO NOT INFER OVERLAP FROM THE FRAME RATE. The check that overlap
+            // is real is `handler` collapsing to upload+paint while `dec` and
+            // `sws` stay where they are, with `outside` rising to absorb the
+            // difference. If `handler` falls and `dec` falls with it, the run
+            // decoded fewer frames rather than overlapping them.
+            const QString l7h = QString("pq %1 %2/%3 (max %4) | starve %5 | drop %6 | reseed %7 | wait %8ms | posted %9 | %10/%11 MB")
+                .arg(playbackQueueRequestedDepth() <= 0 ? "OFF"
+                     : playbackPrefetchActive_ ? "ON" : "idle")
+                .arg(static_cast<long long>(playbackQueue_.size()))
+                .arg(playbackQueueDepthForMedia())
+                .arg(pqMaxDepth_)
+                .arg(pqStarves_)
+                .arg(pqAheadDrops_)
+                .arg(pqReseeds_)
+                .arg(QString::number(pqWaitMaxMs_, 'f', 2))
+                .arg(pqPosted_)
+                .arg(QString::number(static_cast<double>(pqBytes_) / (1024.0 * 1024.0), 'f', 0))
+                .arg(QString::number(static_cast<double>(pqPeakBytes_) / (1024.0 * 1024.0), 'f', 0));
+
             // `batch` sits beside `stride` because they are the two ways one
             // request can cover more than one frame and they are mutually
             // exclusive by construction -- reading them together is what says
@@ -7624,7 +8029,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2));
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l5b + "\n" + l6
-                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l7g + "\n" + l8 + "\n" + l9
+                 + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l7g + "\n" + l7h + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
