@@ -1,4 +1,78 @@
-# OPEN: the bounded async decode queue. Mixed-monitor DPI is DONE and the beta gate is clear.
+# OPEN: (1) poor scrubbing on an AI-generated 720p MP4, then (2) the async decode queue.
+
+## NEW OWNER REPORT, 2026-08-14 — scrubbing is poor on a small 720p file
+
+`C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets\14_720P_Comfyui_mp4\video_ComfyUI_0000Fly8.mp4`
+
+**Take this first.** It should be an hour of measurement before it is any implementation at
+all, and it is likely to be cheap to diagnose. The decode queue is below and is unchanged.
+
+**Why it matters more than one file: this is a target format class, not an outlier.** Trace's
+stated audience in `CLAUDE.md` is *"editors, VFX artists, motion designers, AI video
+creators"*. A ComfyUI export is the AI-video case, and AI tools export through ffmpeg with
+whatever `libx264` defaults or explicit flags the workflow happened to set. If those settings
+produce a structure Trace scrubs badly, the report is about a whole segment of the intended
+users.
+
+**The symptom is the opposite of what size predicts, which is the useful clue.** 720p is the
+smallest video in the pool. Frames are tiny — a `yuv420p` 1280x720 plane set is ~1.4MB, so the
+384MB reverse cache should hold on the order of 270 entries against 24 at 4K. Previews are
+*not* halved below 1920 (`> 1920`, deliberately, §the preview-threshold entry), so conversion
+is cheap and full-res. Every mechanism that usually explains a bad drag predicts this file
+should be the *best* case. **So the cause is almost certainly structural in the file, not
+dimensional.**
+
+### Characterise the file BEFORE proposing anything
+
+`TRACE_OPEN_LOG=1` first — it writes fps to 6dp, exact frame count, time base and colour
+metadata per open, and exists so probe experiments are validated against exact values rather
+than assumptions. Then, with `ffprobe`:
+
+1. **The GOP structure, and this is the leading hypothesis.** Count keyframes and their spacing
+   (`ffprobe -select_streams v -show_packets -show_entries packet=pts_time,flags`). AI exports
+   frequently carry a very long `keyint`, and a short clip can easily contain **exactly one
+   IDR, at frame 0**. If that is true, every backward step that misses the cache seeks to frame
+   0 and walks the entire clip forward — which is precisely "scrubbing is terrible" on a file
+   whose every other property says it should be fast. Compare against the pool's other H.264
+   files, whose GOPs are 30 and 48.
+2. **Trace's own empirical check agrees or disagrees with the container.** The HUD's `ra-walk`
+   is frames walked per seek — recorded as 0.00 on ProRes and **10–16 on H.264**. On this file
+   it may read in the hundreds. That number is the fastest confirmation available and needs no
+   external tool.
+3. **Time base, PTS sanity and frame rate.** Seeks are frame-exact because the first decoded
+   frame's index is resolved from its PTS (`seekResolvePending`), with a documented fallback to
+   label-as-target for files without PTS. An unusual timebase, VFR, or missing/duplicated PTS
+   would make `frameFromPts` and its monotonic bump behave differently than on any validated
+   file. Check whether the container's frame count, `avg_frame_rate` and the real packet count
+   agree.
+4. **B-frames and whether the GOP is open or closed.**
+
+### Then measure the drag with the existing instruments
+
+`scrub.ps1` (with `-Env TRACE_TRANSPORT_BAR=1`) and `-SnapRelease`, plus a reversal drag.
+Quote `hitch`, `win WxH`, `display`, `rev-hit %`, `seeks`, `ra-walk` and `walk max`. **Compare
+against 1080p H.264 in the same window size** — that is the file this one should resemble and
+does not.
+
+### Two things not to jump to
+
+- **Sampling is correctly refused here.** §15's gate is `AV_CODEC_PROP_INTRA_ONLY`, asked of the
+  codec, and H.264 is not intra-only. Four inferred gates were measured wrong before that one
+  was chosen; do not reach for a fifth because one long-GOP file scrubs badly.
+- **More cache bytes is not the first answer.** §26 already took 192 → 384MB and §26.5 verified
+  it; §15.5 item 1 was closed as answered-no. If the GOP is the whole clip, depth is not the
+  binding term — *distance to the nearest keyframe* is.
+
+**A legitimate outcome is that the file is pathological and Trace should handle it better
+anyway.** If the clip is small enough that the whole decoded thing fits inside the existing
+byte budget, "on a file with no usable keyframe grid, fill the cache once" is a bounded and
+defensible answer. So is deciding this is an encoder problem and documenting it. **Establish
+which before choosing**, and say plainly whether other players scrub it well — the same
+contract question the 8K report needed.
+
+---
+
+# THEN: the bounded async decode queue. Mixed-monitor DPI is DONE and the beta gate is clear.
 
 **§20.4 CLOSED ON HARDWARE, 2026-08-14 (`8945894` fix · `fb30bb9` harness).** A second display
 was connected and the whole hardware case ran. **It found a real bug, which was the point of
@@ -138,6 +212,37 @@ decode** — do not assume decode alone is enough.
 
 **Do not begin CUDA work.** The measurements establish the target is reachable through the
 optimised CPU decoder plus pipeline overlap.
+
+**THIS IS THE THIRD ASYNC DECODE ATTEMPT, AND THE FIRST TWO WERE REVERTED FOR FRAME ORDERING**
+(`a171e3a`/`1d280eb`, reverted `9cd2a0c`/`a2f7999`; post-mortem at plan §6). The recorded
+condition for revisiting was *"sequence-number every request and drop stale results"* — and
+that machinery now exists and is validated: `requestGeneration_`, `supersedeInFlightRequests()`
+and the decoder lease. **Say in the design where each of those is used.** Attempt three is
+allowed to proceed because the ownership model was built first, not because the idea got
+better.
+
+**THE QUEUE SUPPLIES FRAMES; IT MUST NOT DECIDE WHICH FRAME IS PRESENTED.** This is the trap
+most likely to sink the work, and this project already has the scar. Under the audio master
+clock the **audio clock picks the frame** — it may hold the current one, or advance up to
+three to catch up. Under GATE E the deadline scheduler picks the slot. A queue that runs ahead
+is implicitly asserting the next frame is `current + 1`, which is true for the 8K file (no
+audio track) and **not true in general**. `cd79d49` is the record of what happens when two
+mechanisms each decide half of "which frame, when": matched hold/skip pairs at the beat
+frequency of the two clocks.
+
+So the queue is a **bounded lookahead cache**, not a presentation schedule. The tick still asks
+for a specific frame index; the queue answers it if it has it and is bypassed if it does not.
+**Design for the head of the queue not being the frame that is wanted** — a hold means the head
+is not consumed this tick, a 3-frame catch-up means two entries are discarded, and a
+scrub/step/shuttle means the whole queue is stale. `§9`'s composition rule generalises here:
+one owner per question, and "which frame" is already owned.
+
+**MEMORY: TWO BUDGETS ADD, AND NEITHER KNOWS ABOUT THE OTHER.** A full-resolution 8K 12-bit
+4:4:4 frame is ~199MB, so a depth-3 queue is ~600MB — on top of the **384MB reverse cache**
+(`TRACE_REVERSE_CACHE_MB`, verified bounded at §26.5) and a working set already measured at
+~900MB at 4K. Report the peak, and state whether the two budgets need to be aware of each
+other or are simply summed. "Deliberately shallow" is the owner's word; justify the depth
+chosen with the measured starvation count rather than picking a number.
 
 **Design constraints already established that the queue must respect:** there is exactly one
 `VideoDecoderFFmpeg` and one owner of it at any instant (plan §14's lease); playback currently

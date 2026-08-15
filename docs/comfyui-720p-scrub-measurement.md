@@ -198,10 +198,117 @@ is not per-frame cost, so striding would buy little and reopen a question that t
 wrong inferences to settle. And more cache bytes would do nothing: `rev-hit` is already
 98–99% and the cache already holds 80% of the clip.
 
-## 7. The one question only the owner can answer
+## 7. The contract question, answered
 
-**Does another player scrub this file well?** The same contract question the 8K report
-needed. Everything above says the picture *trails* the pointer by ~236ms and then
-converges — it never shows a wrong frame and never skips one. A player that feels
-instant here may be sampling the drag, which Trace deliberately does not do on long-GOP
-media. Worth establishing before choosing between options 1 and 2.
+**The owner confirms the file plays and scrubs perfectly in QuickTime** (2026-08-14). So this
+is not a contract difference the way the 8K plate's was: the source is not the limiting factor,
+and the ~236ms is Trace's own delivery path. Option 1 was taken.
+
+---
+
+# THE FIX — implemented and measured, 2026-08-14
+
+Option 1: the synchronous walk's ease, ported onto the async path.
+**`TRACE_SCRUB_BATCH=0` is the in-binary negative control.**
+
+## The rule
+
+```
+stride = computeScrubStride(gap)                   // section 15 sampling, unchanged
+batch  = (stride > 1) ? 1
+       : clamp(ceil(gap * kScrubEase), 1, 4)       // kScrubEase = 0.5, as the sync walk
+budget = scrubWalkBudgetMs()                       // 8.0ms, as the sync walk
+```
+
+One `ScrubRequest` now covers `batch` **consecutive** frames from `frame`, advancing by
+`direction`. Every frame is decoded, delivered and presented **individually and in order** —
+what is batched is the *asking*, never the showing. Nothing is sampled and nothing is skipped.
+
+**Why a stride above 1 forces batch 1.** A batch covers consecutive frames and a stride means
+the wanted frames are not consecutive, so the two cannot describe the same set. They also
+address different deficits: sampling exists because a frame is expensive to *decode* on
+intra-only media, which no amount of amortised round trip reaches.
+
+**Why the cap is 4.** Effective cost per frame is `roundTrip/N + decode`: on this file N=1 is
+3.56ms (281 f/s), N=2 is 1.84ms (543 f/s), N=4 is 0.98ms (1020 f/s). The fastest pointer demand
+measured anywhere in the asset set is **479 f/s**, so 4 clears the worst measured gesture by
+about 2x while 2 barely clears it, and above 4 the headroom is against nothing observed. Two
+costs bind before any further benefit: the conversion pool's floor is
+`clamp(maxEntries, 4, 128) + 4` = **8 slots** on the largest media and a batch holds its frames
+alive at once, so 4 is half that floor and cannot reintroduce a per-frame allocation during a
+drag; and a batch delays its own first frame, which the budget bounds separately.
+
+**Why the budget is what makes heavy media safe.** It is checked *after* each frame, so a batch
+always delivers at least one. At ~23ms a frame ProRes 4444 exhausts 8ms on its first frame and
+the batch collapses to 1 — `batch cap 4 last 1 max 1` on the HUD — with **no size- or
+codec-conditional branch**. On the UI thread that number capped occupancy; on the worker it caps
+how long the picture waits for a batch's first frame.
+
+## TWO BUGS THE BATCH EXPOSED, BOTH AROUND `ScrubDecodeWorker::busy()`
+
+Both were invisible at batch 1 because the window they open is exactly one frame wide there.
+
+**(a) A request posted between publish and drain asked for a frame the decoder had passed.**
+The caller derives its next target from the frame last *presented*, so between the worker
+publishing a batch and the UI thread draining it, the decoder has advanced N frames and
+`activeScrubFrame_` has not. At batch 1 re-asking for that frame was a cache hit and nothing
+showed; at batch 4 it is a **backward move — a seek plus a GOP walk in the middle of a forward
+drag**. Measured before the fix: `seeks 1 -> 13`, `ra-walk 0.00 -> 44.85`, `ins 371 -> 986`,
+`evict 79 -> 694`, and it ate most of the gain (`p2p max` only reached 116-213ms). `busy()` now
+counts undelivered results.
+
+**(b) That made `revokeLease()` incomplete, and it FROZE THE NEXT SHUTTLE RUN.** `revokeLease`
+dropped the pending target but not results already produced, so after `reclaimDecoder()` handed
+the decoder back, `busy()` still read true. `endShuttleRun()` reclaims the lease and
+`startShuttleRun()` then calls `pumpShuttleQueue()`, which returns early on `busy()` — **the new
+run never posted its first request**, the queue stayed empty and the tick starved. The
+run-is-over test at the top of the tick reads `busy()` too, so it could not even end.
+
+**It presented as one random "expected moving" case failing per full transitions matrix** —
+`R -> ffBtn` on one run, `F -> J` on the next, `F -> rewBtn` on a third — and every one of them
+**passed when run in isolation**, which reads exactly like harness flake. A control binary built
+from `efda50c` is what settled it: **0 failures in 50 cases against 2 in 50.** Reaching for the
+control rather than accepting "it passes on its own" is the only reason this was found.
+`revokeLease()` clears the results now; every caller bumps the generation first, so what it
+drops was already stale by construction.
+
+## Before / after
+
+**720p ComfyUI**, 1.0s forward sweep, three repeats each, same binary, `TRACE_SCRUB_BATCH=0` as
+the control:
+
+| | `dec f/s` | supply | **behind max** | **pointer-to-picture max** |
+|---|---|---|---|---|
+| before (batch off) | 271.1 / 281.7 / 287.4 | 109 / 112 / 114% | **91 / 77 / 69 f** | **285 / 236 / 210 ms** |
+| **after (batch 4)** | **345.4 / 345.3 / 343.8** | 139 / 137 / 138% | **6 / 6 / 6 f** | **25 / 26 / 27 ms** |
+
+**A 9x reduction in pointer-to-picture latency**, and the async path now equals the synchronous
+walk it was losing to (`dec 342.3/343.4/345.3`, `behind 7-8f`, `p2p 22/23/22ms`) while keeping
+the worker's UI-thread protection. `seeks 1`, `ra-walk 0.00`, `ins 371 evict 79` identical on
+both legs, so the gain is not bought with cache churn.
+
+**Release landing, `-SnapRelease`:** `target 360 shown 360 delta 0`, full-resolution planar, on
+**both** legs. The batched release is also cheaper — `walk 5f -> 0f`, `release 11.5 -> 0.3ms` —
+because the picture was already at the pointer when the button came up.
+
+**ProRes 4444 control** (the file the worker exists for), 1.0s sweep:
+
+| | `ui gap avg/max` | over 16ms | behind max | p2p | batch |
+|---|---|---|---|---|---|
+| before | 1.68 / 23.4 ms | **1 of 820** | 20f | 20/68 ms | cap 0 |
+| after | 1.64 / 21.6 ms | **1 of 841** | 18f | 27/67 ms | **cap 4 last 1 max 1** |
+
+`delta 0` and `hitch 0` both. The batch collapsed to 1 exactly as the budget predicts. For
+scale, the *synchronous* path on this file reads **69 of 84** over 16ms and ends 196 frames
+behind — that is what is being protected, and it is untouched.
+
+**1080p H.264 control:** `behind 0/9f` both, `p2p max 49 vs 54ms`, `dec 229.1 vs 229.7 f/s`,
+`batch cap 4 last 1 max 4`. Identical.
+
+**4K H.264 reversal drag**, two repeats each way: `hitch 1`, `seeks 3` and `delta 0` on all four
+legs; `behind max` 38/38 with the batch against 44/43 without. `p2p max` is noisy on this
+gesture in both configurations (742-1194ms) and does not separate them.
+
+**Reverse shuttle** (shares the worker): 4K H.264 reverse 1x reads **100.0% of real time**, 114
+frames in 4.75s, `handler>budget 0 of 113`, `drop 0`, `rephase 0` — the recorded baseline to the
+digit. Both lifecycle legs pass (86.8% moved, and the 0% control).

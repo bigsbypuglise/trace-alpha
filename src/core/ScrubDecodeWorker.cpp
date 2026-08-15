@@ -140,6 +140,21 @@ double ScrubDecodeWorker::revokeLease() {
     pending_.reset();
     leaseRevoked_ = true;
     idle_.wait(lock, [this]() { return !inDecoder_; });
+    // AND DROPPING RESULTS ALREADY PRODUCED, which busy() now reports. Every
+    // caller of reclaimDecoder() bumps the generation before revoking, so
+    // anything sitting here is stale by construction and the UI thread would
+    // discard it at the delivery boundary anyway -- but it would still be
+    // COUNTED, and a worker that reads busy() after handing the decoder back is
+    // a worker nothing can be posted to.
+    //
+    // That froze the next shuttle run outright. endShuttleRun() reclaims the
+    // lease and startShuttleRun() then calls pumpShuttleQueue(), which returns
+    // early on busy(): the new run never posted its first request, the queue
+    // stayed empty, and the tick starved forever. The run-is-over test at the
+    // top of the tick reads busy() too, so it could not even end. Measured as
+    // one random "expected moving" case per full transitions matrix -- 2 of 50
+    // against 0 of 50 on a control built from efda50c.
+    results_.clear();
     lock.unlock();
 
     lastCancelWaitMs_ = static_cast<double>(waitTimer.nsecsElapsed()) / 1'000'000.0;
