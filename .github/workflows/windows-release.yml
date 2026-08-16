@@ -48,6 +48,51 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      # Assets against the contract, BEFORE the ~20 minute build, because it needs
+      # neither a toolchain nor a compile and there is no reason to learn about a bad
+      # icon delivery at the end.
+      #
+      # rcc already fails the build on a missing entry, so that half is covered twice.
+      # WHAT THIS ADDS IS THE SIZE CHECK: a 25px export named -24 builds green and
+      # renders wrong on one control at runtime, which is invisible in a folder listing
+      # and invisible in a diff.
+      #
+      # The expected set is DERIVED from app/resources.qrc and app/trace.rc rather than
+      # written down in the script, which is what makes it safe to run here: a hard-coded
+      # copy of the contract goes stale on the next .qrc edit, and a stale instrument
+      # accusing a correct build is the failure this project has recorded ten times.
+      # trace.rc is read as well as the .qrc because assets/ was reorganised once and the
+      # .qrc was re-pointed while trace.rc was not, so the resource compiler dangled on a
+      # path no count of .qrc entries could have found.
+      #
+      # --no-pillow is deliberate rather than defensive: it pins the PNG-header reader so
+      # the result does not depend on whether a runner image happens to ship Pillow. Both
+      # readers were confirmed to agree on all 176 PNGs in the tree.
+      #
+      # --strict asserts the .qrc's own stated invariant, that assets/interface/ holds the
+      # SVG masters plus exactly the PNGs it embeds and nothing else. That is also the
+      # "artwork follows behaviour" rule: a glyph arrives in the commit that uses it.
+      #
+      # NOT passing --app-icon. That set (macOS renditions, the extra Windows sizes, the
+      # .icns) is a delivery convention with no contract file behind it, so putting it in
+      # CI would reintroduce exactly the hard-coded staleness this step exists to avoid.
+      - name: Verify interface assets against the .qrc contract
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          # Resolved and printed rather than assumed. If the runner image ever drops
+          # python from PATH, this says so instead of failing as though the assets were
+          # bad -- the step must not be able to accuse a correct delivery.
+          $py = (Get-Command python -ErrorAction SilentlyContinue).Source
+          if (-not $py) { $py = (Get-Command py -ErrorAction SilentlyContinue).Source }
+          if (-not $py) { throw "no Python interpreter on the runner - the asset check could not run (this is NOT an asset failure)" }
+          Write-Host "interpreter: $py"
+          & $py --version
+
+          & $py scripts\verify_trace_assets.py --strict --no-pillow
+          if ($LASTEXITCODE -ne 0) { throw "asset check failed ($LASTEXITCODE) - see the FAIL lines above" }
+
       # qtmultimedia supplies QAudioSink for audio output. Without it CMake
       # builds a silent Trace rather than failing, so the verify step below
       # asserts the DLL actually shipped.
