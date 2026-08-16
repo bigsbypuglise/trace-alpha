@@ -159,9 +159,15 @@ thing being measured is measuring a different program.**
   serving before anything else.
 - **The 720p ComfyUI subjective comparison against QuickTime** — still not taken,
   and must be **at the machine, not over Parsec**.
-- Mixed-monitor DPI residue: three or more displays · 125% and 175% · a scale
-  change made while Trace runs on that monitor · hot-plug. §20.3's cross-backend
-  band difference at real 150% is still not closed.
+- ~~Mixed-monitor DPI residue: three or more displays · 125% and 175% · a scale
+  change made while Trace runs on that monitor · hot-plug · §20.3's band difference
+  at real 150%.~~ **WITHDRAWN by owner decision, 2026-08-15.** The second display is
+  disconnected and **no multi-display work is to be proposed.** §20.4's hardware pass
+  stands — it ran at 100%/150%, found and fixed a real bug, and closed the beta gate;
+  only the *remaining* list is withdrawn. It is an accepted gap, not an open item, and
+  it should not reappear in a handoff. If a multi-monitor or fractional-DPI report ever
+  arrives from testing, the hardware has to come back first and
+  `scripts/measure/dpimove.ps1` is ready for it.
 
 ---
 
