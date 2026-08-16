@@ -1695,7 +1695,7 @@ void MainWindow::setupSharedActions() {
         QUrl url(QStringLiteral("mailto:") + QLatin1String(kIssueEmail));
         QUrlQuery query;
         query.addQueryItem(QStringLiteral("subject"),
-                           tr("Trace alpha - issue report"));
+                           tr("Trace beta - issue report"));
         query.addQueryItem(QStringLiteral("body"),
                            tr("What happened:\n\n\nWhat you expected:\n\n\n"
                               "Media (format, resolution, frame rate):\n\n\n"
@@ -2853,7 +2853,7 @@ void MainWindow::toggleMovieInspector(bool show) {
 QString MainWindow::buildIdentity() const {
     QString renderer = tr("unknown");
     if (viewer_) renderer = viewer_->rendererName();
-    return tr("Trace %1 (alpha)\nQt %2\nRenderer: %3\nTransport: %4")
+    return tr("Trace %1 (beta)\nQt %2\nRenderer: %3\nTransport: %4")
         .arg(QStringLiteral(TRACE_VERSION_STRING))
         .arg(QString::fromLatin1(qVersion()))
         .arg(renderer)
@@ -2867,8 +2867,8 @@ void MainWindow::showAboutDialog() {
         tr("<h3>Trace %1</h3>"
            "<p>A fast, minimal media player for review work.</p>"
            "<p style='white-space:pre'>Qt %2<br>Renderer: %3</p>"
-           "<p><small>Alpha. Frame order, stepping and timing are exact; "
-           "formats and interface are still being filled in.</small></p>")
+           "<p><small>Beta. Frame order, stepping and timing are exact; "
+           "formats are still being filled in.</small></p>")
             .arg(QStringLiteral(TRACE_VERSION_STRING))
             .arg(QString::fromLatin1(qVersion()))
             .arg(viewer_ ? viewer_->rendererName() : tr("unknown")));

@@ -53,3 +53,9 @@ assets/icons/
 # them at spec phases 4-5.
 assets/Interface/*.zip
 assets/260807 Trace Media Player Icon/*.zip
+
+# Python bytecode. scripts/verify_trace_assets.py is a plain script, but merely
+# importing it (a cross-check did) writes a __pycache__ beside it, and one such
+# .pyc reached a commit that way.
+__pycache__/
+*.pyc
