@@ -120,8 +120,8 @@ If you place a writable `trace.ini` next to `Trace.exe`, Trace uses it for setti
 fully portable. Trace never creates that file itself; its presence is how you ask for portable
 mode.
 
-The ZIP asset is still named `trace-alpha-windows-x64.zip`. That is the build pipeline's
-artifact name, not a statement about this release; it is left alone here rather than renamed
-inside a release commit.
+The ZIP asset is `trace-windows-x64.zip`. It carries no release stage, so it does not change
+name on promotion — through `v0.2.0-beta.1` it was `trace-alpha-windows-x64.zip`, and those
+published assets were not renamed retroactively.
 
 ---

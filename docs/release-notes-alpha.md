@@ -6,17 +6,25 @@ kept as it is so links to it do not break.
 
 Current supported package:
 
-- `trace-alpha-windows-x64.zip`
+- `trace-windows-x64.zip`
   - `Trace.exe`
   - required Qt runtime files
   - required FFmpeg runtime DLLs
 
-**The asset name still says `alpha` and that is the pipeline's artifact name, not the release
-stage.** It appears in `.github/workflows/windows-release.yml` five times — the dist folder, the
-launchability check, the renderer and window-shape self-tests, the artifact upload and the
-release ZIP — and in `CLAUDE.md`. Renaming it is a coherent change worth making on its own; it
-was deliberately not made inside a release commit, where a typo in any one of those references
-breaks publication rather than a build.
+**The package name carries no release stage, from 2026-08-15.** It read
+`trace-alpha-windows-x64.zip` through `v0.2.0-beta.1`, so a tester downloading the beta got a
+file named alpha. Renaming it was deliberately kept out of the release commit — a typo in any
+one reference breaks publication rather than a build, and **only two of the nine references run
+on a tag at all**, so an ordinary green build could not have spoken for them.
+
+It is now defined **once**, as `DIST_NAME` at the top of
+`.github/workflows/windows-release.yml`, and every use site references it. A stage word there
+would have to be changed in lockstep with the three `(beta)` literals in
+`src/app/MainWindow.cpp` on every promotion; a name that never has to change cannot fall out of
+step with them.
+
+**Releases up to and including `v0.2.0-beta.1` keep the old asset name** — published assets were
+not renamed retroactively, so a link to one still works.
 
 Distribution sources:
 

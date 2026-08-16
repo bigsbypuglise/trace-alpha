@@ -36,18 +36,23 @@ Use the focused Windows media validation checklist:
 
 - [`docs/windows-validation-checklist.md`](docs/windows-validation-checklist.md)
 
-## Windows distribution (alpha): portable ZIP only
+## Windows distribution (prerelease): portable ZIP only
 
-For the current alpha stage, Trace ships as a **portable Windows ZIP** (no installer yet).
+Trace ships as a **portable Windows ZIP** (no installer yet). It is **beta** from
+`v0.2.0-beta.1`.
 
 GitHub Actions is the source of truth for Windows builds.
 
 Workflow behavior:
 
 - **Every push/tag/manual run**: builds on **Windows Server 2022 (VS 2022)** with Qt6 + FFmpeg and uploads:
-  - workflow artifact: `trace-alpha-windows-x64.zip`
+  - workflow artifact: `trace-windows-x64`
 - **Tag pushes matching `v*`**: also create/update a **GitHub prerelease** with:
-  - release asset: `trace-alpha-windows-x64.zip`
+  - release asset: `trace-windows-x64.zip`
+
+The package name carries **no release stage**, so it does not have to be changed on every
+promotion. Releases up to and including `v0.2.0-beta.1` carry the older
+`trace-alpha-windows-x64.zip` name and were not renamed retroactively.
 
 Portable ZIP contents include:
 
@@ -57,16 +62,16 @@ Portable ZIP contents include:
 
 ### Download latest Windows build
 
-- **Latest tagged alpha build**: GitHub **Releases** → download `trace-alpha-windows-x64.zip`
-- **Latest branch/commit validation build**: GitHub **Actions** → latest run → **Artifacts** → `trace-alpha-windows-x64`
+- **Latest tagged build**: GitHub **Releases** → download `trace-windows-x64.zip`
+- **Latest branch/commit validation build**: GitHub **Actions** → latest run → **Artifacts** → `trace-windows-x64`
 
-### Trigger a new alpha build/release
+### Trigger a new build/release
 
 Create and push a tag like:
 
 ```bash
-git tag v0.1.0-alpha.1
-git push origin v0.1.0-alpha.1
+git tag v0.2.0-beta.2
+git push origin v0.2.0-beta.2
 ```
 
 That tag triggers the Windows build and publishes/updates the prerelease ZIP asset.

@@ -1400,8 +1400,9 @@ Qt 6.10.2 (msvc2022_64, includes Multimedia), vcpkg FFmpeg 8.x (avcodec-62), and
 FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt runtime, `platforms\qwindows.dll` and the multimedia plugins. Then run `build\app\Release\Trace.exe`. **Configure prints `Trace: audio output enabled` or `DISABLED` — check that line**, and since GATE B also `Trace: D3D11 renderer enabled` or `DISABLED (needs Windows + MSVC + fxc)`. The D3D11 backend needs `fxc` from the Windows SDK to compile its shaders at build time; if CMake cannot find it the backend is left out and the app builds exactly as before, so a `DISABLED` line is a missing SDK rather than a broken tree. Note local Qt is 6.10.2 while CI pins 6.7.2, so a local green is not proof CI is green; it does catch every compile error.
 
 - Repo: `https://github.com/bigsbypuglise/trace-alpha` (GitHub account: bigsbypuglise; private)
-- Every push to any branch builds Windows (VS2022, Qt 6.7.2 via install-qt-action, FFmpeg via vcpkg) and uploads artifact `trace-alpha-windows-x64` (workflow: `.github/workflows/windows-release.yml`)
-- Tags matching `v*` also publish a GitHub prerelease with a `trace-alpha-windows-x64.zip` asset
+- Every push to any branch builds Windows (VS2022, Qt 6.7.2 via install-qt-action, FFmpeg via vcpkg) and uploads artifact `trace-windows-x64` (workflow: `.github/workflows/windows-release.yml`)
+- Tags matching `v*` also publish a GitHub prerelease with a `trace-windows-x64.zip` asset
+- **The package name is `DIST_NAME` at the top of the workflow and is spelled ONCE.** It carries no release stage on purpose. Note the **repository** is still `bigsbypuglise/trace-alpha` and that is the remote URL — a search-and-replace over `trace-alpha` breaks the remote, and `docs/release-notes-alpha.md` keeps its filename so links to it do not break.
 - **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
 - **Green must mean launchable** (Aug 2026): the workflow checks native tool exit codes (`windeployqt` failures used to pass silently), asserts FFmpeg was found at configure time, and verifies `Trace.exe` + Qt DLLs + `platforms/qwindows.dll` + av* DLLs exist before publishing. If a build goes green, the download starts.
 - **CI asserts the renderer initializes** (Aug 2026, `b5ad4d2`): `Trace.exe --renderer-selftest=d3d11` builds the viewer, lets it adopt whatever `TRACE_RENDERER` selects, prints `renderer=`/`fellback=`/`planar=` and exits. It runs the real path — `ViewerWidget`'s constructor applies the native-surface contract and calls `initialize()`, which creates the device, the child surface window, the flip-model swapchain, every shader and the render target. **No `show()`**: `initialize()` reaches the HWND through `winId()`, so the check does not need an interactive desktop. The match is a **prefix**, so a runner that falls back to the software rasteriser and renames itself `d3d11 (warp)` still passes. (In the event the first run reported plain `d3d11` — the GitHub runner's device took the hardware path.) **Exit 3 is the selected backend failing to initialize, exit 4 is that backend never having been built** (no `fxc`); the two are separate codes because they are separate faults, and that is also why the expected name is an argument to the exe rather than a grep in the YAML. `planar=1` is asserted too — a failed YUV shader is deliberately non-fatal at runtime (GATE C), which makes it exactly the silent degradation this step exists to catch. **It was printed for one run before being asserted**, because whether the runner's device supplies `ps_4_0` had never been observed and guessing would have turned the first build red on a guess.
@@ -2310,12 +2311,20 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   **Verify against the built binary, not the source** — reading the compiled strings out of
   `Trace.exe` is what confirms all three moved and none survived.
 
-  **The ZIP asset is still `trace-alpha-windows-x64.zip` and that is the pipeline's artifact
-  name, not the stage.** It appears five times in `.github/workflows/windows-release.yml` (dist
-  folder, launchability check, both self-tests, artifact upload, release ZIP) and here at the CI
-  bullet above. Renaming it is a coherent change worth making on its own and was deliberately
-  **not** made inside a release commit, where a typo in any one reference breaks publication
-  rather than a build. Stated in the release body so nobody reads it as the stage.
+  **THE PACKAGE IS `trace-windows-x64` AND CARRIES NO RELEASE STAGE (renamed 2026-08-15, after
+  the beta shipped as `trace-alpha-*`).** The handoff enumerated it as *five* references in the
+  workflow plus one here; there were **nine in the workflow and twenty across the tree**, so an
+  enumeration would have missed four in the file it named. It is `DIST_NAME` at the top of the
+  workflow now and is spelled **once** — which is what removes the "one typo away from a broken
+  publication" risk that kept the rename out of the release commit, rather than testing for it.
+
+  **Two `trace-alpha` strings must NEVER be renamed and a blind search-and-replace hits both**:
+  the remote `https://github.com/bigsbypuglise/trace-alpha` (the repository), and the filename
+  `docs/release-notes-alpha.md` (kept so links do not break; it says so in its own first
+  paragraph). **Only two of the nine workflow references run on a tag** — the `Compress-Archive`
+  and the publish step's `files:` — so an ordinary green branch build cannot speak for them, and
+  the ZIP step now asserts its own output by name and size for exactly that reason.
+  **Published assets up to `v0.2.0-beta.1` were not renamed retroactively.**
 - **Scrub shows a reduced-resolution preview above 1920px wide** (July 2026, threshold corrected Aug 2026, target size corrected Aug 2026 — see the byte-budget entry above): sws conversion dominates 4K frame cost. Half resolution is now a *ceiling*; the actual target is the size the viewer will draw at. The landing frame (slider release) is always full-res accurate via Step mode. Preview-resolution frames **do** enter the cache but are tagged `previewRes`, and `tryReverseCache` refuses them for anything but a Scrub — the old rule forced cache fills to full res so they could serve a step, which paid double for entries that were declined anyway. Don't "fix" scrub softness by removing this at 4K — fix it by making conversion faster.
 
   **The threshold is `> 1920`, not `>= 1920`.** At exactly 1080p halving was a *pessimisation*: a full-res convert is 1920x1080 → 1920x1080, which sws does unscaled, while halving adds a 1920→960 resample costing more than the smaller output saves. Measured on the same file in one session: full-res `sws 0.57/0.72ms` against half-res `sws 2.50/5.07ms`. 1080p was being caught by a rule written for 4K, which throttled the drag shuttle to roughly a third of its rate *and* showed a soft preview for it. Correcting the bound took shuttle cost 3.60 → **1.79ms/frame** at 1080p with full-res previews. **4K H.264 has not been re-measured** — full-res 4K 8-bit conversion is only ~2.9ms, so the same inversion may apply there; 4K ProRes 10-bit (~15ms) is where halving is clearly right.

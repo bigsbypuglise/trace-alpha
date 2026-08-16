@@ -1,4 +1,4 @@
-name: Windows CI + Alpha Release
+name: Windows CI + Release
 
 on:
   workflow_dispatch:
@@ -18,6 +18,18 @@ concurrency:
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
 env:
+  # The package name: the dist folder, the workflow artifact and the release ZIP
+  # all take it. DEFINED ONCE AND NEVER SPELLED OUT AGAIN -- it was written out
+  # nine times across this file, which is why renaming it was deferred out of the
+  # v0.2.0-beta.1 release commit: a typo in any one of the nine breaks
+  # publication rather than a build, and only two of the nine run on a tag.
+  #
+  # DELIBERATELY CARRIES NO RELEASE STAGE. It read trace-alpha-* through the
+  # beta, so a tester downloading the beta got a file named alpha. A stage word
+  # here has to be changed in lockstep with three literals in MainWindow.cpp on
+  # every promotion; a name that never has to change cannot fall out of step.
+  DIST_NAME: trace-windows-x64
+
   # Bump this string to force a rebuild of the cached FFmpeg/vcpkg tree.
   # v2 (Aug 2026): the v1 cache still held FFmpeg 7.x (avcodec-61) while local
   # dev builds resolve to 8.x, so perf numbers measured locally could not be
@@ -229,7 +241,7 @@ jobs:
           }
 
           $distRoot = Join-Path $PWD "dist"
-          $dist = Join-Path $distRoot "trace-alpha-windows-x64"
+          $dist = Join-Path $distRoot $env:DIST_NAME
 
           if (Test-Path $dist) { Remove-Item $dist -Recurse -Force }
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
@@ -250,7 +262,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $dist = Join-Path $PWD "dist\trace-alpha-windows-x64"
+          $dist = Join-Path $PWD "dist\$env:DIST_NAME"
 
           $required = @(
             "Trace.exe",
@@ -302,7 +314,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = Join-Path $PWD "dist\trace-alpha-windows-x64\Trace.exe"
+          $exe = Join-Path $PWD "dist\$env:DIST_NAME\Trace.exe"
 
           $out = & $exe --renderer-selftest=d3d11 2>&1
           $code = $LASTEXITCODE
@@ -344,7 +356,7 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $exe = Join-Path $PWD "dist\trace-alpha-windows-x64\Trace.exe"
+          $exe = Join-Path $PWD "dist\$env:DIST_NAME\Trace.exe"
 
           $out = & $exe --window-shape-selftest 2>&1
           $code = $LASTEXITCODE
@@ -360,8 +372,8 @@ jobs:
       - name: Upload workflow artifact (every push/tag)
         uses: actions/upload-artifact@v4
         with:
-          name: trace-alpha-windows-x64
-          path: dist/trace-alpha-windows-x64/**
+          name: ${{ env.DIST_NAME }}
+          path: dist/${{ env.DIST_NAME }}/**
           if-no-files-found: error
 
       # Release assets are downloaded directly (not re-zipped by GitHub), so
@@ -371,7 +383,19 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          Compress-Archive -Path "dist\trace-alpha-windows-x64\*" -DestinationPath "dist\trace-alpha-windows-x64.zip" -Force
+          $zip = "dist\$env:DIST_NAME.zip"
+          Compress-Archive -Path "dist\$env:DIST_NAME\*" -DestinationPath $zip -Force
+
+          # THIS STEP AND THE PUBLISH BELOW ARE THE ONLY TWO THAT A BRANCH BUILD
+          # NEVER RUNS, so they are the two the ordinary green tick cannot speak
+          # for. Assert the archive by the same name the publish step will ask
+          # for: a wrong or missing path here fails the release rather than
+          # publishing nothing, which is the failure mode that kept this rename
+          # out of the v0.2.0-beta.1 commit.
+          if (-not (Test-Path $zip)) { throw "release ZIP was not created at $zip" }
+          $mb = [math]::Round(((Get-Item $zip).Length / 1MB), 1)
+          Write-Host "release ZIP: $zip ($mb MB)"
+          if ($mb -lt 20) { throw "release ZIP is only $mb MB - the dist folder was probably empty" }
 
       - name: Publish/Update versioned prerelease asset (tags v*)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -379,10 +403,10 @@ jobs:
         with:
           prerelease: true
           # body_path is the hand-written notes for the CURRENT tag -- what is
-          # new and, more importantly, the known gaps stated plainly. An alpha
-          # with honest limits gets useful bug reports; one without gets reports
-          # about things already known. generate_release_notes appends the
+          # new and, more importantly, the known gaps stated plainly. A
+          # prerelease with honest limits gets useful bug reports; one without
+          # gets reports about things already known. generate_release_notes appends the
           # commit log after it, so both are published.
           body_path: docs/release-body.md
           generate_release_notes: true
-          files: dist/trace-alpha-windows-x64.zip
+          files: dist/${{ env.DIST_NAME }}.zip
