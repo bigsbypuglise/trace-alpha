@@ -158,6 +158,23 @@ than trusting an enumeration. And **`interface/` carries the SVG master plus exa
 renditions the `.qrc` embeds and nothing else**, so the directory listing and the `.qrc` agree
 by construction — the absence of that property is what caused this.
 
+**`scripts/verify_trace_assets.py` CHECKS A DELIVERED ICON PACKAGE AGAINST THAT CONTRACT
+(2026-08-15), AND IT IS DELIBERATELY NOT A CI STEP.** It asserts every glyph the `.qrc` embeds
+is present, every PNG is exactly the pixel size its name claims, the SVG masters are there, and
+nothing extra is sitting in the working copies. **`rcc` already fails the build on a missing
+entry, so that half is covered; a 25px export named `-24` is not** — it builds green and renders
+wrong on one control at runtime, which is precisely the class that is invisible in a folder
+listing. It also rejects interaction-state art (`-hover`, `-pressed`), because those are a
+brightness multiply applied at draw time and a delivered file would be embedded-and-unused.
+
+**It is not in CI because it DUPLICATES the contract rather than deriving it from the `.qrc`**,
+so a future `.qrc` edit leaves it stale — and a stale instrument accusing a correct build is the
+failure this project has recorded ten times. Cross-checked programmatically when it landed: 20
+embedded interface PNGs against 20 required, nothing in either direction. **Deriving its set by
+parsing `app/resources.qrc` is what would make it CI-safe**, and is the change to make first if
+it is ever wanted there. Verified both ways rather than only the passing one — exit 0 on
+`assets/`, exit 1 on a copy with `rewind-48.png` removed.
+
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
 phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The
@@ -2270,6 +2287,35 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
 - **Audio owns its own demuxer and decode thread** (Aug 2026): sharing `VideoDecoderFFmpeg`'s `AVFormatContext` would mean locking it against the seek-heavy video path on every packet, and that path is deliberately single-threaded. This does not reopen the async-video-decode question — it is a separate stream with no frame-ordering contract.
 - Video playback never skips frames (timer clamps steps to 1 for video) — heavy files slow down rather than drop frames. Deliberate: ordering over rate, except under the audio master clock above.
 - Windows ships as **portable ZIP only** — no installer until packaging/playback stabilize (`docs/release-notes-alpha.md`).
+- **TRACE IS BETA FROM `v0.2.0-beta.1` (2026-08-15). The named gate was mixed-monitor DPI and it
+  closed on hardware**, at `8945894` — `v0.2.0-alpha.1`'s own notes called it *"the main reason
+  this release is still alpha rather than beta"*, so promoting the release was reading that
+  sentence rather than making a judgement. Shipped with **`TRACE_PLAYBACK_QUEUE` default off**,
+  which is the configuration every regression figure in the release was taken on; the notes name
+  it as a knob for testers with heavy media, with the measured +9% and the reason depth 1 is
+  worse than off. Tag build green with **all four verification steps read individually**
+  (run `31919458108`): `20.8 MB` / system-DLLs-only · `FFmpeg detected` + `Audio dependencies
+  detected` · `6 required files present, 95.3 MB total` · **`renderer=d3d11 fellback=0
+  planar=1`** · `OK - 11 shapes x 4 scale factors`. **`fellback=0` means the runner took the
+  HARDWARE path** — the check accepts `d3d11 (warp)` by prefix, so a WARP pass looks identical
+  in the step status and different in that line, which is the reason to read the output rather
+  than the tick.
+
+  **THE RELEASE STAGE IS NOT IN THE VERSION NUMBER, AND IT LIVES IN THREE PLACES.** CMake's
+  `VERSION` field cannot hold a prerelease suffix, so `project(Trace VERSION 0.2.0)` covers both
+  the alpha and the beta of this line and the *word* is what distinguishes them. It is a literal
+  in `src/app/MainWindow.cpp` three times: `buildIdentity()`'s `Trace %1 (beta)`, the About
+  dialog's small print, and the **Report an Issue mail subject**. Missing one leaves the number
+  looking right while the build names the wrong stage in the one place a tester quotes back.
+  **Verify against the built binary, not the source** — reading the compiled strings out of
+  `Trace.exe` is what confirms all three moved and none survived.
+
+  **The ZIP asset is still `trace-alpha-windows-x64.zip` and that is the pipeline's artifact
+  name, not the stage.** It appears five times in `.github/workflows/windows-release.yml` (dist
+  folder, launchability check, both self-tests, artifact upload, release ZIP) and here at the CI
+  bullet above. Renaming it is a coherent change worth making on its own and was deliberately
+  **not** made inside a release commit, where a typo in any one reference breaks publication
+  rather than a build. Stated in the release body so nobody reads it as the stage.
 - **Scrub shows a reduced-resolution preview above 1920px wide** (July 2026, threshold corrected Aug 2026, target size corrected Aug 2026 — see the byte-budget entry above): sws conversion dominates 4K frame cost. Half resolution is now a *ceiling*; the actual target is the size the viewer will draw at. The landing frame (slider release) is always full-res accurate via Step mode. Preview-resolution frames **do** enter the cache but are tagged `previewRes`, and `tryReverseCache` refuses them for anything but a Scrub — the old rule forced cache fills to full res so they could serve a step, which paid double for entries that were declined anyway. Don't "fix" scrub softness by removing this at 4K — fix it by making conversion faster.
 
   **The threshold is `> 1920`, not `>= 1920`.** At exactly 1080p halving was a *pessimisation*: a full-res convert is 1920x1080 → 1920x1080, which sws does unscaled, while halving adds a 1920→960 resample costing more than the smaller output saves. Measured on the same file in one session: full-res `sws 0.57/0.72ms` against half-res `sws 2.50/5.07ms`. 1080p was being caught by a rule written for 4K, which throttled the drag shuttle to roughly a third of its rate *and* showed a soft preview for it. Correcting the bound took shuttle cost 3.60 → **1.79ms/frame** at 1080p with full-res previews. **4K H.264 has not been re-measured** — full-res 4K 8-bit conversion is only ~2.9ms, so the same inversion may apply there; 4K ProRes 10-bit (~15ms) is where halving is clearly right.
