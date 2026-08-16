@@ -158,22 +158,49 @@ than trusting an enumeration. And **`interface/` carries the SVG master plus exa
 renditions the `.qrc` embeds and nothing else**, so the directory listing and the `.qrc` agree
 by construction — the absence of that property is what caused this.
 
-**`scripts/verify_trace_assets.py` CHECKS A DELIVERED ICON PACKAGE AGAINST THAT CONTRACT
-(2026-08-15), AND IT IS DELIBERATELY NOT A CI STEP.** It asserts every glyph the `.qrc` embeds
-is present, every PNG is exactly the pixel size its name claims, the SVG masters are there, and
-nothing extra is sitting in the working copies. **`rcc` already fails the build on a missing
-entry, so that half is covered; a 25px export named `-24` is not** — it builds green and renders
-wrong on one control at runtime, which is precisely the class that is invisible in a folder
-listing. It also rejects interaction-state art (`-hover`, `-pressed`), because those are a
-brightness multiply applied at draw time and a delivered file would be embedded-and-unused.
+**`scripts/verify_trace_assets.py` CHECKS A DELIVERED ICON PACKAGE AGAINST THAT CONTRACT, AND
+IT IS A CI STEP AS OF 2026-08-15 (`3e0c936`) BECAUSE ITS SET IS NOW DERIVED.** It asserts every
+glyph the `.qrc` embeds is present, every PNG is exactly the pixel size its name claims, the SVG
+masters are there, and nothing extra is sitting in the working copies. **`rcc` already fails the
+build on a missing entry, so that half is covered; a 25px export named `-24` is not** — it builds
+green and renders wrong on one control at runtime, which is precisely the class that is invisible
+in a folder listing. It also rejects interaction-state art (`-hover`, `-pressed`), because those
+are a brightness multiply applied at draw time and a delivered file would be embedded-and-unused.
 
-**It is not in CI because it DUPLICATES the contract rather than deriving it from the `.qrc`**,
-so a future `.qrc` edit leaves it stale — and a stale instrument accusing a correct build is the
-failure this project has recorded ten times. Cross-checked programmatically when it landed: 20
-embedded interface PNGs against 20 required, nothing in either direction. **Deriving its set by
-parsing `app/resources.qrc` is what would make it CI-safe**, and is the change to make first if
-it is ever wanted there. Verified both ways rather than only the passing one — exit 0 on
-`assets/`, exit 1 on a copy with `rewind-48.png` removed.
+**THE EXPECTED SET IS READ FROM `app/resources.qrc` AND `app/trace.rc`, NOT WRITTEN DOWN.** It
+used to hard-code the manifest, which made it a duplicate of the contract rather than a reading
+of it, so the next `.qrc` edit would have left it stale — and that is the only reason it was kept
+out of CI. **`trace.rc` is parsed as well as the `.qrc` because it is a SECOND contract that has
+already failed once**: `assets/` was reorganised, the `.qrc` was re-pointed, `trace.rc` was not,
+and the resource compiler dangled on a path no count of `.qrc` entries could have found.
+Deriving from the file **paths** also deleted the note describing the fullscreen alias remap —
+the path is the disk name, so the remap stopped being something the script has to be told.
+
+**Two things it checks that the `.qrc` cannot state, both labelled as such**: the SVG master
+beside each embedded PNG (the `.qrc` embeds no SVGs because Trace does not link Qt6::Svg, though
+its own comment states the rule), and the **unembedded** app-icon delivery set — macOS
+renditions, the extra Windows sizes, the `.icns` — which has no contract file behind it, stays
+behind `--app-icon`, and is **deliberately not run in CI**, because putting a hand-written list
+there would reintroduce exactly the staleness this change removed.
+
+**CI runs it immediately after checkout, before the ~20 minute build**, as
+`--strict --no-pillow`. `--strict` asserts the `.qrc`'s own stated invariant that
+`assets/interface/` holds the masters plus exactly what it embeds; it is also the "artwork
+follows behaviour" rule, so **a glyph committed before the code that uses it now turns CI red on
+purpose**. `--no-pillow` pins the PNG-header reader so the result cannot depend on whether a
+runner image ships Pillow — both readers were confirmed to agree on all **176** PNGs in the tree,
+and the runner takes the header path (observed: Python 3.12.10, `derived: 25 embedded files`).
+The step resolves and prints the interpreter and reports a missing Python **distinctly from an
+asset failure**, so it cannot accuse a correct delivery.
+
+**Verified with eleven negative controls plus an untouched copy as the control**, each breaking
+the delivery one way: missing PNG · a PNG named `-24` containing 48px · missing SVG master ·
+sized state art · missing `trace.ico` · a stray file warning by default and failing under
+`--strict` · an unreadable and a malformed `.qrc` both exiting **2** rather than passing. **The
+one that matters is a NEW `.qrc` entry being demanded with no edit to the script** — that is the
+difference between deriving and duplicating, and it is the only case that would still pass on the
+old version. It also closed a recorded soft spot: the state-suffix test strips the size first
+now, so `play-hover-24.png` fails where it previously only warned.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
@@ -1405,6 +1432,7 @@ FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt ru
 - **The package name is `DIST_NAME` at the top of the workflow and is spelled ONCE.** It carries no release stage on purpose. Note the **repository** is still `bigsbypuglise/trace-alpha` and that is the remote URL — a search-and-replace over `trace-alpha` breaks the remote, and `docs/release-notes-alpha.md` keeps its filename so links to it do not break.
 - **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
 - **Green must mean launchable** (Aug 2026): the workflow checks native tool exit codes (`windeployqt` failures used to pass silently), asserts FFmpeg was found at configure time, and verifies `Trace.exe` + Qt DLLs + `platforms/qwindows.dll` + av* DLLs exist before publishing. If a build goes green, the download starts.
+- **CI checks the interface assets against the `.qrc` contract, before the build** (2026-08-15, `3e0c936`): `scripts/verify_trace_assets.py --strict --no-pillow`, second step in the workflow because it needs no toolchain. It catches the class `rcc` cannot — a 25px export named `-24`. Its set is **derived** from `app/resources.qrc` and `app/trace.rc`; see the asset-tree entry above for why that is what made it CI-safe.
 - **CI asserts the renderer initializes** (Aug 2026, `b5ad4d2`): `Trace.exe --renderer-selftest=d3d11` builds the viewer, lets it adopt whatever `TRACE_RENDERER` selects, prints `renderer=`/`fellback=`/`planar=` and exits. It runs the real path — `ViewerWidget`'s constructor applies the native-surface contract and calls `initialize()`, which creates the device, the child surface window, the flip-model swapchain, every shader and the render target. **No `show()`**: `initialize()` reaches the HWND through `winId()`, so the check does not need an interactive desktop. The match is a **prefix**, so a runner that falls back to the software rasteriser and renames itself `d3d11 (warp)` still passes. (In the event the first run reported plain `d3d11` — the GitHub runner's device took the hardware path.) **Exit 3 is the selected backend failing to initialize, exit 4 is that backend never having been built** (no `fxc`); the two are separate codes because they are separate faults, and that is also why the expected name is an argument to the exe rather than a grep in the YAML. `planar=1` is asserted too — a failed YUV shader is deliberately non-fatal at runtime (GATE C), which makes it exactly the silent degradation this step exists to catch. **It was printed for one run before being asserted**, because whether the runner's device supplies `ps_4_0` had never been observed and guessing would have turned the first build red on a guess.
 - vcpkg/FFmpeg and Qt are cached; the ~20+ min build only recurs on cache miss (7-day idle expiry). Bump `VCPKG_CACHE_VERSION` in the workflow to force a clean FFmpeg rebuild.
 - **Whether Claude can push depends on which machine the session is on — check, don't assume.** On the **Windows box** (repo at `C:\Users\andre\Documents\Claude_Cowork\Trace_Windows`) github.com **is reachable and Claude can push directly**; verified Aug 2026 by a read-only `git ls-remote` followed by a real push. On the **macOS sandbox** the proxy blocks github.com, so commits are made locally and Anj pushes from `~/Claude/Trace`.

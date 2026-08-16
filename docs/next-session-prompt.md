@@ -1,5 +1,59 @@
 # v0.2.0-beta.1 IS SHIPPED. NO OPEN OWNER DECISION.
 
+## 2026-08-15, SECOND SESSION: THE TWO DECK-CLEARING ITEMS ARE DONE
+
+Both items this file listed as deferred are closed. **No new work was started, by
+instruction — beta testers are on `v0.2.0-beta.1` and capacity is being kept free for
+their reports.** `main` is at `3e0c936`, clean and pushed.
+
+**(1) The package is `trace-windows-x64`** (`3b732f0`). It carries **no release stage**, so
+it never has to change again — a stage word there has to move in lockstep with the three
+`(beta)` literals in `MainWindow.cpp` on every promotion.
+
+**This file said five references in the workflow. There were NINE, plus eleven more across
+`README.md`, `CLAUDE.md` and three docs — twenty in the tree.** An enumeration would have
+missed four in the file it named. Found by grepping, which is the rule this project already
+records for `assets/` and which applied here unchanged.
+
+**It is `DIST_NAME` at the top of the workflow now and is spelled ONCE**, so the "one typo
+away from a broken publication" risk that kept this out of the release commit is removed
+structurally rather than tested for. **Two `trace-alpha` strings must never be renamed and a
+blind search-and-replace hits both**: the remote `bigsbypuglise/trace-alpha`, which is the
+repository, and `docs/release-notes-alpha.md`, whose filename is kept so links do not break.
+
+**Verified by a real tag build, because a branch build provably cannot.** The
+`Compress-Archive` and publish steps read `skipped` in the green branch run — exactly the
+two the ordinary tick cannot speak for. A throwaway `v0.2.0-beta.1-ziptest` tag published
+**`trace-windows-x64.zip`, 40.8 MB**, with the ZIP step's new self-assertion reading
+`release ZIP: dist\trace-windows-x64.zip (40.8 MB)`; the release and tag were then deleted
+and the Releases page confirmed back to `v0.2.0-beta.1`. **Published assets were not renamed
+retroactively**, so every existing release link still works.
+
+Both builds reproduced the beta baseline to the digit: `20.8 MB` / system-DLLs-only ·
+`FFmpeg detected` + `Audio dependencies detected` · `6 required files present, 95.3 MB` ·
+**`renderer=d3d11 fellback=0 planar=1`** · `OK - 11 shapes x 4 scale factors`.
+
+**(2) `verify_trace_assets.py` derives its set and is now a CI step** (`3e0c936`). Read from
+`app/resources.qrc` **and `app/trace.rc`** — the second because it is a separate contract
+that has already dangled once, when `assets/` was reorganised and only the `.qrc` was
+re-pointed. Runs second in the workflow, before the ~20 minute build, as
+`--strict --no-pillow`.
+
+**Eleven negative controls, plus an untouched copy as the control.** The one that matters:
+**a new `.qrc` entry is demanded with no edit to the script** — the only case that would
+still have passed on the hard-coded version, and therefore the only one that proves the
+derivation. Full detail in `CLAUDE.md`.
+
+**One deliberate non-inclusion**: `--app-icon` covers the unembedded delivery set (macOS
+renditions, extra Windows sizes, `.icns`), which has no contract file behind it. Putting
+that in CI would reintroduce the hard-coded staleness the change removed. **Do not add it
+without a contract to derive it from.**
+
+**CI now has FIVE verification steps, not four** — the asset check joined them. The working
+note further down still says four; read it as five.
+
+---
+
 Trace is **beta** as of 2026-08-15. The named gate — mixed-monitor DPI — closed on
 hardware at `8945894`, which is what promoted the release: `v0.2.0-alpha.1`'s own
 notes called that gate *"the main reason this release is still alpha rather than
@@ -188,10 +242,10 @@ program.**
   a real cold-read figure from Anj to calibrate the synthetic knobs.
 - **The 720p ComfyUI subjective comparison against QuickTime** — still not taken, and
   must be **at the machine, not over Parsec**.
-- **Renaming the `trace-alpha-*` artifact to drop `alpha`** — see the release section
-  above. Cheap, worth doing, needs a real tag build to verify.
-- **Deriving `verify_trace_assets.py`'s set from `app/resources.qrc`**, which is what
-  would make it safe to put in CI. See below.
+- ~~Renaming the `trace-alpha-*` artifact.~~ **DONE 2026-08-15, `3b732f0`** — see the
+  session block at the top.
+- ~~Deriving `verify_trace_assets.py`'s set from `app/resources.qrc`.~~ **DONE 2026-08-15,
+  `3e0c936`**, and it is in CI.
 - ~~Mixed-monitor DPI residue.~~ **WITHDRAWN by owner decision, 2026-08-15.** The
   second display is disconnected and **no multi-display work is to be proposed.**
   §20.4's hardware pass stands — it ran at 100%/150%, found and fixed a real bug, and
@@ -203,7 +257,7 @@ program.**
 
 ---
 
-## `scripts/verify_trace_assets.py` — new, and deliberately not in CI
+## `scripts/verify_trace_assets.py` — derived, and IN CI since 2026-08-15
 
 Checks a delivered interface-icon package against the `.qrc` contract: every embedded
 glyph present, every PNG exactly the pixel size its name claims, SVG masters there,
@@ -212,18 +266,21 @@ rejected because those are a brightness multiply applied at draw time.
 
 **`rcc` already fails the build on a missing entry, so that half is covered. A 25px
 export named `-24` is not** — it builds green and renders wrong on one control at
-runtime.
+runtime. That class is the reason it is in CI.
 
-**Not in CI because it duplicates the contract rather than deriving it from the
-`.qrc`**, so a future `.qrc` edit leaves it stale, and a stale instrument accusing a
-correct build is the failure this project has recorded ten times. Cross-checked when
-it landed: 20 embedded interface PNGs against 20 required, nothing in either
-direction. Verified both ways — exit 0 on `assets/`, exit 1 on a copy with
-`rewind-48.png` removed.
+**The expected set is DERIVED from `app/resources.qrc` and `app/trace.rc`**, which is
+what made it CI-safe: the earlier version duplicated the contract, so a `.qrc` edit
+would have left it stale. Run it as `python scripts/verify_trace_assets.py` with no
+arguments to check the repo against itself, or pass a staging directory to check a
+delivery.
 
-One known soft spot: the state-suffix check tests `stem.endswith("-hover")`, so it
-catches `play-hover.png` but only *warns* on `play-hover-24.png`. Worth widening if
-the check is ever extended.
+**The known soft spot is closed** — the state-suffix test strips the size first, so
+`play-hover-24.png` now fails where it previously only warned.
+
+**If you extend it, extend the derivation, not the lists.** The two hand-written sets
+left in the file are the unembedded app-icon delivery convention (behind `--app-icon`,
+not in CI) and the state suffixes. Anything that the build actually loads must come
+from a contract file.
 
 ---
 
@@ -286,7 +343,8 @@ whole directory silently.
 - **A `v*` tag publishes a real ZIP and marks the release prerelease.** The body comes
   from **`docs/release-body.md`**. Rewrite it as part of cutting a release, and **state
   the gaps as measured, with numbers**.
-- **CI has four verification steps and they are separate claims**: FFmpeg found by
+- **CI has FIVE verification steps and they are separate claims** (the asset check joined
+  them on 2026-08-15; the four below are the originals): FFmpeg found by
   CMake (including swresample and Qt Multimedia, or audio degrades silently), the
   package is launchable, `--renderer-selftest` (exit 3 = failed to init, exit 4 = never
   built; `planar=1` asserted separately), and `--window-shape-selftest`. Read them
