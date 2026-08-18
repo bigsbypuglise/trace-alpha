@@ -291,6 +291,145 @@ separately revertable, non-adjacent edits.
   picture motion, not HUD text, and with the HUD's chrome gone §4 gives it a window wide
   enough for its control scan.
 
+**ROADMAP STEP 3 IS DONE (2026-08-18, `72aa9ac`): THE POLISHED EMPTY STATE, AND IT REMOVES A
+DUPLICATION RATHER THAN ADDING ONE.** The prism mark and its hint line are a **fourth image in
+`OverlayModel`**, beside the atlas, the rate text and the toast. The literal
+`"Drop media or File > Open"` and the code that drew it existed independently in
+`CpuImageRenderer` and `D3D11VideoRenderer`, and **not even as the same mechanism** — a
+`QPainter::drawText` on one, a window-sized uploaded texture on the other. `setPlaceholderText`
+and `ViewerWidget::setCenterText` left with it; **`setCenterText` had no callers at all**, so
+the only thing that ever reached those two literals was their own default.
+
+**IT IS EMITTED OUTSIDE BOTH GATES, AND THAT IS THE DESIGN.** Outside the opacity gate, like
+the toast, because it must not fade. Outside **`enabled_`**, because the empty state is what
+the window *is* with no media and must survive `TRACE_TRANSPORT_BAR=1` — the documented escape
+hatch, which would otherwise be a black window with no hint. Same reasoning as the pan gesture
+being ungated in `onMouseDown`: a behaviour that belongs to the window, not to the transport.
+Verified in bar mode on both backends — the stage is **641 rows rather than 735** and the mark
+is correctly centred in the smaller stage.
+
+**"IS THERE MEDIA" IS ASKED OF THE RENDERER, NOT OF `MainWindow`, AND THAT IS WHAT MAKES THE
+NO-FLASH REQUIREMENT STRUCTURAL.** Each backend passes `setMediaPresent()` the same member its
+own draw branch reads, so the two cannot disagree. `currentMedia_` would have answered too and
+would have been wrong twice: `openPath` releases the outgoing media before the incoming frame
+lands, and a **first open that fails** leaves it set with nothing on screen. *There is no
+picture* is true at startup, true after Close Media, **false throughout a file change** —
+because the viewer holds the outgoing frame until the incoming one lands — and true when an
+open failed.
+
+**THE D3D11 VIDEO DRAW IS NOW GATED ON `hasContent_`, WHICH IT WAS NOT BEFORE, AND THE GATE IS
+NOT COSMETIC.** `textureSrv_` deliberately outlives `clearFrame()` so the next media does not
+pay a texture creation, and until now the placeholder upload overwrote it — so "no frame" and
+"the texture holds something drawable" were never both true. With nothing uploaded in its
+place, drawing on `textureSrv_` alone would stretch the **outgoing file's last frame** across
+the window of a closed one.
+
+**`ViewerWidget`'s overlay fallback is no longer gated on `overlayModel_.enabled()`.** It was,
+because the only thing the composited path carried was the floating transport and bar mode had
+real widgets doing that job. The empty state is drawn in **both** transport modes now, so a
+backend that cannot draw quads can no longer present a window with no media in it whichever
+transport is selected. **Reasoned, not measured** — forcing an overlay-pipeline failure needs a
+shader that will not compile.
+
+**THE ARTWORK IS A DIFFERENT ASSET FROM THE APP ICON'S PLAY MARK, AND THE NAMES ARE CLOSE
+ENOUGH TO REACH FOR THE WRONG ONE.** `assets/interface/branding/empty-mark.svg` is the
+empty-state mark from the design package's own `Trace-App-Mockups.html`, section `screen-3`;
+`trace-play-mark.svg` is the app icon's and differs in five places — **scale 1.7 not 1.9**, a
+five-stop prism edge rather than a two-tone cyan/violet one, edge stroke 11 not 9, glow opacity
+0.42 not 0.3, specular 0.6 not 0.7. Rendering the wrong one looks almost right.
+`assets/interface/branding/` is a new working-copy folder, so `--strict` and the SVG-master
+rule cover the mark the same way they cover a control glyph.
+
+**TWO VALUES IN THE MASTER ARE ANIMATION PHASE RATHER THAN DESIGN.** The package's mockup PNG
+is a browser screenshot taken partway through an 18s loop, so **its still and its own t=0 do
+not match** — the delivered art at t=0 draws a pink edge where the published still shows cyan.
+The animation start is rotated to **150°** and the two animated glow stops carry their own
+`values[0]` as their static colour, which makes the still, the animation's t=0 and the shipped
+PNG one thing rather than three. Measured against the mockup crop composited over its own
+`#050506`: **mean absolute channel delta 0.67, max 39**, against the delivered art's own
+**1.82 / 71** at the unrotated phase.
+
+**RENDITIONS ARE 104 AND 208, NOT 24 AND 48**, because the design draws this mark at a fixed
+104 logical px — so those are the @1x/@2x pair *at its own drawn size*, exactly the convention
+the controls follow at theirs. `paintIcon` takes its candidate sizes as a parameter now, and
+every candidate is existence-checked, which subsumes the `-72` special case rather than sitting
+beside it. **`verify_trace_assets.py` demanded both new files with no edit to itself** — the
+derived set went 25 → 27 — which is the property that whole change was made for.
+
+**THE DESIGN'S SIZES ARE FIXED LOGICAL PIXELS, NOT A FRACTION OF THE WINDOW**: a 104px mark, a
+22px gap, a 14px line, `rgba(255,255,255,0.42)`, centred as a column. So the mark stays 104px
+in a 460px portrait window and in a fullscreen one. Checked against the delivered mockup rather
+than assumed — its client is 832x483 and its mark canvas measures 103, which is 104 at that
+render's 0.9917 scale.
+
+**Measured, both backends, 1920x1080 @ 59.999Hz** (so no figure here is comparable to a
+physical-panel record): mark ink **59x68** where the mockup reads 59x68 · optical offset
+**+10.5px** where the mockup reads +9.5 · hint **157x13** centred **+0.5px** · gap **45px**
+where the mockup reads 45 · **cross-backend empty window 0 differing pixels, max channel delta
+0** over the whole 1280x735 stage. The mark's own bounding box sits **9.5px right of its canvas
+centre by design** — a right-pointing triangle is balanced by eye, not by its box — so what is
+centred is the **canvas**, and the offset comes along.
+
+**Regression, against a control built from `893237c` and hash-verified** (`da670347` vs
+`020c3757`), same display, same day: 4K H.264 cadence ×3 **99.1/99.1/99.2%** with `drop 0`,
+`rephase 0` and buckets `~1x 118 / 1.5-2.5x 1` — **the control reads 99.1% with the same
+buckets and the same p50/p95/p99/max**; 4444 `scrub -SnapRelease` `target 261 shown 261 delta
+0` full-res planar, `hitch 0`, `land 0`, `release 20.6ms` against the control's 21.4; both
+lifecycle legs **40.7% moving / 0% control, identical to the control to the digit**; **25 of 25
+transitions**; `overlay.ps1` cross-backend `08-mid-drag` **0 px, max channel delta 0**, with
+`renderer d3d11 +overlay` and `renderer cpu +overlay` read off both HUDs first.
+
+**LAST SESSION'S 100.0% CADENCE FIGURE DID NOT REPRODUCE TODAY ON A BINARY BUILT FROM THAT SAME
+COMMIT.** The re-baseline recorded 4K H.264 at **100.0%** with `win 728x795` / `display
+728x410`; today the same clip through the same harness reads **99.1%** at `win 703x794` on both
+the control and the new build, and their captures are **the same size to the pixel**. So the
+machine moved, not the code — and the only reason that is known is that the control was built
+and run rather than compared against the record. **A recorded figure is a record, not a
+baseline, unless a control was taken beside it.** Note the same session's 4444 run reads
+`win 728x795`, so the opening size is media-dependent through the HUD's own wrapped height;
+quote `win` and `display` from the run itself.
+
+**`scripts/measure/emptystate.ps1` IS NEW, AND NO OTHER HARNESS CAN REACH THIS STATE** —
+`restart.ps1` takes a mandatory `-Clip`, so "what the window looks like with no media" had
+never been measured here at all. Four modes: `launch` (geometry against the design's own
+proportions), `transport` (the panel must still draw over the empty state — the empty-state
+half of the D3D11 quad-loop regression check, since step 3 adds a case to that loop; **459x83
+on both backends**, the settled panel), `close` (Ctrl+W; **both legs read**, because a check
+that only looks at the second one passes on a build that never draws a frame), and `swap` (two
+opens; **57 samples across the change, every one showing a picture, the mark never appearing**).
+
+Three things it cost to get right, each a repeat of something this project already knows.
+**The mark is found by its colour and the hint by the absence of colour**, never by a layout
+constant — the prism is strongly chromatic and the hint is exactly neutral. **The menu bar
+defeats both detectors at once**: its labels are subpixel-antialiased, so "File Edit View
+Window Help" is a row of strongly *chromatic* pixels, and its background is a lit neutral; the
+first run reported a 670x398 "mark" that was the menu bar. And **"the stage is the black part"
+is true only of the state the script was first pointed at** — §4 shapes the window to the
+media, so with a clip open a frame reaches all four edges, there is no black row anywhere, and
+the stage finder returned −1 and indexed off the bitmap. It locates the menu bar's own bottom
+edge now, and the hint is scanned in a band **below the mark** rather than across the stage, so
+no other neutral-lit thing — a groove, a border, a toast — can join its bounding box.
+
+**The swap detector was proven able to fire before its negative result was believed.** It keys
+on a *mark-sized chromatic object* rather than on a coverage band, because a coverage threshold
+cannot tell a 59x68 mark from a mostly-dark frame with something colourful in one corner. Run
+over a real empty-state capture it reads **bbox 58x68, count 556, fires: True**; run over 57
+samples of an actual file change it never fired once.
+
+**THE PRISM ANIMATION IS NOT BUILT, AND THE HANDOFF'S PREMISE FOR IT NEEDS CORRECTING.** The
+roadmap called it "a small gradient animator (a `QVariantAnimation` on the stops, or a tiny
+shader)". That is true only if the mark is drawn as **QPainter paths and gradients in code** —
+which is a *different shipping decision* from the one taken here, not a layer on top of it. The
+mark ships as committed PNG renditions embedded through the `.qrc`; re-authoring it as vectors
+would leave those files embedded-and-unused, which is "artwork follows behaviour" pointing the
+other way, and would give one mark two sources of truth. Animating the PNG instead means either
+recolouring it at draw time — which is neither the design's spatial gradient rotation nor its
+glow hue cycle — or committing a multi-phase sprite sheet, which at a smooth 18s roll is orders
+of magnitude larger than the art it animates. **An owner decision, not a tidy-up.** What still
+holds if it is ever built: **one place must decide both "the empty state is showing" and "the
+animation is running"**, and that place already exists — `rebuildEmpty`'s `mediaPresent_`
+branch, where the image is dropped and its revision bumped.
+
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
 phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The
@@ -3091,6 +3230,18 @@ groove rather than trying to find it mid-clip.
 - **A stride-unaware `LockBits` pixel diff walks row padding and invents differences.** It
   reported 399 differing pixels at max delta 171 on four unrelated files — **identical figures
   across unrelated inputs is the tell.** Compare only the first `width*4` bytes of each row.
+- **XML forbids a double hyphen inside a comment, and that now covers the SVG masters as well
+  as `app/resources.qrc`.** resvg enforces it where some renderers do not, so a comment written
+  in this project's usual voice fails the rasteriser rather than the build.
+- **To rasterise an SVG on this box, `pip install resvg-py`.** There is no `magick`, `inkscape`
+  or `rsvg-convert`; `cairosvg` installs and then cannot load a cairo DLL, because the pycairo
+  wheel links cairo statically into its own `.pyd` and leaves nothing for `cairocffi` to open.
+  `resvg_py.svg_to_bytes(svg_path=..., width=N, height=N)` returns PNG bytes and handles
+  gradients and `mix-blend-mode`.
+- **A control binary copied out of `build/app/Release` will not start.** It has no Qt DLLs
+  beside it, and the failure arrives as a modal "Qt6Widgets.dll was not found" box that then
+  sits on top of the next capture. Check out the parent commit and rebuild in the same build
+  directory instead, and verify the swap by hash.
 - **Benchmark the libraries you ship, at the settings you ship, and subtract what your harness
   serializes that the reference overlaps.** Two 8K figures in this repo were wrong for the first
   reason and one for the second.

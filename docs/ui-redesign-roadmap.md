@@ -68,18 +68,39 @@ the HUD in a pixel capture; the six direct-launch HUD-reading scripts set it the
 `dpimove.ps1` forces it so `-HideHud`'s `h` press still means "hide". The re-baseline was
 taken with the flip in (see the session block in `CLAUDE.md`).
 
-### 3. Polished empty state
+### 3. Polished empty state — **STATIC STATE DONE 2026-08-18 (`72aa9ac`); the idle animation is NOT built**
 
-**Low risk, with one condition.** The renderer already owns the whole paint including the
-no-frame placeholder, so this is renderer work on **both** backends — CPU and D3D11 — and the
-cross-backend comparison applies.
+Built as a **fourth image in `OverlayModel`**, beside the atlas, the rate text and the toast,
+emitted **outside both gates** in `buildFrame` — outside the opacity gate like the toast, so it
+cannot fade, and outside `enabled_`, so it survives `TRACE_TRANSPORT_BAR=1`. It therefore
+**removes a duplication rather than adding one**: the literal and its drawing code existed
+independently in `CpuImageRenderer` and `D3D11VideoRenderer`, and not even as the same
+mechanism (a `drawText` on one, a window-sized uploaded texture on the other).
+`setPlaceholderText` and `ViewerWidget::setCenterText` are gone with it; the latter had no
+callers at all.
 
-**Flag — the idle animation.** The design package's "prism" animation is SVG SMIL, which Qt's
-SVG module does not play and which Trace does not link anyway. In-app it needs a small gradient
-animator. That is fine *while no media is loaded*, but the animation timer must be **stopped the
-moment media opens**, not merely hidden. A timer left running during playback is exactly the
-kind of thing that costs a frame budget on the heaviest file and is invisible on the lightest.
-Honour reduced-motion by holding static.
+Measured on both backends at 1920x1080 @ 59.999Hz, against the design package's own mockup:
+mark ink **59x68** (mockup 59x68), optical offset **+10.5px** (mockup +9.5), hint **157x13**
+centred **+0.5px**, gap **45px** (mockup 45). Cross-backend empty window **0 differing pixels,
+max channel delta 0**. Harness: `scripts/measure/emptystate.ps1`, four modes — no other script
+in that directory can reach this state, because `restart.ps1` takes a mandatory `-Clip`.
+
+**Flag, REVISED — the idle animation is not the cheap thing the handoff assumed, and the two
+approaches are ALTERNATIVES rather than layers.** The original note said it "needs a small
+gradient animator (a `QVariantAnimation` on the stops, or a tiny shader)". That is true only if
+the mark is drawn as **QPainter paths and gradients in code**, which is a different shipping
+decision from the one taken here: the mark ships as committed PNG renditions embedded through
+the `.qrc`, and re-authoring it as vectors would make those files embedded-and-unused — the
+"artwork follows behaviour" rule pointing the other way. Animating the PNG instead means either
+recolouring it at draw time (which is neither the design's spatial gradient rotation nor its
+glow hue cycle) or committing a multi-phase sprite sheet, which at a smooth 18s roll is orders
+of magnitude larger than the art it animates. **This is an owner decision, not a tidy-up.**
+
+What still holds if it is ever built: **one place must decide both "the empty state is showing"
+and "the animation is running"**, and that place already exists — `rebuildEmpty`'s
+`mediaPresent_` branch, which is where the image is dropped and its revision bumped. A timer
+started or stopped anywhere else is the failure this flag was written about. Reduced motion
+holds static.
 
 ### 4. Edge-to-edge media — **STATUS BAR DONE 2026-08-17 (`5ff6431` + `c63aba4`); menu bar deliberately left for step 7**
 
