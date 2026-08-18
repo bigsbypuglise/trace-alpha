@@ -186,9 +186,26 @@ function Find-Stage([System.Drawing.Bitmap]$b) {
     # hint's band is bounded by the MARK's own bounding box rather than by this:
     # a bound that lands above the docked bar cannot sweep a lit border row into
     # anything.
+    # THE THRESHOLD IS 3, NOT 12, AND UI REDESIGN ROADMAP STEP 5 IS WHY.
+    #
+    # Step 5's transport is an edge-to-edge strip whose background is a
+    # TRANSLUCENT DARK gradient -- rgba(16,16,18,0.34..0.55). Over the empty
+    # state's black stage that composites to row means of 6 to 10, which is
+    # under the old threshold, so the very first row tested passed as
+    # "essentially black" and the bound stopped at the bottom of the client with
+    # the whole strip inside the stage. The mark scan then swept the strip's
+    # ACCENT -- the first strongly chromatic thing the transport has ever had --
+    # into the mark's bounding box and reported a 433x377 mark against the
+    # design's 59x68, on a build whose empty state is visibly correct.
+    #
+    # Measured on the closed capture, sampled columns, at the strip's top edge:
+    # the stage reads exactly 0.00 and the strip's own rows read 6.00 to 10.77.
+    # 3 sits between them with room on both sides. This is the same trap the two
+    # notes above record, arriving a third time from the same end -- a detector
+    # meeting chrome it was not written for.
     $bottom = $b.Height - 1
     for ($y = $b.Height - 1; $y -gt $top; $y--) {
-        if ((& $rowMean $y) -lt 12) { $bottom = $y; break }
+        if ((& $rowMean $y) -lt 3) { $bottom = $y; break }
     }
     return @{ top = $top; bottom = $bottom }
 }
@@ -340,11 +357,21 @@ switch ($Mode) {
         $w = $x1 - $x0 + 1; $hgt = $y1 - $y0 + 1
         Write-Output ("transport  revealed region {0}x{1} at {2},{3} (client {4}x{5})" -f
             $w, $hgt, $x0, $y0, $box.w, $box.h)
-        # The settled 460x84 panel, allowing for the 2px scan stride and the
-        # panel's own soft edge. A pass here on a build whose quad loop draws
-        # nothing is impossible, which is the point.
-        if ($w -lt 380 -or $w -gt 540 -or $hgt -lt 60 -or $hgt -gt 120) {
-            Write-Output "FAIL: revealed region is not the 460x84 transport panel"; $fail++
+        # THE EDGE-TO-EDGE 56px STRIP as of UI redesign roadmap step 5, which
+        # replaced the 460x84 panel this used to assert. The height is the
+        # design's; the width is the window's, so it is checked against the
+        # measured client rather than against a band -- a width band would now
+        # be asserting the window size.
+        #
+        # The top chrome does NOT contaminate this scan even though it reveals
+        # on the same state: with no media open the host holds it up
+        # permanently, so it is present in the hidden capture too and cancels.
+        # A pass here on a build whose quad loop draws nothing is impossible,
+        # which is the point.
+        if ($hgt -lt 44 -or $hgt -gt 72) {
+            Write-Output "FAIL: revealed region is not the 56px transport strip"; $fail++
+        } elseif ($w -lt ($box.w - 40)) {
+            Write-Output ("FAIL: strip is {0} wide against a {1} client; it should be edge to edge" -f $w, $box.w); $fail++
         }
     }
 }

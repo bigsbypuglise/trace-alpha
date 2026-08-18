@@ -82,6 +82,7 @@ $w = $r.R - $r.L
 $cx = $r.L + [int]($w / 2)
 $panelTop = 0; $panelLeft = 0; $panelH = 0; $panelW = 0
 $iconY = 0; $trackY = 0; $playX = 0; $rewX = 0; $ffX = 0
+$startX = 0; $endX = 0; $muteX = 0; $shareX = 0; $fullX = 0; $trackX0 = 0
 
 # THE TOP CHROME REVEALS WITH THE PANEL, SO THE DIFFERENCE IS NO LONGER ONE
 # REGION (UI redesign roadmap step 7). Both fade in on the same reveal state, so
@@ -162,28 +163,64 @@ Shot "02-revealed"
 # Everything below aims at the panel that just appeared.
 $panel = LocatePanel (Join-Path $OutDir "01-hidden.png") (Join-Path $OutDir "02-revealed.png")
 if ($null -eq $panel) { Write-Output "OVERLAY: FAIL - panel not found between hidden and revealed"; exit 1 }
-if ($panel.h -lt 68 -or $panel.h -gt 108 -or $panel.w -lt 400 -or $panel.w -gt 540) {
-    Write-Output ("OVERLAY: FAIL - located region {0}x{1} is not the 460x84 panel" -f $panel.w, $panel.h)
+# THE PANEL IS AN EDGE-TO-EDGE STRIP AS OF UI REDESIGN ROADMAP STEP 5, so what
+# is asserted changed shape as well as size: the height is the design's 56
+# logical px and the WIDTH is however wide the window is. Checking a width band
+# the way the 460px panel was checked would now be checking the window size, so
+# the width is asserted against the captured window instead -- which is the
+# property that actually distinguishes "the strip drew" from "something else
+# did".
+#
+# The height tolerance is wide at the bottom because the strip's top row is its
+# 7%-alpha border, which over a dark frame can be within the difference
+# threshold and get clipped off the located box.
+$expectedW = $r.R - $r.L
+if ($panel.h -lt 44 -or $panel.h -gt 68) {
+    Write-Output ("OVERLAY: FAIL - located region {0}x{1} is not the 56px transport strip" -f $panel.w, $panel.h)
+    exit 1
+}
+if ($panel.w -lt ($expectedW - 40)) {
+    Write-Output ("OVERLAY: FAIL - strip is {0} wide against a {1} window; it should be edge to edge" -f $panel.w, $expectedW)
     exit 1
 }
 $panelTop = $panel.y; $panelLeft = $r.L + $panel.x; $panelH = $panel.h; $panelW = $panel.w
 $panelCx = $r.L + $panel.x + [int]($panel.w / 2)
-# EVERY FRACTION HERE COMES FROM OverlayModel::layout() AND IS EXPRESSED AS A
-# FRACTION OF THE MEASURED PANEL, never as a logical pixel count. The panel is
-# located by difference and its size measured, so a fraction of it is
+# EVERY OFFSET HERE COMES FROM OverlayModel::layout() AND IS EXPRESSED AS A
+# MULTIPLE OF THE MEASURED STRIP HEIGHT, never as a logical pixel count. The
+# strip is located by difference and its height measured, so a multiple of it is
 # dpr-independent by construction -- which an absolute offset is not, and which
 # is why this script spent a whole phase aiming 1.2px outside every control.
 #
-# Spec phase 6 moved all four: the row centre 0.30 -> 0.36 and the track
-# 0.72 -> 0.76 as the panel grew to hold a 44px play control, and the
-# centre-to-centre gap became (44+34)/2 + 22 = 61 of the 460 panel = 0.1326.
-$iconY  = $r.T + $panelTop + [int]($panelH * 0.36)
-$trackY = $r.T + $panelTop + [int]($panelH * 0.76)
-$playX = $panelCx
-$rewX  = $panelCx - [int]($panelW * 0.1326)
-$ffX   = $panelCx + [int]($panelW * 0.1326)
-Write-Output ("OVERLAY panel {0}x{1} at ({2},{3}) - icons y={4}, rew/play/ff x={5}/{6}/{7}" -f `
-    $panelW, $panelH, $panel.x, $panelTop, ($iconY - $r.T), ($rewX - $r.L), ($playX - $r.L), ($ffX - $r.L))
+# It is a multiple of the HEIGHT rather than a fraction of the width now,
+# because step 5's strip is edge to edge: its controls are pinned at a fixed
+# distance from each end and do not move when the window is resized, so a
+# fraction of the width would drift with the window and hit nothing. Every
+# figure below is (logical px from that end) / 56.
+#
+#   pad 14 + util 36 + gap 2 + play 40, all from layout():
+#     go-to-start  14 + 18                 =  32 -> 0.5714
+#     rewind       14 + 38 + 18            =  70 -> 1.2500
+#     play         14 + 76 + 20            = 110 -> 1.9643
+#     fast-forward 14 + 76 + 42 + 18       = 150 -> 2.6786
+#     go-to-end    14 + 76 + 42 + 38 + 18  = 188 -> 3.3571
+#     mute         + 38                    = 226 -> 4.0357
+#   and from the RIGHT edge, share outermost:
+#     share        14 + 18                 =  32 -> 0.5714
+#     fullscreen   14 + 36 + 12 + 1 + 12 + 18 = 93 -> 1.6607
+$iconY  = $r.T + $panelTop + [int]($panelH * 0.5)
+# The track shares the strip's centre line now; it is no longer a separate row.
+$trackY = $iconY
+$startX = $panelLeft + [int]($panelH * 0.5714)
+$rewX   = $panelLeft + [int]($panelH * 1.2500)
+$playX  = $panelLeft + [int]($panelH * 1.9643)
+$ffX    = $panelLeft + [int]($panelH * 2.6786)
+$endX   = $panelLeft + [int]($panelH * 3.3571)
+$muteX  = $panelLeft + [int]($panelH * 4.0357)
+$shareX = $panelLeft + $panelW - [int]($panelH * 0.5714)
+$fullX  = $panelLeft + $panelW - [int]($panelH * 1.6607)
+Write-Output ("OVERLAY strip {0}x{1} at ({2},{3}) - icons y={4}, start/rew/play/ff/end/mute x={5}/{6}/{7}/{8}/{9}/{10}, full/share x={11}/{12}" -f `
+    $panelW, $panelH, $panel.x, $panelTop, ($iconY - $r.T), ($startX - $r.L), ($rewX - $r.L), ($playX - $r.L), `
+    ($ffX - $r.L), ($endX - $r.L), ($muteX - $r.L), ($fullX - $r.L), ($shareX - $r.L))
 
 # 3. hover the Play control
 Pt $playX $iconY; Start-Sleep -Milliseconds 350
@@ -211,9 +248,16 @@ Tap $rewX $iconY
 Shot "07-after-one-rewind"
 
 # 6. timeline drag
-Pt ($panelLeft + 40) $trackY
+#
+# IT STARTS PAST THE BUTTON CLUSTER AND THE POSITION READOUT, which the old
+# `$panelLeft + 40` no longer clears: on the 460px panel the track began 24px in,
+# and on the strip the first 244+ logical px are buttons and the readout. A drag
+# beginning there would press Go to Start and then sweep the pointer across the
+# rest of the row, which reads as a passing drag and tests nothing.
+$trackX0 = $panelLeft + [int]($panelH * 5.5)
+Pt $trackX0 $trackY
 [O]::mouse_event([O]::DOWN,0,0,0,[IntPtr]::Zero); Start-Sleep -Milliseconds 150
-for ($i = 0; $i -lt 12; $i++) { Pt ($panelLeft + 40 + $i * 30) $trackY }
+for ($i = 0; $i -lt 12; $i++) { Pt ($trackX0 + $i * 30) $trackY }
 Shot "08-mid-drag"
 [O]::mouse_event([O]::UP,0,0,0,[IntPtr]::Zero); Start-Sleep -Milliseconds 700
 Shot "09-after-drag"
@@ -225,7 +269,91 @@ Shot "10-after-key"
 $fg = [O]::GetForegroundWindow()
 Write-Output ("OVERLAY foreground-is-main-window: {0}" -f ($fg -eq $h))
 
-# 8. fade out by leaving
+# 8. THE FOUR CONTROLS UI REDESIGN ROADMAP STEP 5 ADDED, each asserted by an
+# observable rather than by "the click did not crash".
+#
+# Go to Start and Go to End are checked by MEASURING THE PLAYED TRACK, which is
+# the one thing on the strip that says where the playhead is and is readable
+# without OCR: the accent runs from the track's left edge to the thumb, so it is
+# ~0% of the track at frame 0 and ~100% at the last frame. Mute is checked by
+# the mute cell's own pixels changing, because the glyph swaps between volume
+# and volume-muted -- a click that did nothing would leave them identical.
+#
+# Each has a NEGATIVE half by construction: Go to End must move the fill UP and
+# Go to Start must bring it back DOWN, so a build whose buttons do nothing fails
+# both rather than passing one by accident.
+function AccentFraction([string]$png) {
+    $bmp = [System.Drawing.Bitmap]::FromFile($png)
+    try {
+        $y = $trackY - $r.T
+        if ($y -lt 0 -or $y -ge $bmp.Height) { return -1.0 }
+        $x0 = $trackX0 - $r.L
+        $lit = 0; $seen = 0
+        for ($x = $x0; $x -lt $bmp.Width; $x++) {
+            $c = $bmp.GetPixel($x, $y)
+            # #5AC8E8 with room for the alpha it is composited at.
+            $isAccent = ([math]::Abs($c.R - 0x5A) -lt 46) -and ([math]::Abs($c.G - 0xC8) -lt 46) `
+                        -and ([math]::Abs($c.B - 0xE8) -lt 46) -and ($c.B -gt $c.R + 20)
+            $seen++
+            if ($isAccent) { $lit++ }
+        }
+        if ($seen -le 0) { return -1.0 }
+        return [math]::Round($lit / $seen, 3)
+    } finally { $bmp.Dispose() }
+}
+
+Pt $playX $iconY; Start-Sleep -Milliseconds 200
+Tap $endX $iconY; Start-Sleep -Milliseconds 700
+Shot "13-after-go-to-end"
+$fracEnd = AccentFraction (Join-Path $OutDir "13-after-go-to-end.png")
+Tap $startX $iconY; Start-Sleep -Milliseconds 700
+Shot "14-after-go-to-start"
+$fracStart = AccentFraction (Join-Path $OutDir "14-after-go-to-start.png")
+Write-Output ("OVERLAY go-to-end/start played-track fraction: {0} -> {1}" -f $fracEnd, $fracStart)
+if ($fracEnd -lt 0 -or $fracStart -lt 0) {
+    Write-Output "OVERLAY: FAIL - could not sample the played track"
+} elseif ($fracEnd -lt 0.55) {
+    Write-Output ("OVERLAY: FAIL - Go to End left the played track at {0}" -f $fracEnd)
+} elseif ($fracStart -gt 0.12) {
+    Write-Output ("OVERLAY: FAIL - Go to Start left the played track at {0}" -f $fracStart)
+} else {
+    Write-Output "OVERLAY go-to-end / go-to-start: PASS"
+}
+
+Tap $muteX $iconY; Start-Sleep -Milliseconds 450
+Shot "15-after-mute"
+Tap $muteX $iconY; Start-Sleep -Milliseconds 450
+Shot "16-after-unmute"
+# COMPARED AGAINST THE OTHER HOVERED STATE, NOT AGAINST THE ONE BEFORE THE
+# POINTER ARRIVED -- and the first version of this check got that wrong in a way
+# that PASSED. Sampling 15 against 14 reads 625 of 625 changed pixels, because
+# moving the pointer onto the control raises its hover plate and brightens its
+# glyph: the region changes completely whether or not the click did anything, so
+# the assertion would hold on a build where Mute is inert. 15 and 16 are both
+# taken with the pointer on the control and differ only in the muted state, so
+# what is left is the glyph swap and nothing else.
+$muteDelta = 0
+$b14 = [System.Drawing.Bitmap]::FromFile((Join-Path $OutDir "16-after-unmute.png"))
+$b15 = [System.Drawing.Bitmap]::FromFile((Join-Path $OutDir "15-after-mute.png"))
+try {
+    $mx = $muteX - $r.L; $my = $iconY - $r.T
+    for ($dy = -12; $dy -le 12; $dy++) {
+        for ($dx = -12; $dx -le 12; $dx++) {
+            $p1 = $b14.GetPixel($mx + $dx, $my + $dy); $p2 = $b15.GetPixel($mx + $dx, $my + $dy)
+            if ([math]::Abs($p1.R - $p2.R) + [math]::Abs($p1.G - $p2.G) + [math]::Abs($p1.B - $p2.B) -gt 24) {
+                $muteDelta++
+            }
+        }
+    }
+} finally { $b14.Dispose(); $b15.Dispose() }
+Write-Output ("OVERLAY mute glyph changed pixels (hovered vs hovered): {0} of 625" -f $muteDelta)
+if ($muteDelta -lt 20) {
+    Write-Output "OVERLAY: FAIL - the mute button did not change its glyph"
+} else {
+    Write-Output "OVERLAY mute: PASS"
+}
+
+# 9. fade out by leaving
 Pt ($r.L + 30) ($r.B - 30)
 Start-Sleep -Milliseconds 400
 Shot "11-fading"
