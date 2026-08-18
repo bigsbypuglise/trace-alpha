@@ -202,6 +202,42 @@ difference between deriving and duplicating, and it is the only case that would 
 old version. It also closed a recorded soft spot: the state-suffix test strips the size first
 now, so `play-hover-24.png` fails where it previously only warned.
 
+**THE 260817 UI v2 ASSET SWAP IS IN (2026-08-17, three commits), AND THE REDESIGN IT PREVIEWS
+IS NOT STARTED.** The owner's UI roadmap is annotated at `docs/ui-redesign-roadmap.md` — read
+it before any UI work. The delivered package is committed untouched at
+`assets/source/260817-trace-ui-v2/` (**renamed before first commit from a folder name
+containing a backtick**, PowerShell's escape character — any harness referencing the old path
+would have misbehaved). The ten glyphs and the app-icon PNG/SVG sets were swapped in place —
+same names, same sizes, **no `.qrc` or code change**, one revertable commit — and
+`trace.ico`/`trace.icns` were compiled from the delivered PNG sets since the package declares
+them absent: five PNG-compressed ICO entries (16/24/32/48/256) and seven ICNS PNG entries,
+**mirroring the existing containers' structure exactly** rather than inventing a layout.
+`volume` and `loop` stay in `source/` only — the features do not exist, and `--strict` failing
+on them in `assets/interface/` is the "artwork follows behaviour" rule enforcing itself.
+
+Three things to carry.
+
+- **Verification went to the built binary, not the tree**: `--app-icon --strict` exit 0, and
+  the five ICO payloads plus the new glyphs confirmed **inside `Trace.exe`** by byte search —
+  `rcc` stores PNGs uncompressed, so the embedded bytes are the file bytes and a negative
+  search would have meant a stale embed.
+- **The cross-backend comparison passed with no pixel-snapping work**: `overlay.ps1` on both
+  renderers reads `08-mid-drag` **0 px, max channel delta 1** — the recorded standard — so the
+  new art inherits the layout's pixel snap; `banddiff.ps1` in bar mode reads 0.12%/max 29,
+  which is the video band's own backend class, not the artwork. Display that session was
+  1920x1080 @ 59.999Hz; figures are not comparable to physical-panel records.
+- **`powershell -File script.ps1 -Env "A=1","B=2"` FLATTENS THE ARRAY, and the first diff
+  compared cpu with cpu and read a perfect 0.** The mangled token gave `TRACE_RENDERER` an
+  unknown value (warns, falls back to cpu) and swallowed `TRACE_TRANSPORT_BAR` entirely — both
+  "backends" ran `renderer cpu +overlay`, and the check exonerated the build wrongly, the
+  harder direction to notice. Caught by reading the HUD's `renderer` field off both captures.
+  Invoke `restart.ps1` with `&` from inside PowerShell so the array survives, and **read
+  `renderer` off both HUDs before believing any cross-backend diff.**
+
+**Roadmap steps 2 and 4 (HUD off by default, removing chrome) change the video rect and every
+stall figure with it** — they need their own commit and a one-time re-baseline, done together,
+as the roadmap's cross-cutting section spells out. That is the next session's decision.
+
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
 phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The

@@ -1,4 +1,35 @@
-# v0.2.0-beta.1 IS SHIPPED. NO OPEN OWNER DECISION.
+# v0.2.0-beta.1 IS SHIPPED. THE OPEN PHASE IS THE OWNER'S UI REDESIGN ROADMAP.
+
+## 2026-08-17: THE 260817 UI v2 ASSET SWAP IS DONE — THE REDESIGN IS NOT STARTED
+
+The owner's roadmap arrived and is annotated at **`docs/ui-redesign-roadmap.md`** — read it
+before doing any UI work; the flags name where a step re-opens a signed-off decision or moves
+a recorded baseline. This session did **only the asset swap**, in three commits: the delivered
+package committed untouched at `assets/source/260817-trace-ui-v2/` (renamed from a folder name
+containing a backtick — PowerShell's escape character); the ten glyphs and app-icon PNG/SVG
+sets swapped in place with **no `.qrc` or code change**; `trace.ico`/`trace.icns` compiled from
+the delivered PNG sets mirroring the existing container structure. `volume`/`loop` stayed in
+`source/` only — those features do not exist and `--strict` fails on them on purpose.
+
+Verified: asset check `--app-icon --strict` exit 0 · build green, new payloads confirmed inside
+the built exe by byte search · cross-backend `overlay.ps1` `08-mid-drag` **0 px, max delta 1**
+(no pixel-snapping needed) · `banddiff.ps1` bar mode 0.12%/max 29, the video band's own class.
+
+**Steps 2 and 4 of the roadmap change the video rect and every stall figure with it. They need
+their own commit and a one-time re-baseline, done together and early — that is the next
+session's first decision, not something to drift into.**
+
+**One harness trap found and it generalises: `powershell -File script.ps1 -Env "A=1","B=2"`
+flattens the array into one garbage token.** `TRACE_RENDERER` got an unknown value and fell
+back to cpu, `TRACE_TRANSPORT_BAR` was swallowed, and the first "cross-backend" diff compared
+cpu with cpu and read a perfect 0 — an instrument *exonerating* wrongly, which is the harder
+direction to notice. Caught by reading `renderer cpu +overlay` off both HUDs. Invoke
+`restart.ps1` with `&` from inside PowerShell so the array survives, and **read the HUD's
+`renderer` field off both captures before believing any cross-backend diff.**
+
+---
+
+# Previous state (2026-08-15): v0.2.0-beta.1 shipped, no open owner decision at that time.
 
 ## 2026-08-15, SECOND SESSION: THE TWO DECK-CLEARING ITEMS ARE DONE
 
