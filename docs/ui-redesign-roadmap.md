@@ -385,7 +385,7 @@ cursor hides after inactivity. Note the cursor is hidden by *two different mecha
 two backends (`Qt::BlankCursor` on CPU, `SetCursor(nullptr)` answering `WM_SETCURSOR` on D3D11),
 so `GetCursorInfo` sees only one of them — verify by the handle, not the flag.
 
-### 10. Windows 11 visual conversion - **THE TYPOGRAPHY HALF IS DONE (2026-08-18, `d91f026`). THE BLUR IS ANSWERED AND DEFAULT-OFF: MICA/ACRYLIC CANNOT DO IT, ROUTE 2 CAN**
+### 10. Windows 11 visual conversion - **DONE 2026-08-18. Typography `d91f026`; the blur SHIPS ON at `a4c6bb2`, honouring Windows' transparency setting. Mica/Acrylic cannot do it, route 2 can**
 
 **DWM BACKDROP EFFECTS REACH THE TITLE BAR AND NOTHING ELSE.** Applied to Trace's live main
 window: `DwmExtendFrameIntoClientArea(-1)`, `DWMWA_SYSTEMBACKDROP_TYPE` at all four values, the
@@ -402,7 +402,7 @@ blur()`, which blurs what is behind the **ELEMENT** - the video. They are differ
 value of `DWMWA_SYSTEMBACKDROP_TYPE` turns one into the other. This would hold even if the client
 area were reachable, which is why it is the durable half of the finding.
 
-**ROUTE 2 IS BUILT AND MEASURED FLAT (`efa3160`), `TRACE_STRIP_BACKDROP=1`, DEFAULT OFF.** The
+**ROUTE 2 IS BUILT AND MEASURED FLAT (`efa3160`), AND IT SHIPS ON AS OF `a4c6bb2`.** The
 strip paints a tiny blurred copy of the video it covers as its own background, under the package's
 own `rgba(22,22,24,0.66)` -> `0.04` scrim - so the design's look is reached **while the menu bar
 stays a real `QMenuBar` in a real native window**, which is what route 1 (redraw the strip as
@@ -474,11 +474,18 @@ and `scripts/measure/backdropcost.ps1`.
 **Note the table measures the WORST case deliberately** -- holding the chrome revealed throughout
 defeats the gate on purpose, so it is an upper bound rather than a typical cost.
 
-**Whether to SHIP it is still an owner decision.** It is default-off and separately revertable
-(the revert was applied and the reverted tree built, rather than assumed); the solid `#14161A`
-remains the fallback and is what ships today. **DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`)
-and rebuilding the strip as video quads are both explicitly NOT being pursued** (owner,
-2026-08-18).
+**IT SHIPS ON (owner, 2026-08-18, `a4c6bb2`), AND IT HONOURS WINDOWS' TRANSPARENCY SETTING WHILE
+DOING SO.** `TRACE_STRIP_BACKDROP` is three-valued now -- `0` forces off (the rollback), `1`
+forces on (the override), unset reads
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency`.
+**That is the design package's own instruction rather than an addition to it**: it supplies the
+solid `#14161A` as "the fallback when transparency effects are disabled in Windows Settings", so
+it already expected the setting to be read, and honouring it is what makes the Fluent direction
+Windows-**native** rather than Windows-looking. The registry read is **tri-state**, because a
+wrong key path and a machine that has never touched the toggle produce the same boolean -- the
+dev HUD's `backdrop` field prints `on` against `on (unset)` so the two are different readings.
+Full record in `CLAUDE.md`. **DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`) and rebuilding the
+strip as video quads are both explicitly NOT being pursued** (owner, 2026-08-18).
 
 **So the rest of step 10 is typography and spacing, which carry no playback risk** - exactly what
 the original flag anticipated as the fallback.
@@ -560,18 +567,90 @@ follows behaviour" pointing the wrong way.
 Original flag, retained: fonts and spacing carry no playback risk. Segoe UI Variable is a safe
 default on Windows 11.
 
-### 11. Validate across both backends
+### 11. Validate across both backends - **DONE 2026-08-18. CONSOLIDATED, NOT REPEATED, AND IT FOUND ONE DEFECT**
 
-**No flag — and this is the step most likely to be skipped, so treat it as mandatory.** The
-current icon set differed between backends on **8.1% of the play glyph's pixels at max delta 29**
-purely from two resamplers reconstructing the same art at a fractional offset, until the layout
-was pixel-snapped. `overlay.ps1` and `banddiff.ps1` exist for this; take backend diffs in **bar
-mode**, because the floating overlay's fade state otherwise lands inside the band and read 9.1%
-on the first attempt.
+Display: **physical panel, 5120x1440 @ 239.999Hz**, so no figure here compares to the step 7
+block's 1920x1080 record. `renderer` was read off both HUDs before any cross-backend figure was
+believed -- `d3d11 +overlay` and `cpu +overlay`, both `backdrop on`.
 
-**Note the DPI line has changed since this roadmap was written**: 125% and 175% were withdrawn
-by owner decision on 2026-08-15 and the second display is disconnected. 100% and 150% are
-validated on hardware. Do not re-propose the rest.
+**MOST OF THIS STEP WAS ALREADY DONE INCREMENTALLY, AND THE JOB WAS TO FIND WHAT WAS NOT.** Every
+step since 2 took a cross-backend comparison, so the audit came first and the run only closed
+what it left. What the audit found is that **`abdiff.ps1` samples rows 6%..46% of the capture --
+the VIDEO band -- so it cannot see either strip, the empty state or the toast.** Every
+"cross-backend" figure taken with it is a statement about the picture, not about the chrome. That
+is why the chrome had to be compared separately, and it is the single most useful thing this step
+established.
+
+**THE HEADLINE: THE ENTIRE EMPTY-STATE WINDOW WITH BOTH STRIPS REVEALED READS 0 OF 972,800 PIXELS
+DIFFERING AT TOLERANCE 0, MAX CHANNEL DELTA 0.** That is the top strip, the brand mark and
+wordmark, the real `QMenuBar`, the filename, the prism mark and its hint, and the whole
+edge-to-edge transport with all ten controls, its timeline and both readouts -- byte-identical
+across renderers in one measurement. It subsumes the separate step 3, 5, 7 and 10 chrome claims
+at the current geometry. **Taken over the empty state, per step 5's own rule**, because a diff
+taken over video cannot see a translucent strip.
+
+**What each surface reads:**
+
+| surface | figure | note |
+|---|---|---|
+| whole empty-state window, both strips up | **0 of 972,800 px, delta 0** | tolerance 0 |
+| top strip band alone | 0 of 48,640 px, delta 0 | |
+| bottom transport strip alone | 0 of 70,400 px, delta 0 | |
+| popup menu body (View) | **0 of 94,944 px, delta 0** | `themeshot.ps1` gained `-Renderer` |
+| top strip **with the backdrop drawing**, over video | 0 px above tolerance 2, **max delta 2** | better than step 10's recorded 1847 px / delta 7 |
+| transport strip over video | 1.14% above tolerance 2 | show-through, not the way to measure a strip |
+| `overlay.ps1` `08-mid-drag` | **0 px, max delta 0** | the recorded standard |
+| video band | ~10% at max delta 12 | the long-signed-off GATE B class |
+
+**SIX PIXELS ARE THE ONLY CHROME DIFFERENCE ANYWHERE, and they are worth writing down because
+they look like the fault this step exists to catch.** Over *video*, the transport band carries
+six pixels at delta 247 -- x 116..123, y 716..727, which is the play glyph's two diagonal edges:
+white on one backend, background on the other. That is superficially the "8.1% of the play
+glyph's pixels" class the original flag names. **It is not**, and the empty-state result is what
+says so: the same glyph is byte-identical there. So it is compositing residue that only shows
+over a bright background, not glyph geometry, and it is six pixels rather than hundreds.
+
+**THE OTHER LEGS, all on both backends.** §4 opening geometry, shipping configuration, all four
+shapes **identical to the pixel**: 16:9 `client 1280x720` (1.7778) - 9:16 `609x1083` (0.5623) -
+1:1 `960x960` - 4:5 `859x1074` (0.7998), matching the step 7 record. `emptystate.ps1` all four
+modes PASS on both plus the `-Bar` control, mark 59x68 / offset +10.5 / hint 169x14 / gap 44
+identical to the digit. `overlay.ps1` every leg PASS on both, played track `0.822 -> 0`, mute
+`43 of 625`, loop accent `9/89/9` on d3d11 and `9/71/9` on cpu. `uiatree.ps1` ten named transport
+controls plus MenuBar and five MenuItems, **on identical rects to the pixel**. Copy Current Frame
+returns 4096x2304 on both.
+
+**Scrub and playback on the escape hatch, which is the half most likely to have rotted:** cpu
+4444 cadence x2 **99.4%** (`drop 0`, `handler>budget 1 of 260`) against d3d11's 99.8%, and cpu 4K
+H.264 **99.2/99.2%** against 99.1/99.2% with identical buckets -- the recorded GATE C class, `sws
+16.27` against `5.09`. `scrub -SnapRelease` on 4444 lands exactly on both: `target 261 shown 261
+delta 0`, `hitch 0`, release **21.3ms** on d3d11 and **91.1ms** on cpu, which is that path's own
+recorded cost. Reversal drag 4K H.264 `delta 0` on both, `seeks 5` both, `rev-hit 97.3%` against
+97.1%, `hitch 1` against 2. **25 of 25 transitions.**
+
+**THE DEFECT IT FOUND: the composited toast was drawn entirely behind the top chrome strip**, and
+the both-backend pass is what surfaced it -- capturing the toast on each renderer produced no
+toast on either, while the clipboard demonstrably held the frame. Step 2 chose its 12px top-left
+margin while the menu bar was still in the layout; step 7 floated the chrome over the picture and
+did not move it. Fixed at `e002085` by reading `OverlayModel::setTopInset`, which gains its second
+reader. See the `CLAUDE.md` entry for why the offset is unconditional.
+
+**TWO HARNESS FACTS.** `uiatree.ps1` must be run with **the pointer parked inside the client** or
+the menu-bar half of the walk depends on the auto-hide -- a first run read `MenuBar 0` on cpu and
+`MenuBar 2` on d3d11 and looked exactly like a backend difference; held revealed, both read the
+same rects to the pixel. And **any mouse/SendKeys harness is void if another window takes the
+foreground mid-run**: an `overlay.ps1` run had its foreground stolen and reported `panel-mean 0`
+with every interaction leg failing at once, which -- like `transitions.ps1`'s 25 identical
+failures -- is a statement about the harness's inputs and not about the build.
+
+**The DPI line stands as narrowed**: 125% and 175%, hot-plug, a live scale change and three-plus
+displays were withdrawn by owner decision on 2026-08-15 and the second display is disconnected.
+100% is what this pass ran at. Do not re-propose the rest.
+
+**Original flag, retained:** the current icon set differed between backends on **8.1% of the play
+glyph's pixels at max delta 29** purely from two resamplers reconstructing the same art at a
+fractional offset, until the layout was pixel-snapped. `overlay.ps1` and `banddiff.ps1` exist for
+this; take backend diffs in **bar mode** or over the empty state, because the floating overlay's
+fade state otherwise lands inside the band and read 9.1% on the first attempt.
 
 ### 12. Frameless window — later
 

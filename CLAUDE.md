@@ -777,7 +777,7 @@ Applying it costs nothing measurable (4444 x2: 99.8%, `drop 0`, `handler>budget 
 `hitch 0`, buckets identical) but that is **a null result on a no-op** and is not evidence that a
 real transparency route would be free.
 
-**ROUTE 2 IS BUILT, DEFAULT OFF, AND MEASURED FLAT (`efa3160`): `TRACE_STRIP_BACKDROP=1`.** The
+**ROUTE 2 IS BUILT AND MEASURED FLAT (`efa3160`), AND IT SHIPS ON AS OF `a4c6bb2`.** The
 top strip paints a tiny blurred copy of the video it covers as its background, under the design
 package's own `rgba(22,22,24,0.66)` -> `0.04` scrim -- so the design's look is reached **while the
 menu bar stays a real `QMenuBar` in a real native window**, which is exactly what route 1
@@ -844,10 +844,11 @@ design's purely vertical fallback gradient, reading 0 on all six `bd=0` rows and
 chrome revealed defeats the gate on purpose. Harnesses: `scripts/measure/stripbackdrop.ps1`,
 `scripts/measure/backdropcost.ps1`.
 
-**Whether to SHIP it is an open owner decision.** It is default-off and separately revertable --
-**the revert was applied and the reverted tree built rather than assumed**. The solid `#14161A`
-remains the fallback and is what ships today. **DirectComposition and rebuilding the strip as
-video quads are both explicitly NOT to be pursued** (owner, 2026-08-18).
+**IT SHIPS ON (owner, 2026-08-18, `a4c6bb2`) AND IT HONOURS WINDOWS' TRANSPARENCY SETTING** -- see
+the entry below for the three-valued knob, the tri-state registry read and the HUD's `backdrop`
+field. The solid `#14161A` is still the fallback and is now a state a user can actually reach
+rather than a permanent condition. **DirectComposition and rebuilding the strip as video quads are
+both explicitly NOT to be pursued** (owner, 2026-08-18).
 
 **STEP 10's TYPOGRAPHY HALF IS DONE (2026-08-18, `d91f026`): `src/app/Theme.*`, one home for the
 application font, the palette and the popup-menu surface.** `main.cpp` had a hand-rolled grey
@@ -894,6 +895,128 @@ with `+10.5` offset because it is a bitmap. **A silent fallback would still read
 x2 **99.8% on both binaries**, 261 frames, `drop 0`, `rephase 0`, `handler>budget 0 of 260`,
 buckets and percentiles identical; `scrub -SnapRelease` **`target 261 shown 261 delta 0`**
 full-res planar with **`hitch 0`** on both, release 19.9 vs 21.1ms.
+
+**THE STRIP BACKDROP SHIPS ON BY DEFAULT AND HONOURS WINDOWS' TRANSPARENCY SETTING (owner,
+2026-08-18, `a4c6bb2`).** Roadmap step 10 route 2 was built default-off and left as the last open
+owner decision; the decision is to ship it. `TRACE_STRIP_BACKDROP` is **three-valued** now --
+`0` forces off (the rollback), `1` forces on (the override), **unset asks Windows**.
+
+- **HONOURING THE SETTING IS THE DESIGN PACKAGE'S OWN INSTRUCTION, NOT AN ADDITION TO IT.** The
+  package supplies the solid `#14161A` as *"the fallback when transparency effects are disabled
+  in Windows Settings"*, so it already expects the setting to be read. Until now that sentence
+  was quoted as cover for an opaque strip; it is followed literally. It is also what makes step
+  10's Fluent direction Windows-**native** rather than Windows-looking.
+- **THE REGISTRY READ IS TRI-STATE (-1/0/1) AND THAT IS THE ONLY AVAILABLE PROOF IT READS THE
+  RIGHT KEY.** A path with a typo in it and a machine that has never touched the toggle produce
+  the **same boolean**, so a build reading `on` would say nothing about whether it found
+  anything. The dev HUD's new **`backdrop`** field prints `on` / `on (unset)` / `off (windows)` /
+  `off (env)` / `on (env)` / `n/a`, and on this box it reads **`backdrop on`, not `on (unset)`**
+  -- which is what says `HKCU\...\Themes\Personalize\EnableTransparency` actually resolved. Same
+  silent-degradation class as `renderer`, `planar` and `font`: the effect is no longer decided by
+  the launch, so a run on a machine with transparency off would otherwise measure the fallback
+  while its command line said backdrop.
+- **`QSettings::NativeFormat` HERE IS REGISTRY *READING*, NOT A SETTINGS HOME.** Spec phase 11
+  rules NativeFormat out for Trace's own preferences because it leaves HKCU keys behind after a
+  portable install is deleted; that rule is about **writing**. `LucidLinkIntegration.cpp` already
+  reads the registry this way for CLSID discovery. Nothing here writes.
+- **`refreshBackdrop()` PUBLISHES NULL WHEN DISABLED RATHER THAN RETURNING EARLY**, and that
+  became load-bearing the moment the gate stopped being a launch-time constant: `TopChrome` keeps
+  the last image it was given, so a gate that merely stopped calling would leave the blur on
+  screen after the setting was turned off. One `std::function` call, which is what the reveal
+  gate beside it already pays.
+- **`WM_SETTINGCHANGE` IS THE ONLY NON-GEOMETRY MESSAGE IN `nativeEvent`, and it does not
+  return**, so Qt's own handling of the font and metric changes that message also carries is
+  untouched. 30 broadcasts with the `ImmersiveColorSet` lParam: window and client geometry
+  identical **to the pixel**, process alive, strip `hsd` unchanged at 2.792.
+
+**Measured, physical panel 5120x1440 @ 239.999Hz, against a control built from `f419957` and
+hash-verified (`0B490C0F` against `475F35C7`) and run beside every leg:** default launch with the
+variable unset reads HUD `backdrop on` and **strip `hsd` 2.787**; `=0` reads `off (env)` and
+**`hsd` 0.00** (the fallback is a purely vertical gradient, so its horizontal variation is exactly
+zero); `=1` reads `on (env)` and `hsd` 2.792. Cadence x2 each: **4K 60fps 99.9/100.0%** against
+the control's 99.9/100.0% at a **16.67ms** budget - **4444 99.8/99.8%** against 99.8/99.8% -
+**4K H.264 99.1/99.2%** against 99.1/99.2%, `drop 0`, `rephase 0`, `handler>budget 0` and
+identical buckets on all three. `scrub -SnapRelease` 4444 **`target 261 shown 261 delta 0`**
+full-res planar, `hitch 0`, `land 0`, release 21.3 against 21.1ms. `emptystate` all four modes on
+both backends plus the `-Bar` control. **25 of 25 transitions.**
+
+**STATED GAP: the `EnableTransparency=0` branch is proven by construction and by its rendering,
+not by the value itself.** The key path resolves (`backdrop on` rather than `on (unset)`), the
+value is read as a DWORD, and the off branch's *drawing* is what `TRACE_STRIP_BACKDROP=0`
+measures at `hsd 0.00` -- same null publication, same paint branch. What was **not** done is
+flipping the owner's own Windows transparency toggle unattended. One flip of Settings >
+Personalisation > Colours > Transparency effects closes it; the HUD must read `off (windows)`
+and `hsd` must read 0.00.
+
+**`scripts/measure/stripbackdrop.ps1` GAINED `-Mode shipping`**, which launches with the variable
+**unset** and the HUD on. Setting it to `1` and calling that the shipping configuration would be
+testing the override rather than the default, and the two reach the same picture by different
+branches. It prints `hsd` beside a capture carrying Trace's own `backdrop` field, and PASS
+requires the two to **agree** -- a disagreement is the gate and the drawing having different
+opinions.
+
+**ROADMAP STEP 11 IS DONE (2026-08-18): THE BOTH-BACKEND PASS, CONSOLIDATED RATHER THAN REPEATED,
+AND IT FOUND ONE DEFECT.** Full record in `docs/ui-redesign-roadmap.md` section 11. Physical
+panel, `renderer` read off both HUDs first.
+
+- **`abdiff.ps1` SAMPLES ROWS 6%..46% OF THE CAPTURE -- THE VIDEO BAND -- SO IT CANNOT SEE EITHER
+  STRIP, THE EMPTY STATE OR THE TOAST.** Every "cross-backend" figure ever taken with it is a
+  statement about the **picture**, not about the chrome. That is why the chrome had to be
+  compared separately, and it is the most useful thing the audit established.
+- **THE ENTIRE EMPTY-STATE WINDOW WITH BOTH STRIPS REVEALED READS 0 OF 972,800 PIXELS DIFFERING
+  AT TOLERANCE 0, MAX CHANNEL DELTA 0** -- top strip, brand mark, wordmark, the real `QMenuBar`,
+  the filename, the prism mark and hint, and the whole edge-to-edge transport with all ten
+  controls, its timeline and both readouts. One measurement that subsumes the separate step 3, 5,
+  7 and 10 chrome claims. Taken **over the empty state**, per step 5's own rule. The popup menu
+  body reads **0 of 94,944 px, delta 0** (`themeshot.ps1` gained `-Renderer`; it was hard-coded
+  to one backend, which is exactly how `overlay.ps1`'s cpu half went unrun for a whole phase).
+- **THE TOP STRIP WITH THE BACKDROP DRAWING, over video -- the one surface that can only be
+  compared there -- reads 0 px above tolerance 2 at max channel delta 2**, better than step 10's
+  recorded 1847 px / delta 7.
+- **SIX PIXELS ARE THE ONLY CHROME DIFFERENCE ANYWHERE AND THEY LOOK LIKE THE FAULT THIS STEP
+  EXISTS TO CATCH.** Over *video* the transport band carries six pixels at delta 247, at
+  x 116..123 / y 716..727 -- the play glyph's two diagonal edges, white on one backend and
+  background on the other. That is superficially step 11's own "8.1% of the play glyph's pixels"
+  class. **It is not, and the empty-state result is what says so**: the same glyph is
+  byte-identical there. Compositing residue that only shows over a bright background, not glyph
+  geometry, and six pixels rather than hundreds.
+- **Section 4 opening geometry is identical to the pixel on both backends, all four shapes** --
+  16:9 `1280x720`, 9:16 `609x1083`, 1:1 `960x960`, 4:5 `859x1074` -- matching the step 7 record.
+  `uiatree.ps1` finds ten named transport controls plus MenuBar and five MenuItems **on identical
+  rects to the pixel**. Copy Current Frame returns 4096x2304 on both.
+- **The escape hatch is healthy**: cpu 4444 cadence **99.4%** against d3d11's 99.8% and cpu 4K
+  H.264 **99.2/99.2%** with identical buckets -- the recorded GATE C class, `sws 16.27` against
+  `5.09`. `-SnapRelease` lands exactly on both (`delta 0`, `hitch 0`), release **21.3ms** on
+  d3d11 and **91.1ms** on cpu, that path's own recorded cost. Reversal drag `delta 0` and
+  `seeks 5` on both.
+
+**THE DEFECT: THE COMPOSITED TOAST WAS DRAWN ENTIRELY BEHIND THE TOP CHROME STRIP (fixed,
+`e002085`).** Capturing it on each renderer produced **no toast on either**, while the clipboard
+demonstrably held a 4096x2304 frame -- so the command had run and the confirmation had fired.
+The message quad is top-left with a 12px margin, chosen at step 2 while the menu bar was still in
+the **layout**; step 7 floated the chrome over the picture and did not move it. **It is not a rare
+state**: every route to a message is an input and `keyPressEvent` calls `revealOverlay()`, so the
+gesture that raises the toast raises the chrome that hides it -- invisible for the first two
+seconds of its 2.5s life. Measured both ways on one build: pointer parked **inside** the client
+(the auto-hide holds while `hover_` is a region) drew nothing; parked **outside**, the same Ctrl+C
+drew `Copied frame 0 (4096 x 2304)` 300ms later.
+
+**`OverlayModel::setTopInset` GAINS ITS SECOND READER, AND THE OFFSET IS UNCONDITIONAL.** It could
+have been gated on `chromeRevealed_`, which is right there -- but the 2s auto-hide lands in the
+middle of a 2.5s message, so a conditional offset would make the toast **jump 38px partway through
+being read**. A constant position sometimes 38px below the design's margin is the better of the
+two, and it is the same reasoning that already keeps the message outside the transport's fade.
+Both readers are chrome rather than picture, so that setter still cannot move a picture. Bar mode
+is untouched -- the message routes to the status bar on the same `barIsDocked_` gate.
+
+**TWO HARNESS FACTS FROM THE PASS.** **`uiatree.ps1` must run with the pointer parked inside the
+client**, or the menu-bar half of the walk depends on the auto-hide: a first run read `MenuBar 0`
+on cpu against `MenuBar 2` on d3d11 and **looked exactly like a backend difference**; held
+revealed, both read the same rects to the pixel. And **any mouse/SendKeys harness is void if
+another window takes the foreground mid-run** -- an `overlay.ps1` run had its foreground stolen
+and reported `panel-mean 0` with every interaction leg failing at once, which, like
+`transitions.ps1`'s 25 identical failures, is a statement about the harness's inputs and not about
+the build. Re-run before building a control.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
@@ -3496,14 +3619,20 @@ synchronous path is the comparison. **Depth 1 is worse than off** -- a depth-1 q
 overlap -- and **depth 2 is the minimum that overlaps**; the byte budget clamps 8K to 2 by
 itself. Worth ~+10% on the 8K plate and nothing on a file that already meets budget, where it
 simply moves the decode off the UI thread),
-**`TRACE_STRIP_BACKDROP=1`** (2026-08-18, roadmap step 10 route 2 PROTOTYPE, **default off**: the
-top chrome strip paints a tiny blurred copy of the video it covers as its background instead of
-the solid `#14161A`. **Gated on the reveal state since `2a3c634`**, so it samples nothing while
-the strip is hidden -- which is most of an ordinary run -- and the figures below are the worst
-case, taken with the chrome held up on purpose. Measured flat on 4K ProRes 4444 with the chrome held revealed for the whole
-run -- 99.8%, `drop 0`, `handler>budget 0 of 260`, `hitch 0` -- and it is the ONLY route to the
-design's blur, because Mica/Acrylic blur the desktop behind the window rather than the video
-behind the element and reach the title bar only. Shipping it is an owner decision),
+**`TRACE_STRIP_BACKDROP`** (2026-08-18, roadmap step 10 route 2, **SHIPPED ON** by owner
+decision: the top chrome strip paints a tiny blurred copy of the video it covers as its
+background instead of the solid `#14161A`. **Three-valued** -- `0` forces it off and is the
+ROLLBACK, `1` forces it on and is the OVERRIDE, and **unset asks Windows** by reading
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency`,
+because the design package supplies the solid colour as the fallback for exactly that setting
+being off. **Gated on the reveal state since `2a3c634`**, so it samples nothing while the strip
+is hidden, which is most of an ordinary run. Measured flat with the chrome held revealed for
+the whole run -- the WORST case, on purpose -- on the three files that bound the set: 4K 60fps
+at a 16.67ms budget 100.0%, 4444 99.8% with `handler>budget 0 of 260`, 8K inside its own
+variance. It is the ONLY route to the design's blur, because Mica/Acrylic blur the desktop
+behind the WINDOW rather than the video behind the ELEMENT and reach the title bar only.
+**Read the HUD's `backdrop` field rather than the command line** -- the answer is no longer
+decided by the launch),
 **`TRACE_THEME_LOG=1`** (2026-08-18, roadmap step 10: print the font family that ACTUALLY
 resolved and the `Segoe UI Variable` families **Qt** can see, which are not the ones GDI lists.
 It exists because the first build of `src/app/Theme.*` asked for a family Qt does not enumerate,
