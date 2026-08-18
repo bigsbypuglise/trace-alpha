@@ -1,4 +1,103 @@
-# v0.2.0-beta.1 IS SHIPPED. THE OPEN PHASE IS THE OWNER'S UI REDESIGN ROADMAP.
+# THE UI REDESIGN ROADMAP IS DONE EXCEPT STEP 12. A BETA RE-CUT IS PROPOSED AND NOT CUT.
+
+## 2026-08-18, SIXTH SESSION: THE BACKDROP SHIPS, STEP 11 IS CLOSED, AND THE VERSION IS 0.3.0
+
+Five commits: `a4c6bb2` the backdrop default flip, `e002085` the toast fix step 11 found,
+`5711f3b` the docs, `eb00746` the draft release notes, `361aa1a` the version bump.
+**Pushed; CI was building at `361aa1a` and its result was NOT read from this box** -- there is no
+`gh` CLI here, so check the run before doing anything with a tag.
+
+**Display was the physical panel, 5120x1440 @ 239.999Hz** throughout, so nothing here compares to
+the step 7 block's 1920x1080 figures. A control was built from `f419957` and hash-verified
+(`0B490C0F` against `475F35C7`) and run beside every regression leg.
+
+**THE ONLY OPEN OWNER ITEMS ARE THE FOUR IN `docs/release-body-draft.md`**, and two of them are
+things nobody but the owner can do: flipping the Windows transparency toggle, and looking at the
+new interface on the machine.
+
+### What shipped
+
+**`TRACE_STRIP_BACKDROP` IS THREE-VALUED AND UNSET NOW ASKS WINDOWS.** `0` forces off (the
+rollback), `1` forces on (the override), unset reads
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency`. That is
+the design package's own instruction rather than an addition to it -- it supplies the solid
+`#14161A` as "the fallback when transparency effects are disabled in Windows Settings".
+
+**THE REGISTRY READ IS TRI-STATE AND THAT IS THE POINT.** A wrong key path and a machine that has
+never touched the toggle produce the **same boolean**, so a build reading `on` would say nothing
+about whether it found anything. The dev HUD's new **`backdrop`** field distinguishes `on` from
+`on (unset)`, and on this box it reads `on` -- which is the proof the path resolves.
+
+### What step 11 found, and the one thing to carry from it
+
+**`abdiff.ps1` SAMPLES ROWS 6%..46% OF A CAPTURE -- THE VIDEO BAND.** It cannot see either strip,
+the empty state or the toast. **Every "cross-backend" figure ever taken with it is a statement
+about the picture, not about the chrome.** That is why the chrome had never been compared as a
+whole, and it is why the toast being invisible since step 7 had gone unnoticed.
+
+Compared properly -- over the empty state, per step 5's own rule -- **the entire window with both
+strips revealed reads 0 of 972,800 pixels differing at tolerance 0, max channel delta 0.** Popup
+menu body 0 of 94,944. Top strip with the backdrop drawing, over video, 0 px above tolerance 2 at
+max delta 2. Section 4 opening geometry identical to the pixel on both backends, all four shapes.
+
+**SIX PIXELS ARE THE ONLY CHROME DIFFERENCE ANYWHERE, and they impersonate the exact fault step 11
+exists to catch.** Over video the transport band carries six pixels at delta 247 on the play
+glyph's diagonal edges -- superficially step 11's own "8.1% of the play glyph's pixels" class.
+**It is not, and the empty-state result is what says so**: the same glyph is byte-identical there.
+Compositing residue over a bright background, not glyph geometry.
+
+**THE DEFECT: the composited toast was drawn entirely behind the top chrome strip.** Capturing it
+on each renderer produced no toast on either while the clipboard demonstrably held the frame.
+Step 2 chose its 12px top-left margin while the menu bar was in the **layout**; step 7 floated the
+chrome over the picture and did not move it. Every route to a message is an input and every input
+reveals the chrome, so the gesture that raises the toast raised the chrome that hid it. Fixed by
+giving `OverlayModel::setTopInset` its second reader; the offset is **unconditional**, because a
+2s auto-hide inside a 2.5s message would otherwise make the toast jump 38px mid-read.
+
+### Three harness facts, each of which cost a wrong reading first
+
+- **`uiatree.ps1` must run with the pointer parked INSIDE the client.** A first run read
+  `MenuBar 0` on cpu against `MenuBar 2` on d3d11 and **looked exactly like a backend
+  difference**. It was the auto-hide. Held revealed, both read the same rects to the pixel.
+- **Any mouse/SendKeys harness is void if another window takes the foreground mid-run.** An
+  `overlay.ps1` run had its foreground stolen and reported `panel-mean 0` with every interaction
+  leg failing at once -- which, like `transitions.ps1`'s 25 identical failures, is a statement
+  about the harness's inputs. Re-run before building a control.
+- **`swapexe.ps1` prints the hash for a reason.** A control build linked against a running
+  `Trace.exe` failed with `LNK1104`, the copy silently took the HEAD binary, and only the hash
+  said so.
+
+### Regression, flat against the control on every leg
+
+Cadence x2 each: **4K 60fps 99.9/100.0%** against 99.9/100.0% at a 16.67ms budget - **4444
+99.8/99.8%** against 99.8/99.8% - **4K H.264 99.1/99.2%** against 99.1/99.2%. `drop 0`,
+`rephase 0`, `handler>budget 0`, identical buckets on all three. `scrub -SnapRelease` 4444
+`target 261 shown 261 delta 0` full-res planar, `hitch 0`, release 21.3 against 21.1ms.
+`emptystate` all four modes on both backends plus the `-Bar` control. **25 of 25 transitions.**
+Escape hatch healthy: cpu 4444 **99.4%**, cpu 4K H.264 **99.2/99.2%**, `-SnapRelease` `delta 0`
+and `hitch 0` on both at that path's own 91.1ms release.
+
+### The version is 0.3.0 and the STAGE did not move
+
+`CMakeLists.txt` says `0.3.0`; all three "beta" literals in `MainWindow.cpp` are correct as they
+stand. **Verified against the built binary rather than the source**, and note **Qt stores `tr()`
+strings as UTF-8 while the CMake define lands as UTF-16** -- a byte search in one encoding reports
+the other half absent, which is exactly what the first pass did and it looked like two of the
+three literals had been lost.
+
+### What is left
+
+- **Step 12, the frameless window.** Correctly deferred and the highest-risk item on the list: it
+  adds `WM_NCHITTEST` and `WM_NCCALCSIZE` to the same `nativeEvent` path as the aspect lock and
+  the DPI reshape, both signed-off geometry.
+- **The prism idle animation.** Owner decision, not a tidy-up -- it is a different shipping
+  decision from the committed PNG renditions, not a layer on top of them.
+- **The four items in `docs/release-body-draft.md`.** CI green, the transparency flip, an owner
+  look at the interface, and then the tag.
+
+---
+
+# Previous state: v0.2.0-beta.1 shipped; the UI redesign roadmap was the open phase.
 
 ## 2026-08-18, FIFTH SESSION: THE REPO IS PUSHED AND GREEN, THE BACKDROP IS GATED AND WIDENED, AND STEP 10's TYPOGRAPHY HALF IS DONE
 
