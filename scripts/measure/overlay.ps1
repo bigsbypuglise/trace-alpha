@@ -83,11 +83,20 @@ $cx = $r.L + [int]($w / 2)
 $panelTop = 0; $panelLeft = 0; $panelH = 0; $panelW = 0
 $iconY = 0; $trackY = 0; $playX = 0; $rewX = 0; $ffX = 0
 
+# THE TOP CHROME REVEALS WITH THE PANEL, SO THE DIFFERENCE IS NO LONGER ONE
+# REGION (UI redesign roadmap step 7). Both fade in on the same reveal state, so
+# a bounding box over every changed pixel spans from the strip at the top of the
+# client area down to the panel and reads ~1253x675 -- which is a correct
+# observation of a two-part interface and a useless answer to "where is the
+# transport". The scan starts below the strip, and the strip's own height plus
+# the title bar is the only thing skipped.
+$chromeSkip = 90
+
 function LocatePanel([string]$hiddenPng, [string]$revealedPng) {
     $a = [System.Drawing.Bitmap]::FromFile($hiddenPng)
     $b = [System.Drawing.Bitmap]::FromFile($revealedPng)
     $minX = [int]::MaxValue; $minY = [int]::MaxValue; $maxX = -1; $maxY = -1
-    for ($y = 0; $y -lt [Math]::Min($a.Height, $b.Height); $y += 2) {
+    for ($y = $chromeSkip; $y -lt [Math]::Min($a.Height, $b.Height); $y += 2) {
         for ($x = 0; $x -lt [Math]::Min($a.Width, $b.Width); $x += 2) {
             $ca = $a.GetPixel($x, $y); $cb = $b.GetPixel($x, $y)
             if ([Math]::Abs($ca.R - $cb.R) + [Math]::Abs($ca.G - $cb.G) + [Math]::Abs($ca.B - $cb.B) -gt 24) {

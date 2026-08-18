@@ -94,6 +94,22 @@ struct OverlayHooks {
     // still checks itself.
     std::function<bool()> holdVisible;
 
+    // Show or hide the TRANSIENT TOP CHROME (UI redesign roadmap step 7), on
+    // the same reveal state the floating transport uses.
+    //
+    // TOP AND BOTTOM ARE ONE SYSTEM. There is one idle timer, one hold list and
+    // one notion of "the interface is out of the way"; this hook is how the
+    // second panel learns the answer rather than computing its own. It is
+    // shaped exactly like setCursorHidden, and for the same reason: the overlay
+    // decides WHEN, and the host decides WHETHER -- with no media open the host
+    // holds the chrome up, because there is nothing for it to get out of the way
+    // of and the design's empty-state mockup shows it present.
+    //
+    // Called only on the transitions. "Revealed" means revealed OR still fading
+    // out, so the strip appears the instant a reveal starts and leaves when the
+    // panel has finished fading rather than halfway through it.
+    std::function<void(bool)> setChromeRevealed;
+
     // Hide or show the pointer. Called only on the transitions, never per move.
     // The overlay decides WHEN -- the same inactivity that fades the panel --
     // and the host decides WHETHER, because the spec hides the cursor in

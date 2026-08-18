@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <defs>
+    <linearGradient id="pmBody" x1="0.1" y1="0" x2="0.8" y2="1">
+      <stop offset="0" stop-color="#2E4E58"></stop>
+      <stop offset="0.5" stop-color="#2A3A50"></stop>
+      <stop offset="1" stop-color="#3A2E48"></stop>
+    </linearGradient>
+    <radialGradient id="pmGlow" gradientUnits="userSpaceOnUse" cx="560" cy="600" r="300">
+      <stop offset="0" stop-color="#8B6FE8" stop-opacity="0.3"></stop>
+      <stop offset="0.5" stop-color="#6FA8D8" stop-opacity="0.16"></stop>
+      <stop offset="1" stop-color="#6FA8D8" stop-opacity="0"></stop>
+    </radialGradient>
+    <linearGradient id="pmEdge" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#8FEEFF"></stop>
+      <stop offset="0.5" stop-color="#6FD0EA"></stop>
+      <stop offset="1" stop-color="#9F8FE0"></stop>
+    </linearGradient>
+    <linearGradient id="pmSpec" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0"></stop>
+      <stop offset="0.3" stop-color="#FFFFFF" stop-opacity="0.85"></stop>
+      <stop offset="0.7" stop-color="#FFFFFF" stop-opacity="0.85"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </linearGradient>
+    <linearGradient id="pmRim" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#FFFFFF" stop-opacity="0.18"></stop>
+      <stop offset="0.4" stop-color="#FFFFFF" stop-opacity="0.03"></stop>
+      <stop offset="1" stop-color="#FFFFFF" stop-opacity="0"></stop>
+    </linearGradient>
+  </defs>
+  <g transform="translate(520 512) scale(1.9) translate(-520 -512)">
+    <path d="M420 336 L720 512 L420 688 Z" fill="url(#pmBody)" stroke="url(#pmBody)" stroke-width="40" stroke-linejoin="round"></path>
+    <path d="M420 336 L720 512 L420 688 Z" fill="none" stroke="url(#pmRim)" stroke-width="40" stroke-linejoin="round"></path>
+    <path d="M420 336 L720 512 L420 688 Z" fill="url(#pmGlow)" stroke="url(#pmGlow)" stroke-width="40" stroke-linejoin="round" opacity="0.85" style="mix-blend-mode: screen;"></path>
+    <path d="M452 388 L672 512 L452 636 Z" fill="none" stroke="url(#pmEdge)" stroke-width="9" stroke-linejoin="round" opacity="0.85" style="mix-blend-mode: screen;"></path>
+    <path d="M430 352 L604 454" stroke="url(#pmSpec)" stroke-width="9" stroke-linecap="round" fill="none" opacity="0.7"></path>
+  </g>
+</svg>

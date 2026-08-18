@@ -183,6 +183,8 @@ add_executable(Trace
   ../src/ui/TransportOverlay.cpp
   ../src/ui/TransportBar.h
   ../src/ui/TransportBar.cpp
+  ../src/ui/TopChrome.h
+  ../src/ui/TopChrome.cpp
   ../src/core/MediaItem.h
   ../src/core/PlaybackState.h
   ../src/core/ViewState.h

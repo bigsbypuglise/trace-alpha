@@ -35,6 +35,7 @@ class QSlider;
 class QAction;
 class QActionGroup;
 class QMenu;
+class QMenuBar;
 QT_END_NAMESPACE
 
 // Forward-declared at GLOBAL scope, and that placement is the point: written
@@ -48,6 +49,7 @@ namespace trace::ui {
 class ViewerWidget;
 class TransportOverlay;
 class TransportBar;
+class TopChrome;
 }
 
 namespace trace::app {
@@ -75,10 +77,16 @@ protected:
     // maximize or snap -- but only when the restored geometry is actually the
     // wrong shape, so a correctly-shaped restore keeps its position.
     void changeEvent(QEvent* event) override;
-    // Only for the timeline slider, and only to classify a wheel notch. See
+    // Installs the window-handle event filter the top chrome's Alt handling
+    // needs. Here rather than in the constructor because windowHandle() is null
+    // until the native window exists, and on TRACE_RENDERER=cpu nothing before
+    // this forces it into being.
+    void showEvent(QShowEvent* event) override;
+    // For the timeline slider, and for Alt on the window handle. See
     // userPlayIntent_: a wheel over the groove is a stepping gesture that
     // arrives as a bare valueChanged with no press and no release, so it is the
-    // one way into the scrub lambdas that is not part of a drag.
+    // one way into the scrub lambdas that is not part of a drag. The Alt branch
+    // is why the filter is also on windowHandle() -- see the body.
     bool eventFilter(QObject* watched, QEvent* event) override;
     // MEASUREMENT ONLY at this stage: it counts WM_SIZING / WM_ENTERSIZEMOVE /
     // WM_EXITSIZEMOVE and always returns false, so every message continues to
@@ -616,6 +624,24 @@ private:
     trace::ui::ViewerWidget* viewer_ = nullptr;
     trace::ui::TransportOverlay* overlay_ = nullptr;
     trace::ui::TransportBar* transportBar_ = nullptr;
+    // THE TRANSIENT TOP CHROME (UI redesign roadmap step 7), and null in bar
+    // mode. It floats over the viewer, holds the real menu bar, and is shown and
+    // hidden by OverlayModel's reveal state through OverlayHooks::
+    // setChromeRevealed -- one idle timer for both panels.
+    trace::ui::TopChrome* topChrome_ = nullptr;
+    // THE APPLICATION'S MENU BAR, whichever home it has. In bar mode it is
+    // QMainWindow's own, in the layout, exactly as it shipped; in overlay mode
+    // it belongs to topChrome_ and QMainWindow never creates one -- the same
+    // shape as the status bar, which is never constructed in overlay mode
+    // either. Held as a member so setupMenus() and warnOnDuplicateMnemonics()
+    // build and walk ONE bar rather than each asking which mode this is.
+    QMenuBar* appMenuBar_ = nullptr;
+    // What OverlayModel last said about the reveal. Separate from the chrome's
+    // own visibility because the host has one more condition of its own: with no
+    // media open the chrome is held up, since there is nothing for it to get out
+    // of the way of.
+    bool topChromeRevealed_ = false;
+    void syncTopChrome();
     // Whether the transport bar is in the layout (TRACE_TRANSPORT_BAR) or the
     // floating overlay is the transport. The bar object exists in both cases,
     // because it owns timelineSlider_ and therefore the whole scrub path.

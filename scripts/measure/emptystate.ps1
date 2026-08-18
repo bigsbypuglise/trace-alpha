@@ -166,14 +166,31 @@ function Find-Stage([System.Drawing.Bitmap]$b) {
     for ($y = 3; $y -lt [int]($b.Height / 3); $y++) {
         if ([Math]::Abs((& $rowMean $y) - $bar) -gt 6) { $top = $y; break }
     }
-    # NO BOTTOM SCAN. The chrome that can live down there -- the docked
-    # transport bar, the window's own border -- is entirely NEUTRAL, so it
-    # cannot enter the chromatic mark scan, and the hint scan is confined to a
-    # band below the mark rather than to the stage. Finding a bottom edge as
-    # well was tried and made the run WORSE: it moved by one row between the two
-    # backends and swept a lit border row into the hint's bounding box, which
-    # read as a 1280px-wide hint on one backend and 157px on the other.
-    return @{ top = $top; bottom = $b.Height - 1 }
+    # THE BOTTOM SCAN IS BACK, NARROWER, AND THE REASON THE OLD NOTE GAVE FOR
+    # DROPPING IT WAS ONLY EVER TRUE OF THE HINT.
+    #
+    # The note below said the chrome down there is "entirely NEUTRAL, so it
+    # cannot enter the chromatic mark scan". That is false in bar mode, and
+    # measurably so: the status bar's "Ready" is subpixel-antialiased, so its
+    # pixels are chromatic at a MEDIAN hi-lo of 115 against the prism mark's own
+    # 58 -- more chromatic than the thing being looked for, so no threshold can
+    # separate them. Unbounded, the mark's bounding box ran from the mark down to
+    # the status bar and read 1154x470 against the design's 59x68, on a build
+    # whose empty state is visibly correct. That is the SAME trap this script
+    # already records for the menu bar at the top, arriving from the other end.
+    #
+    # It is found rather than encoded, symmetrically with the top: walk up from
+    # the last row to the lowest row that is essentially black across the sampled
+    # columns, which is the bottom of the stage in bar mode and the bottom of the
+    # client in overlay mode. And the old failure cannot come back, because the
+    # hint's band is bounded by the MARK's own bounding box rather than by this:
+    # a bound that lands above the docked bar cannot sweep a lit border row into
+    # anything.
+    $bottom = $b.Height - 1
+    for ($y = $b.Height - 1; $y -gt $top; $y--) {
+        if ((& $rowMean $y) -lt 12) { $bottom = $y; break }
+    }
+    return @{ top = $top; bottom = $bottom }
 }
 
 # Chromatic pixels: the mark. Neutral-but-lit pixels below it: the hint.

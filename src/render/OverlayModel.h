@@ -84,6 +84,17 @@ public:
     static bool enabledByEnvironment();
 
     void setSurfaceSize(QSize devicePixels);
+    // Device pixels of the surface's TOP EDGE that the transient top chrome
+    // covers (UI redesign roadmap step 7), or 0 when there is no such chrome.
+    //
+    // It exists for the EMPTY STATE and nothing else. The design's empty-state
+    // markup puts its stage BELOW the 38px strip and centres the mark in that,
+    // which is also what the window did while the menu bar was in the layout; a
+    // strip that floats over the picture instead would otherwise leave the mark
+    // half a strip high in the only state the strip is permanently shown in. The
+    // transport is bottom-anchored and unaffected, and with media open there is
+    // no empty state at all, so this can never move a picture.
+    void setTopInset(double devicePixels);
     void setDevicePixelRatio(double dpr);
     double devicePixelRatio() const { return dpr_; }
 
@@ -199,6 +210,10 @@ private:
     QRectF trackHitRect() const;
     void startAnimation();
     void tickAnimation();
+    // Pushes the top chrome's shown/hidden state at the host, on transitions
+    // only. Called from every place the fade state can change, so there is one
+    // reveal state driving both panels rather than a second timer for the top.
+    void syncChrome();
     double fractionAt(int x) const;
 
     QImage atlas_;
@@ -238,6 +253,7 @@ private:
     double handlePx_ = 16.0;
 
     QSize surfaceSize_;
+    double topInset_ = 0.0;
     double dpr_ = 1.0;
     bool atlasDirty_ = true;
     bool enabled_ = false;
@@ -254,8 +270,11 @@ private:
     int panLastY_ = 0;
     bool draggingTimeline_ = false;
     // Mirrors what the host was last told, so reveal() on every pointer move
-    // does not call across the hook once per move to say the same thing.
+    // does not call across the hook once per move to say the same thing. The
+    // chrome mirror is the same idea and exists for the same reason: showing a
+    // native window is not free and reveal() runs per pointer sample.
     bool cursorHidden_ = false;
+    bool chromeRevealed_ = false;
 
     // Fade. targetOpacity_ is where it is going; opacity_ is where it is.
     double opacity_ = 0.0;

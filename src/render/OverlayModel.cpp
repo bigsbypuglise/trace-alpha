@@ -194,6 +194,15 @@ void OverlayModel::setSurfaceSize(QSize devicePixels) {
     layout();
 }
 
+void OverlayModel::setTopInset(double devicePixels) {
+    const double v = std::max(0.0, devicePixels);
+    if (std::abs(v - topInset_) < 0.5) return;
+    topInset_ = v;
+    // Nothing is rebuilt: the inset moves a destination rect and no image
+    // depends on it. The next paint picks it up.
+    if (hooks_.requestRepaint) hooks_.requestRepaint();
+}
+
 void OverlayModel::setDevicePixelRatio(double dpr) {
     const double clamped = std::clamp(dpr, 0.5, 8.0);
     if (std::abs(clamped - dpr_) < 1e-6) return;
@@ -562,8 +571,14 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     if (!empty_.isNull()) {
         // Snapped, like every other destination rect here, so it is a 1:1 copy
         // on both backends rather than two resamples of the same art.
+        // Centred in the stage the chrome leaves, not in the whole surface. See
+        // setTopInset: with no media the top chrome is held up, so this is the
+        // one state where it is permanently on screen and the difference is
+        // permanently visible.
         const QRectF dst(std::floor((surfacePixels.width() - empty_.width()) / 2.0 + 0.5),
-                         std::floor((surfacePixels.height() - empty_.height()) / 2.0 + 0.5),
+                         std::floor(topInset_
+                                    + (surfacePixels.height() - topInset_ - empty_.height()) / 2.0
+                                    + 0.5),
                          empty_.width(), empty_.height());
         quads_.push_back(OverlayQuad{dst, QRectF(QPointF(0, 0), QSizeF(empty_.size())),
                                      1.0f, 1.0f, OverlayQuad::Source::Empty});
@@ -686,6 +701,10 @@ void OverlayModel::reveal() {
     targetOpacity_ = 1.0;
     startAnimation();
     autoHideTimer_.start();
+    // Before the cursor, and before the fade has moved a pixel: the top chrome
+    // is a real window that has to be mapped, and mapping it at the START of the
+    // fade-in is what makes the two panels arrive together.
+    syncChrome();
     // Guarded on the mirrored state rather than called unconditionally: reveal()
     // runs on every pointer move, and this is a cross-boundary call into the
     // host.
@@ -863,7 +882,22 @@ void OverlayModel::tickAnimation() {
         animTimer_.stop();
         if (opacity_ <= 0.0) hover_ = Region::None;
     }
+    syncChrome();
     if (hooks_.requestRepaint) hooks_.requestRepaint();
+}
+
+// ONE reveal state, read the same way for both panels. "Revealed" is true from
+// the moment a fade-in is asked for until a fade-out has finished, which is what
+// makes the strip appear with the transport and leave with it rather than
+// blinking out halfway down the fade.
+//
+// It cannot be `visible()` alone: opacity_ is still 0 when reveal() sets the
+// target, so a strip driven off that would arrive 16ms late on every reveal.
+void OverlayModel::syncChrome() {
+    const bool revealed = targetOpacity_ > 0.001 || opacity_ > 0.001;
+    if (revealed == chromeRevealed_) return;
+    chromeRevealed_ = revealed;
+    if (hooks_.setChromeRevealed) hooks_.setChromeRevealed(revealed);
 }
 
 } // namespace trace::render

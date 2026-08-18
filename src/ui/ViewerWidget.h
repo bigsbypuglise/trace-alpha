@@ -86,6 +86,11 @@ public:
     // "relevant keyboard input reveals it". Mouse reveals are handled inside the
     // model, on both backends' own input paths.
     void revealOverlay() { overlayModel_.reveal(); }
+    // How much of the viewer's TOP EDGE the transient top chrome covers, in
+    // logical pixels (UI redesign roadmap step 7). Held here in LOGICAL units
+    // and converted at paint time, because the model wants device pixels and the
+    // scale factor can change under a window that never moved.
+    void setChromeTopInsetLogical(int px) { chromeTopInsetLogical_ = px; }
     // Hide or show the pointer over the video. Both paths are applied because
     // which one has effect depends on the adopted backend: the CPU renderer
     // draws into this widget and takes Qt's cursor, while the D3D11 surface is a
@@ -203,6 +208,7 @@ private:
     QSize pictureDeviceSize() const;
     trace::render::ViewScale viewScale_{};
     QSize sourcePixels_;
+    int chromeTopInsetLogical_ = 0;
     double minimumAspect_ = 16.0 / 9.0;
     // The settled floating-transport width (spec phase 6). Named here rather
     // than reached for from OverlayModel because this is a FLOOR expressed in

@@ -57,6 +57,7 @@
 #include "render/OverlayModel.h"
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
+#include "ui/TopChrome.h"
 #include "app/LucidLinkIntegration.h"
 #include "app/OverlayAccessibility.h"
 #include "app/Settings.h"
@@ -1120,6 +1121,10 @@ MainWindow::MainWindow() {
     // it already faded would present the user with a black stage and no controls
     // until they happened to move the pointer.
     if (viewer_) viewer_->revealOverlay();
+    // Establishes the strip's opening state rather than relying on the reveal
+    // above to have pushed it: the hook only fires on a TRANSITION, and a state
+    // that is only ever set by a transition has no defined value at t=0.
+    syncTopChrome();
 
     // UI roadmap step 4: in overlay mode the window has NO status bar, and
     // this gate is what removes it. QMainWindow creates the bar lazily on the
@@ -1165,6 +1170,44 @@ void MainWindow::setupUi() {
     barIsDocked_ = !trace::render::OverlayModel::enabledByEnvironment();
     if (barIsDocked_) layout->addWidget(transportBar_, 0);
     else transportBar_->hide();
+
+    // UI ROADMAP STEP 7, AND IT IS WHAT FINISHES STEP 4. The menu bar was the
+    // last permanent chrome left: with the status bar gone and the HUD hidden,
+    // windowChromeLogical() read 0x21 and that 21 was all of it. In overlay mode
+    // the bar moves into a strip that FLOATS OVER the viewer rather than sitting
+    // above it, so the chrome term goes to zero and the picture reaches the top
+    // edge of the client area. Every media-shaped opening size therefore moves
+    // again, exactly as it did when the status bar left -- section 4 measures
+    // chrome as window-minus-viewer, so it needs no telling, but the record does.
+    //
+    // GATED ON barIsDocked_, the same single predicate that already decides
+    // which transport is on screen and where a transient message goes. So
+    // TRACE_TRANSPORT_BAR=1 keeps QMainWindow's own menu bar in the layout and
+    // the old geometry with it: the escape hatch stays a true control, and the
+    // groove-scanning harnesses keep measuring a window comparable to the record.
+    //
+    // The bar is created HERE and not in setupMenus() because setupMenus() must
+    // not be the thing that decides this -- calling QMainWindow::menuBar() even
+    // once constructs a bar in the layout, and that is precisely the lazy
+    // construction the status bar's removal turns on.
+    if (barIsDocked_) {
+        appMenuBar_ = menuBar();
+    } else {
+        // PARENTED TO THE CENTRAL WIDGET, NOT TO THE VIEWER, AND THAT IS A
+        // MEASURED REQUIREMENT RATHER THAN A PREFERENCE. See TopChrome's header:
+        // as a native child of the viewer -- i.e. a SIBLING of the D3D11 surface
+        // window -- it corrupts that surface's own overlay pass. One level up it
+        // is an uncle of the surface, it draws over the video exactly the same,
+        // and the transport renders correctly. The strip still spans the viewer,
+        // because the viewer is the full width of the central widget and sits at
+        // its top.
+        topChrome_ = new trace::ui::TopChrome(central);
+        appMenuBar_ = topChrome_->menuBar();
+        // The empty state centres itself in the stage the chrome leaves. See
+        // OverlayModel::setTopInset: with no media the strip is held up, so that
+        // is the one state where the difference is permanently on screen.
+        viewer_->setChromeTopInsetLogical(trace::ui::TopChrome::stripHeightLogical());
+    }
 
     // Dev diagnostics HUD sits below the transport. It carries the perf
     // readouts used for playback validation, so it stays until the playback
@@ -1266,6 +1309,13 @@ void MainWindow::installOverlayHooks() {
         const QWidget* focus = QApplication::focusWidget();
         return focus != nullptr && focus != this && focus != viewer_ &&
                focus->window() == this;
+    };
+    // UI roadmap step 7. The model decides WHEN, exactly as it does for the
+    // cursor; the host decides WHETHER, and it has one extra condition of its
+    // own -- see syncTopChrome.
+    hooks.setChromeRevealed = [this](bool revealed) {
+        topChromeRevealed_ = revealed;
+        syncTopChrome();
     };
     hooks.setCursorHidden = [this](bool hidden) {
         // The overlay decides WHEN -- the same inactivity that fades the panel.
@@ -3117,6 +3167,8 @@ void MainWindow::closeMedia() {
     // MEDIA, and there is none -- resizing to some default here would move a
     // window the user had placed, to say nothing new.
     setWindowTitle(QStringLiteral("Trace"));
+    // Back to "No media", and held up from here: see syncTopChrome.
+    syncTopChrome();
     showTransientMessage(tr("No media open"), 2000);
 
     syncTransportBar();
@@ -3441,7 +3493,7 @@ void MainWindow::goToFrame(long long frame, const char* action) {
 //     then, exactly as phase 10 left it.
 void MainWindow::setupMenus() {
     // ---- File ---------------------------------------------------------------
-    auto* fileMenu = menuBar()->addMenu(tr("&File"));
+    auto* fileMenu = appMenuBar_->addMenu(tr("&File"));
 
     // A member rather than a local, so setupShortcuts() can list it: the
     // Keyboard Shortcuts window has to print Ctrl+O too, and a table that can
@@ -3490,7 +3542,7 @@ void MainWindow::setupMenus() {
     fileMenu->addAction(quitAction);
 
     // ---- Edit ---------------------------------------------------------------
-    auto* editMenu = menuBar()->addMenu(tr("&Edit"));
+    auto* editMenu = appMenuBar_->addMenu(tr("&Edit"));
     editMenu->addAction(copyFrameAction_);
     editMenu->addSeparator();
     editMenu->addAction(rotateLeftAction_);
@@ -3502,7 +3554,7 @@ void MainWindow::setupMenus() {
     editMenu->addAction(resetViewTransformAction_);
 
     // ---- View ---------------------------------------------------------------
-    auto* viewMenu = menuBar()->addMenu(tr("&View"));
+    auto* viewMenu = appMenuBar_->addMenu(tr("&View"));
     viewMenu->addAction(fullscreenAction_);
     viewMenu->addAction(alwaysOnTopAction_);
     viewMenu->addSeparator();
@@ -3598,7 +3650,7 @@ void MainWindow::setupMenus() {
     viewMenu->addAction(toggleHudAction_);
 
     // ---- Window -------------------------------------------------------------
-    auto* windowMenu = menuBar()->addMenu(tr("&Window"));
+    auto* windowMenu = appMenuBar_->addMenu(tr("&Window"));
     windowMenu->addAction(minimizeAction_);
     windowMenu->addAction(maximizeRestoreAction_);
     windowMenu->addSeparator();
@@ -3613,7 +3665,7 @@ void MainWindow::setupMenus() {
     windowMenu->addAction(inspectorAction_);
 
     // ---- Help ---------------------------------------------------------------
-    auto* helpMenu = menuBar()->addMenu(tr("&Help"));
+    auto* helpMenu = appMenuBar_->addMenu(tr("&Help"));
     helpMenu->addAction(traceHelpAction_);
     helpMenu->addAction(keyboardShortcutsAction_);
     helpMenu->addSeparator();
@@ -3672,10 +3724,10 @@ void MainWindow::warnOnDuplicateMnemonics() const {
         }
     };
 
-    if (!menuBar()) return;
+    if (!appMenuBar_) return;
     // The menu bar's own titles, then each menu's items and each submenu's.
-    scan(menuBar()->actions(), QStringLiteral("menu bar"));
-    for (const QAction* top : menuBar()->actions()) {
+    scan(appMenuBar_->actions(), QStringLiteral("menu bar"));
+    for (const QAction* top : appMenuBar_->actions()) {
         QMenu* menu = top->menu();
         if (!menu) continue;
         QString name = top->text();
@@ -3913,9 +3965,40 @@ void MainWindow::resizeEvent(QResizeEvent* event) {
     // them needs its own hook.
 }
 
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    // Idempotent: installEventFilter removes an existing registration of the
+    // same filter before prepending it, so repeated shows do not stack.
+    if (auto* handle = windowHandle()) handle->installEventFilter(this);
+}
+
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     if (watched == timelineSlider_ && event->type() == QEvent::Wheel) {
         userPlayIntent_ = false;
+    }
+    // ALT MUST STILL REACH A MENU BAR THAT IS NOT ON SCREEN (UI roadmap step 7),
+    // and this is the whole reason there is a filter on the window handle.
+    //
+    // Qt gives a QMenuBar its Alt+letter mnemonics through QWidget::grabShortcut,
+    // and QShortcutMap declines a shortcut whose widget is not VISIBLE. So with
+    // the strip hidden, Alt+F would silently do nothing -- a menu reachable only
+    // with the mouse, which is a regression for exactly the users spec phase 14
+    // was built for. Revealing first makes the bar visible before the shortcut
+    // is looked up.
+    //
+    // ON THE WINDOW HANDLE, NOT ON THIS WIDGET, AND THE ORDER IS THE POINT.
+    // Key events are delivered to the QWidgetWindow, which consults the shortcut
+    // map INSIDE its own event() before anything reaches a widget; an object's
+    // event filters run before that event(). MainWindow::keyPressEvent would be
+    // reached only after the shortcut had already been declined.
+    //
+    // Nothing is consumed: the event is observed and passed straight on, so Alt
+    // still means to Qt exactly what it meant before.
+    if (topChrome_ && event->type() == QEvent::KeyPress && watched == windowHandle()) {
+        const auto* key = static_cast<QKeyEvent*>(event);
+        if (key->key() == Qt::Key_Alt || (key->modifiers() & Qt::AltModifier)) {
+            if (viewer_) viewer_->revealOverlay();
+        }
     }
     return QMainWindow::eventFilter(watched, event);
 }
@@ -4965,6 +5048,10 @@ bool MainWindow::openPath(const QString& path) {
     // Ctrl+C put nothing on the clipboard and Edit > Copy Current Frame showed
     // no status message, which reads exactly like a broken conversion.
     syncMediaDependentActions();
+    // UI roadmap step 7: the strip's centre carries the filename. The design
+    // handoff puts it in the top chrome and NOT in the bottom transport, which
+    // is why the floating panel gained nothing here.
+    syncTopChrome();
     // Spec phase 10: "reset the transform when new media opens". A rotation the
     // user applied to inspect one clip must not silently follow them into the
     // next one, where it would look like the new file is tagged wrong -- which
@@ -5481,6 +5568,29 @@ void MainWindow::startShuttle(int direction, trace::core::ShuttleEntry entry) {
 // member IS the applied decision -- the same single gate that already decides
 // which transport is on screen, so the message surface and the transport cannot
 // disagree about which mode the app is in.
+// THE HOST'S HALF OF THE TOP CHROME'S VISIBILITY (UI roadmap step 7).
+//
+// OverlayModel owns the reveal: one idle timer, one fade, one hold list, shared
+// with the floating transport. This adds the single condition the model cannot
+// see, and it is the same shape as setCursorHidden's ("hidden AND fullscreen"):
+//
+//   WITH NO MEDIA OPEN THE CHROME IS HELD UP. There is nothing for it to get out
+//   of the way of, the design package's own empty-state mockup draws the strip
+//   present with a dimmed "No media" in it, and a window that faded its only
+//   menu access away two seconds after launch and left a prism mark on black
+//   would be the "controls the user cannot find" failure the startup reveal in
+//   the constructor already exists to avoid.
+//
+// It is NOT a second auto-hide: nothing here starts a timer or animates. It
+// reads the model's answer and one piece of application state.
+void MainWindow::syncTopChrome() {
+    if (!topChrome_) return;
+    topChrome_->setMediaTitle(
+        currentMedia_ ? QFileInfo(QString::fromStdString(currentMedia_->path)).fileName()
+                      : QString());
+    topChrome_->setRevealed(topChromeRevealed_ || !currentMedia_.has_value());
+}
+
 void MainWindow::showTransientMessage(const QString& text, int timeoutMs) {
     if (barIsDocked_) {
         statusBar()->showMessage(text, timeoutMs);

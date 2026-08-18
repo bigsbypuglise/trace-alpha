@@ -486,6 +486,11 @@ void ViewerWidget::paintEvent(QPaintEvent* event) {
         ++perfStats_.paintsWithoutNewImage;
     }
 
+    // Pushed per paint, beside the dpr the backends push for the same reason:
+    // the scale factor can change without a resize, and a stale device-pixel
+    // inset would move the empty state's mark rather than merely be out of date.
+    overlayModel_.setTopInset(chromeTopInsetLogical_ * devicePixelRatioF());
+
     renderer_->paint(this);
 
     // Fold the backend's numbers into the widget's, so the HUD reads one struct

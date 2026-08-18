@@ -106,5 +106,17 @@
          different asset from the app icon's play mark. -->
     <file alias="empty-mark-104.png">../assets/interface/branding/empty-mark-104.png</file>
     <file alias="empty-mark-208.png">../assets/interface/branding/empty-mark-208.png</file>
+
+    <!-- The transient top chrome's brand mark, UI redesign roadmap step 7.
+         Drawn at 15 logical px beside the Trace wordmark, so it ships 15 and 30:
+         the @1x/@2x pair at its own drawn size, the same convention the
+         controls follow at 24/48 and the empty mark at 104/208.
+
+         It is trace-play-mark.svg from the delivered package, byte for byte,
+         and it is a DIFFERENT ASSET from empty-mark.svg beside it. The two
+         differ in scale, edge stops, stroke width, glow opacity and specular,
+         and rendering the wrong one looks almost right. -->
+    <file alias="brand-mark-15.png">../assets/interface/branding/brand-mark-15.png</file>
+    <file alias="brand-mark-30.png">../assets/interface/branding/brand-mark-30.png</file>
   </qresource>
 </RCC>
