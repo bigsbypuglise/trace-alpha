@@ -1267,12 +1267,29 @@ void MainWindow::installOverlayHooks() {
     // flips the tick AND emits triggered(bool) with the new state, which is
     // what the handler reads. trigger() on a checkable action would fire the
     // handler with the OLD checked value and leave the tick behind by one.
-    hooks.toggleMute = [this]() { if (muteAction_) muteAction_->toggle(); };
+    //
+    // AND THE ENABLEMENT HAS TO BE ASKED FOR, BECAUSE toggle() DOES NOT ASK.
+    // QAction::trigger() routes through activate(), which returns early on a
+    // disabled action -- that is what makes "the click is refused by the action"
+    // true of Go to Start and Go to End above, with no test in the lambda.
+    // QAction::toggle() is setChecked(!checked) and carries no such check, so
+    // every checkable control on the strip needs the test the others get for
+    // free. Measured before this guard existed: with no media open, clicking
+    // Loop on the empty-state strip turned it on (0 -> 36 accent pixels in its
+    // cell) and PERSISTED loop=true to the settings file, from a disabled
+    // action. Mute never reaches it because muting is deliberately not
+    // media-dependent, but the guard is written for both rather than for the
+    // one that happens to be gated today.
+    hooks.toggleMute = [this]() {
+        if (muteAction_ && muteAction_->isEnabled()) muteAction_->toggle();
+    };
     hooks.isMuted = [this]() { return audio_.isMuted(); };
     // Loop. toggle() reaches loopAction_'s handler because that action has been
     // connected on `toggled` since spec phase 14 -- which is what Mute was not,
     // and is why Mute's button flipped a tick and changed nothing for one build.
-    hooks.toggleLoop = [this]() { if (loopAction_) loopAction_->toggle(); };
+    hooks.toggleLoop = [this]() {
+        if (loopAction_ && loopAction_->isEnabled()) loopAction_->toggle();
+    };
     hooks.isLooping = [this]() { return loopEnabled_; };
     hooks.isFullscreen = [this]() { return isFullScreen(); };
 
@@ -2083,6 +2100,26 @@ void MainWindow::setReadoutMode(trace::core::PrimaryReadoutMode mode) {
     }
     viewState_.readoutMode = mode;
     syncTimeDisplayActions();
+    // THE STRIP'S TWO READOUTS ARE PAINTED, SO A MODE CHANGE HAS TO ASK FOR A
+    // PAINT. refreshHud() rebuilds the dev HUD, which is a separate widget in
+    // the layout and repaints itself; the transport's position and duration are
+    // quads built inside the viewer's paint from hooks.positionText /
+    // durationText, and nothing here was reaching that paint.
+    //
+    // keyPressEvent calls revealOverlay() after every dispatched key and that
+    // is NOT enough: OverlayModel::startAnimation returns early when the fade
+    // has already settled, so reveal() on a strip that is up and idle schedules
+    // nothing. Measured on a paused 4444 with the strip revealed -- pressing E,
+    // and choosing the same item from the menu, both left the strip reading
+    // `0` / `261` (0 differing pixels in its band) while the HUD switched to
+    // `Readout: Elapsed`; four mode changes in a row never moved it, and an
+    // auto-hide plus re-reveal then showed the correct values, which is what
+    // makes this a repaint fault rather than a wiring one.
+    //
+    // update() rather than repaint(): nothing here reports a value MEASURED BY
+    // the paint -- the trap phases 10, 12 and 15 each hit -- so there is no
+    // reason to pay for a synchronous one on a user action.
+    if (viewer_) viewer_->update();
     switch (mode) {
         case PrimaryReadoutMode::Frame:    refreshHud("Readout: Frame"); break;
         case PrimaryReadoutMode::Seconds:  refreshHud("Readout: Seconds"); break;
