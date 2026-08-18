@@ -87,6 +87,7 @@ public:
         QAction* goToStart = nullptr;
         QAction* goToEnd = nullptr;
         QAction* mute = nullptr;
+        QAction* loop = nullptr;
         QAction* fullscreen = nullptr;
     };
 

@@ -78,6 +78,7 @@ public:
         FastForward,
         GoToEnd,
         Mute,
+        Loop,
         Timeline,
         Fullscreen,
         Share
@@ -282,7 +283,7 @@ private:
     QRectF aStrip_, aStripSample_;
     QRectF aPlay_, aPause_;
     QRectF aGoToStart_, aRewind_, aFfwd_, aGoToEnd_;
-    QRectF aVolume_, aVolumeMuted_, aFullscreen_, aExitFullscreen_, aShare_;
+    QRectF aVolume_, aVolumeMuted_, aLoop_, aLoopOn_, aFullscreen_, aExitFullscreen_, aShare_;
     QRectF aThumb_, aThumbScrub_;
     QRectF aSolid_, aSolidSample_, aAccent_, aAccentSample_;
     // The design's own alphas, baked in rather than applied at draw time --
@@ -294,7 +295,7 @@ private:
     // nothing is stretched -- these are 1:1 like every glyph.
     QRectF aPlateUtil_, aPlateUtilPressed_, aPlatePlay_, aPlatePlayPressed_;
     // Destination rects, in surface device pixels.
-    QRectF dStrip_, dPlay_, dGoToStart_, dRewind_, dFfwd_, dGoToEnd_, dMute_;
+    QRectF dStrip_, dPlay_, dGoToStart_, dRewind_, dFfwd_, dGoToEnd_, dMute_, dLoop_;
     QRectF dFullscreen_, dShare_, dSeparator_, dTrack_;
     // The two readout cells. Empty when the strip is too narrow to carry them
     // -- see layout()'s elision -- which is also how buildFrame knows not to

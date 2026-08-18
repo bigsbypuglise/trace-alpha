@@ -352,7 +352,8 @@ void OverlayModel::layout() {
     dPlay_ = cell(x, playPx_);            x += playPx_ + buttonGap;
     dFfwd_ = cell(x, utilPx_);            x += utilPx_ + buttonGap;
     dGoToEnd_ = cell(x, utilPx_);         x += utilPx_ + buttonGap;
-    dMute_ = cell(x, utilPx_);            x += utilPx_;
+    dMute_ = cell(x, utilPx_);            x += utilPx_ + buttonGap;
+    dLoop_ = cell(x, utilPx_);            x += utilPx_;
     const double leftEnd = x;
 
     // The right group, laid out from the right edge inwards: share, separator,
@@ -441,13 +442,14 @@ std::vector<OverlayModel::ControlRect> OverlayModel::controlRects() const {
     // controls UI redesign roadmap step 5 adds are interleaved into that order
     // rather than appended, because appending would have announced Go to Start
     // -- the leftmost thing on the strip -- after the timeline.
-    rects.reserve(9);
+    rects.reserve(10);
     rects.push_back({Region::GoToStart, dGoToStart_});
     rects.push_back({Region::Rewind, dRewind_});
     rects.push_back({Region::PlayPause, dPlay_});
     rects.push_back({Region::FastForward, dFfwd_});
     rects.push_back({Region::GoToEnd, dGoToEnd_});
     rects.push_back({Region::Mute, dMute_});
+    rects.push_back({Region::Loop, dLoop_});
     rects.push_back({Region::Timeline, trackHitRect()});
     rects.push_back({Region::Fullscreen, dFullscreen_});
     rects.push_back({Region::Share, dShare_});
@@ -509,7 +511,7 @@ void OverlayModel::rebuildAtlas() {
     // silently clips the LAST cell, which is why the count is spelled out.
     const int atlasW = static_cast<int>(std::ceil(std::max(
         kStripCellW,
-        play * 4 + util * 11 + thumbCell + thumbScrubCell + 32 + 4 * 20)));
+        play * 4 + util * 12 + thumbCell + thumbScrubCell + 32 + 4 * 20)));
     const int atlasH = static_cast<int>(std::ceil(stripH + rowH + 16));
     if (atlasW <= 0 || atlasH <= 0) return;
 
@@ -577,6 +579,19 @@ void OverlayModel::rebuildAtlas() {
     util3(aGoToEnd_, "go-to-end");
     util3(aVolume_, "volume");
     util3(aVolumeMuted_, "volume-muted");
+    util3(aLoop_, "loop");
+    // The same glyph in the accent, for Loop ON. Its own cell rather than a
+    // draw-time tint, because `brighten` scales RGB uniformly and cannot turn
+    // neutral ink cyan -- and because every other cell here is 1:1 for exactly
+    // the cross-backend reason the strip's background had to become 1:1.
+    {
+        aLoopOn_ = QRectF(x, row, util, util);
+        const double inset = snapTo(util * 0.22);
+        paintIconTinted(p, aLoopOn_.adjusted(inset, inset, -inset, -inset),
+                        QStringLiteral("loop"), {24, 48},
+                        QColor(kAccentR, kAccentG, kAccentB));
+        x += util + 4;
+    }
     util3(aFullscreen_, "fullscreen");
     util3(aExitFullscreen_, "exit-fullscreen");
     util3(aShare_, "share");
@@ -1020,6 +1035,17 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     control(dFfwd_, aFfwd_, Region::FastForward);
     control(dGoToEnd_, aGoToEnd_, Region::GoToEnd);
     control(dMute_, muted ? aVolumeMuted_ : aVolume_, Region::Mute);
+    // LOOP IS THE ONE CONTROL WHOSE STATE IS NOT A SECOND GLYPH, because the
+    // package ships ONE loop glyph where it ships a volume/volume-muted pair.
+    // On is drawn at the accent; off is the same neutral ink as its neighbours.
+    // Two atlas cells would have been the consistent answer and would have meant
+    // inventing a second piece of artwork, which is the thing this project does
+    // not do quietly -- so the state is carried by colour, and the accent is
+    // already the strip's one colour.
+    const bool looping = hooks_.isLooping && hooks_.isLooping();
+    plate(dLoop_, Region::Loop);
+    push(dLoop_, looping ? aLoopOn_ : aLoop_, a, hoverBoost(Region::Loop),
+         OverlayQuad::Source::Atlas);
     control(dFullscreen_, fullscreen ? aExitFullscreen_ : aFullscreen_, Region::Fullscreen);
     control(dShare_, aShare_, Region::Share);
 
@@ -1109,6 +1135,7 @@ OverlayModel::Region OverlayModel::regionAt(int x, int y) const {
     if (dFfwd_.contains(p)) return Region::FastForward;
     if (dGoToEnd_.contains(p)) return Region::GoToEnd;
     if (dMute_.contains(p)) return Region::Mute;
+    if (dLoop_.contains(p)) return Region::Loop;
     if (dFullscreen_.contains(p)) return Region::Fullscreen;
     if (dShare_.contains(p)) return Region::Share;
     // Last, because its hit rect is the full height of the strip and the
@@ -1257,6 +1284,7 @@ bool OverlayModel::onMouseUp(int x, int y) {
             case Region::GoToStart:   if (hooks_.goToStart) hooks_.goToStart(); break;
             case Region::GoToEnd:     if (hooks_.goToEnd) hooks_.goToEnd(); break;
             case Region::Mute:        if (hooks_.toggleMute) hooks_.toggleMute(); break;
+            case Region::Loop:        if (hooks_.toggleLoop) hooks_.toggleLoop(); break;
             // The SAME action the double-click and F11 run, which is why this
             // needs no new hook: toggleFullscreen has been in this struct since
             // spec phase 6, because the D3D11 surface takes every mouse message

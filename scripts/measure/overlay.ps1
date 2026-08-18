@@ -50,7 +50,12 @@ public class O {
 "@
 
 New-Item -ItemType Directory -Force $OutDir | Out-Null
-& "$PSScriptRoot\restart.ps1" -Clip $Clip -Env "TRACE_RENDERER=$Renderer","TRACE_OVERLAY_COMPOSITED=1" | Out-Null
+# A SCRATCH SETTINGS FILE, because Loop is PERSISTED (spec phase 14) and this
+# script now presses it. Without this the run would write the machine's own INI,
+# and the next cadence measurement would inherit a looping file -- which is
+# exactly how phase 14's first cadence run read a healthy 100% off one lap.
+$settingsIni = Join-Path $OutDir "overlay-scratch.ini"
+& "$PSScriptRoot\restart.ps1" -Clip $Clip -Env "TRACE_RENDERER=$Renderer","TRACE_OVERLAY_COMPOSITED=1","TRACE_SETTINGS_FILE=$settingsIni" | Out-Null
 
 $p = Get-Process -Name Trace | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $p) { Write-Output "OVERLAY: no window"; exit 1 }
@@ -82,7 +87,7 @@ $w = $r.R - $r.L
 $cx = $r.L + [int]($w / 2)
 $panelTop = 0; $panelLeft = 0; $panelH = 0; $panelW = 0
 $iconY = 0; $trackY = 0; $playX = 0; $rewX = 0; $ffX = 0
-$startX = 0; $endX = 0; $muteX = 0; $shareX = 0; $fullX = 0; $trackX0 = 0
+$startX = 0; $endX = 0; $muteX = 0; $loopX = 0; $shareX = 0; $fullX = 0; $trackX0 = 0
 
 # THE TOP CHROME REVEALS WITH THE PANEL, SO THE DIFFERENCE IS NO LONGER ONE
 # REGION (UI redesign roadmap step 7). Both fade in on the same reveal state, so
@@ -204,6 +209,7 @@ $panelCx = $r.L + $panel.x + [int]($panel.w / 2)
 #     fast-forward 14 + 76 + 42 + 18       = 150 -> 2.6786
 #     go-to-end    14 + 76 + 42 + 38 + 18  = 188 -> 3.3571
 #     mute         + 38                    = 226 -> 4.0357
+#     loop         + 38                    = 264 -> 4.7143
 #   and from the RIGHT edge, share outermost:
 #     share        14 + 18                 =  32 -> 0.5714
 #     fullscreen   14 + 36 + 12 + 1 + 12 + 18 = 93 -> 1.6607
@@ -216,11 +222,12 @@ $playX  = $panelLeft + [int]($panelH * 1.9643)
 $ffX    = $panelLeft + [int]($panelH * 2.6786)
 $endX   = $panelLeft + [int]($panelH * 3.3571)
 $muteX  = $panelLeft + [int]($panelH * 4.0357)
+$loopX  = $panelLeft + [int]($panelH * 4.7143)
 $shareX = $panelLeft + $panelW - [int]($panelH * 0.5714)
 $fullX  = $panelLeft + $panelW - [int]($panelH * 1.6607)
-Write-Output ("OVERLAY strip {0}x{1} at ({2},{3}) - icons y={4}, start/rew/play/ff/end/mute x={5}/{6}/{7}/{8}/{9}/{10}, full/share x={11}/{12}" -f `
+Write-Output ("OVERLAY strip {0}x{1} at ({2},{3}) - icons y={4}, start/rew/play/ff/end/mute/loop x={5}/{6}/{7}/{8}/{9}/{10}/{11}, full/share x={12}/{13}" -f `
     $panelW, $panelH, $panel.x, $panelTop, ($iconY - $r.T), ($startX - $r.L), ($rewX - $r.L), ($playX - $r.L), `
-    ($ffX - $r.L), ($endX - $r.L), ($muteX - $r.L), ($fullX - $r.L), ($shareX - $r.L))
+    ($ffX - $r.L), ($endX - $r.L), ($muteX - $r.L), ($loopX - $r.L), ($fullX - $r.L), ($shareX - $r.L))
 
 # 3. hover the Play control
 Pt $playX $iconY; Start-Sleep -Milliseconds 350
@@ -254,7 +261,7 @@ Shot "07-after-one-rewind"
 # and on the strip the first 244+ logical px are buttons and the readout. A drag
 # beginning there would press Go to Start and then sweep the pointer across the
 # rest of the row, which reads as a passing drag and tests nothing.
-$trackX0 = $panelLeft + [int]($panelH * 5.5)
+$trackX0 = $panelLeft + [int]($panelH * 6.2)
 Pt $trackX0 $trackY
 [O]::mouse_event([O]::DOWN,0,0,0,[IntPtr]::Zero); Start-Sleep -Milliseconds 150
 for ($i = 0; $i -lt 12; $i++) { Pt ($trackX0 + $i * 30) $trackY }
@@ -351,6 +358,42 @@ if ($muteDelta -lt 20) {
     Write-Output "OVERLAY: FAIL - the mute button did not change its glyph"
 } else {
     Write-Output "OVERLAY mute: PASS"
+}
+
+# LOOP, and its state is the one the strip shows by COLOUR rather than by a
+# second glyph -- so this samples for the ACCENT in the control's cell rather
+# than counting changed pixels. It presses TWICE and ends in the state it
+# started in, because Loop is persisted; the scratch INI above is what makes
+# that safe rather than merely tidy.
+function LoopAccent([string]$png) {
+    $bmp = [System.Drawing.Bitmap]::FromFile($png)
+    try {
+        $lx = $loopX - $r.L; $ly = $iconY - $r.T; $n = 0
+        for ($dy = -12; $dy -le 12; $dy++) {
+            for ($dx = -12; $dx -le 12; $dx++) {
+                $c = $bmp.GetPixel($lx + $dx, $ly + $dy)
+                if (($c.B -gt $c.R + 25) -and ($c.G -gt $c.R + 12) -and ($c.B -gt 90)) { $n++ }
+            }
+        }
+        return $n
+    } finally { $bmp.Dispose() }
+}
+Pt $loopX $iconY; Start-Sleep -Milliseconds 450
+Shot "17-loop-off"
+Tap $loopX $iconY; Start-Sleep -Milliseconds 450
+Shot "18-loop-on"
+Tap $loopX $iconY; Start-Sleep -Milliseconds 450
+Shot "19-loop-off-again"
+$loopOff = LoopAccent (Join-Path $OutDir "17-loop-off.png")
+$loopOn  = LoopAccent (Join-Path $OutDir "18-loop-on.png")
+$loopEnd = LoopAccent (Join-Path $OutDir "19-loop-off-again.png")
+Write-Output ("OVERLAY loop accent px off/on/off: {0}/{1}/{2}" -f $loopOff, $loopOn, $loopEnd)
+if ($loopOn -lt ($loopOff + 30)) {
+    Write-Output "OVERLAY: FAIL - Loop ON did not tint the glyph"
+} elseif ($loopEnd -gt ($loopOff + 30)) {
+    Write-Output "OVERLAY: FAIL - Loop did not turn back off"
+} else {
+    Write-Output "OVERLAY loop: PASS"
 }
 
 # 9. fade out by leaving

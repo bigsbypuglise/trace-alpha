@@ -50,6 +50,14 @@ struct OverlayHooks {
     std::function<void()> toggleMute;
     std::function<bool()> isMuted;
 
+    // LOOP, the same shape as mute: a command and a read, never a cached
+    // state. `loopAction_` has existed as a shared checkable QAction since spec
+    // phase 14 and is already connected on `toggled` rather than `triggered`,
+    // so toggle() from the strip reaches it -- which is exactly the thing that
+    // was NOT true of Mute when its button was added.
+    std::function<void()> toggleLoop;
+    std::function<bool()> isLooping;
+
     // Whether the window is fullscreen, so the strip can draw the enter or the
     // exit glyph. `toggleFullscreen` below is the command and already exists --
     // the button and the double-click run the one action.

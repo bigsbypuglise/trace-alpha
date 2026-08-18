@@ -25,8 +25,7 @@
     Transport icons. Only controls that exist in the app are embedded; the rest
     of the base UI set (inspector, zoom, rotate, loop, ...) is deliberately left
     out until those features are real. `volume` left that list at UI redesign
-    roadmap step 5, which gave Mute a visible control; `loop` is still in it,
-    because the feature exists but the strip has no loop button. Spec phase 8 is the
+    roadmap step 5, which gave Mute and Loop visible controls. Spec phase 8 is the
     first time assets/interface/common/ is not empty: the Share menu is real, so
     its three item glyphs arrived with it, and share_menu became the transport
     button's artwork under the name of the control it drives.
@@ -105,6 +104,14 @@
 
     <file alias="volume-muted-24.png">../assets/interface/common/volume-muted-24.png</file>
     <file alias="volume-muted-48.png">../assets/interface/common/volume-muted-48.png</file>
+
+    <!-- Loop, the design package's own master. It sat in source/ from the
+         2026-08-17 swap because the strip had no loop button, which was the
+         "artwork follows behaviour" rule holding; the button arrived at UI
+         redesign roadmap step 5 and the glyph came with it, in the same commit,
+         which is the same rule the other way round. -->
+    <file alias="loop-24.png">../assets/interface/common/loop-24.png</file>
+    <file alias="loop-48.png">../assets/interface/common/loop-48.png</file>
 
     <!-- In use from spec phase 8: the transport Share button, on the docked bar
          and in the composited overlay's right region. This is share_menu from

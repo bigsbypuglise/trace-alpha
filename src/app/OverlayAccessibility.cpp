@@ -269,6 +269,14 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
         {Region::Mute, commands_.mute, QT_TR_NOOP("Mute"),
          QT_TR_NOOP("Mute or unmute the audio. The M key does the same from anywhere."),
          QAccessible::CheckBox},
+        // CheckBox for the same reason Mute is: it reports a state, and Loop's
+        // is the one the strip shows by COLOUR rather than by a second glyph --
+        // which a screen reader cannot see at all, so the role carrying it is
+        // doing more work here than anywhere else on the strip.
+        {Region::Loop, commands_.loop, QT_TR_NOOP("Loop"),
+         QT_TR_NOOP("Repeat playback when it reaches the end. The setting is "
+                    "remembered between files and between sessions."),
+         QAccessible::CheckBox},
         // Slider, not Button: it is a position along a range, and that is what
         // it should announce as even though this proxy carries no value. A
         // Button role here would be a lie a screen reader repeats.

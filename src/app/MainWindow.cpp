@@ -462,6 +462,7 @@ MainWindow::MainWindow() {
         commands.goToStart = goToStartAction_;
         commands.goToEnd = goToEndAction_;
         commands.mute = muteAction_;
+        commands.loop = loopAction_;
         commands.fullscreen = fullscreenAction_;
         overlayAccessibility_ =
             new OverlayAccessibility(viewer_, &viewer_->overlayModel(), commands);
@@ -1268,6 +1269,11 @@ void MainWindow::installOverlayHooks() {
     // handler with the OLD checked value and leave the tick behind by one.
     hooks.toggleMute = [this]() { if (muteAction_) muteAction_->toggle(); };
     hooks.isMuted = [this]() { return audio_.isMuted(); };
+    // Loop. toggle() reaches loopAction_'s handler because that action has been
+    // connected on `toggled` since spec phase 14 -- which is what Mute was not,
+    // and is why Mute's button flipped a tick and changed nothing for one build.
+    hooks.toggleLoop = [this]() { if (loopAction_) loopAction_->toggle(); };
+    hooks.isLooping = [this]() { return loopEnabled_; };
     hooks.isFullscreen = [this]() { return isFullScreen(); };
 
     hooks.setScrubbing = [this](bool down) {
