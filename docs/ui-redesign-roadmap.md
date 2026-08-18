@@ -186,17 +186,19 @@ accessibility proxy takes its name from that action. Neither key was bound befor
 thing on the strip, after the timeline. Mute and Fullscreen are `CheckBox`, which is the honest
 role for a control that reports a state.
 
-**LOOP IS THE ONE MOCKUP CONTROL NOT BUILT.** The markup shows a loop button beside volume, the
-feature exists (phase 14) and the art is in `source/`. It is absent from both owner decisions and
-from the step's own "no flag on the rest" list, so it was left out rather than added quietly.
-It is a one-control addition if wanted — `loopAction_` is already a shared checkable action.
+**LOOP IS BUILT, AS A THIRD OWNER DECISION TAKEN AFTER THE FIRST PASS.** It is the tenth
+control, after Mute, where the design's own markup puts it, and it runs the shared checkable
+`loopAction_` phase 14 built. **It is the one control whose state is not a second glyph** — the
+package ships one loop glyph where it ships a volume/volume-muted pair, so ON is the accent and
+OFF is the neutral ink of its neighbours. Two glyphs would have meant inventing artwork.
 
-**Carried, not fixed: the strip does not dim a disabled control.** With no media open, Go to
-Start and Go to End are disabled `QAction`s and the strip draws them at full brightness; clicking
-does nothing. That is pre-existing behaviour for the controls that were already there — the
-transport has always drawn live over an empty window — and the package supplies no disabled
-treatment (its own note gives draw-time multipliers for hover and pressed only). Recorded as an
-owner/design question rather than settled quietly.
+**Two more owner decisions closed the step, and both are settled rather than defaults.** The
+three glyphs authored here **stay** — accepted "for now", which makes them shipped artwork and
+not placeholders, though they remain a drop-in swap if a designer draws replacements. And
+**disabled controls stay visually unchanged**: with no media, Go to Start and Go to End are
+disabled actions drawn at full brightness and the click is refused by the action. That was
+already true of every control predating this step and the package supplies no disabled
+treatment. **Neither is an omission to fix.**
 
 ---
 

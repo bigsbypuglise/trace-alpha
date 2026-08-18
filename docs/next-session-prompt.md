@@ -2,7 +2,8 @@
 
 ## 2026-08-18, THIRD SESSION: ROADMAP STEP 5 IS DONE — THE EDGE-TO-EDGE TRANSPORT STRIP
 
-Two commits (`15473d0` the strip and its glyphs, `02b07e5` the harness). The floating 460×84
+Four commits: `15473d0` the strip and its glyphs, `02b07e5` the harness, `cdc0959` the docs,
+and the Loop button after the owner asked for it. The floating 460×84
 panel is gone; the transport is the design package's **56px strip across the full width of the
 window** with nine controls — `|◀ ◀◀ ▶ ▶▶ ▶|`, mute, the timeline between its two readouts,
 fullscreen, a separator, share.
@@ -47,19 +48,20 @@ fullscreen, a separator, share.
   before the pointer arrived, so the hover plate changed all 625 pixels and it reported PASS on
   the broken build.
 
-**Carried, not built, and neither is an oversight.** **Loop** is the one mockup control absent
-from the strip: the feature exists and the art is in `source/`, but it is in neither owner
-decision nor the step's own list, so it was left rather than added quietly — a one-control
-addition if wanted. And **the strip does not dim a disabled control** (Go to Start / Go to End
-with no media): pre-existing for the controls that were already there, and the package supplies
-no disabled treatment. Both are owner questions.
+**Three owner decisions closed the step and all three are SETTLED, not defaults.** **Loop is
+built** — the tenth control, after Mute, and **the one whose state is not a second glyph**: the
+package ships one loop glyph, so ON is the accent and OFF is neutral, and its `CheckBox` proxy
+role is the only thing carrying that state to a screen reader. **The three authored glyphs
+stay** ("for now"), which makes them shipped artwork rather than placeholders — still a drop-in
+swap if a designer draws replacements. And **disabled controls stay visually unchanged**, which
+was already true of every control predating the step. **Do not "fix" the last one.**
 
 **Regression flat against the control**: cadence 4K H.264 ×2 **99.1/99.1%** with identical
 buckets, `drop 0`, `rephase 0`, `0 of 120` and the same paints · `-SnapRelease` `delta 0`,
 `hitch 0`, `land 0`, release 21.4 vs 21.1ms · reversal drag **`hitch 1` on six of seven runs
 against 1 on four of four** · lifecycle **83.9% / 0%** against **82.4% / 0%** · **25 of 25
 transitions on both** · `emptystate.ps1` all four modes on both backends plus the `-Bar`
-control · `uiatree.ps1` nine named controls on the drawn rects.
+control · `uiatree.ps1` ten named controls on the drawn rects.
 
 **Two harness changes, both because a detector met chrome it was not written for — the third
 and fourth instances.** `emptystate.ps1`'s "essentially black" bound was under 12 and the

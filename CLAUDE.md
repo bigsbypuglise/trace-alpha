@@ -659,15 +659,25 @@ dialog leaves the playhead alone (0.88), Home with no dialog goes to 0.** Note G
 `QInputDialog` **spin box**, whose edit UIA exposes no `ValuePattern` here, so this has to be
 tested behaviourally rather than by reading the field.
 
-**TWO THINGS ARE CARRIED RATHER THAN BUILT, both stated so they are not read later as
-oversights.** **Loop is the one mockup control not built** — the markup shows it, the feature
-exists since phase 14 and the art is in `source/`, but it is absent from both owner decisions
-and from the step's own "no flag on the rest" list, so it was left out rather than added
-quietly; it is a one-control addition, `loopAction_` already being a shared checkable action.
-And **the strip does not dim a disabled control**: with no media, Go to Start and Go to End are
-disabled `QAction`s drawn at full brightness. That is pre-existing for the controls that were
-already there — the transport has always drawn live over an empty window — and the package
-supplies no disabled treatment, giving draw-time multipliers for hover and pressed only.
+**THREE OWNER DECISIONS CLOSED THE STEP, ALL 2026-08-18, AND ALL THREE ARE SETTLED RATHER THAN
+DEFAULTS.**
+
+- **The three authored glyphs STAY.** `go-to-start`, `go-to-end` and `volume-muted` were
+  derived here because the package ships none of them; the owner accepted them "for now",
+  which makes them shipped artwork rather than placeholders. **They remain a drop-in swap** —
+  same names, same sizes, no code change — if a designer draws replacements.
+- **LOOP IS BUILT** (`257a089`), the tenth control, after Mute where the design's own markup
+  puts it. **It is the one control whose state is not a second glyph**: the package ships one
+  loop glyph where it ships a volume/volume-muted pair, so ON is the accent and OFF is the same
+  neutral ink as its neighbours. Its own atlas cell rather than a draw-time tint, because
+  `brighten` scales RGB uniformly and cannot turn neutral ink cyan. Its `CheckBox` proxy role
+  is therefore doing more work than any other on the strip — colour is the *only* thing
+  distinguishing the two states and a screen reader cannot see it.
+- **DISABLED CONTROLS STAY VISUALLY UNCHANGED.** With no media, Go to Start and Go to End are
+  disabled `QAction`s drawn at full brightness and the click is refused by the action. That was
+  already true of every control that predates this step, the package supplies no disabled
+  treatment (its own note gives draw-time multipliers for hover and pressed only), and the
+  owner confirmed it. **Do not "fix" this** — it is a decision, not an omission.
 
 **THE REGRESSION, AND IT IS FLAT** (display **5120x1440 @ 239.999Hz — the physical panel, NOT
 the 1920x1080 the step 7 block was taken on**, so no figure here is comparable to that one; a
@@ -688,8 +698,15 @@ run beside every leg).
   **25 of 25 transitions** on both binaries.
 - **`emptystate.ps1` all four modes PASS on both backends**, plus the `-Bar` control reading the
   recorded **641-row** stage; `launch` reads mark **59x68**, offset **+10.5**, hint **157x13**,
-  gap **45** — the step 3 figures unchanged. `uiatree.ps1` finds **nine** named controls with
-  correct roles on the drawn rects.
+  gap **45** — the step 3 figures unchanged. `uiatree.ps1` finds **ten** named controls with
+  correct roles on the drawn rects (nine before Loop).
+
+**`overlay.ps1` LAUNCHES WITH A SCRATCH `TRACE_SETTINGS_FILE` NOW, BECAUSE IT PRESSES LOOP.**
+Loop is persisted, so a run that left it on would poison the next cadence measurement — which
+is phase 14's own recorded failure, where a cadence run read a healthy 100% off a single lap.
+Its loop leg presses twice and ends in the state it started in, and samples for the **accent**
+in the control's cell rather than counting changed pixels, because that is what carries the
+state: 0/68/0 accent px on d3d11, 0/54/0 on cpu.
 
 **ONE HARNESS FACT THIS CREATES, AND IT IS A THIRD INSTANCE OF THE SAME TRAP.**
 `emptystate.ps1`'s stage bound looked for a row "essentially black" at a mean under 12. The
