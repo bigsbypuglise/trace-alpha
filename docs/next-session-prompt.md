@@ -1,5 +1,83 @@
 # v0.2.0-beta.1 IS SHIPPED. THE OPEN PHASE IS THE OWNER'S UI REDESIGN ROADMAP.
 
+## 2026-08-18, THIRD SESSION: ROADMAP STEP 5 IS DONE — THE EDGE-TO-EDGE TRANSPORT STRIP
+
+Two commits (`15473d0` the strip and its glyphs, `02b07e5` the harness). The floating 460×84
+panel is gone; the transport is the design package's **56px strip across the full width of the
+window** with nine controls — `|◀ ◀◀ ▶ ▶▶ ▶|`, mute, the timeline between its two readouts,
+fullscreen, a separator, share.
+
+**Read the step 5 block in `CLAUDE.md` before quoting any figure.** This session ran on the
+**physical panel, 5120x1440 @ 239.999Hz**, so nothing in it is comparable to step 7's
+1920x1080 record; a control was built from `637c7e5` and hash-verified (`578A6C03` against
+`0806244E`) and run beside every leg.
+
+**Six things to carry.**
+
+- **THE TIMELINE IS DRAWN, NOT REWRITTEN.** `timelineSlider_` is still the whole scrub state
+  machine and the track is a picture of it — a press still runs `setSliderDown` / `setValue` /
+  `setSliderDown` through `OverlayHooks`. Nothing in the strip computes a target, which is why
+  `-SnapRelease` still reads `target 261 shown 261 delta 0` full-res planar, identical to the
+  control. **If a future step touches the track, this is the property to re-confirm first.**
+- **THE PHASE 6 GEOMETRY IS SUPERSEDED, KNOWINGLY** — 460×84 / 44 / 34 was signed off with "no
+  tuning is wanted" and the owner replaced it with 56 / 40 / 36. **`kFadeMs` and `kAutoHideMs`
+  are NOT superseded.** Both the phase 6 sign-off and the `overlay.ps1` note in `CLAUDE.md`
+  now say so at their own site.
+- **THE ROADMAP'S OWN PREMISE FOR THE MUTE GLYPH WAS WRONG, AND THE START/END ART DOES NOT
+  EXIST EITHER.** The package carries **one** `volume`, in `source/` only, and no muted
+  variant; and the retired 260807 set's `prev-clip` is a **double triangle**, i.e. the same
+  shape as `rewind`. Three masters were authored from the delivered ones (same viewBox, fill
+  and 1.6 stroke; go-to-end an exact mirror about x=12), `volume` was promoted out of
+  `source/`, and there is **deliberately no `volume-low`**. Derived set **29 → 37** with no
+  edit to `verify_trace_assets.py`.
+- **EVERY CELL IS RASTERISED AT THE SIZE IT IS DRAWN, AND THE TWO DEPARTURES WERE MEASURED.**
+  Cross-backend over the empty state's black stage: stretched gradient column **12,511 px at
+  delta 3** → 1:1 cell with draw-time alphas **3,594 at delta 2** → 1:1 cell with the design's
+  alphas **baked into their own cells** **0 px, delta 0**. A fractional alpha applied by
+  QPainter's integer SourceOver on one path and a float multiply in the shader on the other is
+  a real difference; baking it leaves only the fade, which is exactly 1.0 when revealed.
+- **A CROSS-BACKEND DIFF TAKEN OVER VIDEO CANNOT SEE THE STRIP.** The strip band over a paused
+  frame reads 44.9% at delta 3; the *same band with no strip* reads 43.9% at delta 4 and the
+  bare video band 65.3% at delta 20 — the translucent strip attenuates the video's own backend
+  difference. **Compare the strip over the empty state**, which `emptystate.ps1 -Mode
+  transport` already sets up.
+- **`QAction::toggle()` EMITS `toggled()`, NOT `triggered()`.** The Mute button flipped the
+  tick and never reached the audio for one build. It was found by a harness assertion **only
+  after that assertion was corrected** — the first version compared against a capture taken
+  before the pointer arrived, so the hover plate changed all 625 pixels and it reported PASS on
+  the broken build.
+
+**Carried, not built, and neither is an oversight.** **Loop** is the one mockup control absent
+from the strip: the feature exists and the art is in `source/`, but it is in neither owner
+decision nor the step's own list, so it was left rather than added quietly — a one-control
+addition if wanted. And **the strip does not dim a disabled control** (Go to Start / Go to End
+with no media): pre-existing for the controls that were already there, and the package supplies
+no disabled treatment. Both are owner questions.
+
+**Regression flat against the control**: cadence 4K H.264 ×2 **99.1/99.1%** with identical
+buckets, `drop 0`, `rephase 0`, `0 of 120` and the same paints · `-SnapRelease` `delta 0`,
+`hitch 0`, `land 0`, release 21.4 vs 21.1ms · reversal drag **`hitch 1` on six of seven runs
+against 1 on four of four** · lifecycle **83.9% / 0%** against **82.4% / 0%** · **25 of 25
+transitions on both** · `emptystate.ps1` all four modes on both backends plus the `-Bar`
+control · `uiatree.ps1` nine named controls on the drawn rects.
+
+**Two harness changes, both because a detector met chrome it was not written for — the third
+and fourth instances.** `emptystate.ps1`'s "essentially black" bound was under 12 and the
+strip's translucent gradient composites to 6..10 over black, so the bound swallowed the strip
+and the mark scan swept its **accent** — the transport's first strongly chromatic thing — into
+the mark's box, reporting a 433x377 mark against the design's 59x68 on a correct build. The
+stage measures exactly 0.00 and the strip 6.00..10.77; the threshold is **3**. And
+`overlay.ps1` asserted a 460×84 panel with control positions as a *fraction of the panel
+width*; it now asserts the design's 56px height, checks the width against the captured window,
+and derives every control as a multiple of the measured strip **height**, with four new legs
+for the four new controls.
+
+**Steps 6 and 8–12 carry their flags unchanged; the next one is the owner's to choose.** Step
+10's Mica/Acrylic backdrop is still the item with real presentation risk against a flip-model
+swapchain, and the strip is where it would land.
+
+---
+
 ## 2026-08-18, SECOND SESSION: ROADMAP STEP 7 IS DONE — THE TRANSIENT TOP CHROME
 
 One commit (`10a7fba`), and it **finishes step 4**: the menu bar was the last permanent chrome,
@@ -58,9 +136,9 @@ window's width, so the two-pass convergence can settle either way (last session 
 this one `win 1278x1083`, on **both** binaries). The shipping HUD-hidden size is not affected.
 Quote `win` and `display` from the run itself.
 
-**Steps 5, 6 and the rest carry their flags unchanged**; the next one is the owner's to choose.
-**Step 5's prev/next and volume flags are still the two that need an owner answer before any work
-starts**, and step 7's accessibility flag is now closed by the shape that was built.
+~~**Steps 5, 6 and the rest carry their flags unchanged**~~ — **step 5 is DONE, see the top of
+this file**; its two flags were answered by the owner and then built. Step 7's accessibility
+flag is closed by the shape that was built.
 
 ---
 

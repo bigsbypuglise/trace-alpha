@@ -562,7 +562,148 @@ today's at `win 1278x1083` on both binaries. **The shipping (HUD-hidden) size is
 — it converges in one pass on three of four shapes — so quote `win` and `display` from the run
 itself and never compare a HUD-on geometry across sessions. And `overlay.ps1`'s panel location
 now skips the top 90 rows; a run that reports a region much larger than 459x83 is reading the
-strip and the panel together.
+strip and the panel together. **(That 459x83 assertion is superseded at step 5 below — the
+transport is edge to edge, so the script asserts the design's 56px height and checks the width
+against the captured window instead.)**
+
+**ROADMAP STEP 5 IS DONE (2026-08-18, `15473d0` · `02b07e5`): THE EDGE-TO-EDGE TRANSPORT
+STRIP.** The floating 460×84 panel is replaced by the design package's **56px strip across the
+full width of the window** — go to start, rewind, play/pause, fast-forward, go to end, mute,
+then the timeline between its two readouts, then fullscreen, a separator and share. Nine
+controls where there were four.
+
+**THE TIMELINE IS DRAWN, NOT REWRITTEN, AND THAT WAS THE ONE THING THIS STEP COULD GET BADLY
+WRONG.** `timelineSlider_` is still the entire scrub state machine; the strip's track is a
+*picture* of it, and a press still runs `setSliderDown(true)` / `setValue()` /
+`setSliderDown(false)` through `OverlayHooks` exactly as the panel has since phase 6. Nothing
+in the strip computes a target, so exact release, latest-target-wins, the drag shuttle and the
+press-lands-exactly result are **inherited rather than reimplemented** — confirmed in the code
+before the control was designed, and again by measurement after: `-SnapRelease` on 4444 reads
+`target 261 shown 261 delta 0` full-res planar, identical to the control.
+
+**THE PHASE 6 PANEL GEOMETRY IS SUPERSEDED, KNOWINGLY, AND IT IS RECORDED AS SUPERSEDING
+RATHER THAN DRIFTING.** 460×84 with 44×44 play and 34×34 utility controls was signed off with
+*"no tuning is wanted"*, so those were settled numbers. They are now the handoff's **56 / 40 /
+36, radius 6, track 4px (6 on hover), thumb 13px (16 while scrubbing), accent `#5AC8E8` on the
+played track and the thumb ring and nothing else**. **`kFadeMs` and `kAutoHideMs` are NOT
+superseded** and are untouched. Note the package disagrees with itself and the handoff wins:
+`HANDOFF.md`'s geometry line says 56/40/36, its mockup *markup* renders 52/38/34. The
+arrangement is the markup's exactly.
+
+Six things to carry.
+
+- **FOUR GLYPHS HAD TO BE AUTHORED, AND THE ROADMAP'S PREMISE FOR ONE OF THEM WAS WRONG.** Its
+  decision 2 says the package "already carries `volume` / `volume-low` / `volume-muted` art".
+  It carries **one** `volume`, in `source/` only, no muted variant, and **no start/end art at
+  all**. The retired 260807 set is no help either — **its `prev-clip` is a DOUBLE TRIANGLE**,
+  the same shape as `rewind`, so using it would have put one glyph on two controls. The three
+  new masters are derived from the delivered ones rather than invented beside them (same
+  viewBox, same `#FFFFFF`, same 1.6 round stroke; the pair shares `rewind`'s 6.8..17.2 span and
+  go-to-end is an exact mirror about x=12). **There is deliberately no `volume-low`**: with no
+  slider it would be art with no behaviour. `verify_trace_assets.py` demanded all eight PNGs
+  **with no edit to itself**, derived set **29 → 37**.
+- **EVERY CELL IS RASTERISED AT THE SIZE IT IS DRAWN, AND TWO DEPARTURES FROM THAT RULE WERE
+  MEASURED BEFORE THEY WERE FIXED.** Cross-backend, over the empty state's **black stage** so
+  no video could contaminate it: a narrow gradient column stretched across the window read
+  **12,511 differing px at max channel delta 3**; a 1:1 strip cell with the track and separator
+  alphas still applied at draw time read **3,594 at delta 2**; with the design's alphas **baked
+  into their own cells** — so the only draw-time multiplier left is a fade that is exactly 1.0
+  when revealed — it reads **0 px, max channel delta 0**. The reasoning for stretching (the
+  gradient varies only vertically, so a horizontal stretch preserves information) is true of the
+  *source* and says nothing about the two *samplers*, which is the same mistake the play glyph's
+  8.1%/delta-29 offset already cost this project once.
+- **A CROSS-BACKEND DIFF TAKEN OVER VIDEO CANNOT SEE THE STRIP AT ALL.** Over a paused frame the
+  strip band reads 44.9% differing at max delta 3 — and the *same band with no strip drawn*
+  reads 43.9% at delta 4, and the bare video band 65.3% at delta 20. The translucent strip
+  *attenuates* the video's own backend difference. **Take strip comparisons over the empty
+  state**, which is what `emptystate.ps1 -Mode transport` already sets up.
+- **`QAction::toggle()` EMITS `toggled()` AND NOT `triggered()`, AND THAT SHIPPED FOR ONE BUILD.**
+  The strip's Mute button calls `toggle()`, because a checkable action must flip its own tick;
+  the handler was on `triggered`, so `M` worked and the button moved the tick, changed no glyph
+  and never reached the audio. **It was found by a harness assertion, and only after that
+  assertion was corrected** — its first version compared the control against a capture taken
+  before the pointer arrived, so the hover plate changed all 625 pixels in the cell whether or
+  not the click did anything, and it reported PASS on the broken build. Hovered-vs-hovered reads
+  43 of 625.
+- **A PRESS ON THE STRIP'S OWN BACKGROUND IS CONSUMED NOW, AND THE EDGE-TO-EDGE SHAPE IS WHAT
+  MADE THAT NECESSARY.** A press landing on no control starts a **pan** when the picture is
+  zoomed (phase 15). That was harmless while the transport was a 460px box; the strip spans the
+  window, so the space between the buttons and the readout and the whole right end past Share
+  would have dragged the picture out from under the control the user was aiming at.
+  Double-click is consumed the same way, or a stray double-click anywhere along the strip
+  toggles fullscreen.
+- **THE RATE CHIP MOVED, AND THE GEOMETRY FORCED IT.** It sat at the old panel's top-left, in an
+  84px panel with an empty corner. A 56px strip has no empty corner — the chip's ~27px would
+  land on Go to Start — so "inside the panel" stopped being a position that exists. It is
+  **centred above the strip**, which is where the package's §6 puts it and what phase 8 recorded
+  as not yet done. Only the position is taken; §6's padding, radius and 900ms/200ms timing
+  remain unimplemented.
+
+**Also in the step.** **Home and End are bound**, through the existing `goToFrame()` exact Step
+landing Go to Frame already uses — no new decode behaviour. **Mute was promoted from a
+`ShortcutTable` key row to a shared checkable `QAction`**, because a button and its key must
+trigger one action and the accessibility proxy takes its name from that action. **Nine
+accessibility proxies in left-to-right reading order**, the four new ones **interleaved rather
+than appended** (appending would have announced Go to Start, the leftmost thing on the strip,
+after the timeline); Mute and Fullscreen are `CheckBox`, the honest role for a control that
+reports a state. The readouts go through **one shared expression, `readoutTextAt`**, which is
+spec phase 7's four modes extracted out of the HUD — so the HUD and the strip cannot print
+different values for the same frame, and there is no fifth format.
+
+**THE HOME/END TEXT-FIELD GUARD WAS CHECKED RATHER THAN ASSUMED, WHICH PHASE 7'S RULE REQUIRES
+OF ANY NEW SINGLE-KEY SHORTCUT — AND THE MECHANISM THAT COVERS THEM IS NOT THE ONE THAT COVERS
+LETTERS.** `QLineEdit`'s `ShortcutOverride` handles *printable* keys; Home and End are not
+printable, so what protects them is the modal dialog being a separate window. Measured with its
+negative control: **End reaches the end (played track 0.88), Home inside the open Go to Frame
+dialog leaves the playhead alone (0.88), Home with no dialog goes to 0.** Note Go to Frame is a
+`QInputDialog` **spin box**, whose edit UIA exposes no `ValuePattern` here, so this has to be
+tested behaviourally rather than by reading the field.
+
+**TWO THINGS ARE CARRIED RATHER THAN BUILT, both stated so they are not read later as
+oversights.** **Loop is the one mockup control not built** — the markup shows it, the feature
+exists since phase 14 and the art is in `source/`, but it is absent from both owner decisions
+and from the step's own "no flag on the rest" list, so it was left out rather than added
+quietly; it is a one-control addition, `loopAction_` already being a shared checkable action.
+And **the strip does not dim a disabled control**: with no media, Go to Start and Go to End are
+disabled `QAction`s drawn at full brightness. That is pre-existing for the controls that were
+already there — the transport has always drawn live over an empty window — and the package
+supplies no disabled treatment, giving draw-time multipliers for hover and pressed only.
+
+**THE REGRESSION, AND IT IS FLAT** (display **5120x1440 @ 239.999Hz — the physical panel, NOT
+the 1920x1080 the step 7 block was taken on**, so no figure here is comparable to that one; a
+control was built from `637c7e5`, hash-verified `578A6C03` against the step-5 `0806244E`, and
+run beside every leg).
+
+- **Cadence** 4K H.264 ×2, scratch INI, `TRACE_NO_AUDIO`: **99.1 / 99.1%**, 120 frames,
+  `drop 0`, `rephase 0`, `handler>budget 0 of 120`, buckets `~1x 118 / 1.5-2.5x 1`, paints
+  208/121. **The control reads 99.1 / 99.1% with the same buckets and the same paints.**
+- **Scrub `-SnapRelease`** 4444, bar mode widened to 1280 (`win 1264x1083`, `display 1066x600
+  filtered x2` on both): **`target 261 shown 261 delta 0`** full-res planar, `release 21.4ms`
+  against the control's **21.1**, `hitch 0`, `land 0`, `ui over-16ms 0 of 706` on both.
+- **Reversal drag** 4K H.264: `delta 0`, `seeks 4`, `release ~44-45ms`, and **`hitch 1` on six
+  of seven runs against the control's 1 on four of four** — the one run that read 2 is inside
+  this gesture's own recorded variance, which is why it was run seven times rather than argued
+  about.
+- **Lifecycle 83.9% moving / 0% control**, against the control's **82.4% / 0%**.
+  **25 of 25 transitions** on both binaries.
+- **`emptystate.ps1` all four modes PASS on both backends**, plus the `-Bar` control reading the
+  recorded **641-row** stage; `launch` reads mark **59x68**, offset **+10.5**, hint **157x13**,
+  gap **45** — the step 3 figures unchanged. `uiatree.ps1` finds **nine** named controls with
+  correct roles on the drawn rects.
+
+**ONE HARNESS FACT THIS CREATES, AND IT IS A THIRD INSTANCE OF THE SAME TRAP.**
+`emptystate.ps1`'s stage bound looked for a row "essentially black" at a mean under 12. The
+strip's background is a **translucent dark gradient**, which over the black stage composites to
+**6..10** — under that threshold — so the first row tested passed and the bound stopped at the
+bottom of the client with the whole strip inside the stage. The mark scan then swept the
+strip's **accent**, the first strongly chromatic thing the transport has ever had, into the
+mark's bounding box and reported a **433x377** mark against the design's 59x68 on a build whose
+empty state is visibly correct. Measured at the strip's top edge the stage reads **exactly
+0.00** and the strip **6.00 to 10.77**; the threshold is **3**. `overlay.ps1` was defeated the
+other way — it asserted a 460×84 panel and derived control positions as a *fraction of the panel
+width*, both of which stop meaning anything on a strip whose width is the window's; it asserts
+the design's 56px height, checks the width against the captured window, and derives every
+control as a multiple of the measured strip **height**.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
@@ -766,7 +907,11 @@ unattributed — not an overlay win**.
 open.** The panel clearly reads as the transport, the 2s inactivity delay feels right, the
 165ms fade feels natural, and **no tuning is wanted** — so `kFadeMs`, `kAutoHideMs` and the
 460×84 panel with its 44×34 controls are **settled numbers rather than defaults**, and
-changing one reopens an owner decision. Read it at its stated width: what was accepted is the
+changing one reopens an owner decision. **THE PANEL GEOMETRY WAS REOPENED AND REPLACED AT UI
+REDESIGN ROADMAP STEP 5 (2026-08-18)** — an owner decision, recorded there as superseding this
+sign-off rather than drifting from it: the transport is an edge-to-edge 56px strip with 40px
+play and 36px other controls now. **`kFadeMs` and `kAutoHideMs` are NOT superseded** and this
+sign-off still governs them and the auto-hide's feel. Read it at its stated width: what was accepted is the
 **auto-hide's feel and the panel's identity as a transport**, not the Time Display readouts
 (phase 7 rewrites them), not the menus (phase 13), and **not the overlay as finished** — plan
 §31.5 item 4 stands, and it is not final until a screen reader has driven one.

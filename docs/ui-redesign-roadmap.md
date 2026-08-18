@@ -128,7 +128,126 @@ design's area cap instead of being cut off by the work-area bound (1:1 774 → 9
 859x1074). The re-baseline is in `CLAUDE.md`'s step 7 block and **that block is the standing
 reference**; the 2026-08-17 one is a record of the pre-step-7 chrome.
 
-### 5. Bottom transport overlay
+### 5. Bottom transport overlay — **DONE 2026-08-18.** Both blocking questions were answered by the owner first.
+
+Built as the design package's edge-to-edge strip, replacing the floating 460×84 panel. Nine
+controls in the conventional pro order — `|◀ ◀◀ ▶ ▶▶ ▶|` then mute, the timeline between its two
+readouts, then fullscreen, a separator and share — with the position and duration driven by spec
+phase 7's four existing modes and no fifth format anywhere.
+
+**THE TIMELINE IS DRAWN, NOT REWRITTEN, and that was the one thing this step could get badly
+wrong.** `timelineSlider_` is still the entire scrub state machine: the strip's track is a
+picture of it, and pressing the track still runs `setSliderDown(true)` / `setValue()` /
+`setSliderDown(false)` through `OverlayHooks`, exactly as the floating panel did since phase 6.
+Nothing computes a target. Confirmed in the code before the control was designed and confirmed
+again by measurement afterwards — `scrub -SnapRelease` on 4444 reads `target 261 shown 261
+delta 0` full-res planar, identical to the control.
+
+**THE PANEL GEOMETRY IS SUPERSEDED, KNOWINGLY, AND IT IS RECORDED AS SUPERSEDING RATHER THAN
+DRIFTING.** Spec phase 6 settled 460×84 with 44×44 play and 34×34 utility controls and the owner
+signed it off with *"no tuning is wanted"*. This step replaces those numbers with the handoff's
+**56px strip, 40px play, 36px other controls, radius 6, track 4px (6 on hover), thumb 13px (16
+while scrubbing), accent only on the played track and the thumb ring**. **`kFadeMs` and
+`kAutoHideMs` are NOT superseded** and are untouched.
+
+**Note the design package disagrees with itself on the sizes and the handoff wins.** Its
+`HANDOFF.md` "Geometry in the mockups" line specifies 56/40/36; the mockup MARKUP renders the
+same strip at 52/38/34. The handoff is the spec and the markup is a rendering of it at a demo
+window size. The arrangement — buttons, position, track, duration, fullscreen, separator, share
+— is the markup's exactly.
+
+**FOUR GLYPHS HAD TO BE AUTHORED, AND THE ROADMAP'S PREMISE FOR ONE OF THEM WAS WRONG.** Decision
+2 says *"the design package already carries `volume` / `volume-low` / `volume-muted` art"*. It
+carries **one** `volume` glyph, in `source/` only, and no muted variant; and it ships **no
+start/end art at all**. The retired 260807 set is no help either — **its `prev-clip` is a DOUBLE
+TRIANGLE**, the same shape as `rewind`, so using it would have put one glyph on two controls.
+So `go-to-start`, `go-to-end` and `volume-muted` are new, derived from the delivered masters
+rather than invented beside them (same viewBox, same `#FFFFFF`, same 1.6 round stroke;
+go-to-start and go-to-end share `rewind`'s 6.8..17.2 vertical span and go-to-end is an exact
+mirror of go-to-start about x=12), and `volume` is the package's own master promoted out of
+`source/`. **There is deliberately no `volume-low`**: with no slider, a third state would be art
+with no behaviour behind it. `verify_trace_assets.py` demanded all eight PNGs with no edit to
+itself — the derived set went **29 → 37**.
+
+**THE RATE CHIP MOVED, AND THE GEOMETRY FORCED IT.** It sat at the old panel's top-left, in an
+84px-tall panel with an empty corner. A 56px strip has no empty corner — the chip's ~27px would
+land on Go to Start — so "inside the panel" stopped being a position that exists. It is now
+**centred above the strip**, which is where the approved package's §6 puts it and which phase 8
+had already recorded as the thing not yet done. Only the position is taken; §6's own padding,
+radius and 900ms/200ms timing remain unimplemented.
+
+**Home and End are bound**, as the decision requires, through the same `goToFrame()` exact Step
+landing Go to Frame and Go to Timecode already use. **Mute was promoted from a `ShortcutTable`
+key row to a shared `QAction`**, because a button and its key must trigger one action and the
+accessibility proxy takes its name from that action. Neither key was bound before.
+
+**Nine accessibility proxies, in left-to-right reading order**, with the four new controls
+**interleaved rather than appended** — appending would have announced Go to Start, the leftmost
+thing on the strip, after the timeline. Mute and Fullscreen are `CheckBox`, which is the honest
+role for a control that reports a state.
+
+**LOOP IS THE ONE MOCKUP CONTROL NOT BUILT.** The markup shows a loop button beside volume, the
+feature exists (phase 14) and the art is in `source/`. It is absent from both owner decisions and
+from the step's own "no flag on the rest" list, so it was left out rather than added quietly.
+It is a one-control addition if wanted — `loopAction_` is already a shared checkable action.
+
+**Carried, not fixed: the strip does not dim a disabled control.** With no media open, Go to
+Start and Go to End are disabled `QAction`s and the strip draws them at full brightness; clicking
+does nothing. That is pre-existing behaviour for the controls that were already there — the
+transport has always drawn live over an empty window — and the package supplies no disabled
+treatment (its own note gives draw-time multipliers for hover and pressed only). Recorded as an
+owner/design question rather than settled quietly.
+
+---
+
+**The two owner decisions and the original flags are retained below as the record of
+what was asked for, not as open work.**
+
+**DECISION 1 — "previous / next" means GO TO START and GO TO END.** Not clip navigation (there
+are no playlists to navigate), not frame step (keyboard-only by the phase 4/5 owner decision,
+and the approved package ships no frame-step glyph on purpose), not time skip (less useful than
+scrubbing in a tool where people inspect specific frames). `|◀ ▶|` means start/end in Premiere,
+Resolve and Avid, so the glyph reads correctly, and it is cheap: two **exact seeks through the
+existing Step path**, no new decode behaviour. **Bind `Home` and `End` at the same time** —
+neither is bound today, and a button without a key is the asymmetry `ShortcutTable` exists to
+avoid. The resulting layout is the conventional pro one: `|◀ ◀◀ ▶ ▶▶ ▶|`.
+
+**DECISION 2 — a MUTE BUTTON, and NO volume slider.** `M` already mutes and has no visible
+control, so the button closes a gap rather than adding a feature, and the design package already
+carries `volume` / `volume-low` / `volume-muted` art. A slider is more surface in the panel being
+redesigned, needs hit-testing, an accessibility proxy and persistence, and the owner's own
+guardrail answers it — artists ride system volume or an audio interface. **Note the three-state
+art implies a level: with no slider, only `volume` and `volume-muted` are meaningful.** If a
+slider is ever added, it is a **gain applied to the sink** and must not touch the audio master
+clock — audio owns rate and position during 1× playback, and that is what removed the hold/skip
+churn.
+
+**THE SIGNED-OFF PANEL GEOMETRY IS BEING SUPERSEDED KNOWINGLY.** `kFadeMs`, `kAutoHideMs` and the
+**460×84 panel with its 44×44 play and 34×34 utility controls** were signed off at phase 6 with
+*"no tuning is wanted"* — so those were settled numbers, not defaults. This step replaces them
+with the design package's edge-to-edge strip (**56px tall, full window width; play/pause 40px,
+other controls 36px, radius 6; timeline track 4px and 6px on hover, thumb 13px and 16px while
+scrubbing; accent only on the played track and the thumb ring**). That is a deliberate owner
+decision, not a drift — record it as superseding the phase 6 sign-off rather than quietly
+changing the constants. **`kFadeMs` and `kAutoHideMs` are NOT superseded** and stay as they are.
+
+**THE TIMELINE IS THE ONE PLACE THIS CAN GO BADLY WRONG.** `timelineSlider_` is a real `QSlider`
+and **is the entire scrub state machine** — phase 6 took the docked bar out of the layout but
+kept the slider alive precisely because of this, and the composited overlay *drives the real
+slider* rather than replacing it. A custom-drawn timeline must keep doing exactly that. If it
+becomes an independent widget that computes its own target, every scrub guarantee goes with it:
+exact release, latest-target-wins, the drag shuttle, the press-lands-exactly result, and the
+`-SnapRelease` `delta 0` that every phase since 6 has re-measured. **Draw a new timeline; do not
+write a new one.**
+
+**Two rendering warnings, because the last two sessions each found a bug in this exact path.**
+A mechanical rewrite of the D3D11 quad loop drew nothing while the CPU backend was fine
+(`5ff6431`'s first cut), and a native sibling of the surface window corrupted every quad after
+the first (`10a7fba`). This step is the largest change to that path yet. **Build it
+incrementally, verify the panel draws on both backends after each stage, and keep a control
+build to bisect against** — reading the code harder did not find either of those.
+
+**Original flags, retained as the record of what was asked:**
 
 **Flag — "previous / next" contradicts a stated product pillar.** Trace's own description is
 "no libraries/playlists": there is nothing to go previous or next *to*. The retired glyph set
