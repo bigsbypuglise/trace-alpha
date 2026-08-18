@@ -182,6 +182,11 @@ strip is **opaque**, because §18.4 measured that every native-surface variant l
 that is the design package's own stated fallback (`#14161A`) and the blur it falls back from is
 step 10 below.
 
+**Fullscreen gets the same strip**, verified working there. The design's screen-2 shows a
+different one — 52px, filename in bold beside a dimmer `1920x1080 - 24 fps`, no menu bar — which
+is a second layout plus new content, so it is left as an owner decision. One strip keeps the
+menus reachable in fullscreen, which is strictly more functional than the mockup.
+
 **Retained, because it is what the shape was chosen for:**
 
 **Flag — this is the accessibility risk of the whole pass.** The menu bar is currently the

@@ -503,6 +503,14 @@ Four things it cost, each worth carrying.
   is no empty state — so it can never move a picture. Measured: the mark's optical y offset
   went **−38.0 → −19.0**, against bar mode's own −20.0, identical on both backends.
 
+**FULLSCREEN GETS THE SAME STRIP, AND THAT IS A STATED SIMPLIFICATION RATHER THAN AN
+OVERSIGHT.** Verified working there — the strip draws at the top of the screen with the menus
+live. The design's screen-2 shows a *different* fullscreen strip: 52px, the filename in bold
+beside a dimmer `1920×1080 · 24 fps`, and **no menu bar**. Shipping one strip keeps menus
+reachable in fullscreen, which is strictly more functional; the metadata line is new content
+and the second layout is new behaviour, so both are left for an owner decision rather than
+guessed at.
+
 **The brand mark is `trace-play-mark.svg` from the delivered package, byte for byte, at 15 and
 30** — the @1x/@2x pair at its own drawn size, the same convention the controls follow at 24/48
 and the empty mark at 104/208. It is a **different asset from `empty-mark.svg` beside it** and

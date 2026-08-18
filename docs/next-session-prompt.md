@@ -48,6 +48,11 @@ beside every leg.
   status bar's `Ready` is subpixel-antialiased at a **median chroma of 115 against the prism
   mark's own 58**, so no threshold separates them. It has a measured bottom bound now.
 
+**Fullscreen gets the SAME strip** and works there. The design's screen-2 shows a different one
+— 52px, filename bold beside a dimmer `1920x1080 - 24 fps`, no menu bar — which is a second
+layout plus new content, so it is an owner decision rather than an oversight. One strip keeps
+the menus reachable in fullscreen.
+
 **The §4 default window WITH THE HUD FORCED ON is bistable** — the HUD's height depends on the
 window's width, so the two-pass convergence can settle either way (last session `win 728x795`,
 this one `win 1278x1083`, on **both** binaries). The shipping HUD-hidden size is not affected.
