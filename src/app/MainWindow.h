@@ -134,6 +134,17 @@ private:
     // The source timecode at a frame index: start + index, in the source's own
     // drop-frame convention. Only meaningful when hasSourceTimecode_.
     QString sourceTimecodeAt(long long frame) const;
+    // THE TIME READOUT FOR A FRAME, IN WHICHEVER OF SPEC PHASE 7'S FOUR MODES
+    // IS IN FORCE -- extracted at UI redesign roadmap step 5 so the dev HUD and
+    // the transport strip read from ONE expression rather than two that agree.
+    //
+    // `labelled` is the only difference between the two callers: the HUD prints
+    // "Elapsed: 00:00:12:07" because it is a diagnostic line of named fields,
+    // and the strip prints "00:00:12:07" because the readout's position beside
+    // the track is what says what it is. The VALUE is identical either way,
+    // which is the property worth having -- a strip that could disagree with
+    // the HUD about the current timecode is a review tool contradicting itself.
+    QString readoutTextAt(long long frame, bool labelled) const;
     // Frame index for a source timecode, or -1 if it does not parse, is not
     // this source's convention, or falls outside the media.
     long long frameForSourceTimecode(const QString& text) const;
@@ -681,6 +692,31 @@ private:
     // keyboard commands, and they now do entirely different things.
     QAction* fastForwardAction_ = nullptr;
     QAction* rewindAction_ = nullptr;
+    // GO TO START / GO TO END (UI redesign roadmap step 5).
+    //
+    // The owner's decision reads the design's "previous / next" as start/end
+    // rather than as clip navigation -- Trace has no playlists to navigate --
+    // and Home/End are bound with them in the same commit, because a button
+    // with no key is exactly the asymmetry ShortcutTable exists to prevent.
+    // Neither key was bound before this.
+    //
+    // They are two calls to goToFrame(), which is the SAME exact Step seek Go
+    // to Frame and Go to Timecode already land through. No new decode
+    // behaviour, and in particular no new way to reach the decoder: the jump
+    // ends a shuttle run, clears the play intent and lands exactly, because
+    // all three of those are what goToFrame already means.
+    QAction* goToStartAction_ = nullptr;
+    QAction* goToEndAction_ = nullptr;
+    // MUTE, PROMOTED FROM A ShortcutTable KEY ROW TO A SHARED QAction.
+    //
+    // `M` has muted since spec phase 14 and had no visible control, so the
+    // strip's button closes a gap rather than adding a feature. It has to be an
+    // action rather than a second call site for two reasons the project has
+    // already paid for: phase 3's rule that a button and its key trigger ONE
+    // action, and the accessibility proxy, which takes its name and its
+    // enabled state from the action a control runs. It is checkable, so the
+    // menu tick and the strip's glyph read the same state.
+    QAction* muteAction_ = nullptr;
     // Both created in setupSharedActions(), which runs BEFORE setupMenus():
     // the menu adds the action, it does not define it. Before spec phase 2 the
     // fullscreen toggle was four lines written twice -- once for the menu and

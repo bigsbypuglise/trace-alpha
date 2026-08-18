@@ -217,12 +217,15 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
     : QObject(host), host_(host), model_(model), commands_(std::move(commands)) {
     if (!host_ || !model_) return;
 
-    // IN THE ORDER controlRects() RETURNS THEM, which is the order they appear
-    // on screen: Rewind, Play/Pause, Fast-forward, Share, then the timeline.
+    // IN THE ORDER controlRects() RETURNS THEM, which since UI redesign roadmap
+    // step 5 is strictly LEFT TO RIGHT along the strip: Go to Start, Rewind,
+    // Play/Pause, Fast-forward, Go to End, Mute, Timeline, Fullscreen, Share.
     // A screen reader walks children in creation order, so this IS the reading
     // order -- and a reading order that does not match the visual one is the
     // classic way an accessible interface becomes unusable while passing every
-    // check.
+    // check. The four new controls are INTERLEAVED into that order rather than
+    // appended: appending would have announced Go to Start, the leftmost thing
+    // on the strip, after the timeline.
     // Installed once for the process. Qt keeps a list of factories and asks
     // each in turn, so this is additive -- every other widget in the
     // application keeps whatever Qt already gave it.
@@ -240,6 +243,9 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
         QAccessible::Role role;
     };
     const Spec specs[] = {
+        {Region::GoToStart, commands_.goToStart, QT_TR_NOOP("Go to Start"),
+         QT_TR_NOOP("Go to the first frame. The Home key does the same from anywhere."),
+         QAccessible::Button},
         {Region::Rewind, commands_.rewind, QT_TR_NOOP("Rewind"),
          QT_TR_NOOP("Rewind. Each press goes faster: 2x, 5x, 10x, 30x. The J key "
                     "does the same from anywhere, starting at 1x."),
@@ -251,6 +257,29 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
          QT_TR_NOOP("Fast-forward. Each press goes faster: 2x, 5x, 10x, 30x. The L "
                     "key does the same from anywhere, starting at 1x."),
          QAccessible::Button},
+        {Region::GoToEnd, commands_.goToEnd, QT_TR_NOOP("Go to End"),
+         QT_TR_NOOP("Go to the last frame. The End key does the same from anywhere."),
+         QAccessible::Button},
+        // CheckBox, not Button, and the role is the honest one: this control
+        // reports a STATE as well as running a command, and a screen reader
+        // that says "Mute, checked" is telling the user something a Button role
+        // would hide. QAccessibleWidget maps the action's checked state through
+        // ProxyAccessible::state(), so the announcement follows the audio
+        // rather than the last click.
+        {Region::Mute, commands_.mute, QT_TR_NOOP("Mute"),
+         QT_TR_NOOP("Mute or unmute the audio. The M key does the same from anywhere."),
+         QAccessible::CheckBox},
+        // Slider, not Button: it is a position along a range, and that is what
+        // it should announce as even though this proxy carries no value. A
+        // Button role here would be a lie a screen reader repeats.
+        {Region::Timeline, nullptr, QT_TR_NOOP("Timeline"),
+         QT_TR_NOOP("Playback position. Use Left and Right to step one frame, "
+                    "or Ctrl+G to go to a frame."),
+         QAccessible::Slider},
+        {Region::Fullscreen, commands_.fullscreen, QT_TR_NOOP("Toggle Fullscreen"),
+         QT_TR_NOOP("Enter or leave fullscreen. F11 does the same from anywhere, "
+                    "and Escape leaves it."),
+         QAccessible::CheckBox},
         // SHARE IS ANNOUNCED AND IS NOT ACTIVATED FROM HERE, and the
         // description says so rather than leaving a control that answers to
         // nothing. Its command is a QMenu, and a menu needs a screen position
@@ -261,13 +290,6 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
          QT_TR_NOOP("Share options. Use the File menu, Share, to reach them from "
                     "the keyboard."),
          QAccessible::ButtonMenu},
-        // Slider, not Button: it is a position along a range, and that is what
-        // it should announce as even though this proxy carries no value. A
-        // Button role here would be a lie a screen reader repeats.
-        {Region::Timeline, nullptr, QT_TR_NOOP("Timeline"),
-         QT_TR_NOOP("Playback position. Use Left and Right to step one frame, "
-                    "or Ctrl+G to go to a frame."),
-         QAccessible::Slider},
     };
 
     for (const auto& spec : specs) {

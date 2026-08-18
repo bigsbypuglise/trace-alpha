@@ -260,6 +260,7 @@ void CpuImageRenderer::paintOverlay(QPainter& p, QWidget* host) {
     const QImage& text = overlayModel_->textImage();
     const QImage& message = overlayModel_->messageImage();
     const QImage& empty = overlayModel_->emptyImage();
+    const QImage& readout = overlayModel_->readoutImage();
     // No blanket atlas guard: a message quad can be the only thing to show,
     // before the panel has ever been revealed and the atlas rasterised. Each
     // quad checks its own source below -- the same rule the D3D11 drawer
@@ -283,6 +284,11 @@ void CpuImageRenderer::paintOverlay(QPainter& p, QWidget* host) {
                 break;
             case OverlayQuad::Source::Empty:
                 if (!empty.isNull()) src = &empty;
+                break;
+            // UI redesign roadmap step 5: the two time readouts either side of
+            // the track, two halves of one image.
+            case OverlayQuad::Source::Readout:
+                if (!readout.isNull()) src = &readout;
                 break;
             case OverlayQuad::Source::Atlas:
                 if (!atlas.isNull())

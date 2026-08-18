@@ -454,6 +454,15 @@ MainWindow::MainWindow() {
         commands.playPause = playPauseAction_;
         commands.rewind = rewindAction_;
         commands.fastForward = fastForwardAction_;
+        // UI redesign roadmap step 5's four. Every one is the SAME action its
+        // button and its key run, so the announced name, the shortcut and the
+        // enabled state come from one place -- which is the spec's shared-action
+        // requirement applied to the accessible names as well as the commands,
+        // and the reason Mute had to stop being a ShortcutTable key row.
+        commands.goToStart = goToStartAction_;
+        commands.goToEnd = goToEndAction_;
+        commands.mute = muteAction_;
+        commands.fullscreen = fullscreenAction_;
         overlayAccessibility_ =
             new OverlayAccessibility(viewer_, &viewer_->overlayModel(), commands);
     }
@@ -1247,6 +1256,19 @@ void MainWindow::installOverlayHooks() {
     hooks.playPause = [this]() { if (playPauseAction_) playPauseAction_->trigger(); };
     hooks.rewind = [this]() { if (rewindAction_) rewindAction_->trigger(); };
     hooks.fastForward = [this]() { if (fastForwardAction_) fastForwardAction_->trigger(); };
+    // UI redesign roadmap step 5. trigger(), like every other command here, so
+    // the button and the key are one action and a disabled action refuses the
+    // click for free -- there is no "is there media" test in this lambda
+    // because syncMediaDependentActions already answered it.
+    hooks.goToStart = [this]() { if (goToStartAction_) goToStartAction_->trigger(); };
+    hooks.goToEnd = [this]() { if (goToEndAction_) goToEndAction_->trigger(); };
+    // toggle() rather than trigger(): muteAction_ is checkable, so toggle()
+    // flips the tick AND emits triggered(bool) with the new state, which is
+    // what the handler reads. trigger() on a checkable action would fire the
+    // handler with the OLD checked value and leave the tick behind by one.
+    hooks.toggleMute = [this]() { if (muteAction_) muteAction_->toggle(); };
+    hooks.isMuted = [this]() { return audio_.isMuted(); };
+    hooks.isFullscreen = [this]() { return isFullScreen(); };
 
     hooks.setScrubbing = [this](bool down) {
         if (timelineSlider_) timelineSlider_->setSliderDown(down);
@@ -1272,6 +1294,22 @@ void MainWindow::installOverlayHooks() {
     // a standing readout where the spec asks for a rate that appears on a
     // shuttle press and clears itself.
     hooks.rateText = [this]() { return rateFlashText_; };
+    // UI redesign roadmap step 5. Unlabelled: the strip's readouts say what
+    // they are by sitting either side of the track, where the HUD's line of
+    // named fields needs "Elapsed:" in front of the value. Same expression,
+    // same value -- see readoutTextAt.
+    //
+    // EMPTY WITH NO MEDIA, and that is what the strip draws nothing from. A
+    // "0" or a "00:00:00:00" over a window with no file in it would be a
+    // readout asserting a position that does not exist.
+    hooks.positionText = [this]() {
+        if (!currentMedia_.has_value()) return QString();
+        return readoutTextAt(playback_.state().currentFrame, /*labelled=*/false);
+    };
+    hooks.durationText = [this]() {
+        if (!currentMedia_.has_value() || !frameSource_) return QString();
+        return readoutTextAt(std::max(0LL, frameSource_->maxFrame()), /*labelled=*/false);
+    };
     // The transient message toast (see showTransientMessage). The same
     // host-owns-the-string shape as rateText, and the model draws it outside
     // the panel's fade so an error survives the transport hiding itself.
@@ -1865,10 +1903,22 @@ void MainWindow::setupShortcuts() {
 
     shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_Space, tr("Play / Pause"),
                       [this]() { togglePlayPause(); refreshHud("Space"); });
-    shortcuts_.addKey(ShortcutGroup::Playback, Qt::Key_M, tr("Mute"), [this]() {
-        audio_.setMuted(!audio_.isMuted());
-        refreshHud(audio_.isMuted() ? "Mute" : "Unmute");
-    });
+    // MUTE MOVED FROM THIS TABLE'S DISPATCHED HALF TO ITS DOCUMENTATION HALF at
+    // UI redesign roadmap step 5, and the move is required rather than tidy.
+    // The strip gives Mute a visible control, and a button and a key must
+    // trigger ONE action (spec phase 3's rule) -- so `M` is muteAction_'s
+    // shortcut now, Qt dispatches it before keyPressEvent is ever reached, and
+    // an addKey row here would be a second definition that could never run.
+    shortcuts_.addAction(ShortcutGroup::Playback, muteAction_);
+
+    // UI redesign roadmap step 5. Documentation rows for the same reason: both
+    // are QActions, so Qt owns the dispatch and this table owns the contract
+    // the Keyboard Shortcuts window renders. They sit in Playback beside
+    // Play/Pause because that is what they are -- position commands on the
+    // transport, exactly like the strip's other buttons, none of which has a
+    // menu row either.
+    shortcuts_.addAction(ShortcutGroup::Playback, goToStartAction_);
+    shortcuts_.addAction(ShortcutGroup::Playback, goToEndAction_);
 
     // Frame stepping is KEYBOARD-ONLY as of spec phase 5, which is what the spec
     // asks for: the arrows are the only surface that reaches these two actions
@@ -2372,6 +2422,43 @@ QString MainWindow::sourceTimecodeAt(long long frame) const {
         sourceTimecodeStartFrames_ + std::max(0LL, frame),
         timecodeFpsNum_, timecodeFpsDen_, sourceTimecodeDropFrame_);
     return trace::core::TimeFormat::formatTimecode(tc);
+}
+
+// SPEC PHASE 7'S FOUR READOUT MODES, IN ONE PLACE (extracted at UI redesign
+// roadmap step 5).
+//
+// This was the dev HUD's inline switch until the transport strip needed the
+// same value beside its track. Writing that switch a second time would have
+// been a FIFTH format in a phase whose whole point was that elapsed time is not
+// timecode -- and the two copies would have been free to drift, in a tool whose
+// third pillar is that what it displays can be trusted.
+//
+// `hasSourceTimecode_` remains the single gate on everything SMPTE. The
+// Timecode branch is reachable only when it is true (setReadoutMode refuses the
+// mode otherwise, and openPath resets out of it when new media carries none),
+// and the fallback is still written out rather than asserted, because a readout
+// that silently prints the wrong KIND of value is exactly what phase 7 removed.
+QString MainWindow::readoutTextAt(long long frame, bool labelled) const {
+    const double fps = frameSource_ ? frameSource_->fps() : 24.0;
+    const auto label = [labelled](const char* text) {
+        return labelled ? QString::fromLatin1(text) : QString();
+    };
+
+    switch (viewState_.readoutMode) {
+        case PrimaryReadoutMode::Frame:
+            return label("Frame: ") + QString::number(frame);
+        case PrimaryReadoutMode::Seconds:
+            return label("Seconds: ")
+                 + trace::core::TimeFormat::formatSeconds(
+                       trace::core::TimeFormat::frameToSeconds(frame, fps));
+        case PrimaryReadoutMode::Elapsed:
+            return label("Elapsed: ") + trace::core::TimeFormat::frameToElapsed(frame, fps);
+        case PrimaryReadoutMode::Timecode:
+            if (hasSourceTimecode_)
+                return label("Timecode: ") + sourceTimecodeAt(frame);
+            return label("Elapsed: ") + trace::core::TimeFormat::frameToElapsed(frame, fps);
+    }
+    return QString();
 }
 
 long long MainWindow::frameForSourceTimecode(const QString& text) const {
@@ -3370,6 +3457,15 @@ void MainWindow::syncMediaDependentActions() {
     if (flipHorizontalAction_) flipHorizontalAction_->setEnabled(haveMedia);
     if (flipVerticalAction_) flipVerticalAction_->setEnabled(haveMedia);
     if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(haveMedia);
+    // UI redesign roadmap step 5. Gated here for the same reason every other
+    // transport command is: goToFrame() range-checks and returns on its own, so
+    // an ungated Home would be safe -- and would be a control that appears
+    // actionable and does nothing, which is the showInfo failure spec phase 2
+    // deleted. MUTE IS DELIBERATELY ABSENT FROM THIS FUNCTION: muting is a
+    // property of the audio device, not of the file, and it stays available
+    // with nothing open.
+    if (goToStartAction_) goToStartAction_->setEnabled(haveMedia);
+    if (goToEndAction_) goToEndAction_->setEnabled(haveMedia);
     // Spec phase 15's four, through the function that also decides their ticks,
     // so "may this run" and "is this the state" are answered in one place.
     syncViewScaleActions();
@@ -3787,6 +3883,58 @@ void MainWindow::setupTransportControls() {
         startShuttle(-1, trace::core::ShuttleEntry::AtTwoX);
         refreshHud("REW");
     });
+
+    // UI redesign roadmap step 5. Both go through goToFrame(), which is the
+    // exact Step landing Go to Frame and Go to Timecode already use -- so
+    // ending a shuttle run, clearing the play intent and landing exactly all
+    // come along, and there is no second seek path to keep in step.
+    //
+    // maxFrame is read from the SOURCE at trigger time rather than cached,
+    // because the frame count is a property of whatever is open now. goToFrame
+    // range-checks it again and returns on a bad value, so a file that closed
+    // between the press and the trigger is a no-op rather than a seek to -1.
+    goToStartAction_ = new QAction(tr("Go to &Start"), this);
+    goToStartAction_->setShortcut(QKeySequence(Qt::Key_Home));
+    connect(goToStartAction_, &QAction::triggered, this,
+            [this]() { goToFrame(0, "Go to Start"); });
+    addAction(goToStartAction_);
+
+    goToEndAction_ = new QAction(tr("Go to &End"), this);
+    goToEndAction_->setShortcut(QKeySequence(Qt::Key_End));
+    connect(goToEndAction_, &QAction::triggered, this, [this]() {
+        if (!frameSource_) return;
+        goToFrame(frameSource_->maxFrame(), "Go to End");
+    });
+    addAction(goToEndAction_);
+
+    // Mute, promoted out of ShortcutTable's key-only half so the strip's button
+    // and `M` are one action rather than two call sites onto AudioOutput. It
+    // stays reachable with no media -- muting is a device state, not a property
+    // of the file -- which is why it is absent from syncMediaDependentActions.
+    muteAction_ = new QAction(tr("&Mute"), this);
+    muteAction_->setCheckable(true);
+    // BEFORE the connect, so seeding the tick from the device does not fire the
+    // handler and write the value straight back.
+    muteAction_->setChecked(audio_.isMuted());
+    // `toggled`, NOT `triggered`, AND THE DIFFERENCE IS A REAL BUG THAT SHIPPED
+    // FOR ONE BUILD. QAction::toggle() -- which is what the strip's button calls,
+    // because a checkable action has to flip its own tick -- goes through
+    // setChecked() and emits toggled() ALONE. It does not emit triggered(). So a
+    // handler on triggered() ran for the `M` key, which activates the action
+    // properly, and never for the button: the tick moved, the glyph did not, and
+    // the audio was untouched. toggled() covers both routes, which is what a
+    // shared action is for.
+    //
+    // Found by a harness assertion, and only after that assertion was corrected:
+    // its first version compared the control against a capture taken before the
+    // pointer arrived, so the hover plate changed every pixel in the cell and it
+    // reported PASS on the broken build.
+    connect(muteAction_, &QAction::toggled, this, [this](bool on) {
+        audio_.setMuted(on);
+        refreshHud(on ? "Mute" : "Unmute");
+        if (viewer_) viewer_->revealOverlay();
+    });
+    addAction(muteAction_);
 
     // The transport bar owns the slider widget; MainWindow keeps driving it,
     // so every scrub/seek path below is unchanged.
@@ -7379,32 +7527,19 @@ void MainWindow::refreshHud(const QString& action) {
     QString line = "No media loaded";
     QString primaryReadout;
 
+    // ONE expression, shared with the transport strip since UI redesign roadmap
+    // step 5. See readoutTextAt: the four modes and the hasSourceTimecode_ gate
+    // live there now, so the HUD and the strip cannot print different values
+    // for the same frame.
+    primaryReadout = readoutTextAt(st.currentFrame, /*labelled=*/true);
+
+    // Still needed by the image-sequence and still lines below, which print
+    // BOTH units unconditionally rather than the selected readout -- they are
+    // media-description lines, not the readout, and spec phase 7 left them that
+    // way deliberately. They are not a second copy of the switch above.
     const double fps = frameSource_ ? frameSource_->fps() : 24.0;
     const double sec = trace::core::TimeFormat::frameToSeconds(st.currentFrame, fps);
     const QString elapsed = trace::core::TimeFormat::frameToElapsed(st.currentFrame, fps);
-
-    switch (viewState_.readoutMode) {
-        case PrimaryReadoutMode::Frame:
-            primaryReadout = QString("Frame: %1").arg(st.currentFrame);
-            break;
-        case PrimaryReadoutMode::Seconds:
-            primaryReadout = QString("Seconds: %1")
-                                 .arg(trace::core::TimeFormat::formatSeconds(sec));
-            break;
-        case PrimaryReadoutMode::Elapsed:
-            primaryReadout = QString("Elapsed: %1").arg(elapsed);
-            break;
-        case PrimaryReadoutMode::Timecode:
-            // Reachable only when the source carries a timecode --
-            // setReadoutMode refuses the mode otherwise and openPath resets it
-            // when new media has none. The fallback is still written out rather
-            // than asserted, because a readout that silently prints the wrong
-            // kind of value is exactly what this phase exists to remove.
-            primaryReadout = hasSourceTimecode_
-                ? QString("Timecode: %1").arg(sourceTimecodeAt(st.currentFrame))
-                : QString("Elapsed: %1").arg(elapsed);
-            break;
-    }
 
     if (currentMedia_.has_value()) {
         if (currentMedia_->kind == MediaKind::VideoFile) {

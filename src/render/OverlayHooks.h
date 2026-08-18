@@ -32,6 +32,29 @@ struct OverlayHooks {
     std::function<void()> rewind;
     std::function<void()> fastForward;
 
+    // GO TO START / GO TO END (UI redesign roadmap step 5). The owner's reading
+    // of the design's "previous / next": Trace has no playlists, so there is
+    // nothing to go previous or next TO, and |< >| means start/end in every
+    // NLE. Two exact seeks through the host's existing goToFrame(), so nothing
+    // about decoding changes and this struct gains commands rather than
+    // behaviour -- which is the rule every other entry here follows.
+    std::function<void()> goToStart;
+    std::function<void()> goToEnd;
+
+    // MUTE, as a command and a read. Two entries rather than one toggling
+    // function returning the new state, because the glyph is drawn from
+    // `isMuted` on every frame the strip is visible and the command runs only
+    // on a click: a toggle that also reported would tempt the model into
+    // caching what it was last told, and a cached state is one that can
+    // disagree with `M` pressed from the keyboard.
+    std::function<void()> toggleMute;
+    std::function<bool()> isMuted;
+
+    // Whether the window is fullscreen, so the strip can draw the enter or the
+    // exit glyph. `toggleFullscreen` below is the command and already exists --
+    // the button and the double-click run the one action.
+    std::function<bool()> isFullscreen;
+
     // Timeline drag, mapped onto the slider's own press/move/release.
     std::function<void(bool)> setScrubbing;
     std::function<void(double)> seekToFraction;
@@ -77,6 +100,22 @@ struct OverlayHooks {
     std::function<bool()> isPlaying;
     std::function<double()> positionFraction;
     std::function<QString()> rateText;
+    // THE TWO READOUTS EITHER SIDE OF THE TRACK (UI redesign roadmap step 5),
+    // as finished strings.
+    //
+    // They are strings rather than a frame index and an fps because the FORMAT
+    // is spec phase 7's and must stay there: four modes -- Frame Count,
+    // Seconds, Elapsed and *source* SMPTE -- with `hasSourceTimecode_` as the
+    // single gate on the fourth. An overlay that formatted its own would be a
+    // fifth format, and the whole point of that phase was that elapsed time is
+    // not timecode. The host builds both from the one expression the HUD uses.
+    //
+    // `durationText` is also what sizes the readout cells, and that is why it
+    // is asked for even when it is only drawn once: the position can never be
+    // wider than the duration in the same mode, so reserving the duration's
+    // width keeps the track from resizing as the digits change.
+    std::function<QString()> positionText;
+    std::function<QString()> durationText;
     // The transient user-facing message -- what the status bar's showMessage
     // used to carry: "File path copied.", an open failure, a Go to Timecode
     // refusal. One string owned by the host (the same shape as rateText), shown

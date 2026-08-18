@@ -7,6 +7,7 @@
 #include <QFont>
 #include <QFontMetrics>
 #include <QHash>
+#include <QLinearGradient>
 #include <QIcon>
 #include <QPainter>
 #include <QPainterPath>
@@ -21,6 +22,14 @@
 namespace trace::render {
 namespace {
 
+// Rounds to a whole DEVICE pixel. Shared by layout() and rebuildAtlas() so a
+// cell and the rect it is drawn into land on the same integer -- one of them
+// rounding differently is exactly the sub-pixel offset that made the play glyph
+// differ across the two backends on 8.1% of its pixels before the layout was
+// snapped.
+double snapTo(double v) { return std::floor(v + 0.5); }
+
+
 // Fade duration, inside the 150-180ms band asked for. One constant, used for
 // both directions, so appearing and disappearing feel symmetrical.
 constexpr int kFadeMs = 165;
@@ -31,17 +40,69 @@ constexpr int kAutoHideMs = 2000;
 // something is actually animating, which is what keeps a hidden overlay free.
 constexpr int kAnimTickMs = 16;
 
-// The approved package's control geometry, adopted at spec phase 6. Phase 2
-// deliberately declined to apply it to the docked bar, because this is the
-// geometry of the FLOATING transport and re-laying-out a widget phase 6 removes
-// from the layout would have moved the video rect for a component with no
-// future. This is that component.
-constexpr double kPanelWidthLogical = 460.0;
-constexpr double kPanelHeightLogical = 84.0;
-constexpr double kPanelMarginLogical = 28.0;
-constexpr double kPlayLogical = 44.0;
-constexpr double kUtilLogical = 34.0;
-constexpr double kHandleLogical = 16.0;
+// THE EDGE-TO-EDGE TRANSPORT STRIP (UI redesign roadmap step 5), and every
+// number here is the design package's own -- its HANDOFF.md, "Geometry in the
+// mockups": *"Strip 56 px, edge-to-edge - play/pause 40 px, other controls
+// 36 px, radius 6 - timeline track 4 px (6 px on hover), thumb 13 px (16 px
+// scrubbing) - accent only on the played track + thumb ring."*
+//
+// THIS SUPERSEDES SPEC PHASE 6's SIGNED-OFF 460x84 PANEL, and the roadmap says
+// so in terms rather than leaving it to be discovered as drift: that sign-off
+// recorded "no tuning is wanted", which made 460/84/44/34 settled numbers, and
+// the owner has replaced them deliberately. kFadeMs and kAutoHideMs above are
+// NOT superseded -- the auto-hide's feel was accepted separately and is
+// untouched here.
+//
+// Note the mockup MARKUP renders the same strip at 52/38/34 rather than
+// 56/40/36; HANDOFF.md's geometry line is the spec and the mockup is a
+// rendering of it at a demo window size, which is why the spec's numbers are
+// the ones taken. The arrangement -- buttons, position, track, duration,
+// fullscreen, separator, share -- is the mockup's exactly.
+constexpr double kStripHeightLogical = 56.0;
+constexpr double kStripPadLogical = 14.0;
+// Between the button cluster and the readout, and between the right group and
+// the window edge. The mockup's flex `gap: 12px`.
+constexpr double kGroupGapLogical = 12.0;
+// Inside the left cluster. The mockup's inner `gap: 2px` -- the buttons read as
+// one group because their hit cells touch, not because they are drawn joined.
+constexpr double kButtonGapLogical = 2.0;
+// Between a readout and the end of the track.
+constexpr double kReadoutGapLogical = 10.0;
+constexpr double kPlayLogical = 40.0;
+constexpr double kUtilLogical = 36.0;
+// The hover/press plate behind a control. Radius 6 from the same handoff line.
+constexpr double kControlRadiusLogical = 6.0;
+constexpr double kTrackLogical = 4.0;
+constexpr double kTrackHoverLogical = 6.0;
+constexpr double kThumbLogical = 13.0;
+constexpr double kThumbScrubLogical = 16.0;
+// The ring around the thumb, drawn in the accent at low alpha. The mockup's
+// `0 0 0 3px rgba(90,200,232,0.33)`, which is a 3px spread outside the dot.
+constexpr double kThumbRingLogical = 3.0;
+constexpr double kReadoutTextLogical = 12.0;
+// The mockup's `width:1px; height:18px; background:rgba(255,255,255,0.14)`
+// between Fullscreen and Share.
+constexpr double kSeparatorHeightLogical = 18.0;
+// Below this the track is not worth drawing and something has to give; see the
+// elision in layout().
+constexpr double kTrackMinLogical = 48.0;
+
+// THE ACCENT, AND IT IS THE ONLY PLACE COLOUR APPEARS IN THE TRANSPORT.
+// `#5AC8E8` from HANDOFF.md, applied to the played portion of the track and to
+// the thumb's ring and to nothing else -- which is the handoff's own rule
+// ("accent only on the played track + thumb ring") and is what keeps the strip
+// reading as chrome rather than competing with the picture.
+constexpr int kAccentR = 0x5A;
+constexpr int kAccentG = 0xC8;
+constexpr int kAccentB = 0xE8;
+
+// The mockup's utility glyphs are `rgba(255,255,255,0.72)` and its play glyph
+// is `#FFF`. It is baked into the ATLAS CELL as a grey rather than applied as
+// an alpha, because `brighten` scales RGB only: white ink at full alpha is
+// already clamped, so a hover on it changes nothing but the antialiased edge,
+// while grey ink lifts to 247 and is visibly brighter. Dimming by alpha instead
+// would break the premultiplied invariant the moment brighten exceeded 1.
+constexpr int kUtilInk = 183;  // 0.72 * 255
 
 // THE EMPTY STATE, AND EVERY NUMBER HERE IS THE DESIGN PACKAGE'S OWN.
 // assets/source/260817-trace-ui-v2/Trace-App-Mockups.html, section screen-3:
@@ -113,6 +174,33 @@ void paintIcon(QPainter& p, const QRectF& r, const QString& baseName,
     const QPixmap pm = it.value().pixmap(cell);
     if (pm.isNull()) return;
     p.drawPixmap(r.topLeft(), pm);
+}
+
+// The same, tinted. The delivered glyphs are white, and the design draws the
+// utility controls at 72% while play/pause stays full white.
+//
+// Done through a scratch image and CompositionMode_SourceIn rather than by
+// setting an opacity on the painter, for the reason kUtilInk records: the tint
+// has to end up in the RGB of an OPAQUE pixel, so that `brighten` -- which
+// scales RGB and leaves alpha alone -- has somewhere to go on hover. Tinting by
+// alpha would leave brighten pushing RGB past alpha, which is not a
+// representable premultiplied colour and clamps differently on the two
+// backends. The scratch image is per-cell and rebuildAtlas() is rare.
+void paintIconTinted(QPainter& p, const QRectF& r, const QString& baseName,
+                     std::initializer_list<int> sizes, const QColor& ink) {
+    const int w = std::max(1, static_cast<int>(std::lround(r.width())));
+    const int h = std::max(1, static_cast<int>(std::lround(r.height())));
+    QImage cell(w, h, QImage::Format_ARGB32_Premultiplied);
+    if (cell.isNull()) return;
+    cell.fill(Qt::transparent);
+    {
+        QPainter cp(&cell);
+        cp.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        paintIcon(cp, QRectF(0, 0, w, h), baseName, sizes);
+        cp.setCompositionMode(QPainter::CompositionMode_SourceIn);
+        cp.fillRect(QRect(0, 0, w, h), ink);
+    }
+    p.drawImage(r.topLeft(), cell);
 }
 
 } // namespace
@@ -230,47 +318,100 @@ void OverlayModel::layout() {
     const double s = dpr_;
     const auto snap = [](double v) { return std::floor(v + 0.5); };
 
-    const double panelW = snap(std::min<double>(kPanelWidthLogical * s,
-                                                surfaceSize_.width() * 0.9));
-    const double panelH = snap(kPanelHeightLogical * s);
-    const double margin = snap(kPanelMarginLogical * s);
-    const double left = snap((surfaceSize_.width() - panelW) / 2.0);
-    const double top = snap(surfaceSize_.height() - panelH - margin);
-    dPanel_ = QRectF(left, top, panelW, panelH);
-
+    stripPx_ = snap(kStripHeightLogical * s);
     playPx_ = snap(kPlayLogical * s);
     utilPx_ = snap(kUtilLogical * s);
-    handlePx_ = snap(kHandleLogical * s);
+    thumbPx_ = snap(kThumbLogical * s);
+    thumbScrubPx_ = snap(kThumbScrubLogical * s);
 
-    // The three controls sit on one centre line and differ in size, so each
-    // rect is derived from that line rather than from a shared top edge --
-    // aligning their tops would put the two 34px glyphs 5px above the 44px one.
-    const double rowCy = top + panelH * 0.36;
-    const double cx = left + panelW / 2.0;
-    // Centre-to-centre: half of each control plus a constant clear gap, so the
-    // visual spacing stays even when the two sizes differ.
-    const double gap = snap((playPx_ + utilPx_) / 2.0 + 22.0 * s);
-    dPlay_ = QRectF(snap(cx - playPx_ / 2.0), snap(rowCy - playPx_ / 2.0), playPx_, playPx_);
-    dRewind_ = QRectF(snap(cx - gap - utilPx_ / 2.0), snap(rowCy - utilPx_ / 2.0),
-                      utilPx_, utilPx_);
-    dFfwd_ = QRectF(snap(cx + gap - utilPx_ / 2.0), snap(rowCy - utilPx_ / 2.0),
-                    utilPx_, utilPx_);
+    const double pad = snap(kStripPadLogical * s);
+    const double groupGap = snap(kGroupGapLogical * s);
+    const double buttonGap = snap(kButtonGapLogical * s);
+    const double readoutGap = snap(kReadoutGapLogical * s);
+    const double sepW = std::max(1.0, snap(1.0 * s));
 
-    // Spec phase 8, and it fits INSIDE the settled panel rather than growing it.
-    // kPanelWidthLogical, kPanelHeightLogical and the 44/34 control sizes are
-    // owner-signed-off numbers as of phase 6 -- changing one reopens a decision
-    // rather than tuning a constant -- and the three centred controls only reach
-    // 78 logical px either side of centre, so the right end of the row was
-    // already empty. That is also where the design package puts it: the top row
-    // is "rewind - play/pause - forward | fullscreen - share".
-    const double edgeInset = snap(16.0 * s);
-    dShare_ = QRectF(snap(dPanel_.right() - edgeInset - utilPx_),
-                     snap(rowCy - utilPx_ / 2.0), utilPx_, utilPx_);
+    // EDGE TO EDGE: the full width of the surface, flush with its bottom. There
+    // is no margin and no centring any more -- that was the floating panel's
+    // shape, and this is the thing that replaces it.
+    const double top = snap(surfaceSize_.height() - stripPx_);
+    dStrip_ = QRectF(0, top, surfaceSize_.width(), stripPx_);
 
-    const double trackInset = snap(24.0 * s);
-    const double trackY = snap(top + panelH * 0.76);
-    dTrack_ = QRectF(left + trackInset, snap(trackY - 2.0 * s),
-                     panelW - trackInset * 2.0, std::max(1.0, snap(4.0 * s)));
+    // One centre line for everything on the strip. The controls differ in size,
+    // so each rect is derived from that line rather than from a shared top edge
+    // -- aligning tops would sit the 36px glyphs 2px above the 40px one.
+    const double cy = top + stripPx_ / 2.0;
+    const auto cell = [&](double x, double size) {
+        return QRectF(snap(x), snap(cy - size / 2.0), size, size);
+    };
+
+    // The left cluster, in the conventional pro order the owner's decision
+    // names: |< << > >> >| then mute.
+    double x = pad;
+    dGoToStart_ = cell(x, utilPx_);       x += utilPx_ + buttonGap;
+    dRewind_ = cell(x, utilPx_);          x += utilPx_ + buttonGap;
+    dPlay_ = cell(x, playPx_);            x += playPx_ + buttonGap;
+    dFfwd_ = cell(x, utilPx_);            x += utilPx_ + buttonGap;
+    dGoToEnd_ = cell(x, utilPx_);         x += utilPx_ + buttonGap;
+    dMute_ = cell(x, utilPx_);            x += utilPx_;
+    const double leftEnd = x;
+
+    // The right group, laid out from the right edge inwards: share, separator,
+    // fullscreen. Same order as the mockup, which puts share outermost.
+    double r = surfaceSize_.width() - pad;
+    dShare_ = cell(r - utilPx_, utilPx_);
+    r -= utilPx_ + groupGap;
+    const double sepH = snap(kSeparatorHeightLogical * s);
+    dSeparator_ = QRectF(snap(r - sepW), snap(cy - sepH / 2.0), sepW, sepH);
+    r -= sepW + groupGap;
+    dFullscreen_ = cell(r - utilPx_, utilPx_);
+    r -= utilPx_;
+    const double rightStart = r;
+
+    // WHAT IS LEFT IN THE MIDDLE, AND WHAT GIVES WHEN THERE IS NOT ENOUGH.
+    //
+    // Section 4's window minimum is still the 460 logical px the floating panel
+    // set, and at that width the full strip does not fit -- so the readouts are
+    // dropped before the track is allowed to become useless. Duration goes
+    // first because the position is the more useful of the two, and the
+    // buttons and the track are never dropped: a transport that loses its play
+    // button on a narrow window would be a worse answer than a tight one.
+    const double middle = rightStart - leftEnd - 2.0 * groupGap;
+    const double trackMin = snap(kTrackMinLogical * s);
+    bool showPosition = readoutPx_ > 0.0;
+    bool showDuration = readoutPx_ > 0.0;
+    const auto middleNeeds = [&]() {
+        double need = trackMin;
+        if (showPosition) need += readoutPx_ + readoutGap;
+        if (showDuration) need += readoutPx_ + readoutGap;
+        return need;
+    };
+    if (middle < middleNeeds()) showDuration = false;
+    if (middle < middleNeeds()) showPosition = false;
+
+    double tx = leftEnd + groupGap;
+    double tw = middle;
+    dPosition_ = QRectF();
+    dDuration_ = QRectF();
+    const double readoutH = snap(kReadoutTextLogical * s * 1.4);
+    if (showPosition) {
+        dPosition_ = QRectF(snap(tx), snap(cy - readoutH / 2.0), readoutPx_, readoutH);
+        tx += readoutPx_ + readoutGap;
+        tw -= readoutPx_ + readoutGap;
+    }
+    if (showDuration) {
+        tw -= readoutPx_ + readoutGap;
+        dDuration_ = QRectF(snap(tx + tw + readoutGap), snap(cy - readoutH / 2.0),
+                            readoutPx_, readoutH);
+    }
+
+    // dTrack_ IS THE 4px BASE RECT AND STAYS THAT WAY ON HOVER. The design
+    // thickens the track to 6px while the pointer is over it and grows the
+    // thumb while scrubbing, but both of those are computed in buildFrame from
+    // this rect rather than re-run through layout() -- a hover that re-laid out
+    // would bump layoutRevision_ and re-sync the accessibility proxies on every
+    // pointer sample, for a two-pixel change that moves no control.
+    const double trackH = std::max(1.0, snap(kTrackLogical * s));
+    dTrack_ = QRectF(snap(tx), snap(cy - trackH / 2.0), std::max(trackMin, tw), trackH);
 
     // Last, so it is bumped only once every rect above is settled. See
     // layoutRevision() for who reads it and what went wrong without it.
@@ -295,13 +436,21 @@ void OverlayModel::layout() {
 // reverse.
 std::vector<OverlayModel::ControlRect> OverlayModel::controlRects() const {
     std::vector<ControlRect> rects;
-    if (dPanel_.isEmpty()) return rects;
-    rects.reserve(5);
+    if (dStrip_.isEmpty()) return rects;
+    // LEFT TO RIGHT, which is also the screen-reader reading order. The four
+    // controls UI redesign roadmap step 5 adds are interleaved into that order
+    // rather than appended, because appending would have announced Go to Start
+    // -- the leftmost thing on the strip -- after the timeline.
+    rects.reserve(9);
+    rects.push_back({Region::GoToStart, dGoToStart_});
     rects.push_back({Region::Rewind, dRewind_});
     rects.push_back({Region::PlayPause, dPlay_});
     rects.push_back({Region::FastForward, dFfwd_});
-    rects.push_back({Region::Share, dShare_});
+    rects.push_back({Region::GoToEnd, dGoToEnd_});
+    rects.push_back({Region::Mute, dMute_});
     rects.push_back({Region::Timeline, trackHitRect()});
+    rects.push_back({Region::Fullscreen, dFullscreen_});
+    rects.push_back({Region::Share, dShare_});
     return rects;
 }
 
@@ -309,29 +458,59 @@ std::vector<OverlayModel::ControlRect> OverlayModel::controlRects() const {
 // target. ONE definition, asked by the hit test and by the accessibility
 // proxies alike.
 QRectF OverlayModel::trackHitRect() const {
-    return dTrack_.adjusted(-8 * dpr_, -12 * dpr_, 8 * dpr_, 12 * dpr_);
+    // Vertically it fills the strip's own height, which is what the mockup's
+    // 18px-tall flex row does and is more forgiving than the old panel's band.
+    // Horizontally it is NOT widened: the readouts sit immediately either side,
+    // and a track that reached under them would swallow presses meant for
+    // nothing and start a scrub from a point outside the track's own mapping.
+    const double half = std::max(0.0, (dStrip_.height() - dTrack_.height()) / 2.0);
+    return dTrack_.adjusted(0, -half, 0, half);
 }
 
 void OverlayModel::rebuildAtlas() {
     const double s = dpr_;
     // The SAME snapped sizes layout() placed, not the constants recomputed --
     // an atlas cell one pixel off from its destination rect would reintroduce
-    // the resample the snapping exists to remove. Two icon sizes since spec
-    // phase 6, and the row is as tall as the larger of them.
+    // the resample the snapping exists to remove.
     const double play = playPx_;
     const double util = utilPx_;
-    const double rowH = std::max(play, util);
-    const double handle = handlePx_;
-    const double panelW = dPanel_.width();
-    const double panelH = dPanel_.height();
+    const double stripH = stripPx_;
+    // Each thumb cell carries its accent ring, so the cell is the dot plus the
+    // ring on both sides. Drawing the ring as a separate quad would need a
+    // second rect tracking the first to a sub-pixel as it travels.
+    const double ring = snapTo(kThumbRingLogical * s);
+    const double thumbCell = thumbPx_ + 2.0 * ring;
+    const double thumbScrubCell = thumbScrubPx_ + 2.0 * ring;
+    const double rowH = std::max({play, util, thumbCell, thumbScrubCell});
 
-    // Layout the atlas: panel on top, then a row of icons.
-    // play x2 (play, pause), util x3 (rewind, fast-forward, share), the handle,
-    // the 8px solid patch, and the 4px gaps between them. Undercounting here
+    // THE STRIP CELL IS THE FULL WIDTH OF THE STRIP, AND THE FIRST CUT WAS A
+    // NARROW COLUMN STRETCHED ACROSS IT. Measured, both backends, over the
+    // empty state's black stage so no video could contaminate it: the stretched
+    // version differed on 12,511 pixels at max channel delta 3, in whole
+    // uniform rows and mostly in blue -- geometry identical, value rounding
+    // different, because two resamplers reconstructed one gradient.
+    //
+    // The reasoning for stretching was that the gradient varies only vertically,
+    // so a horizontal stretch is information-preserving. That is true of the
+    // SOURCE and says nothing about the two samplers, which is exactly the
+    // mistake this project already paid for once -- the play glyph differed on
+    // 8.1% of its pixels at max delta 29 purely from a fractional offset, and
+    // the rule that came out of it is that every cell is rasterised at the size
+    // it is drawn so the blit is 1:1 on both backends. The strip is not an
+    // exception to that rule; it was just a bigger cell.
+    //
+    // The cost is an atlas as wide as the window -- ~1.1MB at 5120 -- rebuilt
+    // only when the surface size, the DPI or the theme changes, which is the
+    // same set of events that already rebuilt it.
+    const double kStripCellW = std::max(1.0, dStrip_.width());
+
+    // play x2, then nine utility glyphs, two thumb cells, two 8px solid
+    // patches and the strip column, with 4px between them. Undercounting here
     // silently clips the LAST cell, which is why the count is spelled out.
-    const int atlasW = static_cast<int>(
-        std::ceil(std::max(panelW, play * 2 + util * 3 + handle + 40)));
-    const int atlasH = static_cast<int>(std::ceil(panelH + rowH + 16));
+    const int atlasW = static_cast<int>(std::ceil(std::max(
+        kStripCellW,
+        play * 4 + util * 11 + thumbCell + thumbScrubCell + 32 + 4 * 20)));
+    const int atlasH = static_cast<int>(std::ceil(stripH + rowH + 16));
     if (atlasW <= 0 || atlasH <= 0) return;
 
     QImage image(atlasW, atlasH, QImage::Format_ARGB32_Premultiplied);
@@ -340,44 +519,142 @@ void OverlayModel::rebuildAtlas() {
     QPainter p(&image);
     p.setRenderHint(QPainter::Antialiasing, true);
 
-    aPanel_ = QRectF(0, 0, panelW, panelH);
-    QPainterPath panel;
-    panel.addRoundedRect(aPanel_.adjusted(0.5, 0.5, -0.5, -0.5), 10.0 * s, 10.0 * s);
-    // Translucent, which is the whole reason this is composited into the render
-    // pass rather than stacked as a native window.
-    p.fillPath(panel, QColor(18, 18, 20, 165));
-    p.setPen(QPen(QColor(255, 255, 255, 40), 1.0));
-    p.drawPath(panel);
+    // The strip's own column. `linear-gradient(to top, rgba(16,16,18,0.55),
+    // rgba(16,16,18,0.34))` from the mockup, so the BOTTOM is the more opaque
+    // end, plus its 1px top border. Translucent, which is the whole reason this
+    // is composited into the render pass rather than stacked as a native window
+    // -- and it is exactly what the top chrome could NOT have, because that one
+    // is a real HWND with no video pixels to blend against.
+    aStrip_ = QRectF(0, 0, kStripCellW, stripH);
+    QLinearGradient grad(0, aStrip_.top(), 0, aStrip_.bottom());
+    grad.setColorAt(0.0, QColor(16, 16, 18, 87));   // 0.34
+    grad.setColorAt(1.0, QColor(16, 16, 18, 140));  // 0.55
+    p.fillRect(aStrip_, grad);
+    p.fillRect(QRectF(aStrip_.left(), aStrip_.top(), aStrip_.width(),
+                      std::max(1.0, snapTo(1.0 * s))),
+               QColor(255, 255, 255, 18));  // 0.07
+    // The whole cell, with no inset: the inset existed to stop a stretched
+    // sample pulling in the neighbouring cell, and nothing is stretched now.
+    aStripSample_ = aStrip_;
 
-    const double row = panelH + 8;
-    double x = 4;
-    aPlay_ = QRectF(x, row, play, play);   paintIcon(p, aPlay_, "play");        x += play + 4;
-    aPause_ = QRectF(x, row, play, play);  paintIcon(p, aPause_, "pause");      x += play + 4;
-    // Artwork follows behaviour, one control at a time -- and as of spec phase 5
-    // both of them have moved. The right region became Fast-forward at phase 4
-    // and the left became Rewind here, so both carry the continuous-scan glyphs
-    // and neither frame-step glyph is in the tree any more.
-    aRewind_ = QRectF(x, row, util, util); paintIcon(p, aRewind_, "rewind");       x += util + 4;
-    aFfwd_ = QRectF(x, row, util, util);   paintIcon(p, aFfwd_, "fast-forward");   x += util + 4;
-    aShare_ = QRectF(x, row, util, util);  paintIcon(p, aShare_, "share");         x += util + 4;
+    // The icon row starts at x=0 on a line BELOW the strip cell rather than
+    // beside it: the strip cell is now the full width of the window, so laying
+    // the glyphs out after it would make the atlas twice the window wide for no
+    // reason.
+    const double row = stripH + 8;
+    double x = 0;
+    const QColor utilInk(kUtilInk, kUtilInk, kUtilInk);
+    const auto util3 = [&](QRectF& dst, const char* name) {
+        dst = QRectF(x, row, util, util);
+        // Inset so the 24/48 glyph is drawn at its own proportion inside the
+        // 36px control cell rather than filling it -- the mockup draws a 19-20px
+        // glyph in a 34px cell, i.e. a little over half.
+        const double inset = snapTo(util * 0.22);
+        paintIconTinted(p, dst.adjusted(inset, inset, -inset, -inset),
+                        QString::fromLatin1(name), {24, 48}, utilInk);
+        x += util + 4;
+    };
 
-    aHandle_ = QRectF(x, row, handle, handle);
-    p.setBrush(QColor(255, 255, 255));
-    p.setPen(Qt::NoPen);
-    p.drawEllipse(aHandle_.adjusted(1, 1, -1, -1));
-    x += handle + 4;
+    // Play and pause stay FULL WHITE, which is the mockup's own distinction:
+    // every utility glyph is rgba(255,255,255,0.72) and the play glyph is #FFF.
+    const auto playCell = [&](QRectF& dst, const char* name) {
+        dst = QRectF(x, row, play, play);
+        const double inset = snapTo(play * 0.20);
+        paintIcon(p, dst.adjusted(inset, inset, -inset, -inset),
+                  QString::fromLatin1(name), {24, 48});
+        x += play + 4;
+    };
 
-    // A plain white patch, tinted at draw time. Lets the timeline track and its
-    // filled portion be two draws of one texel rather than two more images.
+    // Artwork follows behaviour, one control at a time. go-to-start and
+    // go-to-end arrive here in the same commit as the buttons that run them and
+    // the Home/End keys that reach them, which is the same rule that moved
+    // rewind and fast-forward at spec phases 4 and 5.
+    util3(aGoToStart_, "go-to-start");
+    util3(aRewind_, "rewind");
+    playCell(aPlay_, "play");
+    playCell(aPause_, "pause");
+    util3(aFfwd_, "fast-forward");
+    util3(aGoToEnd_, "go-to-end");
+    util3(aVolume_, "volume");
+    util3(aVolumeMuted_, "volume-muted");
+    util3(aFullscreen_, "fullscreen");
+    util3(aExitFullscreen_, "exit-fullscreen");
+    util3(aShare_, "share");
+
+    // The two thumb cells, each a white dot inside its accent ring. Two cells
+    // rather than one scaled, so both stay a 1:1 blit -- growing the drawn rect
+    // from one cell is exactly the resample the snapping exists to remove, and
+    // it would happen at the moment the user is watching the thumb most closely.
+    const auto thumbCellAt = [&](QRectF& dst, double dot) {
+        dst = QRectF(x, row, dot + 2.0 * ring, dot + 2.0 * ring);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(kAccentR, kAccentG, kAccentB, 84));  // 0.33
+        p.drawEllipse(dst);
+        p.setBrush(QColor(255, 255, 255));
+        p.drawEllipse(QRectF(dst.left() + ring, dst.top() + ring, dot, dot));
+        x += dst.width() + 4;
+    };
+    thumbCellAt(aThumb_, thumbPx_);
+    thumbCellAt(aThumbScrub_, thumbScrubPx_);
+
+    // Two plain patches, white and accent, tinted by alpha at draw time. Lets
+    // the track, its played portion and the separator be three draws of two
+    // texels rather than three more images.
     //
-    // Drawn 8x8 and SAMPLED from its inner 6x6. This is the one quad that is
+    // Drawn 8x8 and SAMPLED from the inner 6x6. These are the quads that are
     // genuinely stretched -- a long thin track from a small square -- so both
-    // backends filter it, and a source rect flush with the patch edge would
-    // pull the surrounding transparency in and fringe the ends of the track.
-    // Insetting is cheaper and more obvious than clamping in two places.
-    aSolid_ = QRectF(x, row, 8, 8);
-    p.fillRect(aSolid_, QColor(255, 255, 255));
-    aSolidSample_ = aSolid_.adjusted(1, 1, -1, -1);
+    // backends filter them, and a source rect flush with the patch edge would
+    // pull the neighbouring cell in and fringe the ends of the track.
+    // THE DESIGN'S ALPHAS ARE BAKED INTO THE CELLS RATHER THAN APPLIED AT DRAW
+    // TIME, AND THAT IS A MEASURED REQUIREMENT RATHER THAN A PREFERENCE.
+    //
+    // These patches are stretched into long thin rects, and the first cut drew
+    // them from one white cell at `a * 0.22f`, `a * 0.14f` and so on. Over the
+    // empty state's black stage the two backends then differed on 3,594 pixels
+    // at max channel delta 2 -- entirely the track and the separator, in whole
+    // uniform rows -- because a fractional alpha is applied by QPainter's
+    // integer SourceOver on one path and by a float multiply in the shader on
+    // the other, and 0.22 x 255 = 56.1 does not round the same way twice.
+    //
+    // With the alpha in the cell, the only multiplier left at draw time is the
+    // FADE, which is exactly 1.0 whenever the strip is fully revealed -- so a
+    // revealed strip is a plain 1:1 blit of identical premultiplied bytes and
+    // the two paths have nothing left to disagree about.
+    p.setBrush(Qt::NoBrush);
+    const auto patch = [&](QRectF& cell, QRectF& sample, const QColor& c) {
+        cell = QRectF(x, row, 8, 8);
+        p.fillRect(cell, c);
+        // Sampled from the inner 6x6: these ARE stretched, so a source rect
+        // flush with the cell edge would pull the neighbouring cell in and
+        // fringe the ends of the track.
+        sample = cell.adjusted(1, 1, -1, -1);
+        x += 12;
+    };
+    patch(aSolid_, aSolidSample_, QColor(255, 255, 255));
+    patch(aAccent_, aAccentSample_, QColor(kAccentR, kAccentG, kAccentB));
+    // `rgba(255,255,255,0.22)` -- the unplayed track.
+    patch(aTrackBg_, aTrackBgSample_, QColor(255, 255, 255, 56));
+    // `rgba(255,255,255,0.14)` -- the separator between Fullscreen and Share.
+    patch(aSeparator_, aSeparatorSample_, QColor(255, 255, 255, 36));
+    // THE HOVER AND PRESSED PLATES ARE ROUNDED RECTS AT THE CONTROL'S OWN SIZE,
+    // not a stretched patch, because the handoff's "radius 6" is a property of
+    // the plate's CORNERS and a corner cannot be stretched out of an 8x8 square.
+    // Four cells rather than two: the plate has to be exactly the size of the
+    // control it sits behind, and there are two control sizes.
+    //
+    // The alpha is baked in for the same reason the track's is -- see above.
+    const double radius = snapTo(kControlRadiusLogical * s);
+    const auto plateCell = [&](QRectF& dst, double size, int alpha) {
+        dst = QRectF(x, row, size, size);
+        QPainterPath rr;
+        rr.addRoundedRect(dst, radius, radius);
+        p.fillPath(rr, QColor(255, 255, 255, alpha));
+        x += size + 4;
+    };
+    plateCell(aPlateUtil_, util, 26);          // 0.10
+    plateCell(aPlateUtilPressed_, util, 41);   // 0.16
+    plateCell(aPlatePlay_, play, 26);
+    plateCell(aPlatePlayPressed_, play, 41);
 
     p.end();
 
@@ -556,6 +833,84 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
     ++emptyRevision_;
 }
 
+// THE TWO TIME READOUTS, RASTERISED TOGETHER (UI redesign roadmap step 5).
+//
+// One image with two halves: the position occupies the left `readoutPx_` and
+// the duration the right, each drawn into a cell of the reserved width. Two
+// halves of one image rather than two images because they always change
+// together -- one rebuild, one revision, one upload per event instead of two.
+//
+// THE RESERVED WIDTH IS MEASURED FROM THE DURATION, WITH ITS DIGITS REPLACED BY
+// EIGHTS, and both halves of that matter. The duration is the widest value the
+// position can ever take in the same mode, so reserving it means the track
+// never resizes as the playhead moves. Replacing the digits makes the width
+// independent of WHICH digits are showing, which a proportional font would
+// otherwise change -- and a track that resized on the frame counter would bump
+// layoutRevision_ 24 times a second and re-sync the accessibility proxies with
+// it.
+void OverlayModel::rebuildReadout() {
+    const QString position = hooks_.positionText ? hooks_.positionText() : QString();
+    const QString duration = hooks_.durationText ? hooks_.durationText() : QString();
+    if (position == positionCached_ && duration == durationCached_ && !readout_.isNull())
+        return;
+    positionCached_ = position;
+    durationCached_ = duration;
+
+    if (position.isEmpty() && duration.isEmpty()) {
+        if (!readout_.isNull()) {
+            readout_ = QImage();
+            ++readoutRevision_;
+        }
+        if (readoutPx_ != 0.0) {
+            readoutPx_ = 0.0;
+            layout();
+        }
+        return;
+    }
+
+    QFont font;
+    font.setPixelSize(std::max(1, static_cast<int>(std::lround(kReadoutTextLogical * dpr_))));
+    const QFontMetrics fm(font);
+
+    QString widest = duration.isEmpty() ? position : duration;
+    for (QChar& c : widest) {
+        if (c.isDigit()) c = QLatin1Char('8');
+    }
+    const double cellW = snapTo(fm.horizontalAdvance(widest));
+    const double cellH = snapTo(kReadoutTextLogical * dpr_ * 1.4);
+    if (cellW <= 0.0 || cellH <= 0.0) return;
+
+    // A width change moves the track, so the layout has to be redone before the
+    // rects are used. It is not per-frame: the reserved width is digit-count
+    // stable, so this fires on a media change or a readout-mode change and not
+    // otherwise.
+    if (std::abs(cellW - readoutPx_) >= 0.5) {
+        readoutPx_ = cellW;
+        layout();
+    }
+
+    QImage image(static_cast<int>(cellW * 2), static_cast<int>(cellH),
+                 QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) return;
+    image.fill(Qt::transparent);
+    QPainter p(&image);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+    p.setFont(font);
+    // `rgba(255,255,255,0.8)` from the mockup.
+    p.setPen(QColor(255, 255, 255, 204));
+    // The position is RIGHT-aligned against the track's left end and the
+    // duration LEFT-aligned against its right end, exactly as the mockup's
+    // `text-align:right` / default pair does. Both readouts therefore sit tight
+    // against the track and the reserved slack falls on the outside, which is
+    // what keeps the track visually centred as the numbers change width.
+    p.drawText(QRectF(0, 0, cellW, cellH), Qt::AlignRight | Qt::AlignVCenter, position);
+    p.drawText(QRectF(cellW, 0, cellW, cellH), Qt::AlignLeft | Qt::AlignVCenter, duration);
+    p.end();
+
+    readout_ = image;
+    ++readoutRevision_;
+}
+
 const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     quads_.clear();
     if (surfacePixels.isEmpty()) return quads_;
@@ -606,6 +961,11 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     }
 
     setSurfaceSize(surfacePixels);
+    // BEFORE the atlas, because a readout width change re-runs layout() and the
+    // atlas cells are sized from what layout() snapped. Rebuilding the atlas
+    // first would size its cells against the previous layout on the one frame a
+    // media change lands.
+    rebuildReadout();
     if (atlasDirty_) rebuildAtlas();
     rebuildText();
     if (atlas_.isNull()) return quads_;
@@ -622,53 +982,113 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
         quads_.push_back(OverlayQuad{dst, src, alpha, brighten, source});
     };
 
-    push(dPanel_, aPanel_, a, 1.0f, OverlayQuad::Source::Atlas);
+    // The strip: one narrow gradient column stretched across the window. Exact
+    // rather than approximate -- see aStrip_.
+    push(dStrip_, aStripSample_, a, 1.0f, OverlayQuad::Source::Atlas);
+
+    // THE HOVER PLATE, which is what "radius 6" in the handoff is about: the
+    // control's own glyph brightens, and a faint rounded plate appears behind
+    // it. Drawn from the white patch, so it costs no atlas cell of its own.
+    // Only on hover -- an always-on plate would draw nine boxes across a strip
+    // the design shows as flat.
+    // The plate cell is chosen by the control's SIZE, so it is exactly the rect
+    // it sits behind and the blit stays 1:1 -- a util plate stretched behind the
+    // 40px play control would resample its own rounded corners.
+    const auto plate = [&](const QRectF& r, Region region) {
+        if (hover_ != region && pressed_ != region) return;
+        const bool isPlay = r.width() > utilPx_ + 0.5;
+        const QRectF& cell = pressed_ == region
+            ? (isPlay ? aPlatePlayPressed_ : aPlateUtilPressed_)
+            : (isPlay ? aPlatePlay_ : aPlateUtil_);
+        push(r, cell, a, 1.0f, OverlayQuad::Source::Atlas);
+    };
 
     const bool playing = hooks_.isPlaying && hooks_.isPlaying();
-    // A different source rect, not a different image: this is the state change
-    // the caching design exists to make free.
-    push(dPlay_, playing ? aPause_ : aPlay_, a, hoverBoost(Region::PlayPause),
-         OverlayQuad::Source::Atlas);
-    push(dRewind_, aRewind_, a, hoverBoost(Region::Rewind), OverlayQuad::Source::Atlas);
-    push(dFfwd_, aFfwd_, a, hoverBoost(Region::FastForward), OverlayQuad::Source::Atlas);
-    push(dShare_, aShare_, a, hoverBoost(Region::Share), OverlayQuad::Source::Atlas);
+    const bool muted = hooks_.isMuted && hooks_.isMuted();
+    const bool fullscreen = hooks_.isFullscreen && hooks_.isFullscreen();
 
-    // Track, filled portion, then handle. All three are the same white patch
-    // tinted differently, so none of them can invalidate the atlas.
-    push(dTrack_, aSolidSample_, a * 0.35f, 1.0f, OverlayQuad::Source::Atlas);
+    // A different source rect, not a different image: this is the state change
+    // the caching design exists to make free, and it now serves three toggles
+    // rather than one -- play/pause, volume/muted and enter/exit fullscreen.
+    const auto control = [&](const QRectF& dst, const QRectF& src, Region region) {
+        plate(dst, region);
+        push(dst, src, a, hoverBoost(region), OverlayQuad::Source::Atlas);
+    };
+    control(dGoToStart_, aGoToStart_, Region::GoToStart);
+    control(dRewind_, aRewind_, Region::Rewind);
+    control(dPlay_, playing ? aPause_ : aPlay_, Region::PlayPause);
+    control(dFfwd_, aFfwd_, Region::FastForward);
+    control(dGoToEnd_, aGoToEnd_, Region::GoToEnd);
+    control(dMute_, muted ? aVolumeMuted_ : aVolume_, Region::Mute);
+    control(dFullscreen_, fullscreen ? aExitFullscreen_ : aFullscreen_, Region::Fullscreen);
+    control(dShare_, aShare_, Region::Share);
+
+    // `rgba(255,255,255,0.14)` from the mockup, baked into its own cell.
+    push(dSeparator_, aSeparatorSample_, a, 1.0f, OverlayQuad::Source::Atlas);
+
+    // THE TRACK THICKENS ON HOVER AND THE THUMB GROWS WHILE SCRUBBING, both
+    // computed from dTrack_ rather than laid out, so neither moves a control or
+    // bumps the layout revision. `dTrack_` is the 4px base; hover expands it
+    // about its own centre line to 6.
+    const bool trackActive = hover_ == Region::Timeline || draggingTimeline_;
+    QRectF track = dTrack_;
+    if (trackActive) {
+        const double want = std::max(1.0, snapTo(kTrackHoverLogical * dpr_));
+        const double grow = snapTo((want - track.height()) / 2.0);
+        track = track.adjusted(0, -grow, 0, grow);
+    }
+
+    // ACCENT ON THE PLAYED TRACK ONLY, which is the handoff's own rule. The
+    // unplayed remainder is white at 0.22 and everything else on the strip is
+    // neutral, so the one coloured thing on screen is where the playhead is.
+    push(track, aTrackBgSample_, a, 1.0f, OverlayQuad::Source::Atlas);
     const double frac = std::clamp(hooks_.positionFraction ? hooks_.positionFraction() : 0.0,
                                    0.0, 1.0);
-    QRectF filled = dTrack_;
-    filled.setWidth(dTrack_.width() * frac);
-    push(filled, aSolidSample_, a * 0.85f, 1.0f, OverlayQuad::Source::Atlas);
+    QRectF filled = track;
+    filled.setWidth(snapTo(track.width() * frac));
+    push(filled, aAccentSample_, a, 1.0f, OverlayQuad::Source::Atlas);
 
-    // Moving the handle is a destination-rect change only. Snapped like every
+    // Moving the thumb is a destination-rect change only. Snapped like every
     // other rect, so it stays a 1:1 copy as it travels rather than resampling
-    // itself differently at each sub-pixel position along the track.
-    const double handleD = handlePx_;
-    const QRectF handleRect(std::floor(dTrack_.left() + dTrack_.width() * frac
-                                       - handleD / 2.0 + 0.5),
-                            std::floor(dTrack_.center().y() - handleD / 2.0 + 0.5),
-                            handleD, handleD);
-    push(handleRect, aHandle_, a,
-         hover_ == Region::Timeline || draggingTimeline_ ? 1.0f : 0.85f,
-         OverlayQuad::Source::Atlas);
+    // itself differently at each sub-pixel position along the track. The two
+    // sizes are two CELLS rather than one scaled, for the same reason.
+    const QRectF& thumbCell = draggingTimeline_ ? aThumbScrub_ : aThumb_;
+    const QRectF thumbRect(snapTo(track.left() + track.width() * frac
+                                  - thumbCell.width() / 2.0),
+                           snapTo(track.center().y() - thumbCell.height() / 2.0),
+                           thumbCell.width(), thumbCell.height());
+    push(thumbRect, thumbCell, a, 1.0f, OverlayQuad::Source::Atlas);
+
+    // The two readouts, each half of one image. Skipped when layout() elided
+    // them on a narrow strip, and when there is no media to have a position in.
+    if (!readout_.isNull() && readoutPx_ > 0.0) {
+        const double halfW = readout_.width() / 2.0;
+        if (!dPosition_.isEmpty())
+            push(dPosition_, QRectF(0, 0, halfW, readout_.height()), a, 1.0f,
+                 OverlayQuad::Source::Readout);
+        if (!dDuration_.isEmpty())
+            push(dDuration_, QRectF(halfW, 0, halfW, readout_.height()), a, 1.0f,
+                 OverlayQuad::Source::Readout);
+    }
 
     if (!text_.isNull()) {
-        // TOP-LEFT since spec phase 8, and this is the one thing the Share
-        // button did move. The chip used to sit at the panel's top-right, which
-        // is where the Share control now is: at 84px of panel height the chip
-        // spans y 10..31 and a 34px control centred on the row spans 13..47, so
-        // they overlapped outright. Left is the smallest change that resolves
-        // it -- the panel, the controls, the fade and the auto-hide are all
-        // untouched, and the chip stays inside the panel where it has been seen.
+        // CENTRED ABOVE THE STRIP, which is where the approved package puts it
+        // (section 6) and where phase 8 recorded that it did not yet sit.
         //
-        // Note the approved package actually specifies the rate chip CENTRED
-        // ABOVE the transport rather than inside it (section 6, with its own
-        // padding, radius and 900ms/200ms timing). That remains unimplemented
-        // and is not this phase's to change.
-        const QRectF textRect(dPanel_.left() + 14 * dpr_,
-                              dPanel_.top() + 10 * dpr_,
+        // It is moved here because the strip's geometry forced it rather than
+        // as a separate change: the chip lived at the old panel's top-left, and
+        // that panel was 84px tall with an empty corner. A 56px strip has no
+        // empty corner -- the chip's ~27px would land on top of Go to Start --
+        // so "inside the panel" stopped being a position that exists. The
+        // package's own answer was already written down as the thing not yet
+        // done, so this takes it rather than inventing a third place.
+        //
+        // Only the POSITION is the package's here. Its section 6 also specifies
+        // the chip's own padding, radius and 900ms/200ms timing, and those stay
+        // unimplemented -- the string and its timer are the host's, exactly as
+        // they were.
+        const QRectF textRect(snapTo((surfacePixels.width() - text_.width()) / 2.0),
+                              snapTo(dStrip_.top() - text_.height() - 10 * dpr_),
                               text_.width(), text_.height());
         push(textRect, QRectF(QPointF(0, 0), QSizeF(text_.size())), a, 1.0f,
              OverlayQuad::Source::Text);
@@ -683,12 +1103,17 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
 
 OverlayModel::Region OverlayModel::regionAt(int x, int y) const {
     const QPointF p(x, y);
-    const QRectF trackHit = trackHitRect();
     if (dPlay_.contains(p)) return Region::PlayPause;
+    if (dGoToStart_.contains(p)) return Region::GoToStart;
     if (dRewind_.contains(p)) return Region::Rewind;
     if (dFfwd_.contains(p)) return Region::FastForward;
+    if (dGoToEnd_.contains(p)) return Region::GoToEnd;
+    if (dMute_.contains(p)) return Region::Mute;
+    if (dFullscreen_.contains(p)) return Region::Fullscreen;
     if (dShare_.contains(p)) return Region::Share;
-    if (trackHit.contains(p)) return Region::Timeline;
+    // Last, because its hit rect is the full height of the strip and the
+    // buttons' cells touch it -- a track tested first would swallow the row.
+    if (trackHitRect().contains(p)) return Region::Timeline;
     return Region::None;
 }
 
@@ -765,6 +1190,22 @@ bool OverlayModel::onMouseDown(int x, int y) {
             }
         }
     }
+    // A PRESS ON THE STRIP'S OWN BACKGROUND IS CONSUMED, AND THE EDGE-TO-EDGE
+    // SHAPE IS WHAT MADE THAT NECESSARY.
+    //
+    // Below, a press that lands on no control starts a PAN when the picture is
+    // zoomed. That was harmless while the transport was a 460px box floating
+    // clear of most of the window -- the gap between its controls is a few
+    // pixels wide. The strip spans the whole window, so the space between the
+    // button cluster and the readout, and the whole right end past Share, are
+    // now large areas of transport that would have dragged the picture out from
+    // under the strip the user was aiming at.
+    //
+    // Gated on the strip being VISIBLE rather than merely laid out: with the
+    // panel faded out there is nothing on screen to have pressed, and a press
+    // there is a press on the picture like any other.
+    if (enabled_ && visible() && dStrip_.contains(QPointF(x, y))) return true;
+
     // Not a control, or there is no overlay at all. A press on the PICTURE, and
     // spec phase 15 gives that a meaning when the picture is bigger than the
     // viewport. Reached with the overlay disabled too, deliberately: panning is
@@ -809,6 +1250,19 @@ bool OverlayModel::onMouseUp(int x, int y) {
             // `isVideoScrubActive()` set.
             case Region::Rewind:      if (hooks_.rewind) hooks_.rewind(); break;
             case Region::FastForward: if (hooks_.fastForward) hooks_.fastForward(); break;
+            // UI redesign roadmap step 5. Each is one call to an action the
+            // host already owns -- two exact seeks and a mute toggle -- so the
+            // overlay still issues no command of its own and still holds no
+            // playback state that could drift.
+            case Region::GoToStart:   if (hooks_.goToStart) hooks_.goToStart(); break;
+            case Region::GoToEnd:     if (hooks_.goToEnd) hooks_.goToEnd(); break;
+            case Region::Mute:        if (hooks_.toggleMute) hooks_.toggleMute(); break;
+            // The SAME action the double-click and F11 run, which is why this
+            // needs no new hook: toggleFullscreen has been in this struct since
+            // spec phase 6, because the D3D11 surface takes every mouse message
+            // and a second route would have to reimplement that plumbing.
+            case Region::Fullscreen:  if (hooks_.toggleFullscreen) hooks_.toggleFullscreen();
+                                      break;
             // Spec phase 8. The point is passed in surface device pixels and
             // the host converts; the overlay does not know what a screen
             // coordinate is on either backend.
@@ -847,6 +1301,11 @@ bool OverlayModel::onMouseDoubleClick(int x, int y) {
         // problem and why the fault would have looked like an overlay-only
         // ladder bug.
         if (wasVisible && regionAt(x, y) != Region::None) return onMouseDown(x, y);
+        // And a double-click on the strip's own background is NOT a request to
+        // change the window, for the same reason a single press there is not a
+        // pan: the strip is interface, not picture. Without this, a stray
+        // double-click anywhere along a full-width transport toggles fullscreen.
+        if (wasVisible && dStrip_.contains(QPointF(x, y))) return true;
     }
     if (hooks_.toggleFullscreen) {
         hooks_.toggleFullscreen();

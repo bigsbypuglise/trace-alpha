@@ -25,7 +25,7 @@ namespace trace::render {
 // and Qt's SourceOver on ARGB32_Premultiplied each already do. That is why the
 // two paths can be compared pixel for pixel rather than merely "looking right".
 struct OverlayQuad {
-    enum class Source { Atlas, Text, Message, Empty };
+    enum class Source { Atlas, Text, Message, Empty, Readout };
 
     QRectF dst;
     QRectF src;
@@ -65,7 +65,23 @@ public:
     // Which control a point is over. Also the identity used for hover and
     // press, so "what is under the pointer" and "what was pressed" cannot
     // disagree.
-    enum class Region { None, PlayPause, Rewind, FastForward, Share, Timeline };
+    // IN LEFT-TO-RIGHT SCREEN ORDER as of UI redesign roadmap step 5, because
+    // controlRects() walks this and that order becomes the screen-reader
+    // reading order. Timeline sits where it is drawn -- between the readouts,
+    // after Mute -- rather than last, which is where it used to be when the
+    // panel had four buttons on one row above it.
+    enum class Region {
+        None,
+        GoToStart,
+        Rewind,
+        PlayPause,
+        FastForward,
+        GoToEnd,
+        Mute,
+        Timeline,
+        Fullscreen,
+        Share
+    };
 
     OverlayModel();
     ~OverlayModel();
@@ -122,10 +138,23 @@ public:
     // it must not fade; and outside `enabled_`, because it is what the window
     // IS with no media open and must therefore survive TRACE_TRANSPORT_BAR=1.
     const QImage& emptyImage() const { return empty_; }
+    // The two time readouts either side of the track (UI redesign roadmap step
+    // 5), rasterised into ONE image with two known sub-rects.
+    //
+    // A FIFTH image rather than a second use of text_, because the rate chip
+    // and the readouts change on completely different schedules -- the chip on
+    // a shuttle press, the readouts on every frame of playback -- and sharing
+    // one image would re-rasterise the chip 24 times a second. One image for
+    // both readouts rather than two, because they always change together: the
+    // position moves and the duration is re-measured against the same font in
+    // the same rebuild, so two images would be two revisions and two uploads
+    // for one event.
+    const QImage& readoutImage() const { return readout_; }
     long long atlasRevision() const { return atlasRevision_; }
     long long textRevision() const { return textRevision_; }
     long long messageRevision() const { return messageRevision_; }
     long long emptyRevision() const { return emptyRevision_; }
+    long long readoutRevision() const { return readoutRevision_; }
 
     // Whether the renderer has a frame to show. The empty state is the negative
     // of this and of nothing else.
@@ -204,6 +233,7 @@ private:
     void rebuildText();
     void rebuildMessage(QSize surfacePixels);
     void rebuildEmpty(QSize surfacePixels);
+    void rebuildReadout();
     Region regionAt(int x, int y) const;
     // The track's HIT rect, which is much taller than its drawn one. One
     // definition, shared by regionAt() and controlRects().
@@ -220,13 +250,17 @@ private:
     QImage text_;
     QImage message_;
     QImage empty_;
+    QImage readout_;
     long long atlasRevision_ = 0;
     long long textRevision_ = 0;
     long long messageRevision_ = 0;
     long long emptyRevision_ = 0;
+    long long readoutRevision_ = 0;
     long long layoutRevision_ = 0;
     QString textCached_;
     QString messageCached_;
+    QString positionCached_;
+    QString durationCached_;
     // Cache key for empty_. The mark is a FIXED logical size, so the only thing
     // that can change its device size is the DPI -- which is why a resize is
     // free here even though the image is rebuilt at the size it is drawn at.
@@ -235,9 +269,37 @@ private:
     double emptyMarkPx_ = 0.0;
 
     // Atlas sub-rects, in atlas pixels.
-    QRectF aPanel_, aPlay_, aPause_, aRewind_, aFfwd_, aShare_, aHandle_, aSolid_, aSolidSample_;
+    //
+    // aStrip_ IS ONE NARROW COLUMN, NOT THE WHOLE STRIP, and that is deliberate.
+    // The strip is now the full width of the window, so a full-width cell would
+    // be a 5120x56 image on this box's panel, rebuilt on every resize. Its
+    // gradient varies only VERTICALLY, so a column stretched horizontally
+    // reproduces it exactly -- there is no scaling along y, and along x every
+    // sampled column is identical, so bilinear returns the same value. Sampled
+    // from its inner columns for the same reason aSolid_ is: a source rect
+    // flush with the cell edge pulls the neighbouring cell in and fringes the
+    // ends.
+    QRectF aStrip_, aStripSample_;
+    QRectF aPlay_, aPause_;
+    QRectF aGoToStart_, aRewind_, aFfwd_, aGoToEnd_;
+    QRectF aVolume_, aVolumeMuted_, aFullscreen_, aExitFullscreen_, aShare_;
+    QRectF aThumb_, aThumbScrub_;
+    QRectF aSolid_, aSolidSample_, aAccent_, aAccentSample_;
+    // The design's own alphas, baked in rather than applied at draw time --
+    // see rebuildAtlas(). A fractional alpha applied by two different
+    // compositors is a measured cross-backend difference.
+    QRectF aTrackBg_, aTrackBgSample_, aSeparator_, aSeparatorSample_;
+    // Four plate cells: two states x two control sizes, each a rounded rect
+    // at the size of the control it sits behind. No sample rect, because
+    // nothing is stretched -- these are 1:1 like every glyph.
+    QRectF aPlateUtil_, aPlateUtilPressed_, aPlatePlay_, aPlatePlayPressed_;
     // Destination rects, in surface device pixels.
-    QRectF dPanel_, dPlay_, dRewind_, dFfwd_, dShare_, dTrack_;
+    QRectF dStrip_, dPlay_, dGoToStart_, dRewind_, dFfwd_, dGoToEnd_, dMute_;
+    QRectF dFullscreen_, dShare_, dSeparator_, dTrack_;
+    // The two readout cells. Empty when the strip is too narrow to carry them
+    // -- see layout()'s elision -- which is also how buildFrame knows not to
+    // draw them.
+    QRectF dPosition_, dDuration_;
 
     // Snapped control sizes in device pixels, computed in layout() and reused
     // by rebuildAtlas() so an atlas cell is exactly the size of the rect it is
@@ -248,9 +310,25 @@ private:
     // a 44x44 play/pause and 34x34 utility targets. They are separate members
     // for the same reason they are snapped at all: the atlas cell for each
     // control has to be exactly the rect it lands in.
-    double playPx_ = 44.0;
-    double utilPx_ = 34.0;
-    double handlePx_ = 16.0;
+    // THE SIGNED-OFF 44/34 PAIR IS SUPERSEDED, KNOWINGLY. Spec phase 6 settled
+    // a 460x84 panel with 44x44 play and 34x34 utility controls and the owner's
+    // sign-off recorded "no tuning is wanted" -- so those were settled numbers
+    // rather than defaults. UI redesign roadmap step 5 replaces them with the
+    // design package's edge-to-edge strip, and the roadmap says in terms that
+    // this SUPERSEDES that sign-off rather than drifting from it. kFadeMs and
+    // kAutoHideMs are explicitly NOT superseded and are unchanged.
+    double playPx_ = 40.0;
+    double utilPx_ = 36.0;
+    double thumbPx_ = 13.0;
+    double thumbScrubPx_ = 16.0;
+    double stripPx_ = 56.0;
+    // The width reserved for each readout cell, in device pixels. Measured from
+    // the DURATION's text rather than the position's, because the position can
+    // never be wider than the duration in the same mode -- so the track's
+    // geometry stays put as the digits change instead of resizing on every
+    // frame of playback, which would bump layoutRevision_ 24 times a second and
+    // re-sync the accessibility proxies with it.
+    double readoutPx_ = 0.0;
 
     QSize surfaceSize_;
     double topInset_ = 0.0;

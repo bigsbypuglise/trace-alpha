@@ -195,6 +195,8 @@ void D3D11OverlayDrawer::draw(OverlayModel& model, QSize surfacePixels) {
                 msgTex_, msgSrv_, msgSize_);
     syncTexture(model.emptyImage(), model.emptyRevision(), emptyRevisionUploaded_,
                 emptyTex_, emptySrv_, emptySize_);
+    syncTexture(model.readoutImage(), model.readoutRevision(), readoutRevisionUploaded_,
+                readoutTex_, readoutSrv_, readoutSize_);
     // No blanket atlas guard: a message quad can be the only thing to show, and
     // it can arrive while the panel is faded -- the one path on which the atlas
     // may never have been rasterised. Each quad checks its own source in the
@@ -230,17 +232,23 @@ void D3D11OverlayDrawer::draw(OverlayModel& model, QSize surfacePixels) {
         const bool isText = q.source == OverlayQuad::Source::Text;
         const bool isMsg = q.source == OverlayQuad::Source::Message;
         const bool isEmpty = q.source == OverlayQuad::Source::Empty;
+        const bool isReadout = q.source == OverlayQuad::Source::Readout;
         if (isText && !textSrv_) continue;
         if (isMsg && !msgSrv_) continue;
         if (isEmpty && !emptySrv_) continue;
-        if (!isText && !isMsg && !isEmpty && !atlasSrv_) continue;
+        if (isReadout && !readoutSrv_) continue;
+        if (!isText && !isMsg && !isEmpty && !isReadout && !atlasSrv_) continue;
         drawQuad(q.dst,
-                 uvOf(q.src, isEmpty ? emptySize_
-                                     : (isMsg ? msgSize_
-                                              : (isText ? textSize_ : atlasSize_))),
+                 uvOf(q.src, isReadout ? readoutSize_
+                                       : (isEmpty ? emptySize_
+                                                  : (isMsg ? msgSize_
+                                                           : (isText ? textSize_
+                                                                     : atlasSize_)))),
                  q.alpha, q.brighten,
-                 isEmpty ? emptySrv_
-                         : (isMsg ? msgSrv_ : (isText ? textSrv_ : atlasSrv_)),
+                 isReadout ? readoutSrv_
+                           : (isEmpty ? emptySrv_
+                                      : (isMsg ? msgSrv_
+                                               : (isText ? textSrv_ : atlasSrv_))),
                  surfacePixels);
     }
 

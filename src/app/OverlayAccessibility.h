@@ -80,6 +80,14 @@ public:
         QAction* rewind = nullptr;
         QAction* fastForward = nullptr;
         QAction* share = nullptr;
+        // UI redesign roadmap step 5's four. Fullscreen and Mute are CHECKABLE,
+        // which the proxy already handles: QAction::changed fires for checked
+        // as well as for text and enabled, so the name follows a control whose
+        // state changes without a second connection.
+        QAction* goToStart = nullptr;
+        QAction* goToEnd = nullptr;
+        QAction* mute = nullptr;
+        QAction* fullscreen = nullptr;
     };
 
     // `host` is the viewer widget the overlay is composited onto; the proxies

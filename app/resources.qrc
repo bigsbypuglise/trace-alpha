@@ -23,8 +23,10 @@
 
   <!--
     Transport icons. Only controls that exist in the app are embedded; the rest
-    of the base UI set (volume, inspector, zoom, rotate, loop, ...) is
-    deliberately left out until those features are real. Spec phase 8 is the
+    of the base UI set (inspector, zoom, rotate, loop, ...) is deliberately left
+    out until those features are real. `volume` left that list at UI redesign
+    roadmap step 5, which gave Mute a visible control; `loop` is still in it,
+    because the feature exists but the strip has no loop button. Spec phase 8 is the
     first time assets/interface/common/ is not empty: the Share menu is real, so
     its three item glyphs arrived with it, and share_menu became the transport
     button's artwork under the name of the control it drives.
@@ -74,6 +76,35 @@
          composited overlay's left region. -->
     <file alias="rewind-24.png">../assets/interface/transport/rewind-24.png</file>
     <file alias="rewind-48.png">../assets/interface/transport/rewind-48.png</file>
+
+    <!-- In use from UI redesign roadmap step 5. THESE FOUR ARE THE ONLY GLYPHS
+         IN THE TREE THAT THE DESIGN PACKAGE DID NOT DELIVER, and they are
+         derived from it rather than invented beside it. Same viewBox, the
+         same #FFFFFF fill and the same 1.6 round stroke, with go-to-start and
+         go-to-end sharing rewind's 6.8..17.2 vertical span and go-to-end an
+         exact mirror of go-to-start about x=12.
+
+         The owner's step 5 decision reads "previous / next" as GO TO START and
+         GO TO END. The package ships no such art, and the retired 260807 set
+         is no help either: because its prev-clip is a DOUBLE TRIANGLE, i.e. the same
+         shape as rewind, so using it would have put one glyph on two controls.
+         volume is the package's own master, promoted out of source/; only
+         volume-muted is new, and it is volume's speaker body with the waves
+         replaced by a cross. -->
+    <file alias="go-to-start-24.png">../assets/interface/transport/go-to-start-24.png</file>
+    <file alias="go-to-start-48.png">../assets/interface/transport/go-to-start-48.png</file>
+
+    <file alias="go-to-end-24.png">../assets/interface/transport/go-to-end-24.png</file>
+    <file alias="go-to-end-48.png">../assets/interface/transport/go-to-end-48.png</file>
+
+    <!-- Mute is a two-state control and NOT a level, which is why there is no
+         volume-low here: the owner's step 5 decision is a mute button with no
+         slider, so a third state would be art with no behaviour behind it. -->
+    <file alias="volume-24.png">../assets/interface/common/volume-24.png</file>
+    <file alias="volume-48.png">../assets/interface/common/volume-48.png</file>
+
+    <file alias="volume-muted-24.png">../assets/interface/common/volume-muted-24.png</file>
+    <file alias="volume-muted-48.png">../assets/interface/common/volume-muted-48.png</file>
 
     <!-- In use from spec phase 8: the transport Share button, on the docked bar
          and in the composited overlay's right region. This is share_menu from

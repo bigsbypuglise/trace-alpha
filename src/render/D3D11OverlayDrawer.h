@@ -92,6 +92,15 @@ private:
     ComPtr<ID3D11ShaderResourceView> emptySrv_;
     QSize emptySize_;
     long long emptyRevisionUploaded_ = -1;
+
+    // The two time readouts, one image (UI redesign roadmap step 5). A fifth
+    // texture rather than a second use of the text one, because the rate chip
+    // and the readouts change on completely different schedules -- the chip on
+    // a shuttle press, the readouts on every frame of playback.
+    ComPtr<ID3D11Texture2D> readoutTex_;
+    ComPtr<ID3D11ShaderResourceView> readoutSrv_;
+    QSize readoutSize_;
+    long long readoutRevisionUploaded_ = -1;
 };
 
 } // namespace trace::render
