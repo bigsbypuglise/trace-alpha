@@ -1,6 +1,29 @@
 # v0.2.0-beta.1 IS SHIPPED. THE OPEN PHASE IS THE OWNER'S UI REDESIGN ROADMAP.
 
-## 2026-08-17: THE 260817 UI v2 ASSET SWAP IS DONE — THE REDESIGN IS NOT STARTED
+## 2026-08-17, SECOND SESSION: ROADMAP STEPS 2 AND 4 ARE DONE, RE-BASELINED
+
+Three commits (`5ff6431` · `635656a` · `c63aba4`) and one re-baseline, exactly the shape the
+roadmap's cross-cutting section asked for. The shipping window is **menu bar + picture**: the
+dev HUD ships hidden (`H` toggles, `TRACE_HUD=1` forces it on — `restart.ps1` passes that by
+default so every harness keeps working) and the status bar is never constructed in overlay
+mode. All 35 `statusBar()->showMessage` sites route through **`showTransientMessage`** — bar
+mode keeps the status bar, overlay mode draws a **composited toast** on both renderers that
+survives the transport's fade. The menu bar is untouched until step 7 builds its home.
+
+**Read the session block in `CLAUDE.md` before quoting any figure** — the full re-baseline
+(cadence ×7, `-SnapRelease`, reversal drag, both lifecycle legs, 25/25 transitions, §4
+geometry per shape) is recorded there, taken on **1920x1080 @ 59.999Hz**, and every §4
+opening size moved with the chrome. Three operational traps it records: 16:9 media now needs
+`widen.ps1` after `restart.ps1` before any groove-scanning harness (the §4 window with HUD
+chrome at this display is 656px wide, under the 300px groove minimum); `transitions.ps1` runs
+with `-Env TRACE_TRANSPORT_BAR=1,TRACE_HUD=0`; and the D3D11 overlay quad loop's *shape* is
+load-bearing — a pointer-to-ComPtr switch rewrite drew nothing while reading as equivalent,
+found only by bisecting against a control build. The next roadmap step is the owner's to
+choose; steps 3 (empty state), 5–7 and the rest carry their flags unchanged.
+
+---
+
+## 2026-08-17, FIRST SESSION: THE 260817 UI v2 ASSET SWAP IS DONE — THE REDESIGN IS NOT STARTED
 
 The owner's roadmap arrived and is annotated at **`docs/ui-redesign-roadmap.md`** — read it
 before doing any UI work; the flags name where a step re-opens a signed-off decision or moves

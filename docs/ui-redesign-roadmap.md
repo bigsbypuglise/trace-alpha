@@ -36,6 +36,14 @@ None of that argues against the steps. It argues for doing steps 2 and 4 **toget
 their own commit**, then re-baselining once rather than chasing moved numbers for the rest of
 the pass.
 
+**DONE, exactly this way, 2026-08-17** — three commits (`5ff6431` message surface, `635656a`
+HUD default, `c63aba4` status bar) and one re-baseline immediately after, taken on 1920x1080 @
+59.999Hz and recorded in `CLAUDE.md`'s session block: cadence flat across all seven files,
+`-SnapRelease` `delta 0`/`hitch 0`, reversal `hitch 1`, both lifecycle legs, **25 of 25
+transitions**, and the §4 opening geometry re-measured per shape in the shipping (no-HUD,
+no-status-bar) configuration. That block is the standing reference until the next chrome
+change; physical-panel figures remain valid as records but not as comparisons.
+
 ---
 
 ## The roadmap, step by step
@@ -51,17 +59,14 @@ separately revertable, their edits must not be adjacent.** Two independent one-l
 neighbouring lines conflict on whichever is reverted second, because git can only see that they
 touch.
 
-### 2. HUD off by default
+### 2. HUD off by default — **DONE 2026-08-17 (`635656a`)**
 
-**Mostly built.** `H` toggles it and hiding it also stops the string being built. What changes is
-one line: `ViewState::showHud` is `true` at `src/core/ViewState.h:33`.
-
-**Flag — the cross-cutting item above.** This single line moves `display` and every stall
-figure. It is the cheapest step on the list and the one most likely to be mistaken for a
-regression later. Land it with step 4 and re-baseline.
-
-A `View ▸ HUD` menu item is a good idea: `H` is undiscoverable, and the shortcut table already
-carries it so the Keyboard Shortcuts window stays correct for free.
+`ViewState::showHud` is `false`; `H`/Return/Enter toggle it and View ▸ Show Diagnostics HUD
+was already in the menu. **`TRACE_HUD=1` forces it on from launch** — the measurement
+override, which `restart.ps1` now passes by default because every recorded figure is read off
+the HUD in a pixel capture; the six direct-launch HUD-reading scripts set it themselves, and
+`dpimove.ps1` forces it so `-HideHud`'s `h` press still means "hide". The re-baseline was
+taken with the flip in (see the session block in `CLAUDE.md`).
 
 ### 3. Polished empty state
 
@@ -76,22 +81,22 @@ moment media opens**, not merely hidden. A timer left running during playback is
 kind of thing that costs a frame budget on the heaviest file and is invisible on the lightest.
 Honour reduced-motion by holding static.
 
-### 4. Edge-to-edge media
+### 4. Edge-to-edge media — **STATUS BAR DONE 2026-08-17 (`5ff6431` + `c63aba4`); menu bar deliberately left for step 7**
 
-**Half built.** Phase 6 already took `transportBar_` out of the layout — the floating overlay is
-the transport, and `TRACE_TRANSPORT_BAR=1` restores the docked bar as the escape hatch. What
-remains is the **status bar** and the **menu bar**.
+The 35 `statusBar()->showMessage` sites were inventoried first — spec-required confirmations,
+validation refusals and error reporting, none of which could vanish silently — and all now
+route through **`MainWindow::showTransientMessage`**: bar mode keeps the status bar, overlay
+mode shows a **composited toast** both renderers draw (a third image in `OverlayModel` beside
+the atlas and rate text, emitted outside the panel's opacity gate so a message survives the
+transport's fade). With every site routed, the status bar is simply never constructed in
+overlay mode. The bar object and `timelineSlider_` stay alive exactly as phase 6 left them,
+so the groove-scanning harnesses still run under `TRACE_TRANSPORT_BAR=1` — **but note two new
+harness facts**: at 1920x1080 with the HUD shown, §4 gives 16:9 media a 656px window whose
+groove is under `scrub.ps1`'s 300px minimum, so `widen.ps1` is needed after `restart.ps1` on
+16:9 media too; and `transitions.ps1` runs with `-Env TRACE_TRANSPORT_BAR=1,TRACE_HUD=0`.
 
-**Flag — the status bar is a real surface, not decoration.** It carries error messages
-(`statusBar()->showMessage(...)` at several sites, including open failures and "Recent files
-cleared"). Removing it needs those messages to go somewhere — a transient toast in the overlay,
-most likely — or they vanish silently, which is worse than a strip of chrome.
-
-**Flag — eight harness scripts locate the timeline by scanning for the docked groove's colour**
-and need `TRACE_TRANSPORT_BAR=1` to run. If the docked bar is removed entirely rather than
-hidden, that escape hatch goes with it and those scripts stop working. Keep the bar object
-alive and unshown, as phase 6 did deliberately: `timelineSlider_` is its child and is the entire
-scrub state machine.
+**The menu bar stays until step 7 builds the transient chrome that will hold it** — removing
+it first would leave the app with no menu access in between.
 
 ### 5. Bottom transport overlay
 

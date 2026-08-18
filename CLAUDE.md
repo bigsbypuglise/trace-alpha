@@ -234,9 +234,62 @@ Three things to carry.
   Invoke `restart.ps1` with `&` from inside PowerShell so the array survives, and **read
   `renderer` off both HUDs before believing any cross-backend diff.**
 
-**Roadmap steps 2 and 4 (HUD off by default, removing chrome) change the video rect and every
-stall figure with it** — they need their own commit and a one-time re-baseline, done together,
-as the roadmap's cross-cutting section spells out. That is the next session's decision.
+**ROADMAP STEPS 2 AND 4 ARE DONE AND THE RE-BASELINE IS TAKEN (2026-08-17, `5ff6431` ·
+`635656a` · `c63aba4`; display 1920x1080 @ 59.999Hz, so `stalls`' bar is 33.3ms and no figure
+is comparable to a physical-panel record).** The shipping window is menu bar + picture: the
+HUD ships hidden and the status bar is never constructed in overlay mode. Three commits,
+separately revertable, non-adjacent edits.
+
+- **Every transient message goes through `MainWindow::showTransientMessage(text, timeoutMs)`
+  — the 35 `statusBar()->showMessage` sites were an inventory first, not a deletion.** They
+  split into spec-required confirmations (File path copied, the LucidLink five, Copied frame,
+  Recent files cleared/removed), validation refusals (Go to Timecode, the scrub-preview copy
+  refusal) and ~20 error sites, and none could vanish silently. Routing is on `barIsDocked_`
+  — the same single gate that decides which transport is on screen — so bar mode keeps the
+  status bar (old chrome, harness comparability) and overlay mode gets a **composited toast**:
+  a third image in `OverlayModel` beside the atlas and the rate text (`OverlayHooks::
+  messageText`, host-owned string and timer, pill background baked in), **emitted OUTSIDE the
+  panel's opacity gate** so a confirmation survives the transport's fade, and synced by
+  revision in both drawers like everything else.
+- **THE D3D11 QUAD LOOP'S SHAPE WAS LOAD-BEARING AND THE FIRST CUT DREW NOTHING.** Selecting
+  the SRV through a pointer-to-`ComPtr` plus a switch made the drawer draw no quads at all —
+  the transport panel vanished on the default renderer while the CPU backend was fine — and
+  every line of it read as equivalent to the original. Found because the empty-stage capture
+  was compared against a control build, then bisected by rebuilding the edit in stages: the
+  third `syncTexture` and the guard removal were innocent, the loop shape alone was the
+  poison. The shipped loop is the original ternary shape extended by one case. **When a
+  mechanical rewrite of working code misbehaves, bisect it in stages against a control before
+  reading it harder.**
+- **`TRACE_HUD=1` forces the HUD on from launch, and `restart.ps1` passes it BY DEFAULT** —
+  every recorded figure is read off the HUD in a pixel capture, so the harness ecosystem
+  assumes a visible HUD and that assumption now lives in the common launcher (an explicit
+  `TRACE_HUD` entry in `-Env` wins, so `TRACE_HUD=0` measures the shipping look
+  deliberately). The six scripts that launch Trace directly and read the HUD (`viewscale`,
+  `viewtransform`, `inspector`, `phase14`, `recentfiles`, `sidebyside`) set it themselves;
+  `dpimove.ps1`'s launcher forces it so `-HideHud`'s `h` press still means *hide* rather than
+  toggling a hidden HUD back on.
+- **The §4 chrome term collapsed to the menu bar (`chrome 0x21`), so every opening size moved
+  — measured, shipping config**: 16:9 (4K and 1080p) `viewer 1280x720, bound cap` in a
+  1296x780 window; 9:16 `460x818, bound minimum`; 1:1 `774x774, bound work`; 4:5 `619x774,
+  bound work`. Aspects 1.7778 / 0.5623 / 1.0000 / 0.7997, two-pass convergence visibly doing
+  its job on 9:16 and 4:5 (`TRACE_SHAPE_LOG=1`).
+- **The re-baseline, all flat against the record's classes** (cadence via `restart.ps1` →
+  `TRACE_HUD=1`, `TRACE_NO_AUDIO=1`, scratch INI, ×2 each; 16:9 cadence geometry `win
+  728x795` / `display 728x410 filtered x3`): 4K H.264 **100.0/100.0%** (120f, all ~1×,
+  `drop 0`, `rephase 0`) · 4444 **99.8/99.8%** (261f) · 1080p **100.0/100.0%** (240f) · 4K
+  60fps **100.0/100.0%** (162f at 60.00) · 422 HQ **99.9/99.9%** (168f) · 1×1 and 4×5
+  **100.0%** ×2 each. Scrub, bar mode widened to 1280: 4444 `-SnapRelease` `target 261 shown
+  261 delta 0` full-res planar, `release 20.8ms`, `hitch 0`, `land 0`, `ui over-16ms 0 of
+  898` (`win 1264x843`, `display 640x360 x4`); 4K H.264 reversals `rev-hit 97.9%`, `seeks 3`,
+  `hitch 1`, `delta 0`. Lifecycle **38.9% moving / 0% control**. **25 of 25 transitions.**
+- **Two harness facts this geometry created.** The §4 default window at this display with the
+  HUD shown is **656 logical px wide for 16:9 media, and the docked bar's groove is under
+  `scrub.ps1`'s 300px minimum** — so the groove-scanning harnesses now need `widen.ps1`
+  (to 1280 here) after `restart.ps1` on *16:9* media too, not just portrait; widening 16:9
+  DOES move the video rect, so quote `win`/`display` from the run itself. And
+  `transitions.ps1` runs with **`-Env TRACE_TRANSPORT_BAR=1,TRACE_HUD=0`** — it decides by
+  picture motion, not HUD text, and with the HUD's chrome gone §4 gives it a window wide
+  enough for its control scan.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
@@ -2805,7 +2858,11 @@ buttons' 2× entry was executable before those buttons existed; both buttons are
 real now and pass `AtTwoX` as an argument, so nothing needs it), **`H` (not an env knob — the keyboard
 toggle for the dev HUD, added at spec phase 2; `Return`/`Enter` still work, and
 hiding it also stops the HUD line being *built*, so it is the state to judge feel
-in and the wrong state to quote a bare `stalls` from)**, **`TRACE_TRANSPORT_BAR=1`** (spec
+in and the wrong state to quote a bare `stalls` from)**, **`TRACE_HUD=1`** (2026-08-17,
+roadmap step 2: the HUD ships HIDDEN now, and this forces it on from launch — the
+measurement override, passed by `restart.ps1` by default because every recorded figure
+is read off the HUD; `TRACE_HUD=0` under a harness measures the shipping look
+deliberately), **`TRACE_TRANSPORT_BAR=1`** (spec
 phase 6: back to the docked transport bar. The floating overlay is the default transport now,
 so this is the escape hatch, the negative control for every phase-6 figure, and **what the
 harness scripts that locate the timeline by scanning for its groove colour need in order to
