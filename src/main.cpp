@@ -6,6 +6,7 @@
 #include <cmath>
 
 #include "app/MainWindow.h"
+#include "app/Theme.h"
 #include "app/WindowShape.h"
 #include "ui/ViewerWidget.h"
 
@@ -266,6 +267,12 @@ int main(int argc, char* argv[]) {
     app.setApplicationName("Trace");
     app.setOrganizationName("Trace Project");
     app.setStyle(QStyleFactory::create("Fusion"));
+    // UI redesign roadmap step 10: typography, the palette and the popup-menu
+    // surface, in one place. Before any window is built, and before the
+    // self-tests below return -- the shape self-test measures nothing that
+    // depends on it, but the font is an application-wide default and a window
+    // constructed ahead of it would carry the old one.
+    trace::app::Theme::apply(app);
 
     // Before any window: the self-test wants the renderer and nothing else, and
     // it must not open media, start a clock or touch an audio device.
@@ -288,15 +295,6 @@ int main(int argc, char* argv[]) {
     appIcon.addFile(QStringLiteral(":/icons/trace-48.png"));
     appIcon.addFile(QStringLiteral(":/icons/trace-256.png"));
     app.setWindowIcon(appIcon);
-
-    QPalette p = app.palette();
-    p.setColor(QPalette::Window, QColor(20, 20, 20));
-    p.setColor(QPalette::WindowText, QColor(230, 230, 230));
-    p.setColor(QPalette::Base, QColor(10, 10, 10));
-    p.setColor(QPalette::Text, QColor(230, 230, 230));
-    p.setColor(QPalette::Button, QColor(35, 35, 35));
-    p.setColor(QPalette::ButtonText, QColor(230, 230, 230));
-    app.setPalette(p);
 
     trace::app::MainWindow win;
     win.setWindowIcon(appIcon);

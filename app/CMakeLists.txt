@@ -151,6 +151,7 @@ add_executable(Trace
   ../src/app/MediaShare.cpp
   ../src/app/Settings.h
   ../src/app/Settings.cpp
+  ../src/app/Theme.cpp
   ../src/app/RecentFiles.h
   ../src/app/RecentFiles.cpp
   ../src/app/MovieInspector.h

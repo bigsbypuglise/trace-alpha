@@ -61,6 +61,7 @@
 #include "app/LucidLinkIntegration.h"
 #include "app/OverlayAccessibility.h"
 #include "app/Settings.h"
+#include "app/Theme.h"
 #include "app/ShortcutsWindow.h"
 #include "app/WindowShape.h"
 #include "core/MediaIoSource.h"
@@ -7790,6 +7791,14 @@ void MainWindow::refreshHud(const QString& action) {
               // observed, and nothing recomputed. `reshape` lagging `dpiChg` is
               // also the correct reading for a move between two monitors that
               // share a scale factor.
+              // UI roadmap step 10. `font` is the family that ACTUALLY resolved,
+              // not the one asked for, and the two differ easily: the design
+              // package names "Segoe UI Variable", which is not a family Windows
+              // has -- it ships the same design cut into Display/Text/Small --
+              // so this is a mapping, and on a machine missing it the fallback
+              // to Segoe UI looks very nearly right. That is the same silent
+              // degradation `renderer` and `planar` are reported for.
+              + QString(" | font %1").arg(trace::app::Theme::resolvedFontFamily())
               + QString(" | dpr %1 scr %2 dpiChg %3%4 reshape %5")
                 .arg(QString::number(hudDpr, 'f', 2))
                 .arg(windowHandle() && windowHandle()->screen()
