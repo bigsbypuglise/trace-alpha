@@ -33,7 +33,6 @@ public:
     bool initialize(QWidget* host, QString& error) override;
     void setFrame(const trace::core::VideoFrame& frame) override;
     void clearFrame() override;
-    void setPlaceholderText(const QString& text) override;
     void resize(QSize size) override;
     void paint(QWidget* host) override;
 
@@ -104,10 +103,6 @@ private:
     // Called on change only; the buffer is otherwise untouched between frames.
     bool uploadViewParams();
     void releasePlaneTextures();
-    // The empty state. Rendered on the CPU into an image and uploaded through
-    // the same path as a frame, so the placeholder survives the move to a
-    // native surface instead of quietly becoming a black rectangle.
-    void uploadPlaceholder(QSize pixelSize);
     void releaseSizeDependent();
 
     // The window the swapchain owns. A child of the host widget's HWND rather
@@ -208,12 +203,6 @@ private:
     // can outlive a frame.
     QSize contentSize_;
     bool hasContent_ = false;
-    // What is in the texture is the placeholder, not a frame: the fit is then
-    // 1:1 with the window rather than aspect-preserved.
-    bool contentIsPlaceholder_ = false;
-    QSize placeholderSize_;
-    QString placeholderText_ = QStringLiteral("Drop media or File > Open");
-    bool placeholderDirty_ = true;
 
     QSize swapChainSize_;
     // Reports "d3d11" or "d3d11 (warp)". The distinction matters on CI, which

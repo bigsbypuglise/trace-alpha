@@ -16,6 +16,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <initializer_list>
 
 namespace trace::render {
 namespace {
@@ -42,6 +43,33 @@ constexpr double kPlayLogical = 44.0;
 constexpr double kUtilLogical = 34.0;
 constexpr double kHandleLogical = 16.0;
 
+// THE EMPTY STATE, AND EVERY NUMBER HERE IS THE DESIGN PACKAGE'S OWN.
+// assets/source/260817-trace-ui-v2/Trace-App-Mockups.html, section screen-3:
+// an <svg width="104" height="104"> above a 14px line, in a flex column with
+// `gap: 22px`, centred on both axes.
+//
+// THEY ARE FIXED LOGICAL SIZES, NOT A FRACTION OF THE WINDOW, and that is the
+// design rather than a simplification -- the mark stays 104 logical px in a
+// 460px portrait window and in a 5120px fullscreen one. It is worth knowing
+// that this was checked against the delivered mockup PNG rather than assumed:
+// its client area is 832x483 and its mark canvas measures 103, which is the
+// 104 above at that render's 0.9917 scale.
+constexpr double kEmptyMarkLogical = 104.0;
+constexpr double kEmptyGapLogical = 22.0;
+constexpr double kEmptyTextLogical = 14.0;
+// rgba(255, 255, 255, 0.42) from the same markup. Over the black stage that is
+// the (107, 107, 107) the mockup's own pixels read, and expressing it as white
+// at an alpha rather than as a flat grey is what keeps it correct if the stage
+// is ever not black.
+constexpr int kEmptyTextAlpha = 107;
+
+// U+203A, and the mockup writes it with a non-breaking space either side.
+// The two backends each carried their own copy of a plainer version of this
+// string; that duplication is what step 3 removes.
+QString emptyHintText() {
+    return QStringLiteral("Drop media or File › Open");
+}
+
 // The approved artwork, drawn into the atlas cell.
 //
 // This is a rasterisation, not a per-frame cost: it happens inside
@@ -59,17 +87,24 @@ constexpr double kHandleLogical = 16.0;
 // stepping behaviour and the mismatch was recorded rather than fixed -- that was
 // the right call while the art was placeholder, and the wrong state to keep once
 // it is real.
-void paintIcon(QPainter& p, const QRectF& r, const QString& baseName) {
+//
+// THE RENDITION SIZES ARE A PARAMETER because the empty-state mark is not on
+// the 24/48 ladder -- it is drawn at 104 logical px, so it ships 104 and 208,
+// which is the same @1x/@2x pair the controls have at their own drawn size.
+// Every candidate is existence-checked, which subsumes the special case the
+// -72 line used to be rather than adding a second one beside it.
+void paintIcon(QPainter& p, const QRectF& r, const QString& baseName,
+               std::initializer_list<int> sizes = {24, 48, 72}) {
     // Cached by base name: an atlas rebuild is rare, but a QIcon assembled from
     // resources on each one is avoidable work for no benefit.
     static QHash<QString, QIcon> cache;
     auto it = cache.find(baseName);
     if (it == cache.end()) {
         QIcon icon;
-        icon.addFile(QStringLiteral(":/ui/%1-24.png").arg(baseName), QSize(24, 24));
-        icon.addFile(QStringLiteral(":/ui/%1-48.png").arg(baseName), QSize(48, 48));
-        const QString at3x = QStringLiteral(":/ui/%1-72.png").arg(baseName);
-        if (QFile::exists(at3x)) icon.addFile(at3x, QSize(72, 72));
+        for (const int px : sizes) {
+            const QString path = QStringLiteral(":/ui/%1-%2.png").arg(baseName).arg(px);
+            if (QFile::exists(path)) icon.addFile(path, QSize(px, px));
+        }
         it = cache.insert(baseName, icon);
     }
 
@@ -425,9 +460,116 @@ void OverlayModel::rebuildMessage(QSize surfacePixels) {
     ++messageRevision_;
 }
 
+// THE POLISHED EMPTY STATE (UI redesign roadmap step 3).
+//
+// One image holding the prism mark above its hint line, laid out exactly as the
+// design package's own empty-state markup does it: a 104px mark, a 22px gap and
+// a 14px line, centred as a column. Building both into one image is what makes
+// the whole state one quad and one texture on each backend, and it is why the
+// two renderers now share this instead of each carrying a literal and a
+// drawText call of its own.
+//
+// RASTERISED AT THE SIZE IT IS DRAWN, like every control in the atlas, so the
+// blit is a 1:1 copy on both backends and neither resampler gets a chance to
+// reconstruct the art differently from the other. That is not a theoretical
+// concern here: the play glyph differed across the two backends on 8.1% of its
+// pixels at max delta 29 until the layout was snapped, purely from a fractional
+// offset.
+//
+// The rebuild is keyed on the DEVICE mark size and the elided hint, not on the
+// surface size. The mark is a fixed logical size, so an ordinary resize changes
+// neither and costs nothing; only a DPI change, or a window narrow enough to
+// re-elide the hint, rasterises again.
+void OverlayModel::rebuildEmpty(QSize surfacePixels) {
+    if (mediaPresent_) {
+        // Dropped rather than kept hidden, so the backends release the texture
+        // and a revision bump tells them to. There is no reason to hold a
+        // window-sized image alive for the whole of a playback session.
+        if (!empty_.isNull()) {
+            empty_ = QImage();
+            emptyTextCached_.clear();
+            emptyMarkPx_ = 0.0;
+            ++emptyRevision_;
+        }
+        return;
+    }
+
+    const double s = dpr_;
+    const auto snap = [](double v) { return std::floor(v + 0.5); };
+    const double markPx = std::max(1.0, snap(kEmptyMarkLogical * s));
+
+    QFont font;
+    font.setPixelSize(std::max(1, static_cast<int>(std::lround(kEmptyTextLogical * s))));
+    const QFontMetrics fm(font);
+    // Elided against the window rather than allowed to run off it. A 460px
+    // portrait window at 200% is the case: the hint is wider than the picture
+    // and the mark is not.
+    const int maxTextW = std::max(static_cast<int>(markPx),
+                                  static_cast<int>(surfacePixels.width() - snap(32.0 * s)));
+    const QString shown = fm.elidedText(emptyHintText(), Qt::ElideRight, maxTextW);
+
+    if (!empty_.isNull() && std::abs(markPx - emptyMarkPx_) < 0.5 && shown == emptyTextCached_)
+        return;
+
+    const double gap = snap(kEmptyGapLogical * s);
+    const double lineH = fm.height();
+    const double textW = fm.horizontalAdvance(shown);
+    const int w = static_cast<int>(std::ceil(std::max(markPx, textW)));
+    const int h = static_cast<int>(std::ceil(markPx + gap + lineH));
+    if (w <= 0 || h <= 0) return;
+
+    QImage image(w, h, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) return;
+    image.fill(Qt::transparent);
+    QPainter p(&image);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+
+    // The mark's own canvas is square and its art sits off-centre inside it by
+    // design -- a right-pointing triangle is balanced by eye, not by its
+    // bounding box -- so the CANVAS is what gets centred, and the offset comes
+    // along. Measured against the delivered mockup: 9.5px of a 103px canvas,
+    // reproduced to the pixel.
+    paintIcon(p, QRectF(snap((w - markPx) / 2.0), 0.0, markPx, markPx),
+              QStringLiteral("empty-mark"), {104, 208});
+
+    // The CSS line box, followed literally: the gap is measured to the top of
+    // the line, and the glyphs sit an ascent below that.
+    p.setFont(font);
+    p.setPen(QColor(255, 255, 255, kEmptyTextAlpha));
+    p.drawText(QPointF(snap((w - textW) / 2.0), markPx + gap + fm.ascent()), shown);
+    p.end();
+
+    empty_ = image;
+    emptyMarkPx_ = markPx;
+    emptyTextCached_ = shown;
+    ++emptyRevision_;
+}
+
 const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     quads_.clear();
-    if (!enabled_ || surfacePixels.isEmpty()) return quads_;
+    if (surfacePixels.isEmpty()) return quads_;
+
+    // THE EMPTY STATE IS EMITTED BEFORE THE `enabled_` GATE, WHICH IS THE ONE
+    // THING IN THIS FUNCTION THAT IS NOT PART OF THE TRANSPORT. It is what the
+    // window is when there is no media, so it must not fade with the panel and
+    // must not disappear with TRACE_TRANSPORT_BAR=1 -- which is the documented
+    // escape hatch and would otherwise be left with a black window and no hint.
+    // Same reasoning as the pan gesture being ungated in onMouseDown: a
+    // behaviour that belongs to the window rather than to the transport.
+    rebuildEmpty(surfacePixels);
+    if (!empty_.isNull()) {
+        // Snapped, like every other destination rect here, so it is a 1:1 copy
+        // on both backends rather than two resamples of the same art.
+        const QRectF dst(std::floor((surfacePixels.width() - empty_.width()) / 2.0 + 0.5),
+                         std::floor((surfacePixels.height() - empty_.height()) / 2.0 + 0.5),
+                         empty_.width(), empty_.height());
+        quads_.push_back(OverlayQuad{dst, QRectF(QPointF(0, 0), QSizeF(empty_.size())),
+                                     1.0f, 1.0f, OverlayQuad::Source::Empty});
+    }
+
+    if (!enabled_) return quads_;
 
     // The message is deliberately OUTSIDE the opacity gate: a confirmation or
     // an error is shown for its own timeout, whether or not the transport is

@@ -921,9 +921,10 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
     // step 8 asks. `textureCreates` says which samples those were, so an
     // inflated one is attributable rather than mysterious.
     //
-    // Deliberately only in setFrame: uploadPlaceholder goes through the same two
-    // functions but is not a frame, and counting it would put a startup cost in
-    // a per-frame average.
+    // Deliberately only in setFrame. Nothing else uploads through these two
+    // functions any more: the empty state used to arrive as a window-sized
+    // texture through them, and is a composited overlay quad since roadmap
+    // step 3.
     QElapsedTimer uploadTimer;
     uploadTimer.start();
     const auto recordUpload = [this, &uploadTimer]() {
@@ -937,7 +938,7 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
         // Any failure here falls back to nothing rather than to the BGRA path,
         // because there is no BGRA copy of this frame to fall back TO -- the
         // decoder skipped the conversion precisely because this backend said it
-        // could take the planes. clearFrame() shows the placeholder, which is
+        // could take the planes. clearFrame() shows the empty state, which is
         // diagnosable; a stale previous frame under a new index would not be.
         if (!yuvPixelShader_ || !ensurePlaneTextures(buffer) || !uploadPlanes(buffer)
             || !updateYuvParams(frame)) {
@@ -948,7 +949,6 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
         contentSize_ = QSize(buffer.width(), buffer.height());
         hasContent_ = true;
         contentIsPlanar_ = true;
-        contentIsPlaceholder_ = false;
         return;
     }
 
@@ -966,51 +966,21 @@ void D3D11VideoRenderer::setFrame(const trace::core::VideoFrame& frame) {
     contentSize_ = QSize(buffer.width(), buffer.height());
     hasContent_ = true;
     contentIsPlanar_ = false;
-    contentIsPlaceholder_ = false;
 }
 
 void D3D11VideoRenderer::clearFrame() {
     hasContent_ = false;
-    contentIsPlaceholder_ = false;
-    // The placeholder is BGRA, so the next draw must not bind the YUV shader.
     // The plane textures themselves are kept: clearFrame runs on every media
     // change and between drag and landing, and rebuilding three textures each
-    // time would be the allocation this path exists to avoid.
+    // time would be the allocation this path exists to avoid. What must not
+    // survive is the CLAIM that they hold a frame, which is what hasContent_
+    // and contentIsPlanar_ are.
     contentIsPlanar_ = false;
     contentSize_ = QSize();
-    // The placeholder is what gets shown instead, and it has to be rebuilt
-    // because the texture now holds a frame.
-    placeholderDirty_ = true;
-}
-
-void D3D11VideoRenderer::setPlaceholderText(const QString& text) {
-    if (placeholderText_ == text) return;
-    placeholderText_ = text;
-    placeholderDirty_ = true;
-}
-
-void D3D11VideoRenderer::uploadPlaceholder(QSize pixelSize) {
-    if (pixelSize.isEmpty()) return;
-
-    QImage image(pixelSize, QImage::Format_RGB32);
-    image.fill(QColor(0, 0, 0));
-    {
-        QPainter p(&image);
-        p.setPen(QColor(150, 150, 150));
-        p.drawText(QRect(QPoint(0, 0), pixelSize), Qt::AlignCenter, placeholderText_);
-    }
-
-    if (!ensureTexture(pixelSize.width(), pixelSize.height())) return;
-    uploadPixels(image.constBits(), static_cast<int>(image.bytesPerLine()),
-                 pixelSize.width(), pixelSize.height());
-
-    placeholderSize_ = pixelSize;
-    placeholderDirty_ = false;
-    contentIsPlaceholder_ = true;
-    // The placeholder went into the BGRA texture, so the draw must bind the
-    // BGRA shader whatever the last frame was.
-    contentIsPlanar_ = false;
-    contentSize_ = pixelSize;
+    // Nothing is uploaded in its place. The empty state is a composited overlay
+    // quad since roadmap step 3, so with no frame this backend clears the back
+    // buffer, skips the video draw entirely and lets the overlay pass draw the
+    // mark -- the same quads, from the same model, as the CPU backend.
 }
 
 void D3D11VideoRenderer::resize(QSize size) {
@@ -1020,10 +990,6 @@ void D3D11VideoRenderer::resize(QSize size) {
     // both an explicit resize and a DPI change, which does not come through
     // resizeEvent at all.
     releaseSizeDependent();
-    // A resized window needs the placeholder re-rendered at the new size; a
-    // frame does not, because it is fitted to the window rather than drawn at
-    // window size.
-    if (!hasContent_) placeholderDirty_ = true;
 }
 
 void D3D11VideoRenderer::paint(QWidget* host) {
@@ -1052,16 +1018,11 @@ void D3D11VideoRenderer::paint(QWidget* host) {
                                                 static_cast<UINT>(pixels.height()),
                                                 DXGI_FORMAT_UNKNOWN, 0))) {
             swapChainSize_ = pixels;
-            if (!hasContent_) placeholderDirty_ = true;
         }
     }
 
     QString error;
     if (!ensureRenderTarget(error)) return;
-
-    if (!hasContent_ && (placeholderDirty_ || placeholderSize_ != pixels)) {
-        uploadPlaceholder(pixels);
-    }
 
     // Letterbox by viewport. Everything outside it is the clear colour, so the
     // bars come for free and the shader never has to know about them.
@@ -1071,8 +1032,7 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     // fraction of a pixel at fractional DPI.
     // The fit is computed from the DISPLAYED size, not the decoded one: a
     // quarter turn exchanges the axes, so a 16:9 source letterboxes as 9:16 and
-    // the viewport has to follow it. The placeholder deliberately does not
-    // rotate -- it is a message, not the media.
+    // the viewport has to follow it.
     // Pixel aspect first, then the transform: the SAR describes the stored
     // samples, and a quarter turn exchanges the axes of what those samples
     // become. The other order would apply a horizontal stretch to a picture
@@ -1124,7 +1084,14 @@ void D3D11VideoRenderer::paint(QWidget* host) {
 
     const bool drawPlanar = contentIsPlanar_ && planeSrv_[0] && planeSrv_[1] && planeSrv_[2]
                             && yuvPixelShader_;
-    if (drawPlanar || textureSrv_) {
+    // GATED ON hasContent_, WHICH IT WAS NOT BEFORE, AND THE GATE IS NOT
+    // COSMETIC. textureSrv_ outlives clearFrame() by design -- the texture is
+    // kept so the next media does not pay a creation -- and until roadmap
+    // step 3 the placeholder upload overwrote it, so "no frame" and "the
+    // texture holds something drawable" were never both true. With nothing
+    // uploaded in its place, drawing on textureSrv_ alone would stretch the
+    // OUTGOING file's last frame across the window of a closed one.
+    if (hasContent_ && (drawPlanar || textureSrv_)) {
         QElapsedTimer drawTimer;
         drawTimer.start();
 
@@ -1179,6 +1146,9 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     // restores neither, because every path into paint() sets both.
     if (overlayModel_) {
         overlayModel_->setDevicePixelRatio(dpr);
+        // The same member the draw gate above reads, so "is there a picture"
+        // and "is the empty state showing" cannot come to disagree.
+        overlayModel_->setMediaPresent(hasContent_);
         overlay_.draw(*overlayModel_, pixels);
     }
 

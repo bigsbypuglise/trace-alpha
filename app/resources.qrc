@@ -96,5 +96,15 @@
 
     <file alias="copy-lucidlink-24.png">../assets/interface/common/copy-lucidlink-24.png</file>
     <file alias="copy-lucidlink-48.png">../assets/interface/common/copy-lucidlink-48.png</file>
+
+    <!-- The empty state, UI redesign roadmap step 3. NOT on the 24/48 ladder:
+         the design package draws this mark at 104 logical px, so it ships 104
+         and 208, which is the same @1x/@2x pair every control has at its own
+         drawn size. It is in branding/ rather than transport/ or common/
+         because it is the product's mark rather than a control glyph, and the
+         master beside it is the delivered empty-state art, which is a
+         different asset from the app icon's play mark. -->
+    <file alias="empty-mark-104.png">../assets/interface/branding/empty-mark-104.png</file>
+    <file alias="empty-mark-208.png">../assets/interface/branding/empty-mark-208.png</file>
   </qresource>
 </RCC>

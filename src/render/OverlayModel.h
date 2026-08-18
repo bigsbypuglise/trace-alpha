@@ -25,7 +25,7 @@ namespace trace::render {
 // and Qt's SourceOver on ARGB32_Premultiplied each already do. That is why the
 // two paths can be compared pixel for pixel rather than merely "looking right".
 struct OverlayQuad {
-    enum class Source { Atlas, Text, Message };
+    enum class Source { Atlas, Text, Message, Empty };
 
     QRectF dst;
     QRectF src;
@@ -99,9 +99,36 @@ public:
     // be on screen at once, and because this one is emitted even at opacity 0 --
     // a confirmation or an error must not vanish with the panel's fade.
     const QImage& messageImage() const { return message_; }
+    // The polished empty state (UI redesign roadmap step 3): the prism mark and
+    // its hint line, rasterised together. A FOURTH image rather than drawing
+    // code in each backend, because it used to be exactly that -- the literal
+    // and its QPainter call existed independently in CpuImageRenderer and
+    // D3D11VideoRenderer, which is the shape that produced a sub-pixel fit
+    // divergence the last time this project had one expression written twice.
+    //
+    // It is also not part of the transport, and buildFrame() emits it OUTSIDE
+    // both gates to say so: outside the opacity gate, like the message, because
+    // it must not fade; and outside `enabled_`, because it is what the window
+    // IS with no media open and must therefore survive TRACE_TRANSPORT_BAR=1.
+    const QImage& emptyImage() const { return empty_; }
     long long atlasRevision() const { return atlasRevision_; }
     long long textRevision() const { return textRevision_; }
     long long messageRevision() const { return messageRevision_; }
+    long long emptyRevision() const { return emptyRevision_; }
+
+    // Whether the renderer has a frame to show. The empty state is the negative
+    // of this and of nothing else.
+    //
+    // ASKED OF THE RENDERER RATHER THAN OF THE APPLICATION, and the difference
+    // is the "does not flash between two opens" requirement. MainWindow's
+    // currentMedia_ would answer this too, but openPath() releases the outgoing
+    // media before the incoming frame arrives, and a first open that FAILS
+    // leaves currentMedia_ set with nothing on screen. "There is no picture" is
+    // the condition that is true at startup, true after Close Media, false
+    // throughout a file change -- the viewer holds the outgoing frame until the
+    // incoming one lands -- and true when an open failed. Each backend passes
+    // the same member its own draw branch reads, so the two cannot disagree.
+    void setMediaPresent(bool present) { mediaPresent_ = present; }
     // Bumped every time layout() moves a control rect. Same promise the atlas
     // and text revisions make -- a revision that does not move means the rects
     // did not -- and it exists for the same reason: so a consumer can tell
@@ -165,6 +192,7 @@ private:
     void rebuildAtlas();
     void rebuildText();
     void rebuildMessage(QSize surfacePixels);
+    void rebuildEmpty(QSize surfacePixels);
     Region regionAt(int x, int y) const;
     // The track's HIT rect, which is much taller than its drawn one. One
     // definition, shared by regionAt() and controlRects().
@@ -176,12 +204,20 @@ private:
     QImage atlas_;
     QImage text_;
     QImage message_;
+    QImage empty_;
     long long atlasRevision_ = 0;
     long long textRevision_ = 0;
     long long messageRevision_ = 0;
+    long long emptyRevision_ = 0;
     long long layoutRevision_ = 0;
     QString textCached_;
     QString messageCached_;
+    // Cache key for empty_. The mark is a FIXED logical size, so the only thing
+    // that can change its device size is the DPI -- which is why a resize is
+    // free here even though the image is rebuilt at the size it is drawn at.
+    // The hint is elided against the surface width, so it joins the key.
+    QString emptyTextCached_;
+    double emptyMarkPx_ = 0.0;
 
     // Atlas sub-rects, in atlas pixels.
     QRectF aPanel_, aPlay_, aPause_, aRewind_, aFfwd_, aShare_, aHandle_, aSolid_, aSolidSample_;
@@ -205,6 +241,7 @@ private:
     double dpr_ = 1.0;
     bool atlasDirty_ = true;
     bool enabled_ = false;
+    bool mediaPresent_ = false;
 
     Region hover_ = Region::None;
     Region pressed_ = Region::None;

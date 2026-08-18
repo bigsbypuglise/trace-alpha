@@ -79,9 +79,16 @@ struct RenderStats {
 // GPU resources as presentation scratch uploaded from one. Switching backends,
 // or losing a device, therefore costs re-uploading -- never a frame.
 //
-// The renderer owns the whole paint, including the no-frame placeholder. Two
-// painters cannot share one paint event, and a GPU backend will not be drawing
-// through QPainter at all, so the host must not draw alongside it.
+// The renderer owns the whole paint. Two painters cannot share one paint event,
+// and a GPU backend will not be drawing through QPainter at all, so the host
+// must not draw alongside it.
+//
+// The NO-FRAME state is no longer part of that. It was, and each backend
+// carried its own copy of the hint string and its own way of putting it on
+// screen -- a QPainter drawText here, a window-sized uploaded texture there.
+// Since roadmap step 3 the empty state is a composited quad from OverlayModel,
+// which both backends already draw, so it is one expression and one image
+// instead of two that agree by inspection.
 class VideoRenderer {
 public:
     virtual ~VideoRenderer() = default;
@@ -94,8 +101,6 @@ public:
     // bump and a view); an upload for a GPU one.
     virtual void setFrame(const trace::core::VideoFrame& frame) = 0;
     virtual void clearFrame() = 0;
-    // Shown when there is no frame.
-    virtual void setPlaceholderText(const QString& text) = 0;
 
     virtual void resize(QSize size) = 0;
     virtual void paint(QWidget* host) = 0;

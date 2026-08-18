@@ -193,6 +193,8 @@ void D3D11OverlayDrawer::draw(OverlayModel& model, QSize surfacePixels) {
                 textTex_, textSrv_, textSize_);
     syncTexture(model.messageImage(), model.messageRevision(), msgRevisionUploaded_,
                 msgTex_, msgSrv_, msgSize_);
+    syncTexture(model.emptyImage(), model.emptyRevision(), emptyRevisionUploaded_,
+                emptyTex_, emptySrv_, emptySize_);
     // No blanket atlas guard: a message quad can be the only thing to show, and
     // it can arrive while the panel is faded -- the one path on which the atlas
     // may never have been rasterised. Each quad checks its own source in the
@@ -216,16 +218,30 @@ void D3D11OverlayDrawer::draw(OverlayModel& model, QSize surfacePixels) {
     const float blendFactor[4] = {0, 0, 0, 0};
     context_->OMSetBlendState(blend_.Get(), blendFactor, 0xffffffff);
 
+    // THE SHAPE OF THIS LOOP IS LOAD-BEARING AND HAS ALREADY COST ONE SESSION.
+    // Adding the message quad by selecting the SRV through a pointer-to-ComPtr
+    // plus a switch made this drawer draw NO QUADS AT ALL -- the whole transport
+    // panel vanished on the default renderer while the CPU backend was fine --
+    // and every line of it read as equivalent to what it replaced. It was found
+    // by bisecting against a control build, not by reading. So the empty state
+    // is one more case on the existing ternaries, and a rewrite of this loop
+    // that "reads the same" is not something to accept on inspection.
     for (const auto& q : quads) {
         const bool isText = q.source == OverlayQuad::Source::Text;
         const bool isMsg = q.source == OverlayQuad::Source::Message;
+        const bool isEmpty = q.source == OverlayQuad::Source::Empty;
         if (isText && !textSrv_) continue;
         if (isMsg && !msgSrv_) continue;
-        if (!isText && !isMsg && !atlasSrv_) continue;
+        if (isEmpty && !emptySrv_) continue;
+        if (!isText && !isMsg && !isEmpty && !atlasSrv_) continue;
         drawQuad(q.dst,
-                 uvOf(q.src, isMsg ? msgSize_ : (isText ? textSize_ : atlasSize_)),
+                 uvOf(q.src, isEmpty ? emptySize_
+                                     : (isMsg ? msgSize_
+                                              : (isText ? textSize_ : atlasSize_))),
                  q.alpha, q.brighten,
-                 isMsg ? msgSrv_ : (isText ? textSrv_ : atlasSrv_), surfacePixels);
+                 isEmpty ? emptySrv_
+                         : (isMsg ? msgSrv_ : (isText ? textSrv_ : atlasSrv_)),
+                 surfacePixels);
     }
 
     context_->OMSetBlendState(nullptr, blendFactor, 0xffffffff);

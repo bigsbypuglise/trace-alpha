@@ -89,7 +89,14 @@ bool ViewerWidget::adoptRenderer(std::unique_ptr<trace::render::VideoRenderer> r
     // the overlay was an off-by-default spike; today it would leave the window
     // with a picture and no controls, which is exactly the silent degradation
     // the renderer name in the HUD exists to make visible.
-    const bool overlayLost = ok && overlayModel_.enabled() && renderer->overlayDrawFailed();
+    // NOT gated on overlayModel_.enabled() any more. It was, because the only
+    // thing the composited path carried was the floating transport, and with
+    // TRACE_TRANSPORT_BAR=1 there were real widgets doing that job instead.
+    // Roadmap step 3 put the EMPTY STATE on the same quads, and that is drawn
+    // in both transport modes -- so a backend that cannot draw quads can no
+    // longer present a window with no media in it, whichever transport is
+    // selected, and that is a fallback rather than something to survive.
+    const bool overlayLost = ok && renderer->overlayDrawFailed();
     if (overlayLost) error = QStringLiteral("backend cannot draw the floating transport");
     if (!ok || overlayLost) {
         // Leave no half-applied native state behind for the fallback to inherit.
@@ -456,11 +463,6 @@ void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
 void ViewerWidget::clearImage() {
     frame_ = trace::core::VideoFrame{};
     if (renderer_) renderer_->clearFrame();
-    update();
-}
-
-void ViewerWidget::setCenterText(const QString& text) {
-    if (renderer_) renderer_->setPlaceholderText(text);
     update();
 }
 

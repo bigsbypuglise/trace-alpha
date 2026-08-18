@@ -59,7 +59,6 @@ public:
 
     void setFrame(const trace::core::VideoFrame& frame);
     void clearImage();
-    void setCenterText(const QString& text);
     const ViewerPerfStats& perfStats() const { return perfStats_; }
     const trace::core::VideoFrame& frame() const { return frame_; }
     QString rendererName() const;

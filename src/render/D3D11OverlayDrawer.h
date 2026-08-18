@@ -84,6 +84,14 @@ private:
     ComPtr<ID3D11ShaderResourceView> msgSrv_;
     QSize msgSize_;
     long long msgRevisionUploaded_ = -1;
+
+    // The empty state (roadmap step 3). A fourth texture on the same terms as
+    // the other three: uploaded only when its revision moves, and released by
+    // syncTexture when the model drops the image because media opened.
+    ComPtr<ID3D11Texture2D> emptyTex_;
+    ComPtr<ID3D11ShaderResourceView> emptySrv_;
+    QSize emptySize_;
+    long long emptyRevisionUploaded_ = -1;
 };
 
 } // namespace trace::render

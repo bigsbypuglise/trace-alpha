@@ -25,7 +25,6 @@ public:
     bool initialize(QWidget* host, QString& error) override;
     void setFrame(const trace::core::VideoFrame& frame) override;
     void clearFrame() override;
-    void setPlaceholderText(const QString& text) override;
     void resize(QSize size) override;
     void paint(QWidget* host) override;
     void setOverlay(OverlayModel* model) override { overlayModel_ = model; }
@@ -53,7 +52,6 @@ private:
     // buffer alive on its own, so it stays valid even if frame_ is replaced.
     QImage image_;
     bool hasImage_ = false;
-    QString placeholder_ = QStringLiteral("Drop media or File > Open");
     ViewTransform transform_{};
     double pixelAspect_ = 1.0;
     ViewScale viewScale_{};

@@ -64,10 +64,6 @@ void CpuImageRenderer::clearFrame() {
     hasImage_ = false;
 }
 
-void CpuImageRenderer::setPlaceholderText(const QString& text) {
-    placeholder_ = text;
-}
-
 void CpuImageRenderer::resize(QSize size) {
     // The blit refits from the widget rect on every paint, so there is no
     // renderer state to invalidate here.
@@ -173,10 +169,11 @@ void CpuImageRenderer::paint(QWidget* host) {
                 p.restore();
             }
             drawImageMs = static_cast<double>(drawTimer.nsecsElapsed()) / 1'000'000.0;
-        } else {
-            p.setPen(QColor(150, 150, 150));
-            p.drawText(host->rect(), Qt::AlignCenter, placeholder_);
         }
+        // No `else` any more. With no frame the stage is the fill above, and
+        // the empty state is drawn by the overlay pass below -- one expression
+        // shared with the D3D11 backend rather than a QPainter placeholder
+        // here and a full-window uploaded texture there.
 
         // After the video, like the D3D11 backend, and inside the same painter
         // scope so it is included in the paint total rather than measured
@@ -253,12 +250,16 @@ const QImage& CpuImageRenderer::tintedAtlas(const QImage& atlas, long long revis
 void CpuImageRenderer::paintOverlay(QPainter& p, QWidget* host) {
     const QSize pixels = hostDeviceSize(host);
     overlayModel_->setDevicePixelRatio(host->devicePixelRatioF());
+    // The same member the draw branch above reads, so "is there a picture" and
+    // "is the empty state showing" cannot come to disagree.
+    overlayModel_->setMediaPresent(hasImage_);
     const auto& quads = overlayModel_->buildFrame(pixels);
     if (quads.empty()) return;
 
     const QImage& atlas = overlayModel_->atlasImage();
     const QImage& text = overlayModel_->textImage();
     const QImage& message = overlayModel_->messageImage();
+    const QImage& empty = overlayModel_->emptyImage();
     // No blanket atlas guard: a message quad can be the only thing to show,
     // before the panel has ever been revealed and the atlas rasterised. Each
     // quad checks its own source below -- the same rule the D3D11 drawer
@@ -279,6 +280,9 @@ void CpuImageRenderer::paintOverlay(QPainter& p, QWidget* host) {
                 break;
             case OverlayQuad::Source::Message:
                 if (!message.isNull()) src = &message;
+                break;
+            case OverlayQuad::Source::Empty:
+                if (!empty.isNull()) src = &empty;
                 break;
             case OverlayQuad::Source::Atlas:
                 if (!atlas.isNull())
