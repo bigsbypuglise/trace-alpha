@@ -266,9 +266,35 @@ Volume is a gain applied to the sink, not a change to the clock.
 **No flag on the rest** — play/pause, rewind/fast-forward, timeline, position/duration and
 fullscreen all exist and are wired to shared `QAction`s. Reuse them; do not build a second path.
 
-### 6. Frames / Timecode / Seconds
+### 6. Frames / Timecode / Seconds - **DONE. AUDITED AGAINST THE SHIPPED BUILD 2026-08-18, no code needed**
 
-**Already shipped at phase 7, and the roadmap's three modes are a regression of four.** Trace
+Audited rather than implemented, because everything it asks for predates this roadmap and the risk
+was a later session "implementing" what already exists. All four modes reach BOTH strip readouts
+through one `readoutTextAt`, and the strip and the HUD cannot print different values because they
+call the same function. Measured on 4K ProRes 4444 at frame 1: Frame `1` / `261` - Seconds
+`0.083` / `10.875` - Elapsed `00:00:00:03` / `00:00:10:21` - Timecode `00:00:01:16` /
+`00:00:12:09`. **The last row is the check that matters** - the file's own recorded `00:00:01:12`
+start plus the elapsed - so the source timecode is READ and not synthesised.
+
+`hasSourceTimecode_` is still the single gate across ten read sites: `setReadoutMode` refuses
+SMPTE with a reason, the menu item and Go to Timecode are enablement-gated on it, and `openPath`
+resets out of Timecode when new media carries none.
+
+**Observation, not a defect:** in Timecode mode the right-hand readout is the source timecode AT
+the last frame - an end timecode rather than a length. Consistent by construction (both readouts
+are "the value at frame N") and the pro convention, but worth having written down.
+
+**A DEFECT WAS FOUND BESIDE IT AND IS FIXED (`b2a901b`): the readout mode did not repaint the
+strip.** `setReadoutMode` rebuilt the HUD, which is a separate widget in the layout, while the
+strip's readouts are quads built inside the viewer's paint. `keyPressEvent`'s `revealOverlay()` is
+not enough - `OverlayModel::startAnimation` returns early once the fade has settled, so `reveal()`
+on a strip that is up and idle schedules nothing. Measured paused with the strip revealed:
+pressing `E` and choosing the same item from the menu both left it reading `0` / `261` at **zero
+differing pixels** while the HUD switched to `Readout: Elapsed`; four changes in a row never moved
+it, and an auto-hide plus re-reveal then showed the correct values - a repaint fault, not a wiring
+one.
+
+**Flag, retained - do not collapse Elapsed and Timecode into one "Timecode" mode.** Trace
 has `F` Frame Count, `S` Seconds, `E` Elapsed and `T` **source** SMPTE — and the entire point of
 that phase was that *elapsed time is not timecode*. `T` is refused with a reason on a file that
 carries no start timecode, rather than inventing `00:00:00:00`.
@@ -320,7 +346,16 @@ The workable shape is: keep menus as real `QMenu`s owned by the window, and make
 displays them transient rather than reimplementing menus as drawn quads. `holdVisible` already
 covers open popups, so an open menu keeps the chrome revealed by construction.
 
-### 8. Auto-hide
+### 8. Auto-hide - **DONE. AUDITED AGAINST THE SHIPPED BUILD 2026-08-18, no code needed**
+
+`kAutoHideMs = 2000` sits at the top of the roadmap's own 1.5-2s band and `kFadeMs = 165` is
+untouched by step 5, which superseded the panel geometry and explicitly not these two. All three
+hold cases the roadmap names are covered in the timeout handler: pointer over a control
+(`hover_ != Region::None`), timeline dragging (`draggingTimeline_`), and popup open (through
+`holdVisible` -> `activePopupWidget() || activeModalWidget()`, which covers menus, tooltips and
+modal dialogs alike). There is a fourth the roadmap did not ask for - a child widget holding
+keyboard focus, scoped to `focus->window() == this` so a modeless Movie Inspector cannot hold the
+transport up indefinitely.
 
 **Built, measured and signed off.** `kAutoHideMs = 2000`, `kFadeMs = 165`, and the owner's
 sign-off recorded *"no tuning is wanted"* — those are settled numbers, not defaults.
@@ -329,16 +364,73 @@ sign-off recorded *"no tuning is wanted"* — those are settled numbers, not def
 sign-off. The hold rules the roadmap asks for (pointer over controls, timeline dragging, popup
 open) are all already implemented in `OverlayHooks::holdVisible`.
 
-### 9. Fullscreen presentation mode
+### 9. Fullscreen presentation mode - **DONE, AND THE OPEN QUESTION IS CLOSED BY OWNER DECISION 2026-08-18**
+
+**ONE STRIP, WINDOWED AND FULLSCREEN, WITH THE MENUS REACHABLE - and the design package is
+deliberately ignored on this point** (owner, 2026-08-18). The design's screen-2 shows a different
+fullscreen strip - 52px, filename bold beside a dimmer `1920x1080 - 24 fps`, no menu bar - and it
+is **not being built**: no second layout, no metadata line. One strip keeps every menu reachable in
+fullscreen, which is strictly more functional than the mockup, and that is the decision.
+**Do not re-propose screen-2.**
+
+Audited against the shipped build: Escape is a separate `QAction` enablement-gated on fullscreen,
+so a windowed Escape is not consumed at all; geometry is captured BEFORE the state change with the
+maximized bit recorded separately, so a maximized window returns maximized; the monitor rule is
+Qt's own and was validated on real hardware at plan section 20.4 on 2026-08-14; and the cursor's
+two mechanisms are applied together in one function, which is what makes "verify by the handle,
+not the flag" a property rather than a convention.
 
 **Largely built at phase 6** — Escape exits, geometry restores, the monitor rule holds, and the
 cursor hides after inactivity. Note the cursor is hidden by *two different mechanisms* on the
 two backends (`Qt::BlankCursor` on CPU, `SetCursor(nullptr)` answering `WM_SETCURSOR` on D3D11),
 so `GetCursorInfo` sees only one of them — verify by the handle, not the flag.
 
-### 10. Windows 11 visual conversion
+### 10. Windows 11 visual conversion - **THE BLUR PREMISE IS ANSWERED (2026-08-18). MICA/ACRYLIC CANNOT DO IT; ROUTE 2 CAN, AND IS BUILT DEFAULT-OFF**
 
-**Flag — Mica/Acrylic backdrop blur is the one item here with real presentation risk.** The
+**DWM BACKDROP EFFECTS REACH THE TITLE BAR AND NOTHING ELSE.** Applied to Trace's live main
+window: `DwmExtendFrameIntoClientArea(-1)`, `DWMWA_SYSTEMBACKDROP_TYPE` at all four values, the
+undocumented `SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)` and legacy
+`DwmEnableBlurBehindWindow` **all return S_OK** and change **rows 1..30 only** - 37,987 differing
+pixels there and **zero anywhere in the client**, both strip bands included. Mica specifically
+changes nothing at all. The HWND tree says why: `TraceD3D11Surface` is 1280x720 covering **100% of
+the client**, so a backdrop has nothing to show through, and every ex-style is `0` - no
+`WS_EX_LAYERED`, no `WS_EX_NOREDIRECTIONBITMAP`.
+
+**THE DEEPER REASON IS INDEPENDENT OF THE SWAPCHAIN AND IS THE PART TO CARRY.** DWM backdrops blur
+what is behind the **WINDOW** - the desktop. The design's mockup uses CSS `backdrop-filter:
+blur()`, which blurs what is behind the **ELEMENT** - the video. They are different effects, and no
+value of `DWMWA_SYSTEMBACKDROP_TYPE` turns one into the other. This would hold even if the client
+area were reachable, which is why it is the durable half of the finding.
+
+**ROUTE 2 IS BUILT AND MEASURED FLAT (`efa3160`), `TRACE_STRIP_BACKDROP=1`, DEFAULT OFF.** The
+strip paints a tiny blurred copy of the video it covers as its own background, under the package's
+own `rgba(22,22,24,0.66)` -> `0.04` scrim - so the design's look is reached **while the menu bar
+stays a real `QMenuBar` in a real native window**, which is what route 1 (redraw the strip as
+composited quads) would have had to trade away. **Cost is set by the OUTPUT, not the input**: a
+48x6 grid at 4x4 source reads a cell is 4,608 samples per frame at 8K as at 720p. It must never
+become a downscale of the band, which at 4K would be ~438k samples and would scale with resolution.
+
+Measured **with the chrome held revealed for the whole run and jiggled in the control too** - the
+strip auto-hides after 2s, so a plain run would have measured the effect for two seconds and the
+fallback for nine and reported near-zero cost for the wrong reason. 4K ProRes 4444 x2 each,
+1920x1080 @ 59.999Hz, `renderer d3d11 +overlay` read off both HUDs: **99.8% on all four, 261
+frames, `drop 0`, `rephase 0`, `handler>budget 0 of 260`, `hitch 0`, `paints 313/262` identical**.
+The captures confirm the strip really was revealed and really was drawing the blur in the measured
+runs, so the flat result is not a check that could only report one thing. Both backends draw it;
+cross-backend strip band 1847 px of 72576 at max channel delta 7, under the video band's own
+backend class because the scrim attenuates it.
+
+**Whether to SHIP it is still an owner decision.** It is default-off and separately revertable
+(the revert was applied and the reverted tree built, rather than assumed); the solid `#14161A`
+remains the fallback and is what ships today. **DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`)
+and rebuilding the strip as video quads are both explicitly NOT being pursued** (owner,
+2026-08-18).
+
+**So the rest of step 10 is typography and spacing, which carry no playback risk** - exactly what
+the original flag anticipated as the fallback.
+
+**Original flag, retained: Mica/Acrylic backdrop blur is the one item here with real presentation
+risk.** The
 video is presented into a **child HWND with a flip-model swapchain**. DWM backdrop effects apply
 to the window backdrop and interact with the composition model; blur behind a swapchain-presented
 child is at best ineffective and at worst forces a different composition path. **Prototype it

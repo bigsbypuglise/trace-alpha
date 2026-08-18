@@ -722,6 +722,98 @@ width*, both of which stop meaning anything on a strip whose width is the window
 the design's 56px height, checks the width against the captured window, and derives every
 control as a multiple of the measured strip **height**.
 
+**ROADMAP STEPS 6, 8 AND 9 ARE DONE BY AUDIT (2026-08-18), AND THE AUDIT IS THE POINT.** All
+three were already satisfied by work predating the roadmap, so they were checked against the
+shipped build rather than implemented -- the risk being a later session "implementing" something
+that already exists. Step 6: four readout modes reach BOTH strip readouts through one
+`readoutTextAt`, measured Frame `1`/`261` - Seconds `0.083`/`10.875` - Elapsed
+`00:00:00:03`/`00:00:10:21` - Timecode `00:00:01:16`/`00:00:12:09`, the last being the file's own
+`00:00:01:12` start plus the elapsed. Step 8: `kAutoHideMs 2000` / `kFadeMs 165` untouched, and
+all three roadmap hold cases plus a fourth are in the timeout handler. Step 9: Escape, geometry
+restore, monitor rule and both cursor mechanisms all verified. **One strip windowed and
+fullscreen is now an OWNER DECISION (2026-08-18) and the design's screen-2 is deliberately
+ignored** -- no 52px variant, no metadata line, menus reachable in fullscreen. Do not re-propose
+it.
+
+**THE AUDIT FOUND TWO DEFECTS BESIDE THOSE STEPS AND BOTH ARE FIXED (`b2a901b`).**
+
+- **`QAction::toggle()` DOES NOT CHECK ENABLEMENT AND `QAction::trigger()` DOES.** That is why
+  "the click is refused by the action" was true of Go to Start and Go to End with no test in
+  their lambdas, and **false for Loop**, the one checkable strip control
+  `syncMediaDependentActions` actually gates. Measured before the guard: with no media open,
+  clicking Loop on the empty-state strip turned it on -- **0 -> 36 accent px in its cell** -- and
+  **persisted `loop=true`** from a disabled action, which also poisons the next cadence run
+  (phase 14's own recorded failure). After: **0 -> 0**, nothing written, with the negative
+  control confirming Loop still works with media open (**0 -> 46**, persisted). The guard covers
+  Mute too, because it belongs to "checkable control on the strip" rather than to whichever one
+  is gated today. **This is the second time this exact distinction has cost a build** -- step 5's
+  Mute button flipped a tick and never reached the audio.
+- **THE READOUT MODE CHANGED THE HUD AND NOT THE STRIP.** `setReadoutMode` rebuilt the HUD, a
+  separate widget in the layout; the strip's readouts are quads built inside the viewer's paint.
+  **`keyPressEvent`'s `revealOverlay()` is NOT enough** -- `OverlayModel::startAnimation` returns
+  early once the fade has settled, so `reveal()` on a strip that is up and idle schedules
+  nothing. Measured paused with the strip revealed: pressing `E` **and** choosing the same item
+  from the menu both left it reading `0`/`261` at **zero differing pixels** while the HUD read
+  `Readout: Elapsed`; four changes in a row never moved it, and an auto-hide plus re-reveal then
+  showed the correct values -- **a repaint fault, not a wiring one**. After: **1286 differing px**
+  and the strip updates immediately. `update()` rather than `repaint()`, because nothing here
+  reports a value measured BY the paint. **Seventh instance of this project's repaint trap and
+  the first in the shipping UI rather than the dev HUD.**
+
+**MICA / ACRYLIC CANNOT BLUR THE STRIP, AND THE REASON THAT MATTERS IS NOT THE SWAPCHAIN
+(2026-08-18).** Applied to Trace's live main window, `DwmExtendFrameIntoClientArea(-1)`,
+`DWMWA_SYSTEMBACKDROP_TYPE` at all four values, the undocumented
+`SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)` and legacy
+`DwmEnableBlurBehindWindow` **all return S_OK** and change **rows 1..30 only** -- 37,987 differing
+px in the title bar and **zero anywhere in the client**, both strip bands included; Mica changes
+nothing at all. The HWND tree says why: **`TraceD3D11Surface` is 1280x720 covering 100% of the
+client**, and every ex-style is `0` (no `WS_EX_LAYERED`, no `WS_EX_NOREDIRECTIONBITMAP`).
+
+**But the durable half is this: DWM backdrops blur what is behind the WINDOW -- the desktop --
+while the design's mockup uses CSS `backdrop-filter: blur()`, which blurs what is behind the
+ELEMENT -- the video. Different effects, and no configuration turns one into the other.** That
+holds even if the client area were reachable. **Do not re-propose Mica/Acrylic for this.**
+Applying it costs nothing measurable (4444 x2: 99.8%, `drop 0`, `handler>budget 0 of 260`,
+`hitch 0`, buckets identical) but that is **a null result on a no-op** and is not evidence that a
+real transparency route would be free.
+
+**ROUTE 2 IS BUILT, DEFAULT OFF, AND MEASURED FLAT (`efa3160`): `TRACE_STRIP_BACKDROP=1`.** The
+top strip paints a tiny blurred copy of the video it covers as its background, under the design
+package's own `rgba(22,22,24,0.66)` -> `0.04` scrim -- so the design's look is reached **while the
+menu bar stays a real `QMenuBar` in a real native window**, which is exactly what route 1
+(redrawing the strip as composited quads) would have traded away and what step 7 was shaped to
+protect. `src/ui/StripBackdrop.*`.
+
+**THE COST IS SET BY THE OUTPUT AND NOT THE INPUT, AND THAT IS THE WHOLE REASON IT IS
+AFFORDABLE.** A 48x6 grid at 4x4 source reads per cell is **4,608 samples a frame at 8K as at
+720p** -- the loop is over destination cells. **It must never become a downscale of the band**:
+averaging every pixel of a 3840x114 band is ~438k samples at 4K and scales with resolution, which
+is the shape of cost this project spends its time removing. Planar YUV at 8/10/12 bits and BGRA
+are handled; an unrecognised layout returns null, which means "draw the fallback".
+
+**MEASURED WITH THE CHROME HELD REVEALED FOR THE WHOLE RUN, AND JIGGLED IN THE CONTROL TOO** --
+the strip auto-hides after 2s, so a plain 11s run would have measured the effect for two seconds
+and the fallback for nine and reported near-zero cost **for the wrong reason**. 4K ProRes 4444 x2
+each, 1920x1080 @ 59.999Hz, `renderer d3d11 +overlay` read off both HUDs: **99.8% on all four,
+261 frames, `drop 0`, `rephase 0`, `handler>budget 0 of 260`, `hitch 0`, `paints 313/262`
+identical**. The captures confirm the strip really was revealed and really was drawing the blur,
+so the flat result is not a check that could only report one thing. Both backends draw it;
+cross-backend strip band **1847 px of 72576 at max channel delta 7**, under the video band's own
+backend class because the scrim attenuates it -- the same attenuation step 5 measured for the
+bottom strip.
+
+**Whether to SHIP it is an open owner decision.** It is default-off and separately revertable --
+**the revert was applied and the reverted tree built rather than assumed**. The solid `#14161A`
+remains the fallback and is what ships today. **DirectComposition and rebuilding the strip as
+video quads are both explicitly NOT to be pursued** (owner, 2026-08-18). **The rest of step 10 is
+typography and spacing, which carry no playback risk.**
+
+**Regression for the two fixes, against a control built from `7c89cee` and hash-verified**
+(`959FB800` vs `387E008B`), same display, `renderer d3d11 +overlay` read off both: 4444 cadence
+x2 **99.8% on both binaries**, 261 frames, `drop 0`, `rephase 0`, `handler>budget 0 of 260`,
+buckets and percentiles identical; `scrub -SnapRelease` **`target 261 shown 261 delta 0`**
+full-res planar with **`hitch 0`** on both, release 19.9 vs 21.1ms.
+
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
 phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The
@@ -3323,6 +3415,12 @@ synchronous path is the comparison. **Depth 1 is worse than off** -- a depth-1 q
 overlap -- and **depth 2 is the minimum that overlaps**; the byte budget clamps 8K to 2 by
 itself. Worth ~+10% on the 8K plate and nothing on a file that already meets budget, where it
 simply moves the decode off the UI thread),
+**`TRACE_STRIP_BACKDROP=1`** (2026-08-18, roadmap step 10 route 2 PROTOTYPE, **default off**: the
+top chrome strip paints a tiny blurred copy of the video it covers as its background instead of
+the solid `#14161A`. Measured flat on 4K ProRes 4444 with the chrome held revealed for the whole
+run -- 99.8%, `drop 0`, `handler>budget 0 of 260`, `hitch 0` -- and it is the ONLY route to the
+design's blur, because Mica/Acrylic blur the desktop behind the window rather than the video
+behind the element and reach the title bar only. Shipping it is an owner decision),
 **`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second

@@ -1,5 +1,53 @@
 # v0.2.0-beta.1 IS SHIPPED. THE OPEN PHASE IS THE OWNER'S UI REDESIGN ROADMAP.
 
+## 2026-08-18, FOURTH SESSION: STEPS 6/8/9 AUDITED DONE, TWO DEFECTS FIXED, STEP 10's BLUR ANSWERED
+
+Two commits: `b2a901b` the fixes, `efa3160` the step 10 route 2 prototype (default off).
+**Steps 6, 8 and 9 needed no code** -- they were audited against the shipped build rather than
+implemented, which is what the session was for: all three were already satisfied by work
+predating the roadmap and the risk was a later session "implementing" what already exists.
+
+Display was **1920x1080 @ 59.999Hz**, so figures compare to the step 7 block and NOT to step 5's
+physical-panel record. A control was built from `7c89cee` and hash-verified (`959FB800` vs
+`387E008B`) and run beside the fixes.
+
+**Read the roadmap's steps 6, 8, 9 and 10 and the session block in `CLAUDE.md` before proposing
+anything here.** Four things to carry.
+
+- **`QAction::toggle()` DOES NOT CHECK ENABLEMENT AND `trigger()` DOES.** With no media open,
+  clicking Loop on the empty-state strip turned it on and **persisted `loop=true` from a disabled
+  action** -- which also poisons the next cadence run. Fixed, with the negative control
+  confirming Loop still works with media. **Second time this exact distinction has cost a build**
+  after step 5's Mute.
+- **A REPAINT FAULT IN THE SHIPPING UI, NOT THE HUD.** Changing the readout mode rebuilt the HUD
+  and left the strip's two readouts stale -- **zero differing pixels** on both the key and the
+  menu route -- because `reveal()` on an already-settled strip schedules nothing. Seventh
+  instance of this project's repaint trap and the first outside the dev HUD.
+- **MICA/ACRYLIC CANNOT DO STEP 10's BLUR, AND THE SWAPCHAIN IS THE LESSER REASON.** Every DWM
+  call returns S_OK and changes the **title bar only**; the client is 100% covered by
+  `TraceD3D11Surface`. **The durable half: DWM backdrops blur what is behind the WINDOW, the
+  design blurs what is behind the ELEMENT.** Different effects. **Do not re-propose it.**
+- **ROUTE 2 WORKS AND IS FLAT** (`TRACE_STRIP_BACKDROP=1`, default off): the strip paints a tiny
+  blurred copy of the video under the package's own scrim, **keeping the real `QMenuBar`**.
+  Measured **with the chrome held revealed for the whole run and jiggled in the control too**,
+  because the strip auto-hides after 2s and a plain run would have reported near-zero cost for
+  the wrong reason. 4444 x2: 99.8%, `drop 0`, `handler>budget 0 of 260`, `hitch 0`, paints
+  identical.
+
+**THE OPEN OWNER DECISION IS WHETHER TO SHIP ROUTE 2.** It is default-off and separately
+revertable (the revert was applied and the reverted tree built). If yes, the remaining step 10
+work is typography and spacing, which carry no playback risk. **DirectComposition and rebuilding
+the strip as video quads are explicitly ruled out** (owner, 2026-08-18), as is the design's
+screen-2 fullscreen strip -- **one strip, windowed and fullscreen, menus reachable**.
+
+Two things worth knowing before touching the prototype. **Its cost is set by the OUTPUT, not the
+input** -- 4,608 samples a frame at 8K as at 720p -- and **it must never become a downscale of
+the band**, which would scale with resolution. And **it currently samples on every frame
+regardless of whether the strip is visible**; gating that on the reveal state is free and makes
+the shipping version strictly cheaper than what was measured.
+
+---
+
 ## 2026-08-18, THIRD SESSION: ROADMAP STEP 5 IS DONE — THE EDGE-TO-EDGE TRANSPORT STRIP
 
 Four commits: `15473d0` the strip and its glyphs, `02b07e5` the harness, `cdc0959` the docs,
