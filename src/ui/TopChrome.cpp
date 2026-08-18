@@ -27,12 +27,15 @@ constexpr int kMarkToWordGap = 8;
 constexpr int kWordToMenuGap = 18;
 
 // The design's strip is `rgba(22,22,24,0.66)` fading to `rgba(22,22,24,0.04)`
-// over a backdrop blur. A native window over the video swapchain cannot blend
-// with it at all (plan section 18.4), so what is painted is the package's own
-// stated fallback for the no-transparency case: solid #14161A. The vertical
-// gradient is kept in the only form an opaque strip can carry it -- top
-// slightly lighter than bottom -- so the shape of the design survives even
-// though its transparency does not.
+// over a backdrop blur. A native window over the video swapchain cannot BLEND
+// with the video at all (plan section 18.4), so the blur is painted rather than
+// composited -- see setBackdrop. THESE COLOURS ARE WHAT DRAWS WHEN IT IS NOT:
+// the package's own stated fallback for the no-transparency case, solid
+// #14161A, which since the setting is honoured is now a state a user can
+// actually reach rather than a permanent condition. The vertical gradient is
+// kept in the only form an opaque strip can carry it -- top slightly lighter
+// than bottom -- so the shape of the design survives even though its
+// transparency does not.
 const QColor kStripTop(0x1A, 0x1B, 0x20);
 const QColor kStripBottom(0x14, 0x16, 0x1A);
 const QColor kHairline(255, 255, 255, 18);
@@ -201,7 +204,7 @@ void TopChrome::relayout() {
     titleLabel_->raise();
 }
 
-// UI redesign roadmap step 10, route 2 -- PROTOTYPE.
+// UI redesign roadmap step 10, route 2.
 //
 // The design's own strip is `rgba(22,22,24,0.66)` fading to `rgba(22,22,24,0.04)`
 // OVER A BACKDROP BLUR. With a blurred copy of the video underneath, both halves

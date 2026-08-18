@@ -99,8 +99,9 @@ public:
     // child HWND with its own class cursor that Qt cannot reach.
     void setCursorHidden(bool hidden);
 
-    // UI redesign roadmap step 10, route 2 -- PROTOTYPE, off unless
-    // TRACE_STRIP_BACKDROP=1.
+    // UI redesign roadmap step 10, route 2 -- ON BY DEFAULT, subject to
+    // Windows' own transparency setting; TRACE_STRIP_BACKDROP overrides it in
+    // both directions. See stripBackdropEnabled() in the .cpp.
     //
     // Where a tiny blurred copy of the top of each frame is delivered, so the
     // native top chrome can use it as a backdrop. It is computed HERE, at the
@@ -122,6 +123,26 @@ public:
     // arrives. Gating on the reveal state without this would leave a revealed
     // strip blurring whatever was on screen when it last hid.
     void refreshBackdrop();
+
+    // Re-reads Windows' transparency setting and republishes the backdrop if it
+    // changed. Driven from MainWindow's WM_SETTINGCHANGE handler, because that
+    // setting -- unlike the environment override beside it -- can be flipped
+    // while Trace is running, and a strip still blurring after the user turned
+    // system transparency off is the setting not being honoured.
+    void onSystemAppearanceChanged();
+
+    // What the strip backdrop is ACTUALLY doing, for the dev HUD: "on",
+    // "off (windows)", "off (env)" or "n/a" in bar mode.
+    //
+    // IT IS REPORTED BECAUSE THE ANSWER IS NO LONGER SOMETHING THE LAUNCH
+    // DECIDED. While this was a knob, the run's own environment said what it
+    // was measuring; now a machine with transparency switched off in Windows
+    // Settings draws the solid fallback, and a cost or appearance run taken
+    // there would be measuring the fallback while its command line said
+    // backdrop. That is the "instrument exonerates the build wrongly" class
+    // this project has recorded repeatedly, and it is why `renderer`, `planar`
+    // and `font` are on the HUD beside it.
+    QString backdropStateLabel() const;
 
     // Rotate/flip. Held here as well as handed to the backend, so a renderer
     // that fails and is replaced by the CPU fallback inherits the orientation
@@ -235,7 +256,8 @@ private:
     trace::render::ViewScale viewScale_{};
     QSize sourcePixels_;
     int chromeTopInsetLogical_ = 0;
-    // Step 10 route 2 prototype; null unless TRACE_STRIP_BACKDROP=1.
+    // Step 10 route 2. Wired in overlay mode only, so bar mode never pays for
+    // a backdrop it has no strip to draw.
     std::function<void(const QImage&)> backdropSink_;
     double minimumAspect_ = 16.0 / 9.0;
     // The settled floating-transport width (spec phase 6). Named here rather

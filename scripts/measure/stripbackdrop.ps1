@@ -19,7 +19,7 @@
 # backdrop. The right end past the menus is bare strip. The bd=0 leg reading 0.00
 # is what proves the chosen band is clean rather than merely quiet.
 param(
-    [ValidateSet('live','revive','pausereveal','endreveal','close')][string]$Mode = 'live',
+    [ValidateSet('live','shipping','revive','pausereveal','endreveal','close')][string]$Mode = 'live',
     [Parameter(Mandatory = $true)][string]$Clip,
     [string]$Exe,
     [int]$StepFrames = 45,
@@ -143,13 +143,19 @@ function Jiggle($h) {
     Start-Sleep -Milliseconds 120
 }
 
-function Start-Trace($backdrop) {
+# $backdrop of $null means DO NOT SET THE VARIABLE AT ALL -- which is the only
+# way to measure what a double-click launch does now that the effect ships on.
+# Setting it to "1" and calling that the shipping configuration would be testing
+# the override rather than the default, and the two reach the same picture by
+# different branches.
+function Start-Trace($backdrop, $hud = "0") {
     Get-Process -Name Trace -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }
     Start-Sleep -Milliseconds 700
     Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
-    $env:TRACE_STRIP_BACKDROP = $backdrop
-    $env:TRACE_HUD = "0"
+    Remove-Item env:TRACE_STRIP_BACKDROP -ErrorAction SilentlyContinue
+    if ($null -ne $backdrop) { $env:TRACE_STRIP_BACKDROP = $backdrop }
+    $env:TRACE_HUD = $hud
     $env:TRACE_NO_AUDIO = "1"
     $env:TRACE_SETTINGS_FILE = "$OutDir\scratch.ini"
     Start-Process -FilePath $Exe -ArgumentList ('"' + $Clip + '"') | Out-Null
@@ -177,6 +183,35 @@ if ($Mode -eq 'live') {
     Write-Output ""
     Write-Output "PASS requires: bd=0 hsd 0.00 (the fallback is a purely vertical gradient)"
     Write-Output "               bd=1 hsd well above 0 (a blur of the video cannot be flat)"
+}
+
+if ($Mode -eq 'shipping') {
+    # THE DEFAULT FLIP'S OWN LEG. It launches with the variable UNSET, so what is
+    # measured is what a user gets, and it runs with the HUD on so the capture
+    # carries Trace's own answer -- `backdrop on` / `off (windows)` /
+    # `on (unset)` -- beside the pixels. That pairing is the point: with the
+    # effect now gated on a machine setting rather than on the command line, a
+    # run can no longer state its own configuration from its invocation, and a
+    # box with Windows transparency switched off would otherwise measure the
+    # solid fallback while reporting itself as a backdrop run.
+    #
+    # `on (unset)` is the reading to watch for. It means the Personalize key
+    # carried no EnableTransparency value -- which is a legitimate machine state
+    # AND what a wrong registry path would produce, so it is printed distinctly
+    # rather than folded into `on`.
+    $h = Start-Trace $null "1"
+    Start-Sleep -Milliseconds 400
+    Jiggle $h
+    $bmp = Capture-Client $h "$OutDir\shipping-default.png"
+    $m = Measure-Strip $bmp
+    $bmp.Dispose()
+    Write-Output ("TRACE_STRIP_BACKDROP unset   hsd {0} (max {1})  strip mean RGB {2}/{3}/{4}   [{5}]" -f $m.HSd, $m.HSdMax, $m.R, $m.G, $m.B, $m.Band)
+    Write-Output ""
+    Write-Output "Capture: $OutDir\shipping-default.png -- read the HUD's 'backdrop' field off it."
+    Write-Output "PASS requires the two to AGREE:"
+    Write-Output "  HUD 'backdrop on' or 'on (unset)'  <->  hsd well above 0"
+    Write-Output "  HUD 'backdrop off (windows)'       <->  hsd 0.00"
+    Write-Output "A disagreement is the gate and the drawing having different opinions."
 }
 
 if ($Mode -eq 'revive') {

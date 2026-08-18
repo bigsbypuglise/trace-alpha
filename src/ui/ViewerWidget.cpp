@@ -6,6 +6,7 @@
 #include <QDebug>
 #include <QMouseEvent>
 #include <QResizeEvent>
+#include <QSettings>
 
 #include <algorithm>
 #include <cmath>
@@ -453,21 +454,131 @@ void ViewerWidget::leaveEvent(QEvent* event) {
     QWidget::leaveEvent(event);
 }
 
-// UI redesign roadmap step 10, route 2 -- PROTOTYPE. Default OFF, so nothing
-// here runs on a shipping launch and the solid fallback is what draws.
-static bool stripBackdropEnabled() {
-    static const bool on = [] {
-        const QByteArray v = qgetenv("TRACE_STRIP_BACKDROP");
-        return !v.isEmpty() && v != "0";
+// UI redesign roadmap step 10, route 2 -- SHIPPED ON BY DEFAULT (owner decision,
+// 2026-08-18), and it is THREE-VALUED rather than two.
+//
+//   TRACE_STRIP_BACKDROP=0    off,  whatever Windows says   -- the rollback
+//   TRACE_STRIP_BACKDROP=1    on,   whatever Windows says   -- the override
+//   unset                     Windows' own transparency setting
+//
+// HONOURING THAT SETTING IS THE DESIGN PACKAGE'S OWN INSTRUCTION AND NOT AN
+// ADDITION TO IT. The solid #14161A the strip falls back to is supplied by the
+// package as "the fallback when transparency effects are disabled in Windows
+// Settings" -- so the package already expects the setting to be read, and a
+// build that blurred regardless would be shipping half of what was delivered.
+// It is also what makes the Fluent direction Windows-NATIVE rather than
+// Windows-looking: the toggle a user reaches for to turn transparency off
+// across the system reaches Trace too.
+//
+// ABSENT MEANS ON. `EnableTransparency` is written when the user touches the
+// toggle, so a machine that never has carries no value -- and the Windows
+// default is transparency on. Defaulting to on is what keeps "never touched
+// it" and "explicitly turned it on" the same answer.
+//
+// ABSENT IS NEVERTHELESS REPORTED SEPARATELY, and that is the only available
+// proof that this reads the right key at all. A path with a typo in it and a
+// machine that has never touched the toggle produce the SAME boolean, so a
+// build reading `on` says nothing about whether it found anything -- which is
+// exactly the shape of the stale instruments this project keeps recording. The
+// tri-state makes "the value is there and says on" and "nothing was found"
+// different readings, and the dev HUD prints which.
+//
+// QSettings::NativeFormat HERE IS REGISTRY *READING*, NOT A SETTINGS HOME. Spec
+// phase 11 rules NativeFormat out for Trace's own preferences, because it would
+// leave HKCU keys behind after a portable install is deleted; that rule is
+// about writing. LucidLinkIntegration.cpp already reads the registry this way
+// for CLSID discovery, and this is the second instance of the same distinction.
+// Nothing here writes.
+// -1 no value found, 0 transparency off, 1 transparency on.
+static int readWindowsTransparency() {
+#ifdef Q_OS_WIN
+    QSettings personalize(
+        QStringLiteral(
+            R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)"),
+        QSettings::NativeFormat);
+    const QVariant v = personalize.value(QStringLiteral("EnableTransparency"));
+    if (!v.isValid()) return -1;
+    return v.toInt() != 0 ? 1 : 0;
+#else
+    return -1;
+#endif
+}
+
+// -1 unset, 0 forced off, 1 forced on. Read once: an environment variable cannot
+// change under a running process, where the registry value can.
+static int stripBackdropOverride() {
+    static const int v = [] {
+        const QByteArray e = qgetenv("TRACE_STRIP_BACKDROP");
+        if (e.isEmpty()) return -1;
+        return e == "0" ? 0 : 1;
     }();
-    return on;
+    return v;
+}
+
+// Cached, because the gate is asked once per presented frame and a registry
+// read is not free at that rate. Invalidated by onSystemAppearanceChanged(),
+// which MainWindow drives from WM_SETTINGCHANGE -- so the answer is live
+// without the read being.
+static int& windowsTransparencyCache() {
+    static int v = readWindowsTransparency();
+    return v;
+}
+
+static bool stripBackdropEnabled() {
+    const int forced = stripBackdropOverride();
+    if (forced >= 0) return forced != 0;
+    // Only an explicit 0 turns it off. Absent is on, per above.
+    return windowsTransparencyCache() != 0;
+}
+
+// WINDOWS' TRANSPARENCY SETTING CAN CHANGE UNDER A RUNNING PROCESS, WHICH IS
+// THE WHOLE REASON THIS EXISTS -- an environment variable cannot, so the
+// override needed no equivalent. MainWindow drives it from WM_SETTINGCHANGE.
+//
+// It re-reads and republishes only when the answer actually MOVED.
+// WM_SETTINGCHANGE is broadcast for a great many unrelated things, so the
+// common case has to be cheap: with no sink wired (bar mode, where there is no
+// floating strip and the menu bar has the window background behind it rather
+// than video) it does not even read. Filtering on the message's own
+// "ImmersiveColorSet" lParam was considered and left out -- not every sender
+// supplies it, and a registry read at this rate is far below anything a frame
+// costs, so the narrower filter would trade a real miss for an imagined saving.
+QString ViewerWidget::backdropStateLabel() const {
+    // Bar mode first, because there the question does not arise: no floating
+    // strip exists, no sink is wired, and reporting "off" would read as a
+    // configuration when it is an absence.
+    if (!backdropSink_) return QStringLiteral("n/a");
+    const int forced = stripBackdropOverride();
+    if (forced == 0) return QStringLiteral("off (env)");
+    if (forced == 1) return QStringLiteral("on (env)");
+    switch (windowsTransparencyCache()) {
+        case 0:  return QStringLiteral("off (windows)");
+        case 1:  return QStringLiteral("on");
+        // No value under the Personalize key. On, per the Windows default --
+        // but printed distinctly, because this is also what a wrong key path
+        // would read and the two must not look alike.
+        default: return QStringLiteral("on (unset)");
+    }
+}
+
+void ViewerWidget::onSystemAppearanceChanged() {
+    if (!backdropSink_) return;
+    const int was = windowsTransparencyCache();
+    const int now = readWindowsTransparency();
+    if (now == was) return;
+    windowsTransparencyCache() = now;
+    // Only republish if the EFFECTIVE answer moved. Absent and on are both on,
+    // so a value appearing where there was none changes the reading without
+    // changing the picture, and repainting for it would be a change nobody
+    // asked for.
+    if ((was != 0) != (now != 0)) refreshBackdrop();
 }
 
 void ViewerWidget::setBackdropSink(std::function<void(const QImage&)> sink) {
     backdropSink_ = std::move(sink);
 }
 
-// UI redesign roadmap step 10, route 2 -- PROTOTYPE.
+// UI redesign roadmap step 10, route 2.
 //
 // GATED ON THE REVEAL STATE, WHICH IS WHAT MAKES THE EFFECT COST NOTHING FOR THE
 // NINE SECONDS OF EVERY ELEVEN THAT THE STRIP IS NOT ON SCREEN. The transport
@@ -491,8 +602,16 @@ void ViewerWidget::setBackdropSink(std::function<void(const QImage&)> sink) {
 // hide and every media change -- the four moments the answer can change without
 // a frame arriving. One sample per reveal, not one per frame.
 void ViewerWidget::refreshBackdrop() {
-    if (!backdropSink_ || !stripBackdropEnabled()) return;
-    if (frame_.isNull() || !overlayModel_.chromeRevealed()) {
+    if (!backdropSink_) return;
+    // THE DISABLED CASE PUBLISHES NULL RATHER THAN RETURNING EARLY, and that
+    // became load-bearing when the gate stopped being a launch-time constant.
+    // Turning Windows transparency off while a blurred strip is on screen has
+    // to take the blur away, and `TopChrome` keeps the last image it was given
+    // -- so a gate that merely stopped calling would leave the strip blurring
+    // until the next media change. It costs one std::function call, and
+    // `setBackdrop`'s own null-to-null check returns immediately after the
+    // first: exactly what the reveal gate below already pays.
+    if (!stripBackdropEnabled() || frame_.isNull() || !overlayModel_.chromeRevealed()) {
         backdropSink_(QImage());
         return;
     }

@@ -32,11 +32,13 @@ namespace trace::ui {
 // exactly: over the shipped child-HWND video surface, ordinary Qt children are
 // neither visible NOR hit-testable, while native siblings are both -- and lose
 // translucency, because neither design puts the video pixels anywhere Qt can
-// blend against. So the strip is opaque. That is not a shortfall invented here:
-// the design package supplies this case's own answer, a solid `#14161A` fallback
-// for when Windows transparency effects are off, and the backdrop blur it falls
-// back FROM is roadmap step 10, which is flagged as the item with real
-// presentation risk against a flip-model swapchain.
+// blend against. So the strip is opaque, and the only way to a backdrop blur is
+// to PAINT one: see setBackdrop, which is roadmap step 10 route 2 and ships on.
+//
+// The design package supplies this case's own answer for when it cannot -- a
+// solid `#14161A` "fallback when transparency effects are disabled in Windows
+// Settings" -- and that sentence is now honoured literally rather than used as
+// cover for an opaque strip: with the setting off, the fallback is what draws.
 //
 // ITS PARENT IS THE CENTRAL WIDGET AND NOT THE VIEWER, AND THAT IS A MEASURED
 // REQUIREMENT. A native child of the VIEWER is a sibling of the D3D11 surface
@@ -91,8 +93,8 @@ public:
     // repeating the number.
     static int stripHeightLogical();
 
-    // UI redesign roadmap step 10, route 2 -- PROTOTYPE, off unless
-    // TRACE_STRIP_BACKDROP=1.
+    // UI redesign roadmap step 10, route 2 -- ON by default, off when Windows'
+    // transparency setting is off; TRACE_STRIP_BACKDROP overrides both ways.
     //
     // A tiny blurred copy of the video this strip is covering, stretched across
     // it as the background instead of the solid fallback. It is what lets the
@@ -101,10 +103,12 @@ public:
     // (redraw the strip as composited quads) would have had to trade against
     // each other.
     //
-    // A NULL IMAGE IS THE NORMAL CASE AND MEANS "DRAW THE FALLBACK". That is
-    // what ships: no media, an unrecognised pixel layout, or the knob unset all
-    // arrive here as a null image and get the design package's own solid
-    // `#14161A`. The prototype adds a branch, never a dependency.
+    // A NULL IMAGE MEANS "DRAW THE FALLBACK", and it stays a routine case
+    // rather than an error one: no media, a hidden strip, an unrecognised pixel
+    // layout, or Windows transparency switched off all arrive here as a null
+    // image and get the design package's own solid `#14161A`. This is a branch,
+    // never a dependency -- the strip draws correctly having never been given
+    // an image at all, which is exactly what bar mode does.
     void setBackdrop(const QImage& tiny);
 
 
@@ -125,7 +129,7 @@ private:
     QLabel* titleLabel_ = nullptr;
     QMenuBar* menuBar_ = nullptr;
     QString mediaTitle_;
-    // Step 10 route 2 prototype. Tiny (48x6) and stretched at paint time; see
+    // Step 10 route 2. Tiny (48x6) and stretched at paint time; see
     // StripBackdrop for why the grid is the unit of cost rather than the band.
     QImage backdrop_;
 };

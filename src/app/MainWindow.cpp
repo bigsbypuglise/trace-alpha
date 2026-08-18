@@ -1218,8 +1218,8 @@ void MainWindow::setupUi() {
         // OverlayModel::setTopInset: with no media the strip is held up, so that
         // is the one state where the difference is permanently on screen.
         viewer_->setChromeTopInsetLogical(trace::ui::TopChrome::stripHeightLogical());
-        // UI redesign roadmap step 10, route 2 -- PROTOTYPE, inert unless
-        // TRACE_STRIP_BACKDROP=1 (ViewerWidget::stripBackdropEnabled).
+        // UI redesign roadmap step 10, route 2 -- ON by default, subject to
+        // Windows' transparency setting (ViewerWidget::stripBackdropEnabled).
         //
         // The viewer computes the tiny blurred copy because it is where a frame
         // arrives; the host hands it to the strip because the viewer has no
@@ -4692,6 +4692,16 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 dpiReshapeTimer_.start();
                 break;
             }
+            // UI roadmap step 10. The ONLY message here that is not about
+            // geometry, and it is taken for one reason: Windows' transparency
+            // setting can be flipped while Trace is running, and the strip
+            // backdrop honours it. Nothing about the window's size or shape is
+            // touched, and it does not return -- Qt's own handler still runs,
+            // which matters because WM_SETTINGCHANGE also carries font and
+            // metric changes Qt responds to itself.
+            case WM_SETTINGCHANGE:
+                if (viewer_) viewer_->onSystemAppearanceChanged();
+                break;
             default: break;
         }
     }
@@ -5796,7 +5806,7 @@ void MainWindow::syncTopChrome() {
         currentMedia_ ? QFileInfo(QString::fromStdString(currentMedia_->path)).fileName()
                       : QString());
     topChrome_->setRevealed(topChromeRevealed_ || !currentMedia_.has_value());
-    // UI roadmap step 10 route 2 -- PROTOTYPE, inert unless TRACE_STRIP_BACKDROP=1.
+    // UI roadmap step 10 route 2.
     //
     // The backdrop is sampled per frame and gated on the reveal state, so this is
     // what covers the moments the answer changes with NO frame arriving: a reveal
@@ -7792,13 +7802,17 @@ void MainWindow::refreshHud(const QString& action) {
               // also the correct reading for a move between two monitors that
               // share a scale factor.
               // UI roadmap step 10. `font` is the family that ACTUALLY resolved,
-              // not the one asked for, and the two differ easily: the design
-              // package names "Segoe UI Variable", which is not a family Windows
-              // has -- it ships the same design cut into Display/Text/Small --
-              // so this is a mapping, and on a machine missing it the fallback
-              // to Segoe UI looks very nearly right. That is the same silent
-              // degradation `renderer` and `planar` are reported for.
+              // not the one asked for, and the two differ easily -- Qt and GDI
+              // do not agree on which "Segoe UI Variable" families exist, and
+              // a fallback to plain Segoe UI looks very nearly right in any
+              // screenshot. `backdrop` is the same claim for the strip: it is
+              // no longer decided by the launch, so a machine with Windows
+              // transparency switched off draws the solid fallback while the
+              // command line still says backdrop. Both are the silent
+              // degradation class `renderer` and `planar` are reported for.
               + QString(" | font %1").arg(trace::app::Theme::resolvedFontFamily())
+              + QString(" | backdrop %1")
+                .arg(viewer_ ? viewer_->backdropStateLabel() : QStringLiteral("?"))
               + QString(" | dpr %1 scr %2 dpiChg %3%4 reshape %5")
                 .arg(QString::number(hudDpr, 'f', 2))
                 .arg(windowHandle() && windowHandle()->screen()
