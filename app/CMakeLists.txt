@@ -185,6 +185,8 @@ add_executable(Trace
   ../src/ui/TransportBar.cpp
   ../src/ui/TopChrome.h
   ../src/ui/TopChrome.cpp
+  ../src/ui/StripBackdrop.h
+  ../src/ui/StripBackdrop.cpp
   ../src/core/MediaItem.h
   ../src/core/PlaybackState.h
   ../src/core/ViewState.h

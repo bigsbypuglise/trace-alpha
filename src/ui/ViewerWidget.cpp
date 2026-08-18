@@ -1,5 +1,8 @@
 #include "ui/ViewerWidget.h"
 
+#include "ui/StripBackdrop.h"
+#include "ui/TopChrome.h"
+
 #include <QDebug>
 #include <QMouseEvent>
 #include <QResizeEvent>
@@ -450,9 +453,37 @@ void ViewerWidget::leaveEvent(QEvent* event) {
     QWidget::leaveEvent(event);
 }
 
+// UI redesign roadmap step 10, route 2 -- PROTOTYPE. Default OFF, so nothing
+// here runs on a shipping launch and the solid fallback is what draws.
+static bool stripBackdropEnabled() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_STRIP_BACKDROP");
+        return !v.isEmpty() && v != "0";
+    }();
+    return on;
+}
+
+void ViewerWidget::setBackdropSink(std::function<void(const QImage&)> sink) {
+    backdropSink_ = std::move(sink);
+}
+
 void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
     frame_ = frame;
     if (renderer_) renderer_->setFrame(frame);
+    // Step 10 route 2. Computed from the frame the viewer was just handed, so
+    // the backdrop can never be a frame behind the picture it is meant to be a
+    // blur of. The cover fraction is the strip's height over the height the
+    // frame is DRAWN at -- not over the widget -- so a letterboxed picture
+    // samples the part of the source the strip actually sits on.
+    if (backdropSink_ && stripBackdropEnabled()) {
+        const int drawnH = perfStats_.lastDrawSize.height();
+        const double dpr = devicePixelRatioF();
+        const double stripDevice = chromeTopInsetLogical_ > 0
+            ? chromeTopInsetLogical_ * dpr
+            : trace::ui::TopChrome::stripHeightLogical() * dpr;
+        const double cover = drawnH > 0 ? (stripDevice / drawnH) : 0.0;
+        backdropSink_(trace::ui::StripBackdrop::sample(frame, cover));
+    }
     // Timestamp the repaint request so the queued update()->paintEvent latency
     // can be separated from paint cost itself.
     updateRequestedNs_ = clock_.nsecsElapsed();

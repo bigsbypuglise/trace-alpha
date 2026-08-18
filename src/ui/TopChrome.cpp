@@ -201,9 +201,41 @@ void TopChrome::relayout() {
     titleLabel_->raise();
 }
 
+// UI redesign roadmap step 10, route 2 -- PROTOTYPE.
+//
+// The design's own strip is `rgba(22,22,24,0.66)` fading to `rgba(22,22,24,0.04)`
+// OVER A BACKDROP BLUR. With a blurred copy of the video underneath, both halves
+// of that can finally be drawn: the blur goes down first, then the package's own
+// scrim over it at the package's own alphas. The scrim is what keeps the menu
+// labels legible over a bright frame, and it is why this cannot simply be the
+// blurred video on its own.
+void TopChrome::setBackdrop(const QImage& tiny) {
+    // Cheap identity check first: this is called once per presented frame, and
+    // a paused file hands over the same image every time.
+    if (backdrop_.isNull() && tiny.isNull()) return;
+    backdrop_ = tiny;
+    update();
+}
+
 void TopChrome::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter p(this);
+    if (!backdrop_.isNull()) {
+        // The stretch IS most of the blur -- 48 cells across a 1280px strip is
+        // ~27px each, so bilinear interpolation between them is a far wider
+        // kernel than the design's own radius. SmoothPixmapTransform is what
+        // makes it an interpolation rather than 27px blocks.
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        p.drawImage(rect(), backdrop_);
+        // The package's scrim, over the blur, at the package's own alphas.
+        QLinearGradient scrim(0, 0, 0, height());
+        scrim.setColorAt(0.0, QColor(22, 22, 24, 168));  // 0.66
+        scrim.setColorAt(1.0, QColor(22, 22, 24, 10));   // 0.04
+        p.fillRect(rect(), scrim);
+        p.setPen(kHairline);
+        p.drawLine(0, height() - 1, width(), height() - 1);
+        return;
+    }
     QLinearGradient g(0, 0, 0, height());
     g.setColorAt(0.0, kStripTop);
     g.setColorAt(1.0, kStripBottom);

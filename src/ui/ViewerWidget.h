@@ -1,6 +1,8 @@
 #pragma once
 
 #include <QWidget>
+
+#include <functional>
 #include <QSize>
 #include <QString>
 #include <QElapsedTimer>
@@ -96,6 +98,20 @@ public:
     // draws into this widget and takes Qt's cursor, while the D3D11 surface is a
     // child HWND with its own class cursor that Qt cannot reach.
     void setCursorHidden(bool hidden);
+
+    // UI redesign roadmap step 10, route 2 -- PROTOTYPE, off unless
+    // TRACE_STRIP_BACKDROP=1.
+    //
+    // Where a tiny blurred copy of the top of each frame is delivered, so the
+    // native top chrome can use it as a backdrop. It is computed HERE, at the
+    // one place a frame arrives, rather than at any of MainWindow's several
+    // paths that deliver one -- the same reason reclaimDecoder() is one choke
+    // point rather than a convention observed at a dozen call sites.
+    //
+    // A std::function rather than a signal because it must run inline with the
+    // frame: queued, it would deliver the PREVIOUS frame's backdrop, which is
+    // the stale-instrument trap this project has recorded seven times.
+    void setBackdropSink(std::function<void(const QImage&)> sink);
 
     // Rotate/flip. Held here as well as handed to the backend, so a renderer
     // that fails and is replaced by the CPU fallback inherits the orientation
@@ -209,6 +225,8 @@ private:
     trace::render::ViewScale viewScale_{};
     QSize sourcePixels_;
     int chromeTopInsetLogical_ = 0;
+    // Step 10 route 2 prototype; null unless TRACE_STRIP_BACKDROP=1.
+    std::function<void(const QImage&)> backdropSink_;
     double minimumAspect_ = 16.0 / 9.0;
     // The settled floating-transport width (spec phase 6). Named here rather
     // than reached for from OverlayModel because this is a FLOOR expressed in

@@ -1217,6 +1217,21 @@ void MainWindow::setupUi() {
         // OverlayModel::setTopInset: with no media the strip is held up, so that
         // is the one state where the difference is permanently on screen.
         viewer_->setChromeTopInsetLogical(trace::ui::TopChrome::stripHeightLogical());
+        // UI redesign roadmap step 10, route 2 -- PROTOTYPE, inert unless
+        // TRACE_STRIP_BACKDROP=1 (ViewerWidget::stripBackdropEnabled).
+        //
+        // The viewer computes the tiny blurred copy because it is where a frame
+        // arrives; the host hands it to the strip because the viewer has no
+        // business knowing what chrome exists. Same shape as setChromeRevealed:
+        // the model decides WHEN, the host decides WHAT WITH.
+        //
+        // Only wired in overlay mode. In bar mode there is no floating strip --
+        // QMainWindow's own menu bar is in the layout and has the window
+        // background behind it, not video -- so a backdrop would be a blur of
+        // pixels that are not there.
+        viewer_->setBackdropSink([this](const QImage& tiny) {
+            if (topChrome_) topChrome_->setBackdrop(tiny);
+        });
     }
 
     // Dev diagnostics HUD sits below the transport. It carries the perf

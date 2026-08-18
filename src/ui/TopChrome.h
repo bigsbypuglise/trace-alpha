@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QImage>
 #include <QString>
 #include <QWidget>
 
@@ -90,6 +91,23 @@ public:
     // repeating the number.
     static int stripHeightLogical();
 
+    // UI redesign roadmap step 10, route 2 -- PROTOTYPE, off unless
+    // TRACE_STRIP_BACKDROP=1.
+    //
+    // A tiny blurred copy of the video this strip is covering, stretched across
+    // it as the background instead of the solid fallback. It is what lets the
+    // strip look like the design's `backdrop-filter: blur()` while REMAINING a
+    // real native window with a real QMenuBar in it -- the two things route 1
+    // (redraw the strip as composited quads) would have had to trade against
+    // each other.
+    //
+    // A NULL IMAGE IS THE NORMAL CASE AND MEANS "DRAW THE FALLBACK". That is
+    // what ships: no media, an unrecognised pixel layout, or the knob unset all
+    // arrive here as a null image and get the design package's own solid
+    // `#14161A`. The prototype adds a branch, never a dependency.
+    void setBackdrop(const QImage& tiny);
+
+
 protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -107,6 +125,9 @@ private:
     QLabel* titleLabel_ = nullptr;
     QMenuBar* menuBar_ = nullptr;
     QString mediaTitle_;
+    // Step 10 route 2 prototype. Tiny (48x6) and stretched at paint time; see
+    // StripBackdrop for why the grid is the unit of cost rather than the band.
+    QImage backdrop_;
 };
 
 } // namespace trace::ui
