@@ -36,13 +36,17 @@ None of that argues against the steps. It argues for doing steps 2 and 4 **toget
 their own commit**, then re-baselining once rather than chasing moved numbers for the rest of
 the pass.
 
-**DONE, exactly this way, 2026-08-17** — three commits (`5ff6431` message surface, `635656a`
-HUD default, `c63aba4` status bar) and one re-baseline immediately after, taken on 1920x1080 @
+**DONE, exactly this way, 2026-08-17 — AND THEN AGAIN AT STEP 7.** The 2026-08-17 pass was
+three commits (`5ff6431` message surface, `635656a` HUD default, `c63aba4` status bar) and one
+re-baseline immediately after, taken on 1920x1080 @
 59.999Hz and recorded in `CLAUDE.md`'s session block: cadence flat across all seven files,
 `-SnapRelease` `delta 0`/`hitch 0`, reversal `hitch 1`, both lifecycle legs, **25 of 25
 transitions**, and the §4 opening geometry re-measured per shape in the shipping (no-HUD,
-no-status-bar) configuration. That block is the standing reference until the next chrome
-change; physical-panel figures remain valid as records but not as comparisons.
+no-status-bar) configuration. **That block is NO LONGER the standing reference**: step 7 (2026-08-18,
+`10a7fba`) moved the menu bar out of the layout as well, `chrome` went `0x21 → 0x0`, every §4
+opening size moved again and the video rect grew by the menu bar's height. The **step 7 block in
+`CLAUDE.md` is the standing reference**, and it was taken with a control built from `d9d4d98`
+beside it. Physical-panel figures remain valid as records but not as comparisons.
 
 ---
 
@@ -102,7 +106,7 @@ and "the animation is running"**, and that place already exists — `rebuildEmpt
 started or stopped anywhere else is the failure this flag was written about. Reduced motion
 holds static.
 
-### 4. Edge-to-edge media — **STATUS BAR DONE 2026-08-17 (`5ff6431` + `c63aba4`); menu bar deliberately left for step 7**
+### 4. Edge-to-edge media — **DONE.** Status bar 2026-08-17 (`5ff6431` + `c63aba4`); menu bar at step 7, 2026-08-18 (`10a7fba`)
 
 The 35 `statusBar()->showMessage` sites were inventoried first — spec-required confirmations,
 validation refusals and error reporting, none of which could vanish silently — and all now
@@ -116,8 +120,13 @@ harness facts**: at 1920x1080 with the HUD shown, §4 gives 16:9 media a 656px w
 groove is under `scrub.ps1`'s 300px minimum, so `widen.ps1` is needed after `restart.ps1` on
 16:9 media too; and `transitions.ps1` runs with `-Env TRACE_TRANSPORT_BAR=1,TRACE_HUD=0`.
 
-**The menu bar stays until step 7 builds the transient chrome that will hold it** — removing
-it first would leave the app with no menu access in between.
+~~**The menu bar stays until step 7 builds the transient chrome that will hold it**~~ — **DONE
+2026-08-18 at step 7 (`10a7fba`).** The bar moved into a strip that floats over the picture, so
+`windowChromeLogical()` now reports **`chrome 0x0`** on every shape and the client area is
+entirely picture. Every §4 opening size moved with it and three of the four shapes now reach the
+design's area cap instead of being cut off by the work-area bound (1:1 774 → 960, 4:5 619x774 →
+859x1074). The re-baseline is in `CLAUDE.md`'s step 7 block and **that block is the standing
+reference**; the 2026-08-17 one is a record of the pre-step-7 chrome.
 
 ### 5. Bottom transport overlay
 
@@ -147,7 +156,33 @@ carries no start timecode, rather than inventing `00:00:00:00`.
 is the single gate on everything SMPTE and must not grow a second answer. Keep four modes and
 present them clearly; that is a naming and menu question, not a behaviour change.
 
-### 7. Transient top chrome
+### 7. Transient top chrome — **DONE 2026-08-18 (`10a7fba`)**
+
+Built exactly as the flag below asks: the menus are real `QMenu`s on a real `QMenuBar`, owned by
+the window, and only the BAR is transient. `src/ui/TopChrome.*` holds the real menu bar beside
+the brand mark, the wordmark and the filename, and is shown and hidden by the SAME reveal state
+`OverlayModel` keeps for the transport — one idle timer, one hold list, one fade state, through
+`OverlayHooks::setChromeRevealed`. `holdVisible` covers an open popup and the menu bar's own
+keyboard focus by construction, so a menu being navigated cannot fade the chrome out from under
+it. Gated on `barIsDocked_`, so `TRACE_TRANSPORT_BAR=1` keeps the old menu bar and the old
+geometry.
+
+`uiatree.ps1` finds a **`MenuBar` with five `MenuItem`s on real rects** beside the five transport
+proxies, for free, which is the whole point of not drawing it. Alt and every mnemonic still reach
+a hidden bar — Qt declines a `grabShortcut` whose widget is not visible, so an event filter on
+the window HANDLE reveals the chrome before the shortcut map is consulted; measured with
+`menushot.ps1` from a hidden strip, all five open their menu.
+
+**Two things this found that outlive the step.** A **native sibling of the D3D11 surface window
+corrupts that surface's own overlay pass** — the transport's first quad draws and every quad
+after it renders as if its sampled colour were zero, with the atlas texture read back from the
+GPU byte-identical to its source; parenting the strip one level up removes it entirely, so the
+distinction is where in the HWND tree the native window sits, not whether it is native. And the
+strip is **opaque**, because §18.4 measured that every native-surface variant loses translucency;
+that is the design package's own stated fallback (`#14161A`) and the blur it falls back from is
+step 10 below.
+
+**Retained, because it is what the shape was chosen for:**
 
 **Flag — this is the accessibility risk of the whole pass.** The menu bar is currently the
 main accessible surface: real `QMenu`s, exposed to screen readers for free. The composited

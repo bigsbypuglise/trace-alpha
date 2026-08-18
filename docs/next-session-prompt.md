@@ -1,5 +1,64 @@
 # v0.2.0-beta.1 IS SHIPPED. THE OPEN PHASE IS THE OWNER'S UI REDESIGN ROADMAP.
 
+## 2026-08-18, SECOND SESSION: ROADMAP STEP 7 IS DONE — THE TRANSIENT TOP CHROME
+
+One commit (`10a7fba`), and it **finishes step 4**: the menu bar was the last permanent chrome,
+so `windowChromeLogical()` now reports **`chrome 0x0`** and the client area is entirely picture.
+`src/ui/TopChrome.*` is a strip that floats over the top of the video, holds the **real
+`QMenuBar`**, and is shown and hidden by the **same reveal state** `OverlayModel` keeps for the
+transport — one idle timer, one hold list, one fade state, through
+`OverlayHooks::setChromeRevealed`. Gated on **`barIsDocked_`**, so `TRACE_TRANSPORT_BAR=1` keeps
+the old menu bar and the old geometry and the groove-scanning harnesses are unaffected.
+
+**Read the step 7 block in `CLAUDE.md` before quoting any figure. It is the standing reference
+and the 2026-08-17 one is not** — every §4 opening size moved again. Display was 1920x1080 @
+59.999Hz; a control was built from `d9d4d98` and hash-verified (`1DCAFEB7` vs `1F4F39E9`) and run
+beside every leg.
+
+**Five things to carry.**
+
+- **A NATIVE SIBLING OF THE D3D11 SURFACE WINDOW CORRUPTS THAT SURFACE'S OWN OVERLAY PASS.** As
+  a native child of the *viewer*, the strip is visible and hit-testable exactly as plan §18.4
+  predicts — and the transport panel's **first quad draws correctly while every quad after it
+  renders as if its sampled colour were zero**, on the default renderer only. **It is not a data
+  fault**: the atlas texture was read back from the GPU into a staging copy and is byte-identical
+  to its `QImage`, including an opaque white texel at a pixel that drew black, and the uvs, alpha
+  and brighten are all correct per quad. Parented one level up, to the central widget, it is gone
+  completely. **The distinction is where in the HWND tree the native window sits relative to the
+  swapchain's own, not whether it is native.** Cause deliberately unattributed. Found by
+  bisecting against a control build.
+- **A HIDDEN `QMenuBar` LOSES ITS MNEMONICS, BY QT'S OWN MECHANISM.** `grabShortcut` shortcuts
+  are declined for an invisible widget, so `Alt+F` would silently do nothing. An event filter on
+  the **window handle** reveals the chrome first — it has to be there, because key events reach
+  the shortcut map inside `QWidgetWindow::event`, before any widget sees them. Verified from a
+  hidden strip: all five mnemonics open their menu, and a mouse click on the strip does too.
+- **THE STRIP IS OPAQUE AND THAT IS THE DESIGN'S OWN FALLBACK.** §18.4 measured that every
+  native-surface variant loses translucency. The package supplies `#14161A` for exactly this
+  case, and the backdrop blur it falls back from is roadmap step 10. Native on **both** backends
+  deliberately, so no cross-backend comparison contains a real difference; the strip's own rows
+  are identical to the pixel.
+- **THE EMPTY STATE IS NOW CENTRED IN THE STAGE THE CHROME LEAVES** (`OverlayModel::setTopInset`,
+  read by the empty state and nothing else). Optical y offset **−38.0 → −19.0**, against bar
+  mode's −20.0, identical on both backends — which is what the design's own markup does and what
+  the window did while the menu bar was in the layout.
+- **TWO HARNESSES WERE DEFEATED BY CHROME THEY WERE NOT WRITTEN FOR, AND BOTH ARE FIXED.**
+  `overlay.ps1` locates the panel by difference and the strip now reveals with it, so the box
+  spanned both and read 1253x675; it skips the strip's band. `emptystate.ps1`'s mark scan was
+  unbounded at the bottom because "the chrome down there is neutral" — **false in bar mode**: the
+  status bar's `Ready` is subpixel-antialiased at a **median chroma of 115 against the prism
+  mark's own 58**, so no threshold separates them. It has a measured bottom bound now.
+
+**The §4 default window WITH THE HUD FORCED ON is bistable** — the HUD's height depends on the
+window's width, so the two-pass convergence can settle either way (last session `win 728x795`,
+this one `win 1278x1083`, on **both** binaries). The shipping HUD-hidden size is not affected.
+Quote `win` and `display` from the run itself.
+
+**Steps 5, 6 and the rest carry their flags unchanged**; the next one is the owner's to choose.
+**Step 5's prev/next and volume flags are still the two that need an owner answer before any work
+starts**, and step 7's accessibility flag is now closed by the shape that was built.
+
+---
+
 ## 2026-08-18: ROADMAP STEP 3 IS DONE — THE POLISHED EMPTY STATE
 
 One commit (`72aa9ac`). The prism mark and its hint line are a **fourth image in
@@ -45,21 +104,21 @@ to the digit** · **25 of 25 transitions** · `overlay.ps1` cross-backend `08-mi
   `-Bar` is the negative control for the "outside `enabled_`" claim. Its detector was proven
   able to fire before its negative result was believed.
 
-**Steps 5, 6, 7 and the rest carry their flags unchanged**; the next one is the owner's to
-choose. Step 5's prev/next and volume flags and step 7's accessibility flag are the two that
-need an owner answer before any work starts.
+~~**Steps 5, 6, 7 and the rest carry their flags unchanged**~~ — step 7 is DONE, see the top of
+this file. Step 5's prev/next and volume flags still need an owner answer before any work starts.
 
 ---
 
 ## 2026-08-17, SECOND SESSION: ROADMAP STEPS 2 AND 4 ARE DONE, RE-BASELINED
 
 Three commits (`5ff6431` · `635656a` · `c63aba4`) and one re-baseline, exactly the shape the
-roadmap's cross-cutting section asked for. The shipping window is **menu bar + picture**: the
+roadmap's cross-cutting section asked for. The shipping window was **menu bar + picture** after
+this pass and is **picture alone** since step 7: the
 dev HUD ships hidden (`H` toggles, `TRACE_HUD=1` forces it on — `restart.ps1` passes that by
 default so every harness keeps working) and the status bar is never constructed in overlay
 mode. All 35 `statusBar()->showMessage` sites route through **`showTransientMessage`** — bar
 mode keeps the status bar, overlay mode draws a **composited toast** on both renderers that
-survives the transport's fade. The menu bar is untouched until step 7 builds its home.
+survives the transport's fade. The menu bar was untouched here and moved at step 7 (above).
 
 **Read the session block in `CLAUDE.md` before quoting any figure** — the full re-baseline
 (cadence ×7, `-SnapRelease`, reversal drag, both lifecycle legs, 25/25 transitions, §4
@@ -245,7 +304,9 @@ only true under a different shipping decision than the one taken.
 
 **A recorded figure is a record, not a baseline, unless a control was taken beside it.**
 Added 2026-08-18: a 100.0% cadence figure from the previous session read 99.1% today on
-a binary built from its own commit.
+a binary built from its own commit. Seen again the same day, the other way round — the §4
+default window with the HUD forced on is bistable and moved `win 728x795 → 1278x1083` on
+BOTH binaries.
 
 **Standalone throughput is not presentation throughput.**
 
@@ -255,7 +316,9 @@ a binary built from its own commit.
 
 **A harness that cannot fail is not a check — and one that cannot PASS is worse.**
 
-**An instrument can accuse a correct build.** Ten times, two of which *exonerated* one.
+**An instrument can accuse a correct build.** Twelve times, two of which *exonerated* one. The
+eleventh and twelfth are step 7's: `overlay.ps1` reporting a 1253x675 "panel" and
+`emptystate.ps1` a 1154x470 "mark", both because a detector met chrome it was not written for.
 
 **Names lie; read the definition.**
 

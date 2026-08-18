@@ -235,10 +235,13 @@ Three things to carry.
   `renderer` off both HUDs before believing any cross-backend diff.**
 
 **ROADMAP STEPS 2 AND 4 ARE DONE AND THE RE-BASELINE IS TAKEN (2026-08-17, `5ff6431` ·
-`635656a` · `c63aba4`; display 1920x1080 @ 59.999Hz, so `stalls`' bar is 33.3ms and no figure
-is comparable to a physical-panel record).** The shipping window is menu bar + picture: the
-HUD ships hidden and the status bar is never constructed in overlay mode. Three commits,
-separately revertable, non-adjacent edits.
+`635656a` · `c63aba4`) — BUT THAT RE-BASELINE IS SUPERSEDED BY STEP 7's, BELOW.** Step 7
+(2026-08-18, `10a7fba`) took the menu bar out of the layout too, so `chrome` went `0x21 → 0x0`,
+every §4 opening size moved again and the video rect grew; the figures here are a record of the
+pre-step-7 chrome, not a comparison baseline. (Original heading continues: display 1920x1080 @ 59.999Hz, so `stalls`' bar is 33.3ms and no figure
+is comparable to a physical-panel record.)** The shipping window was menu bar + picture after
+this pass and is **picture alone** after step 7: the HUD ships hidden and the status bar is never
+constructed in overlay mode. Three commits, separately revertable, non-adjacent edits.
 
 - **Every transient message goes through `MainWindow::showTransientMessage(text, timeoutMs)`
   — the 35 `statusBar()->showMessage` sites were an inventory first, not a deletion.** They
@@ -429,6 +432,129 @@ of magnitude larger than the art it animates. **An owner decision, not a tidy-up
 holds if it is ever built: **one place must decide both "the empty state is showing" and "the
 animation is running"**, and that place already exists — `rebuildEmpty`'s `mediaPresent_`
 branch, where the image is dropped and its revision bumped.
+
+**ROADMAP STEP 7 IS DONE (2026-08-18, `10a7fba`): THE TRANSIENT TOP CHROME, AND IT FINISHES
+STEP 4 — `chrome 0x0`.** The menu bar was the last permanent chrome: with the status bar gone
+and the HUD hidden, `windowChromeLogical()` read `0x21` and that 21 was all of it. It now lives
+in `src/ui/TopChrome.*`, a strip that **floats over the top of the picture** and is shown and
+hidden by the **same reveal state** `OverlayModel` already keeps for the floating transport.
+**§4 now reports `chrome 0x0` on every shape** and the picture reaches all four edges of the
+client area.
+
+**TOP AND BOTTOM ARE ONE SYSTEM AND THERE IS NO SECOND TIMER.** `OverlayHooks::
+setChromeRevealed` is shaped exactly like `setCursorHidden` — the model decides **when**, the
+host decides **whether** — and `OverlayModel::syncChrome()` reads one expression,
+`targetOpacity_ > 0 || opacity_ > 0`, so the strip arrives at the *start* of the fade-in and
+leaves when the fade-out has *finished* rather than blinking out halfway down it. `visible()`
+alone could not do it: `opacity_` is still 0 when `reveal()` sets the target, so a strip driven
+off that would arrive 16ms late on every reveal. The host's one extra condition is that **with
+no media open the strip is held up**, which is what the design package's own empty-state mockup
+shows and what stops a fresh launch fading its only menu access away after two seconds.
+
+**THE MENUS STAY REAL `QMenu`s ON A REAL `QMenuBar`, AND THAT IS THE WHOLE ACCESSIBILITY
+POSITION.** The composited overlay has no widget tree, which is why phase 14 had to hand-build
+a UIA proxy for five transport controls after phase 6. `uiatree.ps1` now finds a **`MenuBar`
+with five `MenuItem`s on real rects** beside the five transport proxies — File, Edit, View,
+Window, Help — for free, because it is a `QMenuBar`. Gated on **`barIsDocked_`**, the same
+single predicate the status bar and the toast already use, so `TRACE_TRANSPORT_BAR=1` keeps
+`QMainWindow`'s own menu bar in the layout and the old geometry with it.
+
+Four things it cost, each worth carrying.
+
+- **A NATIVE SIBLING OF THE D3D11 SURFACE WINDOW CORRUPTS THAT SURFACE'S OWN OVERLAY PASS, AND
+  THIS IS A THIRD ROW FOR §18.4's TABLE.** As a native child of the **viewer** the strip is
+  visible and hit-testable exactly as §18.4 predicts — and the transport panel's **first quad
+  draws correctly while every quad after it renders as if its sampled colour were zero**: black
+  glyph cells, a black timeline track, on the default renderer only, with
+  `TRACE_RENDERER=cpu` perfect. **It is not a data fault and that was established rather than
+  assumed**: the atlas texture was read back from the GPU into a STAGING copy and is
+  byte-identical to the `QImage` it came from, including an opaque white texel at a pixel that
+  drew black, and the uv rects, `alpha` and `brighten` were printed per quad and are all
+  correct. **Parented one level up, to the central widget, the fault is gone completely** and
+  the strip still covers the top of the picture. So the operative distinction is not "native or
+  not" but **where in the HWND tree the native window sits relative to the swapchain's own**.
+  Found by bisecting against a control build, not by reading. **The cause is left unattributed
+  rather than guessed at.**
+- **ALT MUST STILL REACH A MENU BAR THAT IS NOT ON SCREEN, and Qt's own mechanism is what makes
+  that a real risk.** A `QMenuBar` gets its `Alt+letter` mnemonics through
+  `QWidget::grabShortcut`, and `QShortcutMap` declines a shortcut whose widget is not
+  **visible** — so with the strip hidden `Alt+F` would silently do nothing, which is a
+  regression for exactly the users phase 14 was built for. An event filter reveals the chrome
+  first, and it is on the **window handle** rather than on `MainWindow`: key events reach the
+  shortcut map inside `QWidgetWindow::event`, and an object's event filters run before that,
+  where `keyPressEvent` runs long after. Nothing is consumed. Measured from a hidden strip with
+  `menushot.ps1`: **all five mnemonics reveal the chrome and open their menu**, and a mouse
+  click on the strip resolves through `WindowFromPoint` to a Qt window and opens View.
+- **THE STRIP IS OPAQUE, AND THAT IS THE DESIGN PACKAGE'S OWN FALLBACK RATHER THAN A
+  SHORTFALL.** §18.4 measured that every native-surface variant loses translucency, because
+  neither design puts the video pixels anywhere Qt can blend against. The package supplies this
+  case's answer — a solid `#14161A` for when Windows transparency effects are off — and the
+  backdrop blur it falls back *from* is roadmap step 10, flagged there as the item with real
+  presentation risk against a flip-model swapchain. It is native on **both** backends
+  deliberately: a translucent strip on `cpu` and an opaque one on the d3d11 default would be a
+  real difference inside every cross-backend pixel comparison. Cross-backend, the strip's own
+  rows are **identical to the pixel**; the first differing pixel in the whole window is at
+  y=70, in the video band.
+- **THE EMPTY STATE IS CENTRED IN THE STAGE THE CHROME LEAVES.** The design's own empty-state
+  markup puts its stage *below* the 38px strip, and so did the window while the menu bar was in
+  the layout; a strip that floats instead would have left the mark half a strip high in the one
+  state the strip is permanently shown in. `OverlayModel::setTopInset` is read by the empty
+  state and **by nothing else** — the transport is bottom-anchored, and with media open there
+  is no empty state — so it can never move a picture. Measured: the mark's optical y offset
+  went **−38.0 → −19.0**, against bar mode's own −20.0, identical on both backends.
+
+**The brand mark is `trace-play-mark.svg` from the delivered package, byte for byte, at 15 and
+30** — the @1x/@2x pair at its own drawn size, the same convention the controls follow at 24/48
+and the empty mark at 104/208. It is a **different asset from `empty-mark.svg` beside it** and
+rendering the wrong one looks almost right. `verify_trace_assets.py` demanded both PNGs **with
+no edit to itself**; the derived set went **27 → 29**.
+
+**TWO HARNESSES NEEDED CHANGING AND BOTH WERE DEFEATED THE SAME WAY — a detector meeting chrome
+it was not written for.** `overlay.ps1` locates the panel by *difference*, and the strip now
+reveals with the panel, so the bounding box spanned both and read **1253x675** instead of
+459x83; it skips the strip's band now. And `emptystate.ps1`'s mark scan was unbounded at the
+bottom on the stated grounds that the chrome down there "is entirely NEUTRAL, so it cannot
+enter the chromatic mark scan" — **false in bar mode, and measurably so**: the status bar's
+`Ready` is subpixel-antialiased at a **median hi−lo of 115 against the prism mark's own 58**,
+so it is *more* chromatic than the thing being looked for and no threshold can separate them.
+Unbounded it reported a **1154x470** mark against the design's 59x68 on a build whose empty
+state is visibly correct — the same trap that script already records for the menu bar at the
+top, arriving from the other end. It has a measured bottom bound now and bar mode reads the
+recorded **641-row** stage again.
+
+**THE RE-BASELINE, AND IT IS THE STANDING REFERENCE** (display **1920x1080 @ 59.999Hz**, so no
+figure here is comparable to a physical-panel record; a control was built from `d9d4d98` and
+hash-verified, `1DCAFEB7` against `1F4F39E9`, and run beside every leg below).
+
+- **§4 opening geometry, shipping configuration (HUD hidden), and every shape moved because
+  `chrome` went `0x21 → 0x0`:** 16:9 4K and 1080p **viewer 1280x720, client 1280x720, `bound
+  cap`, one pass** · 9:16 **609x1083, `bound work`** (0.5623, two passes) · 1:1 **960x960,
+  `bound cap`** · 4:5 **859x1074, `bound cap`** (0.7998). **Three of the four shapes now reach
+  the design's area cap instead of being cut off by the work-area bound** — 1:1 goes 774 → 960
+  and 4:5 619x774 → 859x1074 — which is what edge-to-edge media buys.
+- **Cadence** (`restart.ps1` → `TRACE_HUD=1`, `TRACE_NO_AUDIO=1`, scratch INI, ×2 each; 16:9
+  geometry `win 1278x1083` / `display 1278x719 filtered x2`): 4K H.264 **100.0/100.0%** (120f,
+  `drop 0`, `rephase 0`, `handler>budget 0 of 119`, all 119 gaps ~1×) · 4444 **99.8%** (261f) ·
+  1080p **100.0%** (240f) · 4K 60fps **100.0%** (162f at 60.00) · 422 HQ **99.9%** (168f) · 1×1
+  **100.0%** (271f, `display 719x719`) · 4×5 **100.0%** (271f, `display 575x719`). **The control
+  reads 100.0% with the same buckets** at `display 1240x698` / `win 1240x1083` — the 38px the
+  menu bar used to take, now in the picture.
+- **Scrub**, bar mode widened to 1280, `win 1264x1083` / `display 1066x600 filtered x2` on both
+  binaries: 4444 `-SnapRelease` **`target 261 shown 261 delta 0`** full-res planar,
+  `release 21.2ms` against the control's **21.4**, `hitch 0`, `land 0`, `ui over-16ms 0 of 687`.
+  4K H.264 reversals `rev-hit 97.3%`, `seeks 6`, **`hitch 1`**, `delta 0`, `cache 152/152`.
+- **Lifecycle 87.2% moving / 0% control**, against the control's **88.0% / 0%**. **25 of 25
+  transitions.** `emptystate.ps1` `launch` / `transport` / `close` / `swap` all PASS, plus the
+  `-Bar` control.
+
+**TWO HARNESS FACTS THIS GEOMETRY CREATES.** The §4 default window at this display **with the
+HUD forced on is bistable**, because the HUD's height is a function of the window's *width* and
+the two-pass convergence can settle either way: last session's cadence ran at `win 728x795` and
+today's at `win 1278x1083` on both binaries. **The shipping (HUD-hidden) size is not affected**
+— it converges in one pass on three of four shapes — so quote `win` and `display` from the run
+itself and never compare a HUD-on geometry across sessions. And `overlay.ps1`'s panel location
+now skips the top 90 rows; a run that reports a region much larger than 459x83 is reading the
+strip and the panel together.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
@@ -3183,6 +3309,14 @@ the run carries its own proof; it steps +1/-1 afterwards because `refreshHud()` 
 so the same run reads 51 or 3 (plan §26.1). `hitch` is a fixed 33ms bar and is
 the only one comparable across sessions. Cache depth is also a function of
 window size and dominates (§22.8).
+
+**And quote `display` too, because roadmap step 7 made the window ALL picture.** The chrome
+term is `0x0` since `10a7fba`, so the video rect is the client area and every scrub figure
+moves with it. The §4 default window **with the HUD forced on is bistable** — the HUD's height
+depends on the window's *width*, so the two-pass convergence can settle either way, and it was
+observed at `win 728x795` one session and `win 1278x1083` the next **on binaries built from the
+same commit**. The shipping HUD-hidden size is not affected. Never compare a HUD-on geometry
+across sessions.
 
 **Measurement note:** the HUD is unreadable in a normal screenshot on the
 5120x1440 panel -- it downsamples too far. Capture the Trace window at native
