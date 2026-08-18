@@ -58,3 +58,24 @@ CMakeLists.txt text eol=lf
 *.mov  binary
 *.mp4  binary
 *.exr  binary
+
+# GitHub Linguist. `assets/source/` holds delivered design packages exactly as
+# they arrived and is never edited -- assets/README.md states that rule, and
+# `interface/` and `branding/` hold the working copies derived from it. Those
+# packages are not Trace's source code, so they must not appear in the
+# repository's language statistics.
+#
+# The 260817 delivery includes a 1.58MB browser mockup, Trace-App-Mockups.html,
+# which is larger than all of src/ and app/ combined -- it alone put the repo at
+# 47.9% HTML against 38.8% C++, which describes the delivery rather than the
+# application. Trace links no web technology: no QWebEngine, no QWebView, no
+# HTML embedded through app/resources.qrc. The two references to that file in
+# src/ are comments citing the mockup's section IDs as provenance for the
+# empty-state mark and the top strip.
+#
+# The whole directory is marked rather than the one file, so the next delivered
+# package is covered without an edit here -- the same reason
+# verify_trace_assets.py derives its expected set from the .qrc instead of
+# listing it, and the same lesson the trace-alpha rename learned when an
+# enumeration missed four references in the file it named.
+assets/source/** linguist-vendored
