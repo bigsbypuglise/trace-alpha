@@ -1,4 +1,4 @@
-## Trace v0.3.0-beta.1 — DRAFT, NOT CUT
+## Trace v0.3.0-beta.1 — DRAFT, NOT CUT (version agreed 2026-08-18)
 
 > **This is a proposal, not a release.** Nothing is tagged. The version number, the notes and
 > whether to cut at all are the owner's call. See the checklist at the bottom for what has to
@@ -86,10 +86,12 @@ escape hatch and is still the first thing to try if the picture ever looks wrong
 
 ### Before this can be cut
 
-1. **Owner decides the version.** `v0.3.0-beta.1` is proposed over `v0.2.0-beta.2` because the
-   shipping window is unrecognisable from the last release. A minor bump needs one line changed
-   in `CMakeLists.txt`; the three "beta" literals in `MainWindow.cpp` stay as they are either way.
-2. **Push and confirm CI green.** Three commits are unpushed. The tag build's five verification
+1. ~~**Owner decides the version.**~~ **DONE — `v0.3.0-beta.1`** (owner, 2026-08-18). The minor
+   moved rather than the patch because the shipping window is unrecognisable from the last
+   release. `CMakeLists.txt` now says `0.3.0`; the stage did **not** move, so all three "beta"
+   literals in `MainWindow.cpp` are correct as they stand. Verified against the built binary
+   rather than the source: `0.3.0` present, `0.2.0` absent, and all three literals present.
+2. **Push and confirm CI green.** The tag build's five verification
    steps must be read individually, not taken off the summary — in particular `fellback=0`, which
    is the only line separating a real GPU pass from a WARP one.
 3. **One Windows setting flip** to close the last measurement gap: turn off Settings ▸
