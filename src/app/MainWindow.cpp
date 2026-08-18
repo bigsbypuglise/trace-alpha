@@ -1121,7 +1121,18 @@ MainWindow::MainWindow() {
     // until they happened to move the pointer.
     if (viewer_) viewer_->revealOverlay();
 
-    statusBar()->showMessage("Ready");
+    // UI roadmap step 4: in overlay mode the window has NO status bar, and
+    // this gate is what removes it. QMainWindow creates the bar lazily on the
+    // first statusBar() call; every message site routes through
+    // showTransientMessage, whose bar branch is only reached when
+    // barIsDocked_, so after this line nothing in overlay mode ever asks for
+    // it and the strip is simply never constructed. Bar mode keeps it -- old
+    // chrome, old geometry, the same gate that already decides which
+    // transport is on screen -- so the harness escape hatch stays comparable
+    // to the record. Removing the strip changes the chrome term in section
+    // 4's opening-size measurement, so every media-shaped opening size moves
+    // with this commit; the re-baseline is taken on top of it.
+    if (barIsDocked_) statusBar()->showMessage("Ready");
     refreshHud("Idle");
 }
 
