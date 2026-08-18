@@ -113,6 +113,16 @@ public:
     // the stale-instrument trap this project has recorded seven times.
     void setBackdropSink(std::function<void(const QImage&)> sink);
 
+    // Recomputes and publishes the backdrop for the frame currently held, or
+    // publishes null if there is none or the strip is not revealed.
+    //
+    // Called on every frame, and ALSO by MainWindow::syncTopChrome() on every
+    // reveal, hide and media change -- because those are the moments the answer
+    // changes without a frame arriving, and on a PAUSED file no frame ever
+    // arrives. Gating on the reveal state without this would leave a revealed
+    // strip blurring whatever was on screen when it last hid.
+    void refreshBackdrop();
+
     // Rotate/flip. Held here as well as handed to the backend, so a renderer
     // that fails and is replaced by the CPU fallback inherits the orientation
     // rather than quietly resetting it -- the same reason the overlay model

@@ -112,6 +112,15 @@ public:
     // transport is bottom-anchored and unaffected, and with media open there is
     // no empty state at all, so this can never move a picture.
     void setTopInset(double devicePixels);
+
+    // The single reveal state both panels are driven from -- true from the
+    // moment a fade-in is asked for until a fade-out has finished. It is what
+    // `OverlayHooks::setChromeRevealed` reports; this exposes it for readers
+    // that need to ASK rather than be told, so there is still exactly one
+    // answer to "is the chrome on screen" and no second flag to fall out of
+    // step with it. See syncChrome() for why it is not `visible()`.
+    bool chromeRevealed() const { return chromeRevealed_; }
+
     void setDevicePixelRatio(double dpr);
     double devicePixelRatio() const { return dpr_; }
 

@@ -5795,6 +5795,14 @@ void MainWindow::syncTopChrome() {
         currentMedia_ ? QFileInfo(QString::fromStdString(currentMedia_->path)).fileName()
                       : QString());
     topChrome_->setRevealed(topChromeRevealed_ || !currentMedia_.has_value());
+    // UI roadmap step 10 route 2 -- PROTOTYPE, inert unless TRACE_STRIP_BACKDROP=1.
+    //
+    // The backdrop is sampled per frame and gated on the reveal state, so this is
+    // what covers the moments the answer changes with NO frame arriving: a reveal
+    // or a hide, and media opening or closing. On a paused file that is every
+    // moment there is. One sample per reveal against one per frame is the whole
+    // saving, and this is what keeps it correct.
+    if (viewer_) viewer_->refreshBackdrop();
 }
 
 void MainWindow::showTransientMessage(const QString& text, int timeoutMs) {

@@ -467,23 +467,54 @@ void ViewerWidget::setBackdropSink(std::function<void(const QImage&)> sink) {
     backdropSink_ = std::move(sink);
 }
 
+// UI redesign roadmap step 10, route 2 -- PROTOTYPE.
+//
+// GATED ON THE REVEAL STATE, WHICH IS WHAT MAKES THE EFFECT COST NOTHING FOR THE
+// NINE SECONDS OF EVERY ELEVEN THAT THE STRIP IS NOT ON SCREEN. The transport
+// and the chrome auto-hide after 2s, so on an ordinary playback run the strip is
+// hidden for nearly all of it; sampling a backdrop nobody can see is work with no
+// output. The gate asks `overlayModel_` -- the SAME state that drives
+// `OverlayHooks::setChromeRevealed` -- rather than carrying a second flag, so the
+// backdrop cannot disagree with the strip about whether the strip is up.
+//
+// NULL IS PUBLISHED, NOT MERELY WITHHELD, and that is the half that is easy to
+// leave out. `TopChrome::setBackdrop` keeps the last image it was given, so a
+// gate that simply stopped calling would leave the strip drawing a blur of
+// whatever was on screen when it last hid -- and on Close Media, a blur of the
+// OUTGOING FILE behind the empty state. That is the same defect roadmap step 3
+// recorded for `textureSrv_` outliving `clearFrame()`. Publishing null costs one
+// std::function call: `setBackdrop`'s own null-to-null identity check returns
+// immediately on every frame after the first.
+//
+// It is also what keeps the strip HONEST WHILE PAUSED. Nothing calls this on a
+// paused file, so `MainWindow::syncTopChrome()` calls it on every reveal, every
+// hide and every media change -- the four moments the answer can change without
+// a frame arriving. One sample per reveal, not one per frame.
+void ViewerWidget::refreshBackdrop() {
+    if (!backdropSink_ || !stripBackdropEnabled()) return;
+    if (frame_.isNull() || !overlayModel_.chromeRevealed()) {
+        backdropSink_(QImage());
+        return;
+    }
+    // The cover fraction is the strip's height over the height the frame is
+    // DRAWN at -- not over the widget -- so a letterboxed picture samples the
+    // part of the source the strip actually sits on.
+    const int drawnH = perfStats_.lastDrawSize.height();
+    const double dpr = devicePixelRatioF();
+    const double stripDevice = chromeTopInsetLogical_ > 0
+        ? chromeTopInsetLogical_ * dpr
+        : trace::ui::TopChrome::stripHeightLogical() * dpr;
+    const double cover = drawnH > 0 ? (stripDevice / drawnH) : 0.0;
+    backdropSink_(trace::ui::StripBackdrop::sample(frame_, cover));
+}
+
 void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
     frame_ = frame;
     if (renderer_) renderer_->setFrame(frame);
     // Step 10 route 2. Computed from the frame the viewer was just handed, so
     // the backdrop can never be a frame behind the picture it is meant to be a
-    // blur of. The cover fraction is the strip's height over the height the
-    // frame is DRAWN at -- not over the widget -- so a letterboxed picture
-    // samples the part of the source the strip actually sits on.
-    if (backdropSink_ && stripBackdropEnabled()) {
-        const int drawnH = perfStats_.lastDrawSize.height();
-        const double dpr = devicePixelRatioF();
-        const double stripDevice = chromeTopInsetLogical_ > 0
-            ? chromeTopInsetLogical_ * dpr
-            : trace::ui::TopChrome::stripHeightLogical() * dpr;
-        const double cover = drawnH > 0 ? (stripDevice / drawnH) : 0.0;
-        backdropSink_(trace::ui::StripBackdrop::sample(frame, cover));
-    }
+    // blur of.
+    refreshBackdrop();
     // Timestamp the repaint request so the queued update()->paintEvent latency
     // can be separated from paint cost itself.
     updateRequestedNs_ = clock_.nsecsElapsed();
@@ -494,6 +525,9 @@ void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
 void ViewerWidget::clearImage() {
     frame_ = trace::core::VideoFrame{};
     if (renderer_) renderer_->clearFrame();
+    // Step 10 route 2: there is no picture now, so the strip must go back to the
+    // solid fallback rather than keep blurring the file that just closed.
+    refreshBackdrop();
     update();
 }
 
