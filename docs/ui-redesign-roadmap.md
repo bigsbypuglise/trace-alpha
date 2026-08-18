@@ -385,7 +385,7 @@ cursor hides after inactivity. Note the cursor is hidden by *two different mecha
 two backends (`Qt::BlankCursor` on CPU, `SetCursor(nullptr)` answering `WM_SETCURSOR` on D3D11),
 so `GetCursorInfo` sees only one of them — verify by the handle, not the flag.
 
-### 10. Windows 11 visual conversion - **THE BLUR PREMISE IS ANSWERED (2026-08-18). MICA/ACRYLIC CANNOT DO IT; ROUTE 2 CAN, AND IS BUILT DEFAULT-OFF**
+### 10. Windows 11 visual conversion - **THE TYPOGRAPHY HALF IS DONE (2026-08-18, `d91f026`). THE BLUR IS ANSWERED AND DEFAULT-OFF: MICA/ACRYLIC CANNOT DO IT, ROUTE 2 CAN**
 
 **DWM BACKDROP EFFECTS REACH THE TITLE BAR AND NOTHING ELSE.** Applied to Trace's live main
 window: `DwmExtendFrameIntoClientArea(-1)`, `DWMWA_SYSTEMBACKDROP_TYPE` at all four values, the
@@ -420,6 +420,60 @@ runs, so the flat result is not a check that could only report one thing. Both b
 cross-backend strip band 1847 px of 72576 at max channel delta 7, under the video band's own
 backend class because the scrim attenuates it.
 
+**THE PROTOTYPE IS GATED ON THE REVEAL STATE NOW (2026-08-18, `2a3c634`), so the version that
+would ship is strictly cheaper than the one measured above.** It sampled on every presented
+frame whether or not the strip was visible; it asks `OverlayModel::chromeRevealed()` -- the same
+state that drives `OverlayHooks::setChromeRevealed` -- so an ordinary playback run, where the
+chrome is hidden for nine seconds in eleven, samples nothing for those nine.
+
+**THE GATE HAS ONE FAILURE MODE AND IT TOOK FOUR ATTEMPTS TO REPRODUCE.** A gate that stops
+sampling must say so, because `TopChrome` keeps the last image it was given; publishing null when
+hidden costs one `std::function` call, since `setBackdrop`'s null-to-null check returns
+immediately after the first. But null is only published when the sampler **runs**, and it only
+runs when a frame arrives -- so a reveal with no frame behind it draws the solid fallback on a
+build meant to blur. `MainWindow::syncTopChrome()` refreshes it too: one sample per reveal, hide
+and media change against one per frame.
+
+**Three earlier candidates for that failure all PASSED on a build with the fix removed**, and
+each corrected something. Stepping frames "while hidden" tested nothing, because `keyPressEvent`
+calls `revealOverlay()` -- the arrow keys changing the frame were themselves holding the chrome
+up. Pausing reveals the chrome *and* re-presents a frame. **Close Media already published null**,
+because `closeMedia` calls `setFrame(VideoFrame{})` rather than `clearImage()`, so the
+outgoing-file blur that was expected to need fixing never existed. What is left is the only
+reveal that delivers no frame: **playback running off the end, then a reveal by pointer movement
+alone** -- control `hsd 0.000` (the fallback) against fixed `hsd 3.999` (the blur).
+
+**THE COST MEASUREMENT IS WIDENED TO THE TWO FILES THAT BOUND THE SET (`586f2b9`)**, plus 4444
+re-taken on the same display so all three are one record. Physical panel 5120x1440 @ 239.999Hz,
+`TRACE_NO_AUDIO`, scratch INI, x2 per configuration, same binary:
+
+| file | backdrop off | backdrop on |
+|---|---|---|
+| 4K 60fps (16.67ms budget, the tightest) | 100.0 / 100.0% | 100.0 / 100.0% |
+| 4K ProRes 4444 | 99.8 / 99.8% | 99.8 / 99.8% |
+| 8K ProRes 4444 XQ (`TRACE_RT_DROP=0`) | 50.8 / 53.5% | 52.2 / 53.1% |
+
+`drop 0`, `rephase 0` and `handler>budget 0` on both 4K files. **On the 8K the backdrop rows are
+nominally HIGHER, and the spread WITHIN `bd=0` alone is 2.7 points against 0.5 between the
+configuration means** -- the first run pays a cold decoder at `dec 49.42` against ~45 -- so the
+honest reading is "inside run-to-run variance", not "faster". `TRACE_RT_DROP=0` on the 8K because
+the drop policy adapts to load: with it on, added cost would show as a changed drop count rather
+than changed throughput, which compares two policies rather than two amounts of work.
+
+**Two things about that method.** The chrome is held up by **parking the pointer over the
+picture**, not by jiggling: the auto-hide holds while `hover_` is a region, so a stationary
+pointer inside the client keeps the chrome up indefinitely -- measured still up at 6s at the
+client centre and in the corner, against ~2.6s to hide with the pointer outside. That holds the
+strip up for the whole run and generates **no input during it**, which removes the jiggle from
+both sides rather than balancing it. And **every run proves its own premise from the same capture
+the figures come from**: `strip hsd` is horizontal variation across a strip row, exactly 0 for
+the design's purely vertical fallback gradient, and it reads 0 on all six `bd=0` rows and
+3.995 / 2.946 / 17.15 / 16.151 on the `bd=1` rows. Harnesses: `scripts/measure/stripbackdrop.ps1`
+and `scripts/measure/backdropcost.ps1`.
+
+**Note the table measures the WORST case deliberately** -- holding the chrome revealed throughout
+defeats the gate on purpose, so it is an upper bound rather than a typical cost.
+
 **Whether to SHIP it is still an owner decision.** It is default-off and separately revertable
 (the revert was applied and the reverted tree built, rather than assumed); the solid `#14161A`
 remains the fallback and is what ships today. **DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`)
@@ -438,7 +492,73 @@ against a 4K ProRes 4444 playback run before committing to it in the visual lang
 the solid fallback (`#14161A` ~96%) ready — it is also needed when transparency effects are off
 in Windows Settings.
 
-Fonts and spacing carry no playback risk. Segoe UI Variable is a safe default on Windows 11.
+**THE TYPOGRAPHY HALF IS DONE (`d91f026`): `src/app/Theme.*`, one home for the application
+font, the palette and the popup-menu surface.** `main.cpp` had a hand-rolled grey palette;
+`TopChrome` keeps its own screen-1 strip colours because those describe one surface, and
+everything else inherits from `Theme`.
+
+**QT AND GDI DISAGREE ABOUT WHETHER `Segoe UI Variable` EXISTS, AND THE FIRST BUILD SHIPPED THE
+WRONG ANSWER.** GDI lists only the three static optical cuts -- `Display`, `Text`, `Small` --
+and nothing under the plain name, so the first version concluded the design named a family
+Windows does not have and mapped it onto `Segoe UI Variable Text`. `QFontDatabase::hasFamily()`
+declined that and the application silently ran on **Segoe UI**. **Qt 6 enumerates through
+DirectWrite and exposes the VARIABLE font under its typographic family name**: it sees exactly
+one match and it is `Segoe UI Variable`, the design's own CSS name. Both are in the chain now,
+the design's name first, so a Qt build that enumerates the GDI way still lands on the right
+optical size rather than on plain Segoe UI.
+
+**Which cut that is was settled by the package's own embedded TTF, not by guidance.** The
+mockup bundles a **1.8MB font** -- most of why that one file is larger than all of `src/` -- and
+its tables read axes `wght` 300..700 and `opsz` 5..36 with a **default optical size of 10.5**,
+which is squarely `Text` and agrees with the design's 12px UI type.
+
+**THE DEV HUD REPORTS THE FAMILY THAT ACTUALLY RESOLVED (`font ...`), and it earned itself on
+its first run** by reading `font Segoe UI` on the build above. A fallback to Segoe UI looks very
+nearly right and no screenshot separates the two -- the same silent-degradation class `renderer`
+and `planar` are reported for. **No point size is set**: pinning the design's 12px would look
+right at 100% and wrong at every other scale factor, and would override the user's Windows
+text-size setting. That is `TopChrome`'s own reasoning for the menu bar, applied application-wide.
+
+**THE ACCENT GOES WHERE WINDOWS PUTS ONE AND NOWHERE ELSE.** `#5AC8E8` becomes `Highlight` and
+`Link` -- text selection -- with `HighlightedText` **dark**, because the accent has a high
+relative luminance and white on it is unreadable in the inspector's source-path field. It is
+deliberately **not** the menu highlight: the design uses the accent on the played track and the
+thumb ring only, recorded twice above as an owner decision, and a popup lighting up cyan under a
+menu bar lighting up white would be two languages on one gesture. Popups reuse step 7's own
+`rgba(255,255,255,0.10)`.
+
+**POPUP MENUS ARE THE SURFACE STEP 7 EXPLICITLY LEFT HERE** -- its comment says a bare `QMenu`
+rule there would restyle every popup the bar owns. The values are the design's rather than new
+ones: `#1A1B20` is the strip's lighter stop, the 1px `rgba(255,255,255,0.09)` border and 8px
+radius are screen-1's window border and radius, and the 3px/8px item padding is the menu bar's.
+**This is the one surface the package does not show** -- all three of its screens have no menu
+open -- so it is **derived**, the same position the three authored transport glyphs are in.
+`scripts/measure/themeshot.ps1` puts it on screen for that reason; the corner was checked at 10x
+and is cleanly rounded and anti-aliased, with no square artifact.
+
+**Regression flat** (physical panel 5120x1440 @ 239.999Hz, so not comparable to the step 7
+block; the 4444 control is the same session's own `bd=0` rows on the immediately preceding
+binary): 4K H.264 cadence x2 **100.0/100.0%**, 120f, `drop 0`, `rephase 0`, `0 of 119` - 4444
+cadence x2 **99.8/99.8%**, 261f, `0 of 260`, **identical to the control** - `scrub -SnapRelease`
+**`target 261 shown 261 delta 0`** full-res planar, `hitch 0`, `land 0`, release 21.8ms, `ui
+over-16ms 0 of 642` - **25 of 25 transitions** - `emptystate` all four modes PASS on d3d11 plus
+the `-Bar` control at the recorded **641-row** stage, and **cpu identical to the pixel** -
+`uiatree` MenuBar + five MenuItems on real rects and the ten controls.
+
+**ONE FIGURE MOVED AND IT IS THE FONT BEING IN FORCE: the empty state's hint reads `169x14`
+where the record says `157x13`, and the gap 44 where it says 45.** The hint is *text*. The mark
+stays `59x68` with its `+10.5` optical offset and `+0.5` centring, because the mark is a bitmap.
+**A build where the font had silently fallen back would still read `157x13`** -- which is what
+makes this a check rather than a drift.
+
+**The Fluent icon direction needs no work and must not be given any.** The delivered 260817
+glyph set already is it -- the mockup's own `w-play` / `w-rewind` / `w-volume` / `w-loop` /
+`w-full` / `w-share` paths are the art that shipped -- and swapping to `Segoe Fluent Icons`
+(which is installed) would put a font glyph where a delivered asset exists, which is "artwork
+follows behaviour" pointing the wrong way.
+
+Original flag, retained: fonts and spacing carry no playback risk. Segoe UI Variable is a safe
+default on Windows 11.
 
 ### 11. Validate across both backends
 

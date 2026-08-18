@@ -1,5 +1,62 @@
 # v0.2.0-beta.1 IS SHIPPED. THE OPEN PHASE IS THE OWNER'S UI REDESIGN ROADMAP.
 
+## 2026-08-18, FIFTH SESSION: THE REPO IS PUSHED AND GREEN, THE BACKDROP IS GATED AND WIDENED, AND STEP 10's TYPOGRAPHY HALF IS DONE
+
+Four commits after the eight that were unpushed: `02d9677` the vendored design packages,
+`2a3c634` the backdrop reveal gate, `586f2b9` the widened cost harness, `d91f026` the typography.
+**Display was the physical panel, 5120x1440 @ 239.999Hz**, so nothing here compares to the step 7
+block's 1920x1080 figures.
+
+**THE REPOSITORY IS PUSHED AND CI IS GREEN** (run 149 on `02d9677`). `assets/source/**` is
+`linguist-vendored`, and GitHub recomputed: **HTML went from 47.9% to absent**, leaving C++
+74.16% and PowerShell 23.64% -- the measurement harness, honestly counted. The four claims were
+verified before committing, not taken from the handoff: no HTML outside `assets/source/`, no
+QWebEngine or QWebView, nothing HTML in the `.qrc`, and the only two references in `src/` are
+comments citing the mockup's section IDs.
+
+**THE ONLY OPEN OWNER DECISION IS STILL WHETHER TO SHIP `TRACE_STRIP_BACKDROP`.** It is
+default-off, separately revertable, now gated, and measured flat on the three files that bound
+the set. The rest of step 10 is done.
+
+Five things to carry.
+
+- **THE BACKDROP IS GATED ON THE REVEAL STATE, so what would ship is cheaper than what was
+  measured.** It asks `OverlayModel::chromeRevealed()` rather than carrying a second flag.
+- **FINDING THE CASE THE GATE BREAKS TOOK FOUR ATTEMPTS AND THREE OF THEM CORRECTED SOMETHING.**
+  Stepping frames "while hidden" tested nothing, because `keyPressEvent` calls `revealOverlay()`
+  and the arrow keys were holding the chrome up. Pausing reveals the chrome *and* re-presents a
+  frame. **Close Media already published null** -- `closeMedia` calls `setFrame(VideoFrame{})`,
+  not `clearImage()` -- so the outgoing-file blur that was expected to need fixing **never
+  existed**, and a control binary is what said so rather than reading. The real case is the only
+  reveal that delivers no frame: **playback running off the end, then a reveal by pointer alone**
+  (control `hsd 0.000`, fixed `hsd 3.999`).
+- **A STATIONARY POINTER INSIDE THE CLIENT HOLDS THE CHROME UP INDEFINITELY**, because the
+  auto-hide holds while `hover_` is a region. Probed at three positions: centre and corner still
+  up at 6s, unchanged to three decimals; outside the window it hides at ~2.6s. **A leg that needs
+  it hidden must park outside; a run that needs it up should park over the picture**, which needs
+  no jiggling and so adds no input to the measurement.
+- **QT AND GDI DISAGREE ABOUT WHETHER `Segoe UI Variable` EXISTS AND THE FIRST BUILD SHIPPED THE
+  WRONG ANSWER.** GDI lists only `Display`/`Text`/`Small`; **Qt 6 exposes the variable font under
+  the plain typographic name**, which is the design's own CSS name. The dev HUD's new `font` field
+  caught the silent fallback to Segoe UI on its first run.
+- **THE EMPTY STATE'S HINT MOVED `157x13` -> `169x14` AND THE GAP 45 -> 44, AND THAT IS THE FONT
+  BEING IN FORCE, NOT A REGRESSION.** The hint is text; the mark stays `59x68` with its `+10.5`
+  offset because it is a bitmap. **A build where the font had silently fallen back would still
+  read `157x13`**, so treat it as the check rather than as drift, and update any harness
+  expectation against these numbers.
+
+**Regression flat**: 4K H.264 cadence x2 **100.0/100.0%** `0 of 119` - 4444 x2 **99.8/99.8%**
+`0 of 260`, identical to the same-day control - `-SnapRelease` **`target 261 shown 261 delta 0`**
+full-res planar, `hitch 0`, `land 0` - **25 of 25 transitions** - `emptystate` all four modes plus
+the `-Bar` control, **cpu identical to d3d11 to the pixel** - `uiatree` MenuBar + five MenuItems.
+
+**What is left on the roadmap:** step 11 (validate across both backends -- treat as mandatory,
+and note the theme is renderer-neutral so the composited overlay is untouched) and step 12
+(frameless window, correctly deferred and the highest-risk item on the list). Step 3's prism
+animation remains an owner decision, not a tidy-up.
+
+---
+
 ## 2026-08-18, FOURTH SESSION: STEPS 6/8/9 AUDITED DONE, TWO DEFECTS FIXED, STEP 10's BLUR ANSWERED
 
 Two commits: `b2a901b` the fixes, `efa3160` the step 10 route 2 prototype (default off).

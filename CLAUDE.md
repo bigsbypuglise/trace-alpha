@@ -802,11 +802,92 @@ cross-backend strip band **1847 px of 72576 at max channel delta 7**, under the 
 backend class because the scrim attenuates it -- the same attenuation step 5 measured for the
 bottom strip.
 
+**THE PROTOTYPE IS GATED ON THE REVEAL STATE (2026-08-18, `2a3c634`), so what would ship is
+strictly cheaper than what was measured.** It sampled every presented frame regardless of whether
+the strip was visible; it asks `OverlayModel::chromeRevealed()` -- the same state that drives
+`OverlayHooks::setChromeRevealed`, so the backdrop cannot disagree with the strip about whether
+the strip is up. An ordinary run has the chrome hidden nine seconds in eleven and now samples
+nothing for those nine.
+
+**THE GATE'S ONE FAILURE MODE TOOK FOUR ATTEMPTS TO REPRODUCE, AND THREE OF THE ATTEMPTS
+CORRECTED SOMETHING.** A gate that stops sampling must publish null, because `TopChrome` keeps
+the last image it was given -- but null is only published when the sampler **runs**, and it only
+runs when a frame arrives. So a reveal with no frame behind it draws the solid fallback on a
+build meant to blur, and `MainWindow::syncTopChrome()` therefore refreshes it on every reveal,
+hide and media change. **Stepping frames "while hidden" tested nothing**, because `keyPressEvent`
+calls `revealOverlay()` -- the arrow keys changing the frame were themselves holding the chrome
+up. **Pausing reveals the chrome AND re-presents a frame.** **Close Media already published
+null**, because `closeMedia` calls `setFrame(VideoFrame{})` rather than `clearImage()`, so the
+outgoing-file blur that was expected to need fixing **never existed** -- the control binary
+corrected that, not reading. What is left is the only reveal that delivers no frame: **playback
+running off the end, then a reveal by pointer movement alone** -- control `hsd 0.000` (the
+fallback) against fixed `hsd 3.999` (the blur).
+
+**THE COST IS WIDENED TO THE FILES THAT BOUND THE SET AND IS FLAT ON ALL THREE (`586f2b9`)**, on
+the physical panel 5120x1440 @ 239.999Hz, so not comparable to the 1920x1080 figures above:
+**4K 60fps** (16.67ms budget, the tightest) **100.0/100.0% off against 100.0/100.0% on**; **4K
+4444 99.8/99.8% against 99.8/99.8%**; **8K 4444 XQ** (`TRACE_RT_DROP=0`) **50.8/53.5% against
+52.2/53.1%**. `drop 0`, `rephase 0`, `handler>budget 0` on both 4K files. **On the 8K the backdrop
+rows are nominally HIGHER and the spread WITHIN `bd=0` is 2.7 points against 0.5 between the
+configuration means** -- the first run pays a cold decoder -- so that is variance, not a win.
+`TRACE_RT_DROP=0` because the drop policy adapts to load and would otherwise turn added cost into
+a changed drop count rather than changed throughput.
+
+**Two method facts.** The chrome is held up by **parking the pointer over the picture**, not by
+jiggling -- the auto-hide holds while `hover_` is a region, so a stationary pointer inside the
+client keeps it up indefinitely (measured still up at 6s at the centre and in the corner, against
+~2.6s to hide with the pointer outside), which holds the strip up for the whole run and generates
+**no input during it**. And **every run proves its own premise from the same capture the figures
+come from**: `strip hsd` is horizontal variation across a strip row, exactly **0** for the
+design's purely vertical fallback gradient, reading 0 on all six `bd=0` rows and 3.995 / 2.946 /
+17.15 / 16.151 on the `bd=1` rows. **The table is the WORST case deliberately** -- holding the
+chrome revealed defeats the gate on purpose. Harnesses: `scripts/measure/stripbackdrop.ps1`,
+`scripts/measure/backdropcost.ps1`.
+
 **Whether to SHIP it is an open owner decision.** It is default-off and separately revertable --
 **the revert was applied and the reverted tree built rather than assumed**. The solid `#14161A`
 remains the fallback and is what ships today. **DirectComposition and rebuilding the strip as
-video quads are both explicitly NOT to be pursued** (owner, 2026-08-18). **The rest of step 10 is
-typography and spacing, which carry no playback risk.**
+video quads are both explicitly NOT to be pursued** (owner, 2026-08-18).
+
+**STEP 10's TYPOGRAPHY HALF IS DONE (2026-08-18, `d91f026`): `src/app/Theme.*`, one home for the
+application font, the palette and the popup-menu surface.** `main.cpp` had a hand-rolled grey
+palette; `TopChrome` keeps its own screen-1 strip colours because those describe one surface.
+
+- **QT AND GDI DISAGREE ABOUT WHETHER `Segoe UI Variable` EXISTS, AND THE FIRST BUILD SHIPPED THE
+  WRONG ANSWER.** GDI lists only the three static optical cuts -- `Display`/`Text`/`Small` -- and
+  nothing under the plain name, so the first version mapped the design onto `Segoe UI Variable
+  Text`; `QFontDatabase::hasFamily()` declined it and the app silently ran on **Segoe UI**. **Qt 6
+  enumerates through DirectWrite and exposes the VARIABLE font under its typographic family
+  name** -- exactly one match, `Segoe UI Variable`, the design's own CSS name. Both are in the
+  chain, the design's first. **The dev HUD's `font` field is what caught it on its first run**,
+  which is why it exists: a fallback to Segoe UI looks very nearly right.
+- **The optical cut was settled by the package's own embedded TTF.** The mockup bundles a
+  **1.8MB font** -- most of why that one file is larger than all of `src/` -- carrying `wght`
+  300..700 and `opsz` 5..36 with a **default optical size of 10.5**, which is squarely `Text`.
+- **No point size is set**, applying `TopChrome`'s own reasoning application-wide: pinning 12px
+  would look right at 100% and wrong everywhere else, and would override the user's Windows
+  text-size setting.
+- **The accent goes where Windows puts one and nowhere else.** `#5AC8E8` is `Highlight` and
+  `Link` -- text selection -- with `HighlightedText` **dark**, because the accent's luminance
+  makes white unreadable on it. It is deliberately **not** the menu highlight: the design uses
+  the accent on the played track and thumb ring only, and popups reuse step 7's own
+  `rgba(255,255,255,0.10)` so the bar and the popup are one language.
+- **Popup menus are the surface step 7 explicitly left to step 10**, and they are **derived** --
+  all three mockup screens have no menu open -- from the design's own values: `#1A1B20`, the 1px
+  `rgba(255,255,255,0.09)` border, the 8px radius, the menu bar's 3px/8px padding.
+  `scripts/measure/themeshot.ps1` puts them on screen for that reason.
+- **THE FLUENT ICON DIRECTION NEEDS NO WORK AND MUST NOT BE GIVEN ANY.** The delivered 260817
+  glyphs already are it; swapping to `Segoe Fluent Icons` (installed) would put a font glyph
+  where a delivered asset exists.
+
+**Regression flat** (physical panel, 4444 control = the same session's `bd=0` rows on the
+preceding binary): 4K H.264 cadence x2 **100.0/100.0%** `0 of 119` - 4444 x2 **99.8/99.8%**
+`0 of 260`, **identical to the control** - `-SnapRelease` **`target 261 shown 261 delta 0`**
+full-res planar, `hitch 0`, `land 0` - **25 of 25 transitions** - `emptystate` all four modes plus
+the `-Bar` control, **cpu identical to d3d11 to the pixel** - `uiatree` MenuBar + five MenuItems.
+**ONE FIGURE MOVED AND IT IS THE FONT BEING IN FORCE: the empty state's hint reads `169x14`
+against the recorded `157x13`, gap 44 against 45.** The hint is *text*; the mark stays `59x68`
+with `+10.5` offset because it is a bitmap. **A silent fallback would still read `157x13`.**
 
 **Regression for the two fixes, against a control built from `7c89cee` and hash-verified**
 (`959FB800` vs `387E008B`), same display, `renderer d3d11 +overlay` read off both: 4444 cadence
@@ -3417,10 +3498,17 @@ itself. Worth ~+10% on the 8K plate and nothing on a file that already meets bud
 simply moves the decode off the UI thread),
 **`TRACE_STRIP_BACKDROP=1`** (2026-08-18, roadmap step 10 route 2 PROTOTYPE, **default off**: the
 top chrome strip paints a tiny blurred copy of the video it covers as its background instead of
-the solid `#14161A`. Measured flat on 4K ProRes 4444 with the chrome held revealed for the whole
+the solid `#14161A`. **Gated on the reveal state since `2a3c634`**, so it samples nothing while
+the strip is hidden -- which is most of an ordinary run -- and the figures below are the worst
+case, taken with the chrome held up on purpose. Measured flat on 4K ProRes 4444 with the chrome held revealed for the whole
 run -- 99.8%, `drop 0`, `handler>budget 0 of 260`, `hitch 0` -- and it is the ONLY route to the
 design's blur, because Mica/Acrylic blur the desktop behind the window rather than the video
 behind the element and reach the title bar only. Shipping it is an owner decision),
+**`TRACE_THEME_LOG=1`** (2026-08-18, roadmap step 10: print the font family that ACTUALLY
+resolved and the `Segoe UI Variable` families **Qt** can see, which are not the ones GDI lists.
+It exists because the first build of `src/app/Theme.*` asked for a family Qt does not enumerate,
+`hasFamily()` declined it, and the application ran on Segoe UI looking very nearly right. The
+same value is on the dev HUD as `font`),
 **`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second
@@ -3468,6 +3556,36 @@ reads as a filtering difference. `previewshot.ps1` captures with the mouse butto
 still **down**, since the release is what lands a full-resolution frame.
 **Never use Trace as its own reference here** — §20.3 spent a session on a
 CPU-vs-GPU difference where both sides were the same 2x2 tap.
+
+**The step 10 strip backdrop has two harnesses now** (2026-08-18), and no other script reaches
+either state. **`stripbackdrop.ps1`** answers "is the blur drawing, is it fresh, and does it go
+away" in four modes -- `live` / `revive` / `pausereveal` / `endreveal` / `close`. **The
+discriminator is horizontal variation within a strip row, not colour**: the design's fallback is a
+purely vertical gradient, so its `hsd` is exactly **0** and a blur of video cannot be, which puts
+a zero on one side of the question rather than a threshold. It reads the **client** rect, never
+`GetWindowRect`, and samples the **right end** of the strip past the menus -- the `bd=0` leg
+reading 0.000 is what proves the band is clean rather than merely quiet.
+**`backdropcost.ps1`** is the on/off cost A/B, and **every run proves its own premise from the
+same capture the figures come from** by reporting that same `strip hsd`.
+
+**TWO HARNESS FACTS THEY ESTABLISHED, BOTH ABOUT THE AUTO-HIDE.** **A stationary pointer anywhere
+INSIDE the client holds the chrome up indefinitely** -- probed at three positions on a paused
+clip, the centre and the bottom corner are still up at 6s unchanged to three decimals while
+outside the window it hides at ~2.6s, because the timeout handler holds while `hover_` is a
+region. So a leg that needs the chrome hidden must park the pointer **outside**, as `overlay.ps1`
+always has; and a run that needs it **up** should park it over the picture, which holds it for the
+whole run and generates no input at all -- strictly better than jiggling, which the earlier
+measurement had to do on both sides. And **`keyPressEvent` calls `revealOverlay()`**, so any leg
+that changes the frame with the arrow keys is holding the chrome up with the same gesture: the
+first version of the `revive` leg tested nothing for exactly that reason and passed on a build
+with the fix removed.
+
+**`themeshot.ps1` opens each of the five menus and asserts the capture changed** (2026-08-18,
+roadmap step 10). The popup menu is **the one surface the design package does not show** -- all
+three of its screens have the menus closed -- so its colours, radius and spacing are derived
+rather than copied, which makes looking at it the check. It captures a region **around** the
+window because a menu is a separate popup window, and it opens them **by mnemonic, never by
+counting DOWN arrows**, both of which `menushot.ps1` already records.
 
 **Open Recent has a harness now**: `scripts/measure/recentfiles.ps1` (spec phase 11), seven
 modes. **Run `-Mode calibrate` beside any startup result you quote** — it prints what a stat on
