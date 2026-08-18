@@ -94,9 +94,11 @@ escape hatch and is still the first thing to try if the picture ever looks wrong
 2. **Push and confirm CI green.** The tag build's five verification
    steps must be read individually, not taken off the summary — in particular `fellback=0`, which
    is the only line separating a real GPU pass from a WARP one.
-3. **One Windows setting flip** to close the last measurement gap: turn off Settings ▸
-   Personalisation ▸ Colours ▸ Transparency effects and confirm the top strip goes solid. The
-   code path is proven by construction and by its rendering; the registry value at 0 is not.
+3. ~~**One Windows setting flip.**~~ **DONE — closed on hardware** (owner, 2026-08-18). With
+   transparency effects off the HUD reads `backdrop off (windows)` and the strip is byte-identical
+   to the forced-off fallback; forcing it back on with `TRACE_STRIP_BACKDROP=1` against a Windows
+   "off" works, which is the override in both directions; and flipping the setting while Trace was
+   **running** updated the strip with no restart. The setting has been restored.
 4. **An owner look at the new interface on the machine.** Every figure in this release is
    measured; nobody has signed off how it *feels*. The last five interface phases were each
    signed off by eye as well as by number, and this is a bigger visual change than any of them.

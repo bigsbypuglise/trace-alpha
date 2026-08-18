@@ -483,7 +483,10 @@ solid `#14161A` as "the fallback when transparency effects are disabled in Windo
 it already expected the setting to be read, and honouring it is what makes the Fluent direction
 Windows-**native** rather than Windows-looking. The registry read is **tri-state**, because a
 wrong key path and a machine that has never touched the toggle produce the same boolean -- the
-dev HUD's `backdrop` field prints `on` against `on (unset)` so the two are different readings.
+dev HUD's `backdrop` field prints `on` against `on (unset)` so the two are different readings. **Closed on hardware 2026-08-18**: with the setting off the HUD
+reads `off (windows)` and the strip is byte-identical to the forced-off fallback, forcing it on
+against a Windows "off" works, and flipping the setting while Trace was running updated the strip
+with no restart.
 Full record in `CLAUDE.md`. **DirectComposition (`WS_EX_NOREDIRECTIONBITMAP`) and rebuilding the
 strip as video quads are both explicitly NOT being pursued** (owner, 2026-08-18).
 

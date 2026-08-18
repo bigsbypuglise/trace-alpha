@@ -11,9 +11,20 @@ Five commits: `a4c6bb2` the backdrop default flip, `e002085` the toast fix step 
 the step 7 block's 1920x1080 figures. A control was built from `f419957` and hash-verified
 (`0B490C0F` against `475F35C7`) and run beside every regression leg.
 
-**THE ONLY OPEN OWNER ITEMS ARE THE FOUR IN `docs/release-body-draft.md`**, and two of them are
-things nobody but the owner can do: flipping the Windows transparency toggle, and looking at the
-new interface on the machine.
+**THE TRANSPARENCY GATE IS CLOSED ON HARDWARE** (owner flipped the toggle, 2026-08-18). With
+`EnableTransparency` at 0 and the variable unset the HUD reads `backdrop off (windows)` and the
+strip is **byte-identical to the forced-off fallback** (`hsd 0.00`, mean RGB 23.17/24.62/29.17);
+forcing it back on against a Windows "off" reads `hsd 2.792`, identical to the digit to the same
+override taken while the registry said 1 -- **the override wins in both directions, which is the
+requirement's own words**. And flipping the setting **while Trace was running** updated the strip
+with no restart: that is `WM_SETTINGCHANGE` reaching `onSystemAppearanceChanged()`, confirmed by
+the owner rather than sampled here, because the process was closed before it could be. The
+setting has been restored and the default row reads this session's own first figure again.
+
+**WHAT IS LEFT FOR THE OWNER IS THE TWO IN `docs/release-body-draft.md`**: CI green at
+`760ab37` (not readable from this box -- no `gh` CLI), and **an owner look at the new interface on
+the machine**. Every figure is measured; nobody has signed off how it feels, and the last five
+interface phases were each signed off by eye as well as by number.
 
 ### What shipped
 

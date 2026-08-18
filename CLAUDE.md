@@ -940,13 +940,36 @@ identical buckets on all three. `scrub -SnapRelease` 4444 **`target 261 shown 26
 full-res planar, `hitch 0`, `land 0`, release 21.3 against 21.1ms. `emptystate` all four modes on
 both backends plus the `-Bar` control. **25 of 25 transitions.**
 
-**STATED GAP: the `EnableTransparency=0` branch is proven by construction and by its rendering,
-not by the value itself.** The key path resolves (`backdrop on` rather than `on (unset)`), the
-value is read as a DWORD, and the off branch's *drawing* is what `TRACE_STRIP_BACKDROP=0`
-measures at `hsd 0.00` -- same null publication, same paint branch. What was **not** done is
-flipping the owner's own Windows transparency toggle unattended. One flip of Settings >
-Personalisation > Colours > Transparency effects closes it; the HUD must read `off (windows)`
-and `hsd` must read 0.00.
+**THE TRANSPARENCY GATE IS CLOSED ON HARDWARE (owner flipped the toggle, 2026-08-18), AND THE
+WHOLE TRUTH TABLE IS MEASURED.** With `EnableTransparency` set to **0** and the variable unset,
+the HUD reads **`backdrop off (windows)`** and the strip reads **`hsd 0.00`** at mean RGB
+`23.17/24.62/29.17` -- **byte-identical to the `TRACE_STRIP_BACKDROP=0` fallback**, which is what
+says the two routes to "off" reach the same paint rather than merely both looking dark. The owner
+confirmed the solid strip by eye at the machine.
+
+| registry | env | HUD | strip `hsd` |
+|---|---|---|---|
+| 1 | unset | `on` | 2.787 |
+| 1 | `0` | `off (env)` | 0.00 |
+| 1 | `1` | `on (env)` | 2.792 |
+| **0** | **unset** | **`off (windows)`** | **0.00** |
+| 0 | `0` | `off (env)` | 0.00 |
+| 0 | `1` | `on (env)` | **2.792** |
+
+**THE LAST ROW IS THE ONE THAT WAS UNTESTABLE BEFORE and it is the requirement's own words --
+the override wins in BOTH directions.** Forcing the effect ON against a Windows "off" reads
+`hsd 2.792` at mean RGB `103.45/113.27/123.99`, **identical to the digit** to the same override
+taken while the registry said 1. Restoring the setting returns the default row to `hsd 2.787` at
+`103.44/113.26/123.98`, this session's own first reading.
+
+**THE LIVE CHANGE WORKS AND WAS CONFIRMED BY THE OWNER RATHER THAN MEASURED HERE.** Trace was
+left running with transparency off; flipping it back on **updated the strip with no restart**.
+That is `WM_SETTINGCHANGE` reaching `ViewerWidget::onSystemAppearanceChanged()`. The mechanism's
+other half is measured: 30 broadcasts carrying the `ImmersiveColorSet` lParam with the value
+*unchanged* leave window and client geometry identical **to the pixel**, the process alive and
+`hsd` unmoved at 2.792 -- so the handler is live **and** inert on the traffic that message
+normally carries. The process the owner tested was closed before it could be sampled from here,
+so the live half rests on their observation and on that mechanism, not on a pixel figure.
 
 **`scripts/measure/stripbackdrop.ps1` GAINED `-Mode shipping`**, which launches with the variable
 **unset** and the HUD on. Setting it to `1` and calling that the shipping configuration would be
