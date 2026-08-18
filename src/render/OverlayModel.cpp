@@ -959,13 +959,30 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     // The message is deliberately OUTSIDE the opacity gate: a confirmation or
     // an error is shown for its own timeout, whether or not the transport is
     // revealed, and it does not fade with the panel. Top-left with a margin --
-    // clear of the bottom-centred panel at every window shape, including the
-    // 460px-wide portrait minimum.
+    // clear of the bottom-anchored transport at every window shape.
+    //
+    // BELOW THE TOP CHROME, AND UNCONDITIONALLY SO. Roadmap step 7 turned the
+    // menu bar into a strip that floats OVER the picture, and this quad's 12px
+    // margin put it entirely behind that strip: measured, the same Ctrl+C draws
+    // nothing visible with the chrome revealed and "Copied frame 0 (4096 x
+    // 2304)" 300ms later with it hidden. Every route to a message is an input
+    // and every input reveals the chrome, so the confirmation was hidden for
+    // the first two seconds of its two-and-a-half second life -- present,
+    // correct, and unreadable exactly when it fires.
+    //
+    // The offset is NOT conditional on the chrome being up. It could be: the
+    // inset is only non-zero when a strip exists, and the strip's own reveal
+    // state is right here in chromeRevealed_. But the auto-hide lands in the
+    // middle of a 2.5s message, so a conditional offset would make the toast
+    // JUMP 38px partway through being read. A constant position that is
+    // sometimes 38px lower than the design's margin is the better of the two,
+    // and it is the same reasoning that keeps the message outside the fade.
     rebuildMessage(surfacePixels);
     const auto pushMessage = [&]() {
         if (message_.isNull()) return;
         const double margin = 12.0 * dpr_;
-        quads_.push_back(OverlayQuad{QRectF(margin, margin, message_.width(), message_.height()),
+        quads_.push_back(OverlayQuad{QRectF(margin, topInset_ + margin,
+                                            message_.width(), message_.height()),
                                      QRectF(QPointF(0, 0), QSizeF(message_.size())),
                                      1.0f, 1.0f, OverlayQuad::Source::Message});
     };

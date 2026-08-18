@@ -104,13 +104,21 @@ public:
     // Device pixels of the surface's TOP EDGE that the transient top chrome
     // covers (UI redesign roadmap step 7), or 0 when there is no such chrome.
     //
-    // It exists for the EMPTY STATE and nothing else. The design's empty-state
-    // markup puts its stage BELOW the 38px strip and centres the mark in that,
-    // which is also what the window did while the menu bar was in the layout; a
-    // strip that floats over the picture instead would otherwise leave the mark
-    // half a strip high in the only state the strip is permanently shown in. The
-    // transport is bottom-anchored and unaffected, and with media open there is
-    // no empty state at all, so this can never move a picture.
+    // TWO READERS, AND BOTH ARE CHROME RATHER THAN PICTURE. The design's
+    // empty-state markup puts its stage BELOW the 38px strip and centres the
+    // mark in that, which is also what the window did while the menu bar was in
+    // the layout; a strip that floats over the picture instead would otherwise
+    // leave the mark half a strip high in the only state the strip is
+    // permanently shown in.
+    //
+    // The transient MESSAGE reads it for a blunter reason: it is top-left with a
+    // 12px margin, so under a 38px floating strip it was drawn entirely behind
+    // the chrome. That was invisible while the menu bar was in the layout -- the
+    // video surface started below it -- and step 7 made the chrome float over
+    // the picture without moving the toast out from under it.
+    //
+    // The transport is bottom-anchored and unaffected, and neither reader is a
+    // picture, so this still cannot move one.
     void setTopInset(double devicePixels);
 
     // The single reveal state both panels are driven from -- true from the

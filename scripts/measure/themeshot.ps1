@@ -16,7 +16,14 @@
 param(
     [Parameter(Mandatory = $true)][string]$Clip,
     [string]$Exe,
-    [string]$OutDir = "$env:TEMP\tracetheme"
+    [string]$OutDir = "$env:TEMP\tracetheme",
+    # Roadmap step 11 needs BOTH halves, and a script that hard-codes one
+    # backend is how a cross-backend check stops being run -- overlay.ps1 was
+    # aimed at d3d11 for a whole phase for exactly that reason. Popup menus are
+    # Qt widgets in their own top-level popup windows, drawn by neither video
+    # renderer, so they should be renderer-NEUTRAL by construction; this is
+    # what turns that from a claim into a reading.
+    [ValidateSet("d3d11", "cpu")][string]$Renderer = "d3d11"
 )
 
 $ErrorActionPreference = 'Continue'
@@ -42,11 +49,12 @@ New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 
 Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 800
+$env:TRACE_RENDERER = $Renderer
 $env:TRACE_HUD = "0"
 $env:TRACE_NO_AUDIO = "1"
 $env:TRACE_SETTINGS_FILE = "$OutDir\scratch.ini"
 Start-Process -FilePath $Exe -ArgumentList ('"' + $Clip + '"') | Out-Null
-Remove-Item env:TRACE_HUD, env:TRACE_NO_AUDIO, env:TRACE_SETTINGS_FILE -ErrorAction SilentlyContinue
+Remove-Item env:TRACE_RENDERER, env:TRACE_HUD, env:TRACE_NO_AUDIO, env:TRACE_SETTINGS_FILE -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 5
 
 $p = Get-Process -Name Trace -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
