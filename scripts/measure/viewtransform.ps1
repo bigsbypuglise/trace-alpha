@@ -51,9 +51,11 @@ Get-Process Trace -EA SilentlyContinue | Stop-Process -Force
 Start-Sleep -Milliseconds 700
 $env:TRACE_RENDERER = $Renderer
 if ($Bar) { $env:TRACE_TRANSPORT_BAR = "1" }
+$env:TRACE_HUD = "1"  # this script reads its figures off the HUD; hidden by default since roadmap step 2
 Start-Process -FilePath "build\app\Release\Trace.exe" -ArgumentList "`"$Clip`""
 $env:TRACE_RENDERER = ""
 $env:TRACE_TRANSPORT_BAR = ""
+$env:TRACE_HUD = ""
 Start-Sleep -Seconds 6
 
 $p = Get-Process Trace | Select-Object -First 1

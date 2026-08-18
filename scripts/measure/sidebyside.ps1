@@ -62,8 +62,10 @@ function Start-Trace([string]$renderer) {
     # Set on THIS process so the child inherits it, then cleared -- a leaked
     # TRACE_RENDERER would silently apply to every later launch from this shell.
     $env:TRACE_RENDERER = $renderer
+    $env:TRACE_HUD = "1"  # HUD hidden by default since roadmap step 2; both sides need it for the readouts
     $p = Start-Process -FilePath $Exe -ArgumentList "`"$Clip`"" -PassThru
     Remove-Item -Path "env:TRACE_RENDERER" -ErrorAction SilentlyContinue
+    Remove-Item -Path "env:TRACE_HUD" -ErrorAction SilentlyContinue
 
     # Wait for the window rather than sleeping a fixed amount: the d3d11 window
     # has a device and a swapchain to create first and is reliably slower.

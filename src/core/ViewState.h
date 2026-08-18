@@ -30,7 +30,15 @@ enum class PrimaryReadoutMode {
 // two were named for is `readoutMode`, which is real; the diagnostics HUD the
 // third was named for is `showHud`, which is real and is now on `H`.
 struct ViewState {
-    bool showHud = true;
+    // FALSE since the UI redesign roadmap's step 2 (2026-08-17): the dev HUD is
+    // an instrument, and the shipping stage is clean. `H` (and Return/Enter)
+    // toggles it, View > Show Diagnostics HUD is the discoverable surface, and
+    // TRACE_HUD=1 forces it on from launch for the measurement harnesses --
+    // which restart.ps1 passes by default, because every recorded figure is
+    // read off the HUD. Flipping this default moves the video rect and every
+    // stall figure with it (section 22.8); the re-baseline was taken with it
+    // false and TRACE_HUD=1 on the harness side.
+    bool showHud = false;
     bool fullscreen = false;
     PrimaryReadoutMode readoutMode = PrimaryReadoutMode::Frame;
 };

@@ -408,6 +408,17 @@ MainWindow::~MainWindow() {
 MainWindow::MainWindow() {
     setWindowTitle("Trace");
     setAcceptDrops(true);
+    // The dev HUD ships hidden (UI roadmap step 2); `H` toggles it. TRACE_HUD=1
+    // forces it on from launch, which is what the measurement harnesses need --
+    // every scrub and cadence figure is read off the HUD in a pixel capture,
+    // and a harness cannot press H reliably before its first observation.
+    // restart.ps1 sets it by default, so the harness ecosystem keeps working
+    // unchanged; TRACE_HUD=0 under restart.ps1 measures the shipping look.
+    // Read before setupUi so the HUD widget's initial visibility and the menu
+    // item's checked state are both built from the value in force.
+    if (const QByteArray hudEnv = qgetenv("TRACE_HUD"); !hudEnv.isEmpty()) {
+        viewState_.showHud = (hudEnv != "0");
+    }
     setupUi();
     setupSharedActions();
     setupMenus();
@@ -1148,6 +1159,10 @@ void MainWindow::setupUi() {
     // readouts used for playback validation, so it stays until the playback
     // foundation is signed off.
     layout->addWidget(overlay_, 0);
+    // The HUD's initial visibility follows the default (hidden since roadmap
+    // step 2) or TRACE_HUD. A hidden widget gives its height to the viewer, so
+    // this is part of the geometry the re-baseline was taken on.
+    overlay_->setVisible(viewState_.showHud);
     setCentralWidget(central);
 
     // TEMPORARY, env-gated, ships inert. Decides whether the child-HWND viewer

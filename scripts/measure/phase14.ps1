@@ -107,6 +107,11 @@ function Start-Trace {
         $kv = $pair -split "=", 2
         [System.Environment]::SetEnvironmentVariable($kv[0], $kv[1])
     }
+    # HUD forced on unless the caller set it: the loop leg reads the HUD's
+    # `loop` field, and the HUD is hidden by default since roadmap step 2.
+    $hasHud = $false
+    foreach ($pair in $Env) { if ($pair -like 'TRACE_HUD=*') { $hasHud = $true } }
+    if (-not $hasHud) { [System.Environment]::SetEnvironmentVariable('TRACE_HUD', '1') }
     Start-Process -FilePath $exe -ArgumentList "`"$Clip`"" | Out-Null
     Start-Sleep -Seconds 3
     $p = Get-Process Trace | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1

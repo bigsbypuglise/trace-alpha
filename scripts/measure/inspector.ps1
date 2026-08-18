@@ -146,7 +146,11 @@ function Nudge([int]$x, [int]$y) {
 function Launch($clip) {
     Get-Process Trace -ErrorAction SilentlyContinue | Stop-Process -Force
     Start-Sleep -Milliseconds 400
+    # The viewport leg cross-checks against the HUD's `display`, and the HUD is
+    # hidden by default since roadmap step 2.
+    $env:TRACE_HUD = "1"
     $p = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
+    Remove-Item env:TRACE_HUD -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 2500
     return $p
 }

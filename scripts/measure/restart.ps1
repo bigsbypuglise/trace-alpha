@@ -28,6 +28,14 @@ Start-Sleep -Milliseconds 800
 Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
 Start-Sleep -Milliseconds 400
 
+# The dev HUD ships hidden (UI roadmap step 2, 2026-08-17) and every harness
+# reads its figures off the HUD in a pixel capture -- so the launcher forces it
+# on unless the caller says otherwise. Pass TRACE_HUD=0 in -Env to measure the
+# shipping (HUD-hidden) configuration; any explicit TRACE_HUD entry wins.
+$hasHudEntry = $false
+foreach ($pair in $Env) { if ($pair -like 'TRACE_HUD=*') { $hasHudEntry = $true } }
+if (-not $hasHudEntry) { $Env = @($Env) + @('TRACE_HUD=1') }
+
 $applied = @()
 foreach ($pair in $Env) {
     $i = $pair.IndexOf('=')

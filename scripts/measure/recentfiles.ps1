@@ -135,6 +135,8 @@ function KillTrace {
 # squarely inside this interval.
 function LaunchAndTime([string]$clip) {
     $env:TRACE_SETTINGS_FILE = $SettingsFile
+    # `recent 10/10` is read off the HUD, hidden by default since roadmap step 2.
+    $env:TRACE_HUD = "1"
     $sw = [Diagnostics.Stopwatch]::StartNew()
     $p = Start-Process -FilePath $Exe -ArgumentList "`"$clip`"" -PassThru
     $h = [IntPtr]::Zero

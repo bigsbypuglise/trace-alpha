@@ -218,6 +218,13 @@ function Get-Trace {
 }
 
 function Start-Trace([string]$clip, [string[]]$envPairs) {
+    # The dev HUD ships hidden (UI roadmap step 2). Launch with it forced ON so
+    # the HUD-reading legs keep working and so -HideHud's `h` press still means
+    # "hide" rather than toggling a hidden HUD back on. An explicit TRACE_HUD in
+    # $Env wins.
+    $hasHud = $false
+    foreach ($pair in $envPairs) { if ($pair -like 'TRACE_HUD=*') { $hasHud = $true } }
+    if (-not $hasHud) { $envPairs = @($envPairs) + @('TRACE_HUD=1') }
     Get-Process -Name Trace -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }
     Start-Sleep -Milliseconds 700
     Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
