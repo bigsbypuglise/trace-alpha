@@ -191,7 +191,12 @@ void D3D11OverlayDrawer::draw(OverlayModel& model, QSize surfacePixels) {
                 atlas_, atlasSrv_, atlasSize_);
     syncTexture(model.textImage(), model.textRevision(), textRevisionUploaded_,
                 textTex_, textSrv_, textSize_);
-    if (!atlasSrv_) return;
+    syncTexture(model.messageImage(), model.messageRevision(), msgRevisionUploaded_,
+                msgTex_, msgSrv_, msgSize_);
+    // No blanket atlas guard: a message quad can be the only thing to show, and
+    // it can arrive while the panel is faded -- the one path on which the atlas
+    // may never have been rasterised. Each quad checks its own source in the
+    // loop, which is the same rule the CPU drawer follows.
 
     // Full-surface viewport: the overlay is positioned against the window, not
     // against the video rect, and the video's letterbox viewport is still set
@@ -213,9 +218,14 @@ void D3D11OverlayDrawer::draw(OverlayModel& model, QSize surfacePixels) {
 
     for (const auto& q : quads) {
         const bool isText = q.source == OverlayQuad::Source::Text;
+        const bool isMsg = q.source == OverlayQuad::Source::Message;
         if (isText && !textSrv_) continue;
-        drawQuad(q.dst, uvOf(q.src, isText ? textSize_ : atlasSize_), q.alpha, q.brighten,
-                 isText ? textSrv_ : atlasSrv_, surfacePixels);
+        if (isMsg && !msgSrv_) continue;
+        if (!isText && !isMsg && !atlasSrv_) continue;
+        drawQuad(q.dst,
+                 uvOf(q.src, isMsg ? msgSize_ : (isText ? textSize_ : atlasSize_)),
+                 q.alpha, q.brighten,
+                 isMsg ? msgSrv_ : (isText ? textSrv_ : atlasSrv_), surfacePixels);
     }
 
     context_->OMSetBlendState(nullptr, blendFactor, 0xffffffff);

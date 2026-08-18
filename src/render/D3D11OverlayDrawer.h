@@ -79,6 +79,11 @@ private:
     ComPtr<ID3D11ShaderResourceView> textSrv_;
     QSize textSize_;
     long long textRevisionUploaded_ = -1;
+
+    ComPtr<ID3D11Texture2D> msgTex_;
+    ComPtr<ID3D11ShaderResourceView> msgSrv_;
+    QSize msgSize_;
+    long long msgRevisionUploaded_ = -1;
 };
 
 } // namespace trace::render

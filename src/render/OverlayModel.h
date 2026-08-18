@@ -25,7 +25,7 @@ namespace trace::render {
 // and Qt's SourceOver on ARGB32_Premultiplied each already do. That is why the
 // two paths can be compared pixel for pixel rather than merely "looking right".
 struct OverlayQuad {
-    enum class Source { Atlas, Text };
+    enum class Source { Atlas, Text, Message };
 
     QRectF dst;
     QRectF src;
@@ -94,8 +94,14 @@ public:
 
     const QImage& atlasImage() const { return atlas_; }
     const QImage& textImage() const { return text_; }
+    // The transient message pill (see OverlayHooks::messageText). A third image
+    // rather than a second use of text_ because the rate chip and a message can
+    // be on screen at once, and because this one is emitted even at opacity 0 --
+    // a confirmation or an error must not vanish with the panel's fade.
+    const QImage& messageImage() const { return message_; }
     long long atlasRevision() const { return atlasRevision_; }
     long long textRevision() const { return textRevision_; }
+    long long messageRevision() const { return messageRevision_; }
     // Bumped every time layout() moves a control rect. Same promise the atlas
     // and text revisions make -- a revision that does not move means the rects
     // did not -- and it exists for the same reason: so a consumer can tell
@@ -158,6 +164,7 @@ private:
     void layout();
     void rebuildAtlas();
     void rebuildText();
+    void rebuildMessage(QSize surfacePixels);
     Region regionAt(int x, int y) const;
     // The track's HIT rect, which is much taller than its drawn one. One
     // definition, shared by regionAt() and controlRects().
@@ -168,10 +175,13 @@ private:
 
     QImage atlas_;
     QImage text_;
+    QImage message_;
     long long atlasRevision_ = 0;
     long long textRevision_ = 0;
+    long long messageRevision_ = 0;
     long long layoutRevision_ = 0;
     QString textCached_;
+    QString messageCached_;
 
     // Atlas sub-rects, in atlas pixels.
     QRectF aPanel_, aPlay_, aPause_, aRewind_, aFfwd_, aShare_, aHandle_, aSolid_, aSolidSample_;

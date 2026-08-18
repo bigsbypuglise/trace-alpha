@@ -625,6 +625,17 @@ private:
     // value. Cleared by rateFlashTimer_.
     QString rateFlashText_;
     QTimer rateFlashTimer_;
+    // THE ONE ROUTE FOR EVERY TRANSIENT USER-FACING MESSAGE -- confirmations,
+    // refusals and errors that used to be statusBar()->showMessage at 35 call
+    // sites. In bar mode (TRACE_TRANSPORT_BAR=1) it still goes to the status
+    // bar, which keeps the escape hatch's chrome and geometry identical to the
+    // record; in overlay mode it becomes a composited toast drawn by both
+    // backends (OverlayHooks::messageText), because the status bar is not on
+    // screen there. Same shape as the rate flash: host-owned string, host-owned
+    // timer, the model only reads.
+    void showTransientMessage(const QString& text, int timeoutMs);
+    QString transientMessageText_;
+    QTimer transientMessageTimer_;
     // Geometry to restore when leaving fullscreen, and whether the window was
     // maximized when it entered. Fullscreen and maximize are different states
     // and the spec says not to confuse them.

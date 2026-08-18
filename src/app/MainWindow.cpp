@@ -850,7 +850,7 @@ MainWindow::MainWindow() {
                        && audioClockStall_.elapsed() > kAudioStallMs) {
                 audioClockStalled_ = true;
                 audioDriving_ = false;
-                statusBar()->showMessage(
+                showTransientMessage(
                     "Audio clock stalled - playback continued without sync", 4000);
             }
 
@@ -1018,7 +1018,7 @@ MainWindow::MainWindow() {
                 playbackEndFrame_ = playback_.state().currentFrame;
             }
             syncPlaybackSpeedActions();
-            if (!error.isEmpty()) statusBar()->showMessage(error, 2000);
+            if (!error.isEmpty()) showTransientMessage(error, 2000);
         } else {
             notePresentedPlaybackFrame(frameDurationMs);
             if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
@@ -1092,6 +1092,15 @@ MainWindow::MainWindow() {
     rateFlashTimer_.setInterval(trace::ui::TransportBar::rateFlashMs());
     connect(&rateFlashTimer_, &QTimer::timeout, this, [this]() {
         rateFlashText_.clear();
+        if (viewer_) viewer_->update();
+    });
+
+    // Clears the transient message toast. The interval is per message -- the
+    // caller's timeout, exactly as statusBar()->showMessage took one -- so it
+    // is set at each showTransientMessage rather than here.
+    transientMessageTimer_.setSingleShot(true);
+    connect(&transientMessageTimer_, &QTimer::timeout, this, [this]() {
+        transientMessageText_.clear();
         if (viewer_) viewer_->update();
     });
 
@@ -1194,6 +1203,10 @@ void MainWindow::installOverlayHooks() {
     // a standing readout where the spec asks for a rate that appears on a
     // shuttle press and clears itself.
     hooks.rateText = [this]() { return rateFlashText_; };
+    // The transient message toast (see showTransientMessage). The same
+    // host-owns-the-string shape as rateText, and the model draws it outside
+    // the panel's fade so an error survives the transport hiding itself.
+    hooks.messageText = [this]() { return transientMessageText_; };
 
     // Spec phase 6. The overlay checks the two conditions it can see for itself
     // (pointer over a control, timeline drag in progress); this answers for the
@@ -1333,7 +1346,7 @@ void MainWindow::setupSharedActions() {
     connect(clearRecentAction_, &QAction::triggered, this, [this]() {
         recentFiles_.clear();
         rebuildRecentMenu();
-        statusBar()->showMessage(tr("Recent files cleared."), 2000);
+        showTransientMessage(tr("Recent files cleared."), 2000);
     });
 
     // Movie Inspector (spec phase 13). Ctrl+I, and it goes on a QAction rather
@@ -2217,18 +2230,18 @@ void MainWindow::copyMediaFilePath() {
     refreshShareState();
     QString error;
     if (!trace::app::copyPathToClipboard(shareState_, error)) {
-        statusBar()->showMessage(error, 3000);
+        showTransientMessage(error, 3000);
         return;
     }
-    // The spec's "non-blocking confirmation". The status bar is what every other
-    // confirmation in Trace already uses, so this needed no new mechanism.
-    statusBar()->showMessage(tr("File path copied."), 2000);
+    // The spec's "non-blocking confirmation", through the one transient-message
+    // route every other confirmation in Trace uses.
+    showTransientMessage(tr("File path copied."), 2000);
 }
 
 void MainWindow::showMediaInFileExplorer() {
     refreshShareState();
     trace::app::revealInFileExplorer(shareState_, this, [this](const QString& message) {
-        statusBar()->showMessage(message, 3000);
+        showTransientMessage(message, 3000);
     });
 }
 
@@ -2244,7 +2257,7 @@ void MainWindow::copyLucidLinkForMedia() {
     if (shareState_.lucidLink != trace::app::ShareAvailability::Available) {
         QString why = shareState_.lucidLinkReason;
         if (why.isEmpty()) why = tr("A LucidLink link is not available for this file.");
-        statusBar()->showMessage(why, 4000);
+        showTransientMessage(why, 4000);
         return;
     }
     // One at a time. The command reaches the LucidLink daemon and can take a
@@ -2252,11 +2265,11 @@ void MainWindow::copyLucidLinkForMedia() {
     // other -- both watching the same sequence number, either able to attribute
     // the other's result to itself.
     if (lucidCopyInFlight_) {
-        statusBar()->showMessage(tr("Still asking LucidLink for the link..."), 2000);
+        showTransientMessage(tr("Still asking LucidLink for the link..."), 2000);
         return;
     }
     lucidCopyInFlight_ = true;
-    statusBar()->showMessage(tr("Asking LucidLink for the link..."), 4000);
+    showTransientMessage(tr("Asking LucidLink for the link..."), 4000);
 
     const QString path = shareState_.canonicalPath;
     const QPointer<MainWindow> guard(this);
@@ -2267,12 +2280,12 @@ void MainWindow::copyLucidLinkForMedia() {
             if (guard.isNull()) return;
             guard->lucidCopyInFlight_ = false;
             if (result.ok) {
-                guard->statusBar()->showMessage(tr("LucidLink link copied."), 2000);
+                guard->showTransientMessage(tr("LucidLink link copied."), 2000);
             } else {
                 // Failure is reported and the clipboard is whatever
                 // copyLucidLinkViaShell left it as -- which is either untouched
                 // or restored. Trace never writes a guessed value.
-                guard->statusBar()->showMessage(result.error, 5000);
+                guard->showTransientMessage(result.error, 5000);
             }
         }, Qt::QueuedConnection);
     });
@@ -2360,7 +2373,7 @@ void MainWindow::promptGoToTimecode() {
         // Validated BEFORE seeking, and refused rather than clamped. Clamping a
         // mistyped timecode would move the playhead somewhere the user did not
         // ask for and look like it had worked.
-        statusBar()->showMessage(
+        showTransientMessage(
             tr("Not a timecode in this media: %1").arg(text.trimmed()), 4000);
         refreshHud("Go to Timecode: rejected");
         return;
@@ -3078,7 +3091,7 @@ void MainWindow::closeMedia() {
     // MEDIA, and there is none -- resizing to some default here would move a
     // window the user had placed, to say nothing new.
     setWindowTitle(QStringLiteral("Trace"));
-    statusBar()->showMessage(tr("No media open"), 2000);
+    showTransientMessage(tr("No media open"), 2000);
 
     syncTransportBar();
     syncShareActions();
@@ -3123,7 +3136,7 @@ bool MainWindow::loopWrap(int direction) {
     supersedeInFlightRequests();
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, direction, true);
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-        if (!error.isEmpty()) statusBar()->showMessage(error, 2000);
+        if (!error.isEmpty()) showTransientMessage(error, 2000);
         return false;
     }
     syncTransportBar();
@@ -3180,7 +3193,7 @@ void MainWindow::setPlaybackSpeed(double speed) {
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
             && !error.isEmpty()) {
-            statusBar()->showMessage(error, 3000);
+            showTransientMessage(error, 3000);
         }
         syncTransportBar();
     }
@@ -3307,11 +3320,11 @@ void MainWindow::copyCurrentFrame() {
 
     const auto& frame = viewer_->frame();
     if (frame.isNull()) {
-        statusBar()->showMessage(tr("No frame to copy"), 2000);
+        showTransientMessage(tr("No frame to copy"), 2000);
         return;
     }
     if (frame.previewRes) {
-        statusBar()->showMessage(
+        showTransientMessage(
             tr("Release the timeline first - the picture is a scrub preview"), 3000);
         return;
     }
@@ -3319,7 +3332,7 @@ void MainWindow::copyCurrentFrame() {
     QImage image;
     QString error;
     if (!videoDecoder_.frameToRgbImage(frame, image, error)) {
-        statusBar()->showMessage(
+        showTransientMessage(
             error.isEmpty() ? tr("Could not copy the frame") : error, 3000);
         return;
     }
@@ -3330,7 +3343,7 @@ void MainWindow::copyCurrentFrame() {
     // and what "new media resets transforms" means. Baking a session's rotation
     // into a copied frame would make the clipboard depend on when it was taken.
     QGuiApplication::clipboard()->setImage(image);
-    statusBar()->showMessage(
+    showTransientMessage(
         tr("Copied frame %1 (%2 x %3)")
             .arg(playback_.state().currentFrame)
             .arg(image.width())
@@ -3366,7 +3379,7 @@ void MainWindow::goToFrame(long long frame, const char* action) {
 
     QString error;
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        if (!error.isEmpty()) showTransientMessage(error, 3000);
     }
     syncTransportBar();
     if (viewer_) viewer_->revealOverlay();
@@ -3787,7 +3800,7 @@ void MainWindow::setupTransportControls() {
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         QString error;
         if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+            if (!error.isEmpty()) showTransientMessage(error, 3000);
         } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
         }
@@ -3815,7 +3828,7 @@ void MainWindow::setupTransportControls() {
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         QString error;
         if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-            if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+            if (!error.isEmpty()) showTransientMessage(error, 3000);
         } else if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
             prefetchNeighbors();
         }
@@ -4549,7 +4562,7 @@ void MainWindow::openRecentPath(const QString& path) {
     if (box.clickedButton() == remove) {
         recentFiles_.forget(path);
         rebuildRecentMenu();
-        statusBar()->showMessage(tr("Removed from Recent Files."), 2500);
+        showTransientMessage(tr("Removed from Recent Files."), 2500);
     }
 }
 
@@ -4749,7 +4762,7 @@ void MainWindow::completeExactLanding(const trace::core::ScrubResult& result) {
     }
 
     if (!result.ok) {
-        if (!result.error.isEmpty()) statusBar()->showMessage(result.error, 3000);
+        if (!result.error.isEmpty()) showTransientMessage(result.error, 3000);
         // A step that could not be decoded must not leave the counter claiming a
         // frame the viewer is not showing. The synchronous path put the playhead
         // back and re-landed; this puts it back and leaves the picture alone,
@@ -4842,7 +4855,7 @@ bool MainWindow::openPath(const QString& path) {
             // render must still open exactly as it did before.
             QString audioErr;
             if (!audio_.open(path, audioErr) && !audioErr.isEmpty()) {
-                statusBar()->showMessage(audioErr, 3000);
+                showTransientMessage(audioErr, 3000);
             }
             item.kind = MediaKind::VideoFile;
             item.frameCount = videoDecoder_.metadata().frameCount;
@@ -4853,7 +4866,7 @@ bool MainWindow::openPath(const QString& path) {
             playback_.resetForNewMedia(item.frameCount > 0 ? item.frameCount - 1 : -1);
             playback_.setCurrentFrame(0);
         } else {
-            statusBar()->showMessage(err, 3000);
+            showTransientMessage(err, 3000);
         }
     }
 
@@ -4977,7 +4990,7 @@ bool MainWindow::openPath(const QString& path) {
 
     QString error;
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        if (!error.isEmpty()) showTransientMessage(error, 3000);
         refreshHud("Open failed");
         return false;
     }
@@ -5043,7 +5056,7 @@ bool MainWindow::openPath(const QString& path) {
         rebuildRecentMenu();
     }
 
-    statusBar()->showMessage("Opened", 1200);
+    showTransientMessage("Opened", 1200);
     refreshHud("Open file");
     // THE SHAPE IS APPLIED HERE, AFTER refreshHud, AND THAT ORDER IS THE WHOLE
     // CORRECTNESS OF IT.
@@ -5268,7 +5281,7 @@ void MainWindow::togglePlayPause() {
             prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
             if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
                 && !error.isEmpty()) {
-                statusBar()->showMessage(error, 3000);
+                showTransientMessage(error, 3000);
             }
             // The slider still reads the old position, and startAudioForPlayback
             // below takes its start offset from the current frame.
@@ -5433,6 +5446,27 @@ void MainWindow::startShuttle(int direction, trace::core::ShuttleEntry entry) {
 // that was permanently visible, so the overlay read "1.0x" and "PAUSED" forever
 // where the spec asks for a rate that appears on a press and clears itself.
 // A readout that is always on is a HUD; a transport announces a change.
+// Every transient user-facing message goes through here -- the confirmations,
+// refusals and errors that were statusBar()->showMessage at 35 call sites. One
+// function, two surfaces: the docked-chrome mode keeps the status bar (same
+// chrome, same geometry, same place the record's figures were taken), and the
+// shipping overlay mode shows a composited toast that both renderers draw.
+// Routing on barIsDocked_ rather than re-reading the environment, because that
+// member IS the applied decision -- the same single gate that already decides
+// which transport is on screen, so the message surface and the transport cannot
+// disagree about which mode the app is in.
+void MainWindow::showTransientMessage(const QString& text, int timeoutMs) {
+    if (barIsDocked_) {
+        statusBar()->showMessage(text, timeoutMs);
+        return;
+    }
+    transientMessageText_ = text;
+    transientMessageTimer_.start(timeoutMs);
+    // The overlay has no widget to invalidate itself -- same as the rate flash:
+    // ask for the repaint here, and the timer asks for the one that clears it.
+    if (viewer_) viewer_->update();
+}
+
 void MainWindow::flashRate(const QString& text) {
     rateFlashText_ = text;
     if (transportBar_) transportBar_->flashRate(text);
@@ -5522,7 +5556,7 @@ void MainWindow::stepOneFrame(int delta, const char* hudLabel) {
     ++landingsSync_;
     QString error;
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        if (!error.isEmpty()) showTransientMessage(error, 3000);
         // Put the playhead back where it was AND re-land the frame it names: a
         // step that could not be decoded must not leave the counter claiming a
         // frame the viewer is not showing. The button path did this and the
@@ -6657,7 +6691,7 @@ void MainWindow::onScrubResult() {
                 playbackPrefetchNext_ = -1;
                 continue;
             }
-            if (!result.error.isEmpty()) statusBar()->showMessage(result.error, 3000);
+            if (!result.error.isEmpty()) showTransientMessage(result.error, 3000);
             hardError = true;
             continue;
         }
@@ -7105,7 +7139,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         if (activeScrubFrame_ != targetFrame) {
             scrubTimer_.start(scrubRearmMs());
         }
-        if (!error.isEmpty()) statusBar()->showMessage(error, 3000);
+        if (!error.isEmpty()) showTransientMessage(error, 3000);
         refreshHud("Scrub");
         return;
     }
@@ -7140,7 +7174,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
         activeScrubFrame_ = targetFrame;
         scrubShownExact_ = (mode == trace::core::VideoDecoderFFmpeg::RequestMode::Step);
     } else if (!error.isEmpty()) {
-        statusBar()->showMessage(error, 3000);
+        showTransientMessage(error, 3000);
     }
 
     // Refresh here too: the scrub branch of valueChanged returns without
@@ -7158,7 +7192,7 @@ void MainWindow::flushVideoScrub(bool forceExact) {
 void MainWindow::openMediaPath(const QString& path) {
     const QFileInfo fi(path);
     if (path.isEmpty() || !fi.exists() || !fi.isFile()) {
-        statusBar()->showMessage("Ignored command-line path: " + path, 3000);
+        showTransientMessage("Ignored command-line path: " + path, 3000);
         return;
     }
     openPath(fi.absoluteFilePath());

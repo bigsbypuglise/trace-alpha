@@ -371,10 +371,82 @@ void OverlayModel::rebuildText() {
     ++textRevision_;
 }
 
+// The transient message pill -- the surface that replaced the status bar for
+// user-facing text (spec step 4 of the UI redesign roadmap). The pill's
+// background is baked into the image itself, so showing a message costs one
+// quad and no atlas dependency: it has to draw over any frame of video, and it
+// has to draw when the panel has never been shown and the atlas is still null.
+//
+// Cached on the string alone, exactly as rebuildText is: an elide that would
+// change with the surface width is not worth re-rasterising every resize for,
+// because a message lives for two to five seconds.
+void OverlayModel::rebuildMessage(QSize surfacePixels) {
+    const QString text = hooks_.messageText ? hooks_.messageText() : QString();
+    if (text == messageCached_ && (text.isEmpty() == message_.isNull())) return;
+    messageCached_ = text;
+    if (text.isEmpty()) {
+        if (!message_.isNull()) { message_ = QImage(); ++messageRevision_; }
+        return;
+    }
+
+    QFont font;
+    font.setPixelSize(std::max(1, static_cast<int>(13 * dpr_)));
+    const QFontMetrics fm(font);
+    const double padX = 10.0 * dpr_;
+    const double padY = 6.0 * dpr_;
+    const double margin = 12.0 * dpr_;
+    const int maxTextW = std::max(static_cast<int>(32 * dpr_),
+                                  static_cast<int>(surfacePixels.width() - 2.0 * (margin + padX)));
+    const QString shown = fm.elidedText(text, Qt::ElideRight, maxTextW);
+    const QSize textSz = fm.size(Qt::TextSingleLine, shown);
+    const QSize sz(textSz.width() + static_cast<int>(2 * padX),
+                   textSz.height() + static_cast<int>(2 * padY));
+
+    QImage image(sz, QImage::Format_ARGB32_Premultiplied);
+    if (image.isNull()) return;
+    image.fill(Qt::transparent);
+    QPainter p(&image);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setRenderHint(QPainter::TextAntialiasing, true);
+    // The panel's own colour family, slightly more opaque: this is read over
+    // moving picture, not over a dimmed strip.
+    QPainterPath pill;
+    pill.addRoundedRect(QRectF(0.5, 0.5, sz.width() - 1.0, sz.height() - 1.0),
+                        6.0 * dpr_, 6.0 * dpr_);
+    p.fillPath(pill, QColor(18, 18, 20, 205));
+    p.setPen(QPen(QColor(255, 255, 255, 40), 1.0));
+    p.drawPath(pill);
+    p.setPen(QColor(235, 235, 235));
+    p.setFont(font);
+    p.drawText(QRect(QPoint(0, 0), sz), Qt::AlignCenter, shown);
+    p.end();
+
+    message_ = image;
+    ++messageRevision_;
+}
+
 const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     quads_.clear();
     if (!enabled_ || surfacePixels.isEmpty()) return quads_;
-    if (opacity_ <= 0.001) return quads_;
+
+    // The message is deliberately OUTSIDE the opacity gate: a confirmation or
+    // an error is shown for its own timeout, whether or not the transport is
+    // revealed, and it does not fade with the panel. Top-left with a margin --
+    // clear of the bottom-centred panel at every window shape, including the
+    // 460px-wide portrait minimum.
+    rebuildMessage(surfacePixels);
+    const auto pushMessage = [&]() {
+        if (message_.isNull()) return;
+        const double margin = 12.0 * dpr_;
+        quads_.push_back(OverlayQuad{QRectF(margin, margin, message_.width(), message_.height()),
+                                     QRectF(QPointF(0, 0), QSizeF(message_.size())),
+                                     1.0f, 1.0f, OverlayQuad::Source::Message});
+    };
+
+    if (opacity_ <= 0.001) {
+        pushMessage();
+        return quads_;
+    }
 
     setSurfaceSize(surfacePixels);
     if (atlasDirty_) rebuildAtlas();
@@ -444,6 +516,10 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
         push(textRect, QRectF(QPointF(0, 0), QSizeF(text_.size())), a, 1.0f,
              OverlayQuad::Source::Text);
     }
+
+    // Last, so it composites over the panel in the one case they could ever
+    // meet (a very short window); everywhere else the order is irrelevant.
+    pushMessage();
 
     return quads_;
 }

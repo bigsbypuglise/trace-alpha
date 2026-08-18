@@ -77,6 +77,14 @@ struct OverlayHooks {
     std::function<bool()> isPlaying;
     std::function<double()> positionFraction;
     std::function<QString()> rateText;
+    // The transient user-facing message -- what the status bar's showMessage
+    // used to carry: "File path copied.", an open failure, a Go to Timecode
+    // refusal. One string owned by the host (the same shape as rateText), shown
+    // while non-empty and cleared by the host's own timer. It is a separate
+    // hook rather than a second reader of rateText because the two can be live
+    // at once -- a shuttle press while an error is still up -- and because the
+    // message must outlive the panel's fade where the rate chip must not.
+    std::function<QString()> messageText;
 
     // A veto on the auto-hide, asked each time the idle timer fires. The spec's
     // list -- a popup menu open, a tooltip open, a child control holding
