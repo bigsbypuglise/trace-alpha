@@ -652,6 +652,11 @@ private:
     // media open the chrome is held up, since there is nothing for it to get out
     // of the way of.
     bool topChromeRevealed_ = false;
+    // Mirror of OverlayModel's fade opacity (owner item 11), pushed per
+    // animation tick through OverlayHooks::setChromeOpacity. Held so
+    // syncTopChrome can re-derive the strip's effective alpha when the answer
+    // changes with no tick arriving -- media opening or closing.
+    double chromeFadeOpacity_ = 0.0;
     void syncTopChrome();
     // Whether the transport bar is in the layout (TRACE_TRANSPORT_BAR) or the
     // floating overlay is the transport. The bar object exists in both cases,

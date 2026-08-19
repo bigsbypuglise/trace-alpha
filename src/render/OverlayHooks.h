@@ -152,6 +152,13 @@ struct OverlayHooks {
     // panel has finished fading rather than halfway through it.
     std::function<void(bool)> setChromeRevealed;
 
+    // Owner item 11 (2026-08-18): the model's own fade opacity, reported on
+    // every animation tick, so the native top strip can fade in LOCKSTEP with
+    // the composited transport -- same kFadeMs, same clock, no second timer.
+    // setChromeRevealed above stays the map/unmap edge; this is the ramp
+    // between its two calls. A host that does not fade simply leaves it unset.
+    std::function<void(double)> setChromeOpacity;
+
     // Hide or show the pointer. Called only on the transitions, never per move.
     // The overlay decides WHEN -- the same inactivity that fades the panel --
     // and the host decides WHETHER, because the spec hides the cursor in

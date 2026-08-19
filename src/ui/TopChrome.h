@@ -111,6 +111,24 @@ public:
     // an image at all, which is exactly what bar mode does.
     void setBackdrop(const QImage& tiny);
 
+    // Owner item 11 experiment (2026-08-18): fade the native strip with
+    // WHOLE-WINDOW opacity -- WS_EX_LAYERED plus SetLayeredWindowAttributes
+    // (LWA_ALPHA) on this widget's own HWND. Driven from OverlayModel's fade
+    // opacity through MainWindow, so the strip ramps in lockstep with the
+    // composited transport: same kFadeMs, same clock, no second timer.
+    //
+    // Uniform alpha only, never UpdateLayeredWindow -- the paint path is
+    // untouched and the alpha is applied by the compositor. What the strip
+    // blends AGAINST mid-fade is the whole experiment: a layered child blends
+    // against what is beneath it in the window tree, and the video is a
+    // sibling HWND whose pixels may or may not be there. Measured, not read.
+    //
+    // TRACE_TOPCHROME_FADE=0 is the control: the style is never applied and
+    // setRevealed pops exactly as before. TRACE_TOPCHROME_ALPHA=N (0..255)
+    // pins the alpha so a mid-fade state can be captured as a stable state
+    // rather than an 82ms window.
+    void setFadeOpacity(double opacity01);
+    static bool fadeEnabled();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -123,6 +141,11 @@ protected:
 
 private:
     void relayout();
+    void applyLayeredAlpha(int alpha);
+
+    // The last alpha applied. Starts at 0 so the first fade-in maps the window
+    // transparent and ramps, rather than popping opaque for one tick.
+    int fadeAlpha_ = 0;
 
     QLabel* titleLabel_ = nullptr;
     QMenuBar* menuBar_ = nullptr;

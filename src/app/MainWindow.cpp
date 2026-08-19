@@ -1401,6 +1401,15 @@ void MainWindow::installOverlayHooks() {
         topChromeRevealed_ = revealed;
         syncTopChrome();
     };
+    // Owner item 11: the strip fades on the model's own opacity, in lockstep
+    // with the composited transport. The host's one condition mirrors
+    // syncTopChrome's -- with no media the strip is held up, so its alpha is
+    // pinned full rather than following a fade that has nothing to get out of
+    // the way of.
+    hooks.setChromeOpacity = [this](double opacity) {
+        chromeFadeOpacity_ = opacity;
+        if (topChrome_) topChrome_->setFadeOpacity(currentMedia_ ? opacity : 1.0);
+    };
     hooks.setCursorHidden = [this](bool hidden) {
         // The overlay decides WHEN -- the same inactivity that fades the panel.
         // The spec hides the cursor in fullscreen only, so this decides WHETHER,
@@ -5848,6 +5857,11 @@ void MainWindow::syncTopChrome() {
         currentMedia_ ? QFileInfo(QString::fromStdString(currentMedia_->path)).fileName()
                       : QString());
     topChrome_->setRevealed(topChromeRevealed_ || !currentMedia_.has_value());
+    // Owner item 11: re-derive the effective fade alpha here too, because this
+    // is the path that runs when the answer changes with NO animation tick --
+    // media opening or closing under a held-up strip. With no media the strip
+    // is forced visible above, so its alpha must be forced full with it.
+    topChrome_->setFadeOpacity(currentMedia_ ? chromeFadeOpacity_ : 1.0);
     // UI roadmap step 10 route 2.
     //
     // The backdrop is sampled per frame and gated on the reveal state, so this is

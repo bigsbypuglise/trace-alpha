@@ -11,6 +11,14 @@
 #include <QResizeEvent>
 
 #include <algorithm>
+#include <cmath>
+
+#ifdef Q_OS_WIN
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace trace::ui {
 namespace {
@@ -46,6 +54,27 @@ const QColor kHairline(255, 255, 255, 18);
 const QColor kTitle(0xC7, 0xCD, 0xD4);
 // The empty-state mockup's own dimmer grey for "No media".
 const QColor kTitleEmpty(0x6E, 0x74, 0x7B);
+
+// Owner item 11 experiment. Default ON so the experiment measures what would
+// ship; =0 is the control and never touches the window's ex-style.
+bool fadeKnob() {
+    static const bool v = qgetenv("TRACE_TOPCHROME_FADE") != "0";
+    return v;
+}
+
+// Pin the layered alpha for measurement: a mid-fade frame is an 82ms window,
+// a pinned alpha is a stable state the harness can capture at leisure. -1
+// means not pinned.
+int pinnedAlpha() {
+    static const int v = [] {
+        const QByteArray e = qgetenv("TRACE_TOPCHROME_ALPHA");
+        if (e.isEmpty()) return -1;
+        bool ok = false;
+        const int n = e.toInt(&ok);
+        return ok ? std::clamp(n, 0, 255) : -1;
+    }();
+    return v;
+}
 
 } // namespace
 
@@ -115,11 +144,47 @@ void TopChrome::setMediaTitle(const QString& title) {
 
 void TopChrome::setRevealed(bool revealed) {
     if (revealed == isVisible()) return;
+    // Apply the current alpha BEFORE the window maps. The reveal edge fires
+    // at the START of the model's fade-in, when its opacity is still 0, so
+    // this is what makes the strip arrive transparent and ramp rather than
+    // popping opaque for the first tick. On the very first show fadeAlpha_ is
+    // its initial 0 for the same reason.
+    if (revealed && fadeEnabled())
+        applyLayeredAlpha(pinnedAlpha() >= 0 ? pinnedAlpha() : fadeAlpha_);
     setVisible(revealed);
     // A native sibling starts life below the video surface in z-order; raising
     // it on each show is cheaper than trying to keep the order correct across
     // every path that can create or resize the surface.
     if (revealed) raise();
+}
+
+bool TopChrome::fadeEnabled() { return fadeKnob(); }
+
+void TopChrome::applyLayeredAlpha(int alpha) {
+#ifdef Q_OS_WIN
+    // winId() is safe here: the widget is WA_NativeWindow from the
+    // constructor, so this forces nothing that was not already forced.
+    HWND hwnd = reinterpret_cast<HWND>(winId());
+    const LONG_PTR ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+    if (!(ex & WS_EX_LAYERED))
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_LAYERED);
+    // Uniform alpha, LWA_ALPHA only. The window keeps painting normally into
+    // its own surface; the compositor applies the alpha. UpdateLayeredWindow
+    // -- the per-pixel variant -- would take over the paint path entirely and
+    // is exactly what this experiment is shaped to avoid.
+    SetLayeredWindowAttributes(hwnd, 0, static_cast<BYTE>(alpha), LWA_ALPHA);
+#else
+    Q_UNUSED(alpha);
+#endif
+}
+
+void TopChrome::setFadeOpacity(double opacity01) {
+    if (!fadeEnabled()) return;
+    int alpha = static_cast<int>(std::lround(std::clamp(opacity01, 0.0, 1.0) * 255.0));
+    if (pinnedAlpha() >= 0) alpha = pinnedAlpha();
+    if (alpha == fadeAlpha_) return;
+    fadeAlpha_ = alpha;
+    applyLayeredAlpha(alpha);
 }
 
 bool TopChrome::eventFilter(QObject* watched, QEvent* event) {

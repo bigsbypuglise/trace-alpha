@@ -1565,6 +1565,9 @@ void OverlayModel::tickAnimation() {
         animTimer_.stop();
         if (opacity_ <= 0.0) hover_ = Region::None;
     }
+    // Before syncChrome, so when a fade-out lands on 0 the strip's alpha is
+    // already 0 by the time the revealed=false edge unmaps it.
+    if (hooks_.setChromeOpacity) hooks_.setChromeOpacity(opacity_);
     syncChrome();
     if (hooks_.requestRepaint) hooks_.requestRepaint();
 }
