@@ -215,6 +215,53 @@ instruction. **The backdrop ship decision interacts**: if the strip is rebuilt a
 quads, `TRACE_STRIP_BACKDROP` is moot; if it stays native, the painted blur is the only route
 to the design's look. Answer 8 and 11 before shipping the backdrop further.
 
+### Item 11 — CLOSED in a later session (2026-08-18): the native strip fades, option 3 worked
+
+The cheap experiment the write-up proposed — whole-window opacity on the native strip,
+`WS_EX_LAYERED` + `SetLayeredWindowAttributes(LWA_ALPHA)` — was run and it passes on the
+shipping renderer. Full record in the session summary; the durable facts:
+
+- **The pass criterion was what is revealed mid-fade, and the answer is THE VIDEO.** Measured
+  with a pinned alpha (`TRACE_TOPCHROME_ALPHA=128`) over bright footage with the backdrop
+  forced off: the mid capture matches the per-pixel prediction `(strip + video)/2` at
+  **MAE 0.16**, against 85.29 for the blend-toward-black failure mode. DWM composites the
+  layered child against the sibling swapchain's pixels.
+- **It only works because of a manifest nobody had ever needed.** Layered CHILD windows are
+  ignored unless the app declares Windows 8+ `supportedOS`, and Trace.exe carried only a
+  `trustInfo` manifest — the first run measured alpha 128 rendering byte-identical to alpha
+  255 (MAE 0). `app/trace.manifest` adds the declaration; the linker merges it. This changes
+  the app-wide OS compatibility context, which is why the regression below was run.
+- **No second timer.** The strip's alpha is driven per animation tick from `OverlayModel`'s
+  own fade opacity through `OverlayHooks::setChromeOpacity`, so top and bottom ramp in exact
+  lockstep over the same `kFadeMs` — measured as a real ~165ms ramp with four intermediate
+  frames between strip mean and video mean. `setChromeRevealed` stays the map/unmap edge.
+- **`TRACE_RENDERER=cpu` keeps the pop, and that is graceful rather than broken.** The alpha
+  is applied at the OS level identically (probed: both strips read `LAYERED alpha=128`), but
+  Qt's native children share the top-level backing store, so the rows under the strip hold a
+  baked copy of the strip itself — strip blended over strip reads opaque. The strip maps and
+  unmaps at the same instants as before the change, so cpu is visually identical to the old
+  behaviour. With no media the host pins alpha full, so the empty state cannot fade its menu
+  access away.
+- **Hit-testing and the reveal loop are unaffected.** A click on File and an `Alt+F` from a
+  hidden strip both open the menu while layered; `TRACE_REVEAL_LOG=1` over a 10s parked
+  pointer reads `SHOWN 0 / HIDDEN 1 / synthetic-filtered 1`, identical to a fade-off control.
+- Knobs: `TRACE_TOPCHROME_FADE=0` is the rollback (never touches the window style),
+  `TRACE_TOPCHROME_ALPHA=N` pins the alpha for measurement. Harness:
+  `scripts/measure/topchromefade.ps1` (blend / anim / menus / loop).
+
+**Item 8 is NOT closed by this**: at rest the strip is still opaque over the painted blur.
+What changed is that a uniform resting translucency is now *possible* on d3d11 — an owner
+option, deliberately not taken here because cpu cannot match it.
+
+**One harness defect found and fixed on the way** (`emptystate.ps1 -Mode transport`): it
+revealed with a single `SetCursorPos` to a fixed pixel, and every run parks the pointer on
+that exact pixel — so back-to-back runs generated NO input at all (confirmed with
+`TRACE_REVEAL_LOG=1`: no mousemove line, not even a filtered one) and failed a correct build
+in both fade configurations. It jiggles through two points now; 4× back-to-back PASS after.
+Third instance of the mouse-harness-inputs class. The `swap` leg is separately unrunnable
+from a headless session — its File ▸ Open dialog typing needs the foreground, and the
+fade-off control fails it identically.
+
 ---
 
 ## Regression (this session, physical panel 5120x1440 @ 239.999Hz unless stated)

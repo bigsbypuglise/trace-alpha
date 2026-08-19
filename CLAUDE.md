@@ -1109,14 +1109,48 @@ expected paints difference**: idle runs with the pointer inside the window no lo
 chrome every 2.2s, so paint counts can read lower than older records — that is the bug being
 gone.
 
-**Items 8 and 11 (top strip translucency + fade) are UNANSWERED BY DESIGN and block on one
-owner choice** — accept the native strip (blur backdrop already gives the design's look when
-revealed; pops rather than fades), or rebuild it as composited quads (fade + translucency, at
-the cost of re-doing the menu accessibility by hand that the real `QMenuBar` gives free — a
-phase-14-scale effort plus a new Narrator listen). A cheap measured experiment exists between
-them (uniform-alpha `WS_EX_LAYERED` fade on the native strip — §18.4 warns this class fails,
-so measure, never assume). **The backdrop decision interacts: composited quads would moot
-`TRACE_STRIP_BACKDROP`; native keeps the blur as the only route to the design's look.**
+**ITEM 11 IS CLOSED (2026-08-18, the session after the triage): THE NATIVE STRIP FADES, AND
+THE CHEAP EXPERIMENT WON.** Uniform-alpha `WS_EX_LAYERED` + `SetLayeredWindowAttributes
+(LWA_ALPHA)` on the strip's own HWND, driven per animation tick from `OverlayModel`'s fade
+opacity through the new `OverlayHooks::setChromeOpacity` — same `kFadeMs`, same clock, no
+second timer, so top and bottom ramp in lockstep. §18.4's warning applied to *translucency*
+(blending a static strip against video pixels Qt cannot reach); a layered fade is composited
+by DWM, and **what a mid-fade frame reveals on the d3d11 default is THE VIDEO, not black** —
+measured with a pinned alpha (`TRACE_TOPCHROME_ALPHA=128`) over bright footage: the capture
+matches `(strip+video)/2` per pixel at **MAE 0.16** against 85.29 for the toward-black
+failure mode, and a real hide is a ~165ms ramp with four intermediate frames. Record in
+`docs/ui-feedback-260818-progress.md`. Four things to carry:
+
+- **LAYERED CHILD WINDOWS ARE SILENTLY IGNORED WITHOUT A WINDOWS 8+ `supportedOS` MANIFEST,
+  AND TRACE NEVER HAD ONE.** The first run measured alpha 128 rendering byte-identical to
+  alpha 255 (MAE 0) with the style and attributes correctly applied at the OS level.
+  `app/trace.manifest` (merged by the linker beside the default `trustInfo`) is what makes
+  the whole mechanism live — it changes the app-wide OS compatibility context, which is why
+  the full regression was run against it and read flat.
+- **`TRACE_RENDERER=cpu` KEEPS THE POP, GRACEFULLY, AND THE MECHANISM IS KNOWN.** The OS
+  state is identical (probed: `LAYERED alpha=128` on both backends) but Qt's native children
+  share the top-level backing store, so the rows under the strip hold a baked copy of the
+  strip itself — strip blended over strip reads opaque. The strip maps/unmaps at the same
+  instants as before, so cpu is visually identical to the pre-fade behaviour; with no media
+  the host pins alpha full, so the empty state cannot fade its menu access away.
+- **Hit-testing, menus, `Alt` mnemonics and the items-3+7 reveal fix are unaffected** —
+  click-on-File and Alt+F-from-hidden both open menus while layered, and a 10s parked-pointer
+  `TRACE_REVEAL_LOG` run reads `SHOWN 0 / HIDDEN 1 / synthetic-filtered 1`, identical to the
+  fade-off control. **`TRACE_TOPCHROME_FADE=0` is the rollback** (never touches the window
+  style); `TRACE_TOPCHROME_ALPHA=N` pins the alpha for capture. Harness:
+  `scripts/measure/topchromefade.ps1` (blend / anim / menus / loop).
+- **`emptystate.ps1 -Mode transport` HAD A HARNESS DEFECT THIS FOUND**: it revealed with a
+  single `SetCursorPos` to a fixed pixel that every run parks the pointer on, so
+  back-to-back runs generated no input at all — Windows posts no `WM_MOUSEMOVE` for a cursor
+  that did not move (confirmed by reveal log: no line, not even filtered) — and it failed a
+  correct build in both fade configurations. It jiggles through two points now. Its `swap`
+  leg needs the foreground for dialog typing and is not runnable headless; the control fails
+  it identically.
+
+**Item 8 (resting translucency) is NOT closed by this** — at rest the strip is opaque over
+the painted blur, which remains the route to the design's look. A uniform resting alpha is
+now *possible* on d3d11 but would diverge from cpu; that is an owner option, not taken. The
+composited-quads rebuild (option 2) is moot for the fade and no longer justified by it.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
@@ -3733,6 +3767,14 @@ variance. It is the ONLY route to the design's blur, because Mica/Acrylic blur t
 behind the WINDOW rather than the video behind the ELEMENT and reach the title bar only.
 **Read the HUD's `backdrop` field rather than the command line** -- the answer is no longer
 decided by the launch),
+**`TRACE_TOPCHROME_FADE=0`** (2026-08-18, owner item 11: back to the top strip popping on and
+off instead of fading by layered-window alpha. **Default is the fade**; this is the rollback
+and the control, and it never applies `WS_EX_LAYERED` at all. The fade is real only on the
+d3d11 default — cpu ignores the alpha for a known backing-store reason and keeps the pop
+either way — and **it depends on `app/trace.manifest`'s Windows 8+ supportedOS declaration**,
+without which the alpha is silently ignored on both. `TRACE_TOPCHROME_ALPHA=N` (0..255) pins
+the alpha so a mid-fade state can be captured as a stable state; measurement knob only.
+Harness: `scripts/measure/topchromefade.ps1`),
 **`TRACE_THEME_LOG=1`** (2026-08-18, roadmap step 10: print the font family that ACTUALLY
 resolved and the `Segoe UI Variable` families **Qt** can see, which are not the ones GDI lists.
 It exists because the first build of `src/app/Theme.*` asked for a family Qt does not enumerate,

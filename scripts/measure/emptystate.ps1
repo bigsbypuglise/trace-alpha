@@ -336,6 +336,17 @@ switch ($Mode) {
     [ES]::SetForegroundWindow($h) | Out-Null
     Start-Sleep -Seconds 3
     $hidden = Grab $box (Join-Path $OutDir "transport-hidden-$Renderer.png")
+    # TWO moves, not one. A single SetCursorPos to a fixed target reveals
+    # nothing when the pointer is already ON that pixel -- which it is on every
+    # second back-to-back run, because this leg's own reveal parks it there and
+    # the next launch opens the window at the same section-4 position. Windows
+    # posts no WM_MOUSEMOVE for a cursor that did not move (confirmed with
+    # TRACE_REVEAL_LOG=1: no mousemove line at all, not even a filtered one),
+    # so the run fails with "NOTHING CHANGED" on a correct build. Third
+    # instance of the mouse-harness-inputs class; jiggling through two points
+    # guarantees at least one real coordinate change from any prior state.
+    [ES]::SetCursorPos(($box.x + [int]($box.w / 2) - 9), ($box.y + [int]($box.h * 0.55) - 7)) | Out-Null
+    Start-Sleep -Milliseconds 80
     [ES]::SetCursorPos(($box.x + [int]($box.w / 2)), ($box.y + [int]($box.h * 0.55))) | Out-Null
     Start-Sleep -Milliseconds 700
     $shown = Grab $box (Join-Path $OutDir "transport-shown-$Renderer.png")
