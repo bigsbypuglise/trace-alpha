@@ -1,6 +1,22 @@
-# THE UI REDESIGN ROADMAP IS DONE EXCEPT STEP 12. THE BETA RE-CUT IS PREPARED, CI IS GREEN, AND THE ONE OPEN ITEM IS THE OWNER'S LOOK.
+# v0.3.0-beta.1 IS SHIPPED. THE UI REDESIGN ROADMAP IS DONE EXCEPT STEP 12, WHICH IS THE OWNER'S TO SCHEDULE.
 
-## 2026-08-19, SESSION: STEP 11 RE-CONSOLIDATED AT HEAD, CI UN-BROKEN, THE RE-CUT DRAFTED
+## 2026-08-19, SESSION (part 2): THE BETA IS CUT AND PUBLISHED
+
+**`v0.3.0-beta.1` shipped with owner approval, tag at `ae3ff73`** —
+https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.3.0-beta.1, prerelease, asset
+`trace-windows-x64.zip`. The draft went over `docs/release-body.md` minus its banner and
+checklist. **The tag build is green with every step read individually** (run `32269075342`),
+including the two tag-only steps a branch build never exercises: dependency gate · FFmpeg +
+audio detected · `6 required files present, 95.4 MB total` · **`renderer=d3d11 fellback=0
+planar=1`** · `OK - 11 shapes x 4 scale factors` · release ZIP created and uploaded. 49
+commits since `v0.2.0-beta.1`.
+
+**What is open now**: step 12 (frameless window — the real fix for the duplicate top bar,
+highest-risk item left, owner schedules it) · the empty-state prism animation (owner decision,
+not a tidy-up) · the deferred list below, unchanged. There is no open owner item on the
+release itself.
+
+## 2026-08-19, SESSION (part 1): STEP 11 RE-CONSOLIDATED AT HEAD, CI UN-BROKEN, THE RE-CUT DRAFTED
 
 One commit (`86f1186`, the CI fix) plus the docs. **Physical panel, 5120x1440 @ 239.999Hz.**
 Full records: the banner at the top of roadmap §11, and the 2026-08-19 block in `CLAUDE.md`.

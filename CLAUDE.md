@@ -1271,15 +1271,20 @@ Four things to carry.
   the accessibility regression it isn't. Jiggle through two points before any walk or capture
   that needs the chrome up. `emptystate.ps1` already records this; it applies to *any* code
   that reveals by pointer, not just that script.
-- **THE RELEASE STATE**: `docs/release-body-draft.md` is re-drafted at `86f1186` and
-  supersedes the 2026-08-18 draft, which described the deleted blur and a ten-control strip.
-  Version `0.3.0` and all three stage literals verified against the **HEAD binary** (`(beta)`
-  UTF-8, `Beta.` capital — a lowercase-only search misses it — and the mail subject; `0.2.0`
-  absent). Checklist items 1–3 are done; **the one open item is the owner's look at the
-  finished interface at the machine**, and the resting translucency landed last so it has not
-  been seen settled. **To cut: copy the draft over `docs/release-body.md`, commit, tag
-  `v0.3.0-beta.1`** — the workflow publishes `docs/release-body.md` as the release body.
-  Step 12 (frameless window) remains the owner's to schedule.
+- **THE RELEASE STATE — `v0.3.0-beta.1` IS SHIPPED (owner approved, 2026-08-19, tag at
+  `ae3ff73`).** `docs/release-body-draft.md` was re-drafted at `86f1186` (superseding the
+  2026-08-18 draft, which described the deleted blur and a ten-control strip), copied over
+  `docs/release-body.md` minus its draft banner and checklist, and tagged. Version `0.3.0`
+  and all three stage literals verified against the shipped binary (`(beta)` UTF-8, `Beta.`
+  capital — a lowercase-only search misses it — and the mail subject; `0.2.0` absent). **The
+  tag build is green with every step read individually** (run `32269075342`): dependency gate
+  `all DLLs import only Windows system libraries` · `FFmpeg detected` + `Audio dependencies
+  detected` · `6 required files present, 95.4 MB total` · **`renderer=d3d11 fellback=0
+  planar=1`** (the hardware path) · `OK - 11 shapes x 4 scale factors` · release ZIP built
+  and published — prerelease `v0.3.0-beta.1`, asset `trace-windows-x64.zip`, at
+  https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.3.0-beta.1. 49 commits since
+  `v0.2.0-beta.1`. Step 12 (frameless window) remains the owner's to schedule and is the
+  next major interface item.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
