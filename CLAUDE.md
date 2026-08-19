@@ -1333,6 +1333,61 @@ dev-box reference block: `docs/mp4-scrub-threadripper.md`. Five things to carry.
   reproduce the tuned values on the home box** (converging to anything but 4 there means it
   is wrong).
 
+**THE THREADRIPPER MP4 SCRUB FAULT IS DIAGNOSED AND FIXED (2026-08-19, same day as the
+diagnostic): THE SCRUB CHAIN'S PAINT WAS THROTTLED BY THE PRESENT, AND THE FIX IS THE SCRUB
+PAINT GATE.** Full record in `docs/mp4-scrub-threadripper.md` — read it before touching
+anything in the drag present path. The Threadripper's selftest paste refuted the worker
+round trip too (overhead 0.22–1.43ms, 6.6–8.4% of rt) and showed presented throughput
+pinned at 57.8–59.6 f/s against 58–307 f/s of demand, paint gap 16.4–17.0ms against a
+59.98Hz monitor, decode 0.79–0.93ms — one paint per refresh, each blocking the UI thread,
+was the entire cost. Six things to carry.
+
+- **THE REFRESH RATE ALONE IS NOT THE MECHANISM — the dev box's own panel at a true
+  5120x1440@60Hz runs the selftest BYTE-FOR-BYTE at its 240Hz figures.** Interval-0 flip
+  presents are last-one-wins on this driver/DWM and never block at any refresh. The
+  throttle is a machine class (forced driver vsync / composed presentation), which the
+  Threadripper is in and this box is not; the exact cause there is left unattributed and
+  the fix is robust to the class. `scripts/measure/setrefresh.ps1` changes the panel's
+  mode (dynamic, restore explicitly, refuses unadvertised modes); **`TRACE_PRESENT_SYNC=1`
+  is the in-binary model of the throttled class** (Present at sync interval 1 — a
+  diagnostic, never a configuration) and under it this box reproduces the fault harshly
+  (paints block ~250ms here vs ~16.7ms there; same class, machine-specific severity).
+- **THE FIX: decode is decoupled from presentation during the async drag chain.** Every
+  frame is still decoded, delivered, counted and cached in order — no stride, no skips,
+  not §15 — but the screen is painted at most once per gate period, always with the newest
+  delivered frame, through `paintScrubFrameNow()`, the one place a chain frame reaches the
+  screen (a pending single-shot paints the trailing frame at the gate boundary). Landing,
+  release, shuttle, playback and the sync walk are untouched. `TRACE_SCRUB_PAINT_GATE=0`
+  is the rollback and the pre-fix control.
+- **THE GATE IS `max(refresh period, 2 x observed paint cost)`, AND A REFRESH-ONLY GATE
+  WAS BUILT FIRST AND MEASURED USELESS** — `gated 0` on the fault model, because a paint
+  that BLOCKS costs at least the gate period, so the gate is always open and the thread is
+  100% paint. The cost term (instant attack, slow decay, per media) bounds painting to
+  half the thread's wall time; on healthy machines it reads ~0.3ms and never binds, so
+  shipped boxes sit on the pure refresh gate, which is visually free (painting faster than
+  refresh shows nothing under last-one-wins presents).
+- **Validated on the fault model and flat on the healthy path.** 60Hz+PRESENT_SYNC=1: leg
+  supplies 2.8–11.7% → **100.2–125%**, slow-drag p2p 3292 → **0.4ms**, delta 0 throughout.
+  240Hz default: all four selftest legs identical to the pre-fix baseline within variance;
+  real-mouse scrub.ps1 forward/reversals figure-for-figure (rev-hit 97.3%, walk max 29,
+  hitch 8, delta 0); lifecycle 87.2%/0%; 4K H.264 cadence x2 99.2/99.2% `drop 0` identical
+  buckets; **25 of 25 transitions**; renderer selftest green.
+- **`--scrub-selftest` HAS A FOURTH LEG (owner instruction): rapid back-and-forth** — ten
+  16% throws at 150ms, ~6.7 direction changes/s — because the `-Reversals` shape is milder
+  than real use and a fix's validation gesture must be at least as demanding as the real
+  one. The report also prints `painted/gated` and `paint cost/gate` per leg; on a
+  throttled machine `paint cost` reads ≈ the refresh period, on a healthy one ~0.3ms.
+- **THE TWO PAINT-PACING REJECTIONS WERE HARDWARE-SPECIFIC PREMISES, the third this
+  investigation overturned** (after the threading refutation and the dev-box-tuned
+  constants). Both were measured on the 240Hz panel where paints cost 0.3ms and 98% landed
+  inside one refresh — true there, and the exact opposite of a machine where each paint
+  blocks a refresh. Cite them as history, not as a conclusion. Related correction: the
+  recorded remote-session scrub anomalies (hitch 8–9 at 60Hz-class displays) are
+  decode-walk hitches, not present blocks — Parsec-class virtual displays measured paint
+  gaps of 2.8ms and are NOT in the throttled class; the re-encoding attribution for feel
+  stands. The three dev-box-tuned scrub constants (batch 4, 8ms walk budget, 60ms fill)
+  are **exonerated by the paste** — do not adapt them.
+
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
 phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The
@@ -3845,6 +3900,14 @@ behaviour it replaces and the in-binary negative control. It is *not* a sampling
 frame is still decoded, delivered and presented individually and in order, and a §15 stride
 above 1 forces it to 1. On heavy media the 8ms walk budget collapses it to 1 by itself, so
 ProRes 4444 reads `batch cap 4 last 1 max 1` and is unchanged),
+**`TRACE_SCRUB_PAINT_GATE=0`** (2026-08-19: back to one synchronous paint per delivered
+drag frame — the pre-fix behaviour every recorded scrub figure was taken under, and the
+rollback for the scrub paint gate. Default is the gate: at most one paint per
+`max(refresh period, 2 x observed paint cost)`, newest frame wins, drag chain only),
+**`TRACE_PRESENT_SYNC=1`** (2026-08-19: Present at sync interval 1 on the d3d11 backend —
+a DIAGNOSTIC that models the machine class where presents block at the refresh, which is
+what the Threadripper turned out to be. Never ship it on: it makes the present a frame
+scheduler, which is what GATE E's design explicitly rules out),
 `TRACE_PREVIEW_DISPLAY_SIZE=0` (back to plain half-res previews),
 `TRACE_REVERSE_CACHE_MB` (reverse-cache byte budget, **default 384**; the
 control for any hitch measurement and the one number to change if the memory

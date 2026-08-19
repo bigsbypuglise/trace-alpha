@@ -3,27 +3,36 @@
 Owner report, 2026-08-19. Scrubbing MP4 files is badly degraded on a second machine, seen
 before and dismissed as a one-off. **ProRes is not affected. Only MP4.** Top priority.
 
-> **STATUS, 2026-08-19 (later the same day): THE THREADING HYPOTHESIS BELOW IS REFUTED.**
-> `TRACE_DECODE_THREADS=8` and `TRACE_LONGGOP_SLICE_THREADS=1` were both tried on the
-> Threadripper and neither helped — so the frame-pipeline-refill mechanism this brief leads
-> with is not the cause, and its five-minute test section is retained as the record of what
-> was ruled out. The fault also reproduces on `3_1080p_H264_MP4\M&M_TopGun_1080.mp4`, the
-> validated pool file, so **it is the machine, not the media.**
+> **STATUS, 2026-08-19 (final): DIAGNOSED AND FIXED. Both early hypotheses are refuted and
+> the cause is the scrub chain's PAINT, throttled by the present.**
 >
-> **The leading hypothesis is now the worker round trip** — the cross-thread cost of the
-> async scrub chain (post → condition-variable wake → decode → QueuedConnection delivery →
-> UI-thread drain). Playback decodes synchronously on the UI thread and pays none of it,
-> which fits the reported symptom exactly: scrub degraded, playback untouched. On the 720p
-> ComfyUI file that round trip was measured at 97% of the delivery interval; on a 32-core
-> Zen 2 Threadripper (4 CCDs, cross-CCD synchronisation) it is the term that can scale with
-> the machine while the file and the code stay identical. Nothing reported it in isolation
-> until now.
->
-> **The machine is locked down** — no session can run on it and no harness can be driven
-> there — so the next step is `--scrub-selftest`, below: one command, one pasteable block,
-> built to discriminate between the remaining hypotheses. **Do not change any scrub
-> constant until its output from that machine has been read** (see "Do not adapt anything
-> yet" at the end).
+> - **Threading: refuted.** `TRACE_DECODE_THREADS=8` and `TRACE_LONGGOP_SLICE_THREADS=1`
+>   were both tried on the Threadripper and neither helped. The five-minute test section
+>   below is retained as the record of what was ruled out. The fault also reproduces on
+>   `3_1080p_H264_MP4\M&M_TopGun_1080.mp4`, the validated pool file — the machine, not the
+>   media.
+> - **The worker round trip: refuted by the Threadripper's own selftest paste.** Overhead
+>   read 0.22–1.43ms, 6.6–8.4% of the round trip — nothing like a cost that could pin a
+>   drag.
+> - **The finding: the scrub loop was capped at one frame per display refresh.** Three legs
+>   of wildly different demand (pointer 58–307 f/s) all presented 57.8–59.6 f/s, paint gap
+>   16.4–17.0ms against that monitor's 59.98Hz, while decode read 0.79–0.93ms — a frame
+>   costs under a millisecond to decode and took a full refresh to appear. Leg 3 is the
+>   cleanest evidence: a slow 3x drag at supply 99.3% still read p2p 416ms. The chain was
+>   request → decode → deliver → **paint** → next request, and on that machine the paint's
+>   `Present` blocks until the display consumes a frame.
+> - **The refresh rate alone is NOT the mechanism — measured here, not assumed.** The dev
+>   box's own panel set to a true 5120x1440 @ 60Hz runs the identical selftest byte-for-byte
+>   at its 240Hz figures: interval-0 flip presents are last-one-wins on this driver/DWM and
+>   never block. The throttle is a **driver/composition property of the machine** (the
+>   forced-vsync / composed-presentation class), which the Threadripper has and this box
+>   does not. `TRACE_PRESENT_SYNC=1` is the in-binary model of that class, and under it the
+>   dev box reproduces the fault emphatically (see the fix section at the end).
+> - **The fix shipped: the scrub paint gate** — decode decoupled from presentation during a
+>   drag, painting rationed to the display refresh period or half the thread's wall time,
+>   whichever is coarser, always with the newest delivered frame. Every frame is still
+>   decoded, delivered, counted and cached in order; exact release and the landing are
+>   untouched. `TRACE_SCRUB_PAINT_GATE=0` is the rollback.
 
 | | dev box (all recorded figures) | the machine showing the fault |
 |---|---|---|
@@ -180,7 +189,7 @@ question. Exit 0 = report produced; 6 = clip missing/unopenable; 7 = a leg faile
 structurally (nothing presented, landing timed out, or release landed off target). **Slow
 numbers are the report, never a failure.**
 
-Three legs, each against a fresh reopen of the clip (cold cache, per-leg counters — the same
+Four legs, each against a fresh reopen of the clip (cold cache, per-leg counters — the same
 reason the harnesses restart Trace per run), window forced to 1280x760 logical so both
 machines measure at one size (window size drives cache depth, §22.8):
 
@@ -188,6 +197,11 @@ machines measure at one size (window size drives cache depth, §22.8):
 2. **reversal drag** — `scrub.ps1 -Reversals`, segment for segment;
 3. **slow forward drag** — ~3x speed for 2s. No recorded counterpart; it exists because a
    fixed per-request cost shows cleanest at low demand, where `p2p` is nearly pure latency.
+4. **rapid back-and-forth** — ten 16%-of-timeline throws at 150ms each, ~6.7 direction
+   changes a second. Owner instruction (2026-08-19): the `-Reversals` shape is milder than
+   real use, and a fix's validation gesture must be at least as demanding as the real one —
+   a milder harness gesture is how a fix passes the test and still feels broken, which this
+   project has recorded twice.
 
 The gesture is **time-based, never step-counted**, so a slow machine gets the same hand
 motion and shows its deficit as lag rather than slowing the hand down to hide it.
@@ -214,6 +228,11 @@ motion and shows its deficit as lag rather than slowing the hand down to hide it
 - **`behind` / `p2p` / `hitch`** — the subjective anchor. Note `p2p max` under the reversal
   leg is the metric's known artefact class (a gesture that crosses the same frames twice
   charges a frame with drag history); quote `p2p end`, `behind` and `hitch` from that leg.
+- **`painted N gated N | paint cost X ms gate Y ms`** on the hitch line (added with the
+  fix) — how many deliveries reached the screen, how many the gate declined at once, what
+  one paint observably costs on that machine, and the gate period those two produced.
+  `paint cost` near the refresh period **is** the throttled-present class; near 0.3ms is a
+  healthy present. `gated` non-zero is the gate working, not frames lost.
 - **`hud SHOWN|hidden`** on the knobs line — see below; the two configs measure different
   transports and a paste is only comparable to a paste in the same config.
 
@@ -242,14 +261,129 @@ ra-walk 18.8 vs 20.6, walk max 29 both, hitch 8 vs 8, delta 0 both. And on the 4
 file the reversal leg reads **rev-hit 98.8% | seeks 3 | hitch 1 | delta 0** — that file's
 recorded class. The instrument measures what the gesture measures.
 
-## Do not adapt anything yet (part 2, deliberately not started)
+## The part-2 question, resolved by the paste (2026-08-19)
 
-Three constants in the scrub path are tuned to the dev box and are the honest suspects: the
-**batch cap of 4**, the **8ms walk budget**, and the **60ms seek-walk fill budget**. Two
-others are already properly derived and are the model to follow — `thread_count` from
-`av_cpu_count()`, and the byte-budgeted reverse cache. **Adapting the wrong one is worse
-than adapting none**, and any change to those three risks the home box's recorded figures.
-Wait for the selftest's output from the affected machine; it names which term is wrong
-before anything is derived from anything. When an adaptive version is built, the safety
-property is that **it must reproduce the tuned values on the home box** — if it converges to
-something other than 4 there, it is wrong.
+The three dev-box-tuned constants — the **batch cap of 4**, the **8ms walk budget**, the
+**60ms seek-walk fill budget** — were the honest suspects, and the Threadripper's paste
+**exonerated all three**: batches, budgets and fills read normal there; the term that was
+wrong was the paint. The one piece of adaptivity actually built is therefore the paint
+gate's cost term, and it honours the safety property this section demanded: **on the home
+box it reproduces the tuned behaviour** — paint cost reads 0.28ms, the cost term never
+binds, the gate sits at the pure refresh period, and every recorded scrub figure is
+reproduced (measured, table below). Do not adapt the three constants; nothing in either
+machine's paste says they are wrong anywhere.
+
+---
+
+# The diagnosis and the fix (2026-08-19): the scrub paint gate
+
+## What the Threadripper paste said
+
+Overhead 0.22–1.43ms (6.6–8.4% of round trip) — the round-trip hypothesis dead. Presented
+throughput pinned at **57.8–59.6 f/s in all three legs** against pointer demand of 58–307
+f/s; paint gap **16.4–17.0ms** against the monitor's 59.98Hz (16.67ms); decode/frame
+0.79–0.93ms. Leg 2: supply 19.4%, 205 frames behind at peak, p2p max 2767ms. Leg 3 — the
+cleanest evidence, because nothing was being asked of it — supply 99.3% at a 3x drag and
+still paint gap 17.0ms, presented 57.8 f/s, p2p 416ms. A frame costs under a millisecond to
+decode and takes a full refresh to appear.
+
+It also explains MP4-versus-ProRes with nothing MP4-specific: 4K ProRes decodes at
+15–23ms/frame, at or below a 60Hz refresh already, so the cap never binds; 1080p H.264
+decodes at 0.9ms and is entirely paint-bound.
+
+## The mechanism, and the half of it the dev box corrected
+
+The chain was `request → decode → deliver → paint → next request`, with the paint a
+synchronous `repaint()` per delivered frame — deliberate, with the recorded reason that
+"update() coalesces, so a walk loop would decode every frame and display only the last."
+Each paint ends in `Present(0, 0)` on the flip-model swapchain, and on the Threadripper
+that present **blocks until the display consumes a frame**.
+
+**But the block is not a property of the refresh rate — it is a property of the machine's
+presentation path, and that was measured rather than assumed.** The dev box's own panel at
+a true 5120x1440 @ 60Hz (`scripts/measure/setrefresh.ps1`, mode restored after) runs the
+identical selftest **byte-for-byte at its 240Hz figures** — presented 157/353/71/245 f/s
+across the legs, paint gaps 2.8–13.9ms avg. On this driver/DWM, interval-0 flip presents
+are last-one-wins and never block, at any refresh. The Threadripper is in the class where
+they do (forced vsync in the driver, or a composed-presentation mode — the exact cause on
+that box is unattributed and does not need attributing; the fix is robust to the class).
+
+**`TRACE_PRESENT_SYNC=1` is the in-binary model of that class**: it presents at sync
+interval 1, so every present waits for the display. A diagnostic, never a configuration.
+Under it, the dev box at 60Hz reproduces the fault emphatically — in fact more harshly than
+the Threadripper (paints block ~250ms here, ~16.7ms there; the class is the same, the
+severity is machine-specific).
+
+## The fix: decode decoupled from presentation during a drag
+
+Every delivered frame still updates the playhead, the lag model, the counters and the cache,
+in order — nothing is sampled, nothing is skipped, and this is not §15's stride. What
+changed is that **the screen is painted at most once per gate period, always with the newest
+delivered frame**, and `paintScrubFrameNow()` is the one place a chain frame reaches the
+screen. A frame arriving inside the gate window is marked pending and a single-shot paints
+it at the boundary, so the trailing frame always lands. The landing, the release, the
+reverse shuttle (already paced by the tick), playback and the synchronous walk
+(`TRACE_ASYNC_SCRUB=0`) are untouched.
+
+**The gate period is `max(refresh period, 2 x observed paint cost)`, and the second term is
+what makes it work.** A gate pegged to the nominal refresh alone was built first and
+measured useless on the fault model — `gated 0`, nothing improved — because when a paint
+BLOCKS, it costs at least the gate period, so the gate is always open and the thread is
+100% paint. Bounding paints to half the thread's wall time keeps the chain fed however
+expensive the present is. The cost term is observed (instant attack, slow decay, reset per
+media), so on healthy machines it reads ~0.3ms against a 4.17–16.7ms refresh and **never
+binds** — the shipped boxes stay on the pure refresh gate, which is itself visually free:
+painting faster than the refresh cannot show anything when presents are last-one-wins.
+
+**Prior decisions this touches, cited as history.** Paint pacing was prototyped and
+rejected twice (Aug 2026, `5daa5ce` and the `TRACE_SCRUB_PACE` knob), both times on the
+240Hz panel, on the measured argument that 98% of paints landed inside one refresh and
+pacing bought ~200ms of paint cost across a whole run — nothing. At a throttled present
+those paints are not wasted, they are the bottleneck. That is the third hardware-specific
+premise this investigation overturned, after the threading refutation and the
+constants-tuned-on-one-box audit. The `repaint()`-not-`update()` rule survives inside
+`paintScrubFrameNow()` — when the gate decides to paint, the frame must be on screen when
+the call returns; what changed is how often it decides.
+
+## Validation (dev box, 2026-08-19, physical panel; fault model = 60Hz + TRACE_PRESENT_SYNC=1)
+
+| leg (M&M_TopGun_1080) | fault, fix OFF | fault, refresh-only gate | fault, shipped gate |
+|---|---|---|---|
+| 1 forward sweep: dec f/s / supply | 3.8 / 3.7% | 3.9 / 2.9% | **157.4 / 100.2%** |
+| 2 reversals: dec f/s / supply | 4.3 / 2.8% | 8.0 / 4.8% | **313.8 / 100.8%** |
+| 3 slow drag: p2p end | 3292ms | 2777ms | **0.4ms** |
+| 4 back-and-forth: dec f/s / supply | 4.3 / 8.0% | 5.9 / 11.7% | **201.3 / 115.1%** |
+| release delta | 0 | 0 | 0 |
+
+Under the shipped gate the paint cost EMA reads 82–152ms on the fault model and the gate
+rations painting to half the thread; on the Threadripper's real ~16.7ms class the same
+arithmetic gives ~30 painted pictures a second with the chain at full decode speed.
+
+**And the healthy path is flat.** 240Hz default config, gate on versus the same-day pre-fix
+baseline: all four legs identical within run variance (leg 1 supply 100.2 vs 100.1%, behind
+0/1f both; leg 2 rev-hit 97.8% both, walk max 29 both, hitch 9 vs 8; delta 0 everywhere),
+paint cost 0.28ms, gate 4.17ms. Real-mouse `scrub.ps1` forward and `-Reversals` match the
+pre-fix controls figure for figure (forward: delta 0, hitch 0, behind 1/6f; reversals:
+rev-hit 97.3%, seeks 12, walk max 29f, hitch 8, delta 0). Lifecycle **87.2% moving / 0%
+control**; 4K H.264 cadence x2 **99.2/99.2%**, `drop 0`, `rephase 0`, identical buckets,
+`handler>budget 0 of 120`; **25 of 25 transitions**; renderer selftest
+`d3d11 fellback=0 planar=1`.
+
+A caveat stated rather than hidden: the 60Hz-throttled *feel* cannot be judged from here,
+and the recorded remote-session scrub anomalies (hitch 8–9 on this file at 60Hz-class
+remote displays) are decode-walk hitches, not present blocks — yesterday's remote 60Hz runs
+showed paint gaps of 2.8ms, so Parsec-class virtual displays are NOT in the throttled
+class on this box, and the re-encoding attribution for their feel stands.
+
+## What to do on the Threadripper
+
+Run the same one command on a build at or after this commit:
+
+```
+Trace.exe "--scrub-selftest=C:\path\to\M&M_TopGun_1080.mp4"
+```
+
+Expected if the fix lands there: supply back near 100% on every leg, `paint cost` reading
+~16.7ms with `gate` ~33ms and `gated` large, p2p end in single-digit milliseconds, delta 0.
+Then scrub by hand — the feel is the owner's call, and `TRACE_SCRUB_PAINT_GATE=0` is the
+one-variable rollback if anything reads worse.
