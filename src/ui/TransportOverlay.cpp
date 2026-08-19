@@ -40,6 +40,15 @@ void TransportOverlay::paintEvent(QPaintEvent* event) {
 
     QPainter p(this);
     p.fillRect(rect(), QColor(16, 16, 16));
+    // Tabular figures, the same feature the strip's readouts use (owner item
+    // 9, 2026-08-18): the frame counter is mid-line here, so every proportional
+    // digit change reflowed everything after it. One feature on one font, so
+    // the HUD and the strip cannot disagree about how a running number moves.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    QFont hudFont = p.font();
+    hudFont.setFeature(QFont::Tag("tnum"), 1);
+    p.setFont(hudFont);
+#endif
     p.setPen(QColor(220, 220, 220));
 
     const QString top = QString("  %1 | frame %2 | speed %3x | %4")

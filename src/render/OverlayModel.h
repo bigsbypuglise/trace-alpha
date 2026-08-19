@@ -2,6 +2,7 @@
 
 #include <QElapsedTimer>
 #include <QImage>
+#include <climits>
 #include <QRectF>
 #include <QSize>
 #include <QString>
@@ -70,13 +71,14 @@ public:
     // reading order. Timeline sits where it is drawn -- between the readouts,
     // after Mute -- rather than last, which is where it used to be when the
     // panel had four buttons on one row above it.
+    // GoToStart and GoToEnd left this enum with their buttons (owner item 15,
+    // 2026-08-18); Home and End are the remaining route and were always the
+    // keyboard one.
     enum class Region {
         None,
-        GoToStart,
         Rewind,
         PlayPause,
         FastForward,
-        GoToEnd,
         Mute,
         Loop,
         Timeline,
@@ -218,7 +220,10 @@ public:
     // the auto-hide timer, which is the behaviour a floating transport needs.
     // Also the host's entry point for the two reveal sources that are not mouse
     // events: a click on the video, and relevant keyboard input.
-    void reveal();
+    // `source` is attribution only, read by TRACE_REVEAL_LOG=1 (owner items
+    // 3+7): the chrome was observed cycling with the cursor stationary, and a
+    // count of calls means nothing without knowing which path made them.
+    void reveal(const char* source = "host");
 
     // The interactive controls and where they are, in SURFACE DEVICE PIXELS.
     //
@@ -299,9 +304,15 @@ private:
     // ends.
     QRectF aStrip_, aStripSample_;
     QRectF aPlay_, aPause_;
-    QRectF aGoToStart_, aRewind_, aFfwd_, aGoToEnd_;
+    QRectF aRewind_, aFfwd_;
     QRectF aVolume_, aVolumeMuted_, aLoop_, aLoopOn_, aFullscreen_, aExitFullscreen_, aShare_;
-    QRectF aThumb_, aThumbScrub_;
+    // One thumb cell. The 16px scrub variant (aThumbScrub_) is removed -- the
+    // owner cut the grow-while-scrubbing animation (items 16+17, 2026-08-18).
+    QRectF aThumb_;
+    // Track end caps (owner item 2): full circles at the track's base and
+    // hover heights, in the track background's white-0.22 and the accent,
+    // sliced in half at draw time so each cap stays a 1:1 blit.
+    QRectF aTrackCapBg_, aTrackCapBgHover_, aTrackCapAccent_, aTrackCapAccentHover_;
     QRectF aSolid_, aSolidSample_, aAccent_, aAccentSample_;
     // The design's own alphas, baked in rather than applied at draw time --
     // see rebuildAtlas(). A fractional alpha applied by two different
@@ -312,7 +323,7 @@ private:
     // nothing is stretched -- these are 1:1 like every glyph.
     QRectF aPlateUtil_, aPlateUtilPressed_, aPlatePlay_, aPlatePlayPressed_;
     // Destination rects, in surface device pixels.
-    QRectF dStrip_, dPlay_, dGoToStart_, dRewind_, dFfwd_, dGoToEnd_, dMute_, dLoop_;
+    QRectF dStrip_, dPlay_, dRewind_, dFfwd_, dMute_, dLoop_;
     QRectF dFullscreen_, dShare_, dSeparator_, dTrack_;
     // The two readout cells. Empty when the strip is too narrow to carry them
     // -- see layout()'s elision -- which is also how buildFrame knows not to
@@ -338,7 +349,6 @@ private:
     double playPx_ = 40.0;
     double utilPx_ = 36.0;
     double thumbPx_ = 13.0;
-    double thumbScrubPx_ = 16.0;
     double stripPx_ = 56.0;
     // The width reserved for each readout cell, in device pixels. Measured from
     // the DURATION's text rather than the position's, because the position can
@@ -364,6 +374,15 @@ private:
     bool panning_ = false;
     int panLastX_ = 0;
     int panLastY_ = 0;
+    // The last coordinate any mouse move delivered, for the synthetic-move
+    // filter (owner items 3+7): Windows posts a WM_MOUSEMOVE at the unchanged
+    // pixel whenever a window's visibility changes under the cursor, and the
+    // top chrome hiding is such a change -- unfiltered, its own hide revealed
+    // it again and the chrome blinked forever with the pointer parked. Reset
+    // on mouse leave so a genuine re-entry always reveals. INT_MIN = no
+    // coordinate seen yet.
+    int lastMoveX_ = INT_MIN;
+    int lastMoveY_ = INT_MIN;
     bool draggingTimeline_ = false;
     // Mirrors what the host was last told, so reveal() on every pointer move
     // does not call across the hook once per move to say the same thing. The

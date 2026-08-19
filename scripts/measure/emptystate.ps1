@@ -304,11 +304,13 @@ switch ($Mode) {
     $b.Dispose()
     Report-Empty $m $box $stage "launch"
 
-    # The design's own proportions, from Trace-App-Mockups.html screen-3 and
-    # confirmed against the delivered mockup PNG: a 104px canvas whose ink is
-    # 59x68, sitting 9.5px right of the canvas centre because a right-pointing
-    # triangle is balanced by eye rather than by its bounding box. The hint is
-    # centred exactly.
+    # The design's proportions from Trace-App-Mockups.html screen-3 (104px
+    # canvas, 59x68 ink), with ONE owner override on top: the design balances
+    # the right-pointing triangle by eye, +9.5px right of the canvas centre,
+    # and the owner chose the INK centred instead (item 5, 2026-08-18 -- an
+    # override of the delivered art, decided with it on screen). Trace now
+    # measures the art's own ink box at rasterisation time and centres that,
+    # so the expected optical offset is ~0.
     if ($m.markN -eq 0) { Write-Output "FAIL: no mark"; $fail++ }
     elseif ($m.markH -lt 58 -or $m.markH -gt 80) {
         Write-Output "FAIL: mark ink height $($m.markH) is not the design's 68 +/- dpr"; $fail++
@@ -319,8 +321,8 @@ switch ($Mode) {
     }
     if ($m.markN -gt 0) {
         $off = ($m.markX + $m.markW / 2.0) - $box.w / 2.0
-        if ($off -lt 4 -or $off -gt 18) {
-            Write-Output "FAIL: mark optical offset $off is not the design's ~+9.5"; $fail++
+        if ([Math]::Abs($off) -gt 4) {
+            Write-Output "FAIL: mark ink offset $off is not the owner's centred ~0 (item 5)"; $fail++
         }
     }
 }

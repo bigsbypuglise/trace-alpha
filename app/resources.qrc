@@ -76,26 +76,17 @@
     <file alias="rewind-24.png">../assets/interface/transport/rewind-24.png</file>
     <file alias="rewind-48.png">../assets/interface/transport/rewind-48.png</file>
 
-    <!-- In use from UI redesign roadmap step 5. THESE FOUR ARE THE ONLY GLYPHS
-         IN THE TREE THAT THE DESIGN PACKAGE DID NOT DELIVER, and they are
-         derived from it rather than invented beside it. Same viewBox, the
-         same #FFFFFF fill and the same 1.6 round stroke, with go-to-start and
-         go-to-end sharing rewind's 6.8..17.2 vertical span and go-to-end an
-         exact mirror of go-to-start about x=12.
+    <!-- In use from UI redesign roadmap step 5. go-to-start and go-to-end
+         (authored here at step 5, accepted "for now") LEFT with their buttons
+         at owner item 15, 2026-08-18: artwork follows behaviour, in both
+         directions. Home and End remain the keyboard route.
 
-         The owner's step 5 decision reads "previous / next" as GO TO START and
-         GO TO END. The package ships no such art, and the retired 260807 set
+         The package ships no volume-muted art, and the retired 260807 set
          is no help either: because its prev-clip is a DOUBLE TRIANGLE, i.e. the same
          shape as rewind, so using it would have put one glyph on two controls.
          volume is the package's own master, promoted out of source/; only
          volume-muted is new, and it is volume's speaker body with the waves
          replaced by a cross. -->
-    <file alias="go-to-start-24.png">../assets/interface/transport/go-to-start-24.png</file>
-    <file alias="go-to-start-48.png">../assets/interface/transport/go-to-start-48.png</file>
-
-    <file alias="go-to-end-24.png">../assets/interface/transport/go-to-end-24.png</file>
-    <file alias="go-to-end-48.png">../assets/interface/transport/go-to-end-48.png</file>
-
     <!-- Mute is a two-state control and NOT a level, which is why there is no
          volume-low here: the owner's step 5 decision is a mute button with no
          slider, so a third state would be art with no behaviour behind it. -->
@@ -145,16 +136,16 @@
     <file alias="empty-mark-104.png">../assets/interface/branding/empty-mark-104.png</file>
     <file alias="empty-mark-208.png">../assets/interface/branding/empty-mark-208.png</file>
 
-    <!-- The transient top chrome's brand mark, UI redesign roadmap step 7.
-         Drawn at 15 logical px beside the Trace wordmark, so it ships 15 and 30:
-         the @1x/@2x pair at its own drawn size, the same convention the
-         controls follow at 24/48 and the empty mark at 104/208.
+    <!-- The top chrome's brand mark (a 15/30 pair of trace-play-mark.svg)
+         LEFT with the strip's mark and wordmark: owner item 1's approved
+         interim, 2026-08-18. While the native title bar remains, the app
+         identity appeared twice and the strip's copy was the redundant one.
+         It returns with roadmap step 12, the frameless window, when the strip
+         becomes the only header. The master is the delivered package's own
+         trace-play-mark.svg, so nothing is lost by the working copy leaving;
+         note it is a DIFFERENT asset from empty-mark.svg (scale, edge stops,
+         stroke, glow, specular) and rendering the wrong one looks almost
+         right. -->
 
-         It is trace-play-mark.svg from the delivered package, byte for byte,
-         and it is a DIFFERENT ASSET from empty-mark.svg beside it. The two
-         differ in scale, edge stops, stroke width, glow opacity and specular,
-         and rendering the wrong one looks almost right. -->
-    <file alias="brand-mark-15.png">../assets/interface/branding/brand-mark-15.png</file>
-    <file alias="brand-mark-30.png">../assets/interface/branding/brand-mark-30.png</file>
   </qresource>
 </RCC>

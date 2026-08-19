@@ -1409,6 +1409,12 @@ private:
     // them would be section 4's "do not move the window unexpectedly" in
     // spirit: the user moved it, they did not ask for it to be resized.
     double lastShapeDpr_ = 0.0;
+    // Whether a shaping pass has ever positioned this window. False exactly
+    // once per session: the first shape centres (there is no user-meaningful
+    // position at Windows' default placement), every later one anchors the
+    // frame's top-left so opening new media never moves the window (owner,
+    // 2026-08-18, superseding section 4 item 7's unconditional centring).
+    bool windowShapedOnce_ = false;
     // Reshapes actually performed, so the HUD can distinguish "the message
     // arrived" from "something was done about it".
     long long dpiReshapes_ = 0;
@@ -1418,10 +1424,11 @@ private:
     // one of.
     QAction* lockAspectAction_ = nullptr;
     static constexpr const char* kLockAspectKey = "view/lockWindowToMediaAspect";
-    // Spec phase 14, through the same one home. Both are review preferences
-    // rather than properties of the media, so both survive a file change.
+    // Spec phase 14, through the same one home. (Loop's key, "playback/loop",
+    // is GONE: owner item 6, 2026-08-18, reversed the phase 14 persistence
+    // decision -- Loop starts off every session and survives only a file
+    // change within one. A stale key in an existing trace.ini is never read.)
     static constexpr const char* kAlwaysOnTopKey = "view/alwaysOnTop";
-    static constexpr const char* kLoopKey = "playback/loop";
     // Where Report an Issue sends mail. Owner decision, 2026-08-11: a mailto
     // rather than the repository, which is private.
     static constexpr const char* kIssueEmail = "bigsbypuglise@gmail.com";

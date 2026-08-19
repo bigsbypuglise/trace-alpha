@@ -17,14 +17,17 @@ namespace {
 
 // EVERY NUMBER HERE IS THE DESIGN PACKAGE'S OWN.
 // assets/source/260817-trace-ui-v2/Trace-App-Mockups.html, section screen-1:
-// a 38px strip laid out `auto 1fr auto`, a 15px mark and the Trace wordmark at
-// 12px/600 in #EDEFF1 with an 8px gap, 18px to the menus, the menu items at
-// 12px in #C7CDD4 with 3px 8px padding, and the filename centred in #C7CDD4.
+// a 38px strip laid out `auto 1fr auto`, the menu items at 12px in #C7CDD4
+// with 3px 8px padding, and the filename centred in #C7CDD4.
+//
+// THE MARK AND WORDMARK ARE GONE (owner item 1's approved interim,
+// 2026-08-18): while the native title bar remains -- its removal is roadmap
+// step 12, the frameless-window milestone -- the app identity appears twice,
+// and the strip's copy is the redundant one. The menus now start at the edge
+// pad. The design's 15px mark and 12px/600 wordmark return with step 12, when
+// the strip becomes the only header.
 constexpr int kStripHeight = 38;
 constexpr int kEdgePad = 12;
-constexpr int kMarkPx = 15;
-constexpr int kMarkToWordGap = 8;
-constexpr int kWordToMenuGap = 18;
 
 // The design's strip is `rgba(22,22,24,0.66)` fading to `rgba(22,22,24,0.04)`
 // over a backdrop blur. A native window over the video swapchain cannot BLEND
@@ -40,7 +43,6 @@ const QColor kStripTop(0x1A, 0x1B, 0x20);
 const QColor kStripBottom(0x14, 0x16, 0x1A);
 const QColor kHairline(255, 255, 255, 18);
 
-const QColor kWordmark(0xED, 0xEF, 0xF1);
 const QColor kTitle(0xC7, 0xCD, 0xD4);
 // The empty-state mockup's own dimmer grey for "No media".
 const QColor kTitleEmpty(0x6E, 0x74, 0x7B);
@@ -72,34 +74,6 @@ TopChrome::TopChrome(QWidget* parent) : QWidget(parent) {
     // what makes menus keyboard-reachable; it just does not take it at show
     // time.
     setFocusPolicy(Qt::NoFocus);
-
-    markLabel_ = new QLabel(this);
-    markLabel_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    markLabel_->setFocusPolicy(Qt::NoFocus);
-    // DELIBERATELY UNNAMED. It is decoration sitting immediately beside a
-    // wordmark that already reads "Trace", and naming it would make a screen
-    // reader announce the same word twice before reaching the menus.
-    {
-        QIcon icon;
-        for (const int px : {kMarkPx, kMarkPx * 2}) {
-            icon.addFile(QStringLiteral(":/ui/brand-mark-%1.png").arg(px), QSize(px, px));
-        }
-        markLabel_->setPixmap(icon.pixmap(QSize(kMarkPx, kMarkPx)));
-    }
-
-    wordmarkLabel_ = new QLabel(QStringLiteral("Trace"), this);
-    wordmarkLabel_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    wordmarkLabel_->setFocusPolicy(Qt::NoFocus);
-    {
-        QFont f = wordmarkLabel_->font();
-        f.setWeight(QFont::DemiBold);
-        wordmarkLabel_->setFont(f);
-    }
-    {
-        QPalette pal = wordmarkLabel_->palette();
-        pal.setColor(QPalette::WindowText, kWordmark);
-        wordmarkLabel_->setPalette(pal);
-    }
 
     titleLabel_ = new QLabel(this);
     titleLabel_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
@@ -166,15 +140,9 @@ void TopChrome::relayout() {
 
     const auto centreY = [this](int h) { return (height() - h) / 2; };
 
+    // The menus lead the strip now -- the mark and wordmark left with owner
+    // item 1's interim (the title bar already says Trace).
     int x = kEdgePad;
-    markLabel_->setGeometry(x, centreY(kMarkPx), kMarkPx, kMarkPx);
-    x += kMarkPx + kMarkToWordGap;
-
-    const int wordW = wordmarkLabel_->sizeHint().width();
-    const int wordH = wordmarkLabel_->sizeHint().height();
-    wordmarkLabel_->setGeometry(x, centreY(wordH), wordW, wordH);
-    x += wordW + kWordToMenuGap;
-
     const int menuH = menuBar_->sizeHint().height();
     const int menuW = std::max(0, width() - x - kEdgePad);
     menuBar_->setGeometry(x, centreY(menuH), menuW, menuH);

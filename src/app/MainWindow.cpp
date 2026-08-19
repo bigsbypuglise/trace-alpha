@@ -455,13 +455,12 @@ MainWindow::MainWindow() {
         commands.playPause = playPauseAction_;
         commands.rewind = rewindAction_;
         commands.fastForward = fastForwardAction_;
-        // UI redesign roadmap step 5's four. Every one is the SAME action its
-        // button and its key run, so the announced name, the shortcut and the
-        // enabled state come from one place -- which is the spec's shared-action
-        // requirement applied to the accessible names as well as the commands,
-        // and the reason Mute had to stop being a ShortcutTable key row.
-        commands.goToStart = goToStartAction_;
-        commands.goToEnd = goToEndAction_;
+        // Every one is the SAME action its button and its key run, so the
+        // announced name, the shortcut and the enabled state come from one
+        // place -- which is the spec's shared-action requirement applied to
+        // the accessible names as well as the commands, and the reason Mute
+        // had to stop being a ShortcutTable key row. (goToStart/goToEnd left
+        // with their strip buttons, owner item 15, 2026-08-18.)
         commands.mute = muteAction_;
         commands.loop = loopAction_;
         commands.fullscreen = fullscreenAction_;
@@ -1131,7 +1130,7 @@ MainWindow::MainWindow() {
     // the layout it is the only transport there is, so an app that opened with
     // it already faded would present the user with a black stage and no controls
     // until they happened to move the pointer.
-    if (viewer_) viewer_->revealOverlay();
+    if (viewer_) viewer_->revealOverlay("startup");
     // Establishes the strip's opening state rather than relying on the reveal
     // above to have pushed it: the hook only fires on a TRANSITION, and a state
     // that is only ever set by a transition has no defined value at t=0.
@@ -1277,8 +1276,6 @@ void MainWindow::installOverlayHooks() {
     // the button and the key are one action and a disabled action refuses the
     // click for free -- there is no "is there media" test in this lambda
     // because syncMediaDependentActions already answered it.
-    hooks.goToStart = [this]() { if (goToStartAction_) goToStartAction_->trigger(); };
-    hooks.goToEnd = [this]() { if (goToEndAction_) goToEndAction_->trigger(); };
     // toggle() rather than trigger(): muteAction_ is checkable, so toggle()
     // flips the tick AND emits triggered(bool) with the new state, which is
     // what the handler reads. trigger() on a checkable action would fire the
@@ -1361,6 +1358,16 @@ void MainWindow::installOverlayHooks() {
     // -- the file chooser -- counts for the same reason.
     hooks.holdVisible = [this]() {
         if (QApplication::activePopupWidget() || QApplication::activeModalWidget()) return true;
+        // The pointer resting ON the top chrome strip (owner items 3+7,
+        // 2026-08-18). The auto-hide's own rule is "never hide under the
+        // pointer", and the overlay can check that for its own controls but
+        // cannot see the strip, which is a real widget in the host. Without
+        // this, a pointer parked over the menu bar had the strip fade out
+        // beneath it -- and because the strip is a NATIVE window, its hide
+        // handed the pointer back to the video surface as a fresh enter, which
+        // is the one synthetic-move case the coordinate filter cannot hold
+        // across (the surface genuinely lost and regained the pointer).
+        if (topChrome_ && topChrome_->isVisible() && topChrome_->underMouse()) return true;
         // A child control holding keyboard focus. Every transport widget is
         // Qt::NoFocus today so this cannot fire yet; it is written now because
         // phase 7 adds the first text-entry control and this is the predicate it
@@ -1802,9 +1809,17 @@ void MainWindow::setupSharedActions() {
     });
     addAction(alwaysOnTopAction_);
 
-    // Loop. Persisted, because it is a review preference rather than a property
-    // of the media -- someone checking a cycling animation wants it to survive
-    // opening the next version of the same shot.
+    // Loop. NO LONGER PERSISTED ACROSS SESSIONS (owner item 6, 2026-08-18,
+    // REVERSING the phase 14 sign-off that accepted persistence as "a review
+    // preference, not a property of the media" -- the owner decided again with
+    // the strip on screen: a Loop already highlighted at launch reads as a
+    // claim that newly opened media will loop, and he wants every session to
+    // start with it off). It still survives a file CHANGE within a session,
+    // which is the half of "review preference" that survives the reversal --
+    // someone checking a cycling animation still keeps it across versions of
+    // the same shot. A stale `playback/loop` in an existing trace.ini is
+    // simply never read again; some of those were written by the pre-b2a901b
+    // bug where a DISABLED Loop click persisted `loop=true`.
     // "L&oop", not "&Loop": the View menu already gives L to Lock Window to
     // Media Aspect Ratio. Two items sharing a mnemonic makes the key CYCLE the
     // highlight instead of activating either -- phase 10 hit this once and
@@ -1812,12 +1827,10 @@ void MainWindow::setupSharedActions() {
     // warnOnDuplicateMnemonics(), which is why it will not happen a fourth time.
     loopAction_ = new QAction(tr("L&oop"), this);
     loopAction_->setCheckable(true);
-    loopAction_->setChecked(
-        trace::app::settings().value(QLatin1String(kLoopKey), false).toBool());
-    loopEnabled_ = loopAction_->isChecked();
+    loopAction_->setChecked(false);
+    loopEnabled_ = false;
     connect(loopAction_, &QAction::toggled, this, [this](bool on) {
         loopEnabled_ = on;
-        trace::app::settings().setValue(QLatin1String(kLoopKey), on);
         // Turning Loop ON at the end of a file does NOT restart it. Loop
         // decides what happens when playback REACHES the end, and the playhead
         // is only ever moved by an explicit request -- the same rule that keeps
@@ -2079,7 +2092,7 @@ void MainWindow::toggleFullscreen() {
     // Changing what the window looks like is interaction, so the transport comes
     // back -- and in fullscreen with no docked bar it is the only transport
     // there is.
-    if (viewer_) viewer_->revealOverlay();
+    if (viewer_) viewer_->revealOverlay("fullscreen-toggle");
     refreshHud("Fullscreen");
 }
 
@@ -3315,7 +3328,10 @@ void MainWindow::closeMedia() {
     setWindowTitle(QStringLiteral("Trace"));
     // Back to "No media", and held up from here: see syncTopChrome.
     syncTopChrome();
-    showTransientMessage(tr("No media open"), 2000);
+    // No "No media open" toast (owner item 14, 2026-08-18): the empty state's
+    // own mark and hint are already the statement that nothing is open, so the
+    // message said what the window shows. Dropped with the "Opened" toast;
+    // Copy Frame's confirmation stays, errors and refusals all still appear.
 
     syncTransportBar();
     syncShareActions();
@@ -3615,7 +3631,7 @@ void MainWindow::goToFrame(long long frame, const char* action) {
         if (!error.isEmpty()) showTransientMessage(error, 3000);
     }
     syncTransportBar();
-    if (viewer_) viewer_->revealOverlay();
+    if (viewer_) viewer_->revealOverlay("goto-frame");
     refreshHud(action);
 }
 
@@ -3658,6 +3674,16 @@ void MainWindow::setupMenus() {
     openAction_->setShortcut(QKeySequence::Open);
     connect(openAction_, &QAction::triggered, this, &MainWindow::openFileDialog);
     fileMenu->addAction(openAction_);
+    // HOISTED ONTO THE WINDOW, and this stopped being optional at roadmap step
+    // 7: the menu bar lives in the auto-hiding top chrome strip now, and
+    // QShortcutMap declines a shortcut whose only widget is not VISIBLE -- the
+    // same mechanism that step 7's Alt event filter works around for the
+    // mnemonics. So Ctrl+O silently did nothing whenever the strip was hidden.
+    // It survived until the items 3+7 fix (2026-08-18) because the reveal loop
+    // kept the strip on screen ~90% of the time; with the chrome genuinely
+    // hidden, this was the one shortcut action in the tree not also added to
+    // the window. Every other menu action already goes through addAction(this).
+    addAction(openAction_);
 
     // Open Recent (spec phase 11), immediately under Open as the spec's File
     // menu lists it. Its contents are filled by rebuildRecentMenu(), which the
@@ -3991,7 +4017,7 @@ void MainWindow::setupTransportControls() {
     connect(muteAction_, &QAction::toggled, this, [this](bool on) {
         audio_.setMuted(on);
         refreshHud(on ? "Mute" : "Unmute");
-        if (viewer_) viewer_->revealOverlay();
+        if (viewer_) viewer_->revealOverlay("mute-toggle");
     });
     addAction(muteAction_);
 
@@ -4204,7 +4230,7 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     if (topChrome_ && event->type() == QEvent::KeyPress && watched == windowHandle()) {
         const auto* key = static_cast<QKeyEvent*>(event);
         if (key->key() == Qt::Key_Alt || (key->modifiers() & Qt::AltModifier)) {
-            if (viewer_) viewer_->revealOverlay();
+            if (viewer_) viewer_->revealOverlay("alt-mnemonic");
         }
     }
     return QMainWindow::eventFilter(watched, event);
@@ -4446,17 +4472,30 @@ bool MainWindow::applyMediaWindowShapePass(double aspect, int pass) {
     const QSize outer(client.width() + frameMargins.left() + frameMargins.right(),
                       client.height() + frameMargins.top() + frameMargins.bottom());
 
-    // Centred on the monitor the window is ALREADY on -- section 4's "do not
-    // move the window unexpectedly to a different monitor" -- and clamped back
-    // inside the work area, so a window that grew cannot end up with its title
-    // bar somewhere the user cannot reach it.
+    // POSITION: SUPERSEDES SECTION 4 ITEM 7's "centre within the work area"
+    // (owner, 2026-08-18, feedback item 4 -- deciding again with the behaviour
+    // in front of him, having lived with the phase 12 sign-off). Opening new
+    // media keeps the window WHERE IT IS and changes only the size: the frame's
+    // top-left is anchored, because a centre-anchored resize moves the title
+    // bar out from under the cursor and top-left is what every other player
+    // does. Centring survives for exactly one case -- the first shaping of the
+    // session, where the window is at Windows' default position and there is no
+    // user-meaningful position to preserve. Both are clamped back inside the
+    // work area below, so a window that grew cannot end up with its title bar
+    // somewhere the user cannot reach it, still on the monitor the window is
+    // ALREADY on (section 4's "do not move the window unexpectedly").
     QRect target(QPoint(0, 0), outer);
-    target.moveCenter(work.center());
+    if (windowShapedOnce_) {
+        target.moveTopLeft(frame.topLeft());
+    } else {
+        target.moveCenter(work.center());
+    }
     if (target.right() > work.right()) target.moveRight(work.right());
     if (target.bottom() > work.bottom()) target.moveBottom(work.bottom());
     if (target.left() < work.left()) target.moveLeft(work.left());
     if (target.top() < work.top()) target.moveTop(work.top());
     setGeometry(QRect(target.topLeft() + QPoint(frameMargins.left(), frameMargins.top()), client));
+    windowShapedOnce_ = true;
 
     // TRACE_SHAPE_LOG=1. Every term of the calculation and, crucially, what the
     // LAYOUT actually did with the result -- because the two disagreeing is the
@@ -5386,7 +5425,10 @@ bool MainWindow::openPath(const QString& path) {
         rebuildRecentMenu();
     }
 
-    showTransientMessage("Opened", 1200);
+    // No "Opened" toast (owner item 14, 2026-08-18): the picture appearing IS
+    // the confirmation, and the owner dropped the open/close messages while
+    // keeping Copy Frame's -- the one whose result is invisible without it.
+    // Errors and refusals all still appear; only this success message went.
     refreshHud("Open file");
     // THE SHAPE IS APPLIED HERE, AFTER refreshHud, AND THAT ORDER IS THE WHOLE
     // CORRECTNESS OF IT.
@@ -8476,7 +8518,7 @@ void MainWindow::keyPressEvent(QKeyEvent* event) {
         // shuttle or readout command, and a key it does not own is by
         // construction not one. Revealing after the handler, so a shuttle press
         // brings the panel back already showing its new rate.
-        if (viewer_) viewer_->revealOverlay();
+        if (viewer_) viewer_->revealOverlay("keypress");
         return;
     }
     QMainWindow::keyPressEvent(event);

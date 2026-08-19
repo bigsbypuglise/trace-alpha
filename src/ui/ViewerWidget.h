@@ -87,7 +87,7 @@ public:
     // point for the one reveal source that is not a mouse event over the video:
     // "relevant keyboard input reveals it". Mouse reveals are handled inside the
     // model, on both backends' own input paths.
-    void revealOverlay() { overlayModel_.reveal(); }
+    void revealOverlay(const char* source = "host") { overlayModel_.reveal(source); }
     // How much of the viewer's TOP EDGE the transient top chrome covers, in
     // logical pixels (UI redesign roadmap step 7). Held here in LOGICAL units
     // and converted at paint time, because the model wants device pixels and the

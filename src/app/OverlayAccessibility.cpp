@@ -217,15 +217,12 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
     : QObject(host), host_(host), model_(model), commands_(std::move(commands)) {
     if (!host_ || !model_) return;
 
-    // IN THE ORDER controlRects() RETURNS THEM, which since UI redesign roadmap
-    // step 5 is strictly LEFT TO RIGHT along the strip: Go to Start, Rewind,
-    // Play/Pause, Fast-forward, Go to End, Mute, Timeline, Fullscreen, Share.
-    // A screen reader walks children in creation order, so this IS the reading
-    // order -- and a reading order that does not match the visual one is the
-    // classic way an accessible interface becomes unusable while passing every
-    // check. The four new controls are INTERLEAVED into that order rather than
-    // appended: appending would have announced Go to Start, the leftmost thing
-    // on the strip, after the timeline.
+    // IN THE ORDER controlRects() RETURNS THEM, which is strictly LEFT TO
+    // RIGHT along the strip: Rewind, Play/Pause, Fast-forward, Mute, Loop,
+    // Timeline, Fullscreen, Share. A screen reader walks children in creation
+    // order, so this IS the reading order -- and a reading order that does not
+    // match the visual one is the classic way an accessible interface becomes
+    // unusable while passing every check.
     // Installed once for the process. Qt keeps a list of factories and asks
     // each in turn, so this is additive -- every other widget in the
     // application keeps whatever Qt already gave it.
@@ -242,10 +239,10 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
         const char* description;
         QAccessible::Role role;
     };
+    // Go to Start and Go to End are no longer on the strip (owner item 15,
+    // 2026-08-18), so they are no longer announced as strip controls -- Home
+    // and End remain the keyboard route and their QActions still exist.
     const Spec specs[] = {
-        {Region::GoToStart, commands_.goToStart, QT_TR_NOOP("Go to Start"),
-         QT_TR_NOOP("Go to the first frame. The Home key does the same from anywhere."),
-         QAccessible::Button},
         {Region::Rewind, commands_.rewind, QT_TR_NOOP("Rewind"),
          QT_TR_NOOP("Rewind. Each press goes faster: 2x, 5x, 10x, 30x. The J key "
                     "does the same from anywhere, starting at 1x."),
@@ -256,9 +253,6 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
         {Region::FastForward, commands_.fastForward, QT_TR_NOOP("Fast-forward"),
          QT_TR_NOOP("Fast-forward. Each press goes faster: 2x, 5x, 10x, 30x. The L "
                     "key does the same from anywhere, starting at 1x."),
-         QAccessible::Button},
-        {Region::GoToEnd, commands_.goToEnd, QT_TR_NOOP("Go to End"),
-         QT_TR_NOOP("Go to the last frame. The End key does the same from anywhere."),
          QAccessible::Button},
         // CheckBox, not Button, and the role is the honest one: this control
         // reports a STATE as well as running a command, and a screen reader

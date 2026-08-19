@@ -15,12 +15,40 @@
 #include <QPixmap>
 #include <QtGlobal>
 
+#include <QElapsedTimer>
+
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <initializer_list>
 
 namespace trace::render {
 namespace {
+
+// TRACE_REVEAL_LOG=1 (owner items 3+7, 2026-08-18): one stderr line per call
+// to reveal(), per auto-hide decision, per chrome show/hide transition and per
+// mouse-move sample, each with a monotonic timestamp and a source tag. It
+// exists because the owner sees the chrome cycling with the cursor STATIONARY,
+// which contradicts the recorded behaviour (a parked pointer holds the chrome
+// up indefinitely) -- so something is calling reveal() with no input, and the
+// project's standing rule is to attribute it by measurement rather than by
+// reading. A stationary cursor should produce ZERO mousemove lines; synthetic
+// WM_MOUSEMOVEs (which Windows posts when the window under the pointer
+// changes, e.g. a native strip showing or hiding beneath it) show up here as
+// repeated moves at an unchanged coordinate.
+bool revealLogEnabled() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_REVEAL_LOG");
+        return !v.isEmpty() && v != "0";
+    }();
+    return on;
+}
+
+qint64 revealLogMs() {
+    static QElapsedTimer clock;
+    if (!clock.isValid()) clock.start();
+    return clock.elapsed();
+}
 
 // Rounds to a whole DEVICE pixel. Shared by layout() and rebuildAtlas() so a
 // cell and the rect it is drawn into land on the same integer -- one of them
@@ -75,7 +103,11 @@ constexpr double kControlRadiusLogical = 6.0;
 constexpr double kTrackLogical = 4.0;
 constexpr double kTrackHoverLogical = 6.0;
 constexpr double kThumbLogical = 13.0;
-constexpr double kThumbScrubLogical = 16.0;
+// The handoff's 16px scrubbing thumb is REMOVED (owner item 17, 2026-08-18):
+// the size change mid-drag is what made the thumb pop and shimmer (item 16 --
+// the same resample class step 5 measured at 12,511 differing pixels on a
+// stretched cell), and the owner chose a fixed-size thumb over the design's
+// grow-on-scrub. One cell, one size, always a 1:1 blit.
 // The ring around the thumb, drawn in the accent at low alpha. The mockup's
 // `0 0 0 3px rgba(90,200,232,0.33)`, which is a 3px spread outside the dot.
 constexpr double kThumbRingLogical = 3.0;
@@ -251,8 +283,20 @@ OverlayModel::OverlayModel() {
         // is asked for rather than guessed at.
         if (hover_ != Region::None || draggingTimeline_
             || (hooks_.holdVisible && hooks_.holdVisible())) {
+            if (revealLogEnabled()) {
+                fprintf(stderr, "[reveal] %8lld ms  auto-hide HELD  hover %d drag %d hostHold %d\n",
+                        static_cast<long long>(revealLogMs()), static_cast<int>(hover_),
+                        draggingTimeline_ ? 1 : 0,
+                        (hooks_.holdVisible && hooks_.holdVisible()) ? 1 : 0);
+                fflush(stderr);
+            }
             autoHideTimer_.start();
             return;
+        }
+        if (revealLogEnabled()) {
+            fprintf(stderr, "[reveal] %8lld ms  auto-hide FIRED -> fading out\n",
+                    static_cast<long long>(revealLogMs()));
+            fflush(stderr);
         }
         targetOpacity_ = 0.0;
         startAnimation();
@@ -322,7 +366,6 @@ void OverlayModel::layout() {
     playPx_ = snap(kPlayLogical * s);
     utilPx_ = snap(kUtilLogical * s);
     thumbPx_ = snap(kThumbLogical * s);
-    thumbScrubPx_ = snap(kThumbScrubLogical * s);
 
     const double pad = snap(kStripPadLogical * s);
     const double groupGap = snap(kGroupGapLogical * s);
@@ -344,14 +387,15 @@ void OverlayModel::layout() {
         return QRectF(snap(x), snap(cy - size / 2.0), size, size);
     };
 
-    // The left cluster, in the conventional pro order the owner's decision
-    // names: |< << > >> >| then mute.
+    // The left cluster: << > >> then mute and loop. Go to Start and Go to End
+    // are REMOVED from the strip (owner item 15, 2026-08-18, reversing the
+    // step 5 decision with the strip on screen) -- their width goes to the
+    // timeline, which is what the owner asked the removal for. Home and End
+    // stay bound; only the buttons went.
     double x = pad;
-    dGoToStart_ = cell(x, utilPx_);       x += utilPx_ + buttonGap;
     dRewind_ = cell(x, utilPx_);          x += utilPx_ + buttonGap;
     dPlay_ = cell(x, playPx_);            x += playPx_ + buttonGap;
     dFfwd_ = cell(x, utilPx_);            x += utilPx_ + buttonGap;
-    dGoToEnd_ = cell(x, utilPx_);         x += utilPx_ + buttonGap;
     dMute_ = cell(x, utilPx_);            x += utilPx_ + buttonGap;
     dLoop_ = cell(x, utilPx_);            x += utilPx_;
     const double leftEnd = x;
@@ -438,16 +482,14 @@ void OverlayModel::layout() {
 std::vector<OverlayModel::ControlRect> OverlayModel::controlRects() const {
     std::vector<ControlRect> rects;
     if (dStrip_.isEmpty()) return rects;
-    // LEFT TO RIGHT, which is also the screen-reader reading order. The four
-    // controls UI redesign roadmap step 5 adds are interleaved into that order
-    // rather than appended, because appending would have announced Go to Start
-    // -- the leftmost thing on the strip -- after the timeline.
-    rects.reserve(10);
-    rects.push_back({Region::GoToStart, dGoToStart_});
+    // LEFT TO RIGHT, which is also the screen-reader reading order. Go to
+    // Start and Go to End are gone from the strip (owner item 15, 2026-08-18);
+    // Home and End remain the keyboard route and the proxy descriptions for
+    // the remaining controls still name their keys.
+    rects.reserve(8);
     rects.push_back({Region::Rewind, dRewind_});
     rects.push_back({Region::PlayPause, dPlay_});
     rects.push_back({Region::FastForward, dFfwd_});
-    rects.push_back({Region::GoToEnd, dGoToEnd_});
     rects.push_back({Region::Mute, dMute_});
     rects.push_back({Region::Loop, dLoop_});
     rects.push_back({Region::Timeline, trackHitRect()});
@@ -482,8 +524,7 @@ void OverlayModel::rebuildAtlas() {
     // second rect tracking the first to a sub-pixel as it travels.
     const double ring = snapTo(kThumbRingLogical * s);
     const double thumbCell = thumbPx_ + 2.0 * ring;
-    const double thumbScrubCell = thumbScrubPx_ + 2.0 * ring;
-    const double rowH = std::max({play, util, thumbCell, thumbScrubCell});
+    const double rowH = std::max({play, util, thumbCell});
 
     // THE STRIP CELL IS THE FULL WIDTH OF THE STRIP, AND THE FIRST CUT WAS A
     // NARROW COLUMN STRETCHED ACROSS IT. Measured, both backends, over the
@@ -506,12 +547,13 @@ void OverlayModel::rebuildAtlas() {
     // same set of events that already rebuilt it.
     const double kStripCellW = std::max(1.0, dStrip_.width());
 
-    // play x2, then nine utility glyphs, two thumb cells, two 8px solid
-    // patches and the strip column, with 4px between them. Undercounting here
-    // silently clips the LAST cell, which is why the count is spelled out.
+    // play x2, then nine utility glyphs, one thumb cell, the flat patches, the
+    // four track end-cap circles and the strip column, with 4px between them.
+    // Undercounting here silently clips the LAST cell, which is why the count
+    // is spelled out.
     const int atlasW = static_cast<int>(std::ceil(std::max(
         kStripCellW,
-        play * 4 + util * 12 + thumbCell + thumbScrubCell + 32 + 4 * 20)));
+        play * 4 + util * 12 + thumbCell + 32 + 64 + 4 * 20)));
     const int atlasH = static_cast<int>(std::ceil(stripH + rowH + 16));
     if (atlasW <= 0 || atlasH <= 0) return;
 
@@ -567,16 +609,14 @@ void OverlayModel::rebuildAtlas() {
         x += play + 4;
     };
 
-    // Artwork follows behaviour, one control at a time. go-to-start and
-    // go-to-end arrive here in the same commit as the buttons that run them and
-    // the Home/End keys that reach them, which is the same rule that moved
-    // rewind and fast-forward at spec phases 4 and 5.
-    util3(aGoToStart_, "go-to-start");
+    // Artwork follows behaviour, one control at a time -- and it follows it
+    // OUT as well as in: go-to-start and go-to-end left the atlas, the .qrc
+    // and the asset tree in the same commit as the buttons (owner item 15,
+    // 2026-08-18), exactly as the rule brought them in at step 5.
     util3(aRewind_, "rewind");
     playCell(aPlay_, "play");
     playCell(aPause_, "pause");
     util3(aFfwd_, "fast-forward");
-    util3(aGoToEnd_, "go-to-end");
     util3(aVolume_, "volume");
     util3(aVolumeMuted_, "volume-muted");
     util3(aLoop_, "loop");
@@ -596,10 +636,12 @@ void OverlayModel::rebuildAtlas() {
     util3(aExitFullscreen_, "exit-fullscreen");
     util3(aShare_, "share");
 
-    // The two thumb cells, each a white dot inside its accent ring. Two cells
-    // rather than one scaled, so both stay a 1:1 blit -- growing the drawn rect
-    // from one cell is exactly the resample the snapping exists to remove, and
-    // it would happen at the moment the user is watching the thumb most closely.
+    // ONE thumb cell, a white dot inside its accent ring, always drawn 1:1.
+    // There were two -- 13px plus a 16px grow-while-scrubbing variant from the
+    // handoff -- and the swap between them mid-drag is what the owner saw as
+    // the thumb popping (items 16+17, 2026-08-18): the cell changed at exactly
+    // the moment the user is watching the thumb most closely. The owner removed
+    // the scale animation; a single fixed cell cannot resample or pop.
     const auto thumbCellAt = [&](QRectF& dst, double dot) {
         dst = QRectF(x, row, dot + 2.0 * ring, dot + 2.0 * ring);
         p.setPen(Qt::NoPen);
@@ -610,7 +652,29 @@ void OverlayModel::rebuildAtlas() {
         x += dst.width() + 4;
     };
     thumbCellAt(aThumb_, thumbPx_);
-    thumbCellAt(aThumbScrub_, thumbScrubPx_);
+
+    // TRACK END CAPS (owner item 2, 2026-08-18): the timeline track gets round
+    // ends, radius = half the track height. Full circles at the track's two
+    // heights (base and hover) in the track's two colours, alphas BAKED IN like
+    // every other track cell, sliced in half at draw time -- so a cap is a 1:1
+    // blit and cannot fringe or resample the way a stretched rounded rect
+    // would. Heights mirror buildFrame's own hover-grow arithmetic exactly, or
+    // the cell and its destination rect would disagree by a pixel at
+    // fractional DPI.
+    const double capBaseH = std::max(1.0, dTrack_.height());
+    const double capWantH = std::max(1.0, snapTo(kTrackHoverLogical * s));
+    const double capHoverH = capBaseH + 2.0 * snapTo((capWantH - capBaseH) / 2.0);
+    const auto circleCell = [&](QRectF& dst, double diameter, const QColor& c) {
+        dst = QRectF(x, row, diameter, diameter);
+        p.setPen(Qt::NoPen);
+        p.setBrush(c);
+        p.drawEllipse(dst);
+        x += diameter + 4;
+    };
+    circleCell(aTrackCapBg_, capBaseH, QColor(255, 255, 255, 56));
+    circleCell(aTrackCapBgHover_, capHoverH, QColor(255, 255, 255, 56));
+    circleCell(aTrackCapAccent_, capBaseH, QColor(kAccentR, kAccentG, kAccentB));
+    circleCell(aTrackCapAccentHover_, capHoverH, QColor(kAccentR, kAccentG, kAccentB));
 
     // Two plain patches, white and accent, tinted by alpha at draw time. Lets
     // the track, its played portion and the separator be three draws of two
@@ -827,13 +891,45 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
     p.setRenderHint(QPainter::SmoothPixmapTransform, true);
     p.setRenderHint(QPainter::TextAntialiasing, true);
 
-    // The mark's own canvas is square and its art sits off-centre inside it by
-    // design -- a right-pointing triangle is balanced by eye, not by its
-    // bounding box -- so the CANVAS is what gets centred, and the offset comes
-    // along. Measured against the delivered mockup: 9.5px of a 103px canvas,
-    // reproduced to the pixel.
-    paintIcon(p, QRectF(snap((w - markPx) / 2.0), 0.0, markPx, markPx),
-              QStringLiteral("empty-mark"), {104, 208});
+    // THE INK IS CENTRED, NOT THE CANVAS (owner item 5, 2026-08-18 -- an owner
+    // OVERRIDE of the delivered art, not a correction of a bug). The mark's
+    // canvas is square and its art sits ~9.5px right of the canvas centre by
+    // design: a right-pointing triangle balanced by eye rather than by its
+    // bounding box. Trace reproduced that to within a pixel and the owner
+    // prefers the mark visually centred anyway, which is a legitimate
+    // disagreement with the designer, decided with the thing on screen.
+    //
+    // The offset is MEASURED FROM THE ART'S OWN ALPHA at rasterisation time
+    // rather than hard-coded, so the three authored-asset rules survive: the
+    // renditions stay a drop-in swap, and replacement art with a different
+    // balance re-centres itself with no code change. The scan runs only on the
+    // rare rebuild (DPI change or hint re-elision), over one markPx-sized
+    // image.
+    {
+        QImage mark(static_cast<int>(markPx), static_cast<int>(markPx),
+                    QImage::Format_ARGB32_Premultiplied);
+        mark.fill(Qt::transparent);
+        QPainter mp(&mark);
+        mp.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        paintIcon(mp, QRectF(0.0, 0.0, markPx, markPx), QStringLiteral("empty-mark"),
+                  {104, 208});
+        mp.end();
+        // Ink = alpha above a modest floor, so the faint glow does not drag
+        // the box; 40 of 255 keeps the measured 59x68 ink and drops the halo.
+        int inkL = mark.width(), inkR = -1;
+        for (int y = 0; y < mark.height(); ++y) {
+            const QRgb* row = reinterpret_cast<const QRgb*>(mark.constScanLine(y));
+            for (int x2 = 0; x2 < mark.width(); ++x2) {
+                if (qAlpha(row[x2]) >= 40) {
+                    if (x2 < inkL) inkL = x2;
+                    if (x2 > inkR) inkR = x2;
+                }
+            }
+        }
+        const double inkOffset =
+            inkR >= inkL ? (inkL + inkR + 1) / 2.0 - markPx / 2.0 : 0.0;
+        p.drawImage(QPointF(snap((w - markPx) / 2.0 - inkOffset), 0.0), mark);
+    }
 
     // The CSS line box, followed literally: the gap is measured to the top of
     // the line, and the glyphs sit an ascent below that.
@@ -885,6 +981,17 @@ void OverlayModel::rebuildReadout() {
 
     QFont font;
     font.setPixelSize(std::max(1, static_cast<int>(std::lround(kReadoutTextLogical * dpr_))));
+    // TABULAR FIGURES (owner item 9, 2026-08-18): proportional digits have
+    // different widths, so every digit change reflowed the string -- 50 -> 51
+    // moved the text even with the cell width reserved, which is the counter
+    // jitter the owner reported. Segoe UI Variable carries the tnum feature;
+    // with it every digit occupies the same advance and a running counter
+    // holds still. The eights-reservation below stays, because tnum makes
+    // digits equal to EACH OTHER, not to their widest -- the reserved width
+    // still has to come from a real string.
+#if QT_VERSION >= QT_VERSION_CHECK(6, 7, 0)
+    font.setFeature(QFont::Tag("tnum"), 1);
+#endif
     const QFontMetrics fm(font);
 
     QString widest = duration.isEmpty() ? position : duration;
@@ -913,12 +1020,15 @@ void OverlayModel::rebuildReadout() {
     p.setFont(font);
     // `rgba(255,255,255,0.8)` from the mockup.
     p.setPen(QColor(255, 255, 255, 204));
-    // The position is RIGHT-aligned against the track's left end and the
-    // duration LEFT-aligned against its right end, exactly as the mockup's
-    // `text-align:right` / default pair does. Both readouts therefore sit tight
-    // against the track and the reserved slack falls on the outside, which is
-    // what keeps the track visually centred as the numbers change width.
-    p.drawText(QRectF(0, 0, cellW, cellH), Qt::AlignRight | Qt::AlignVCenter, position);
+    // BOTH readouts are LEFT-aligned now (owner item 9, 2026-08-18,
+    // superseding the mockup's text-align:right on the position): with the
+    // position right-aligned, a digit-COUNT change (99 -> 100) moved its left
+    // edge, which read as the whole field shifting. Left-aligned, a growing
+    // count extends into the reserved slack toward the track and the value's
+    // leading digit holds still -- and tabular figures above hold it still
+    // within a count. The track cannot move either way; its position comes
+    // from the reserved cell width, not from the text.
+    p.drawText(QRectF(0, 0, cellW, cellH), Qt::AlignLeft | Qt::AlignVCenter, position);
     p.drawText(QRectF(cellW, 0, cellW, cellH), Qt::AlignLeft | Qt::AlignVCenter, duration);
     p.end();
 
@@ -1046,11 +1156,9 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
         plate(dst, region);
         push(dst, src, a, hoverBoost(region), OverlayQuad::Source::Atlas);
     };
-    control(dGoToStart_, aGoToStart_, Region::GoToStart);
     control(dRewind_, aRewind_, Region::Rewind);
     control(dPlay_, playing ? aPause_ : aPlay_, Region::PlayPause);
     control(dFfwd_, aFfwd_, Region::FastForward);
-    control(dGoToEnd_, aGoToEnd_, Region::GoToEnd);
     control(dMute_, muted ? aVolumeMuted_ : aVolume_, Region::Mute);
     // LOOP IS THE ONE CONTROL WHOSE STATE IS NOT A SECOND GLYPH, because the
     // package ships ONE loop glyph where it ships a volume/volume-muted pair.
@@ -1084,18 +1192,54 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     // ACCENT ON THE PLAYED TRACK ONLY, which is the handoff's own rule. The
     // unplayed remainder is white at 0.22 and everything else on the strip is
     // neutral, so the one coloured thing on screen is where the playhead is.
-    push(track, aTrackBgSample_, a, 1.0f, OverlayQuad::Source::Atlas);
+    //
+    // ROUND ENDS (owner item 2, 2026-08-18): radius = half the track height.
+    // Each run of track is three quads -- a left half-circle cap sliced 1:1
+    // from its atlas circle, the stretched middle, a right cap -- because a
+    // rounded rect stretched to an arbitrary width would distort its corners
+    // and a draw-time rounding does not exist in this pipeline.
+    const QRectF& capBg = trackActive ? aTrackCapBgHover_ : aTrackCapBg_;
+    const QRectF& capAcc = trackActive ? aTrackCapAccentHover_ : aTrackCapAccent_;
+    const double capR = std::min(capBg.width() / 2.0, track.width() / 2.0);
+    const auto pushCapped = [&](const QRectF& run, const QRectF& capCell,
+                                const QRectF& midSample, bool roundLeft, bool roundRight) {
+        double left = run.left();
+        double right = run.right();
+        if (roundLeft) {
+            const double w = std::min(capR, run.width());
+            push(QRectF(left, run.top(), w, run.height()),
+                 QRectF(capCell.left(), capCell.top(), w, capCell.height()), a, 1.0f,
+                 OverlayQuad::Source::Atlas);
+            left += w;
+        }
+        if (roundRight && right - left >= capR) {
+            push(QRectF(right - capR, run.top(), capR, run.height()),
+                 QRectF(capCell.right() - capR, capCell.top(), capR, capCell.height()), a,
+                 1.0f, OverlayQuad::Source::Atlas);
+            right -= capR;
+        }
+        if (right > left)
+            push(QRectF(left, run.top(), right - left, run.height()), midSample, a, 1.0f,
+                 OverlayQuad::Source::Atlas);
+    };
+    pushCapped(track, capBg, aTrackBgSample_, true, true);
     const double frac = std::clamp(hooks_.positionFraction ? hooks_.positionFraction() : 0.0,
                                    0.0, 1.0);
     QRectF filled = track;
     filled.setWidth(snapTo(track.width() * frac));
-    push(filled, aAccentSample_, a, 1.0f, OverlayQuad::Source::Atlas);
+    if (filled.width() > 0.0) {
+        // The played portion's right end is square: it either meets the
+        // unplayed track mid-run or sits under the thumb at the far end.
+        pushCapped(filled, capAcc, aAccentSample_, true,
+                   filled.width() >= track.width() - 0.5);
+    }
 
     // Moving the thumb is a destination-rect change only. Snapped like every
     // other rect, so it stays a 1:1 copy as it travels rather than resampling
-    // itself differently at each sub-pixel position along the track. The two
-    // sizes are two CELLS rather than one scaled, for the same reason.
-    const QRectF& thumbCell = draggingTimeline_ ? aThumbScrub_ : aThumb_;
+    // itself differently at each sub-pixel position along the track. ONE cell
+    // at one size -- the 16px grow-while-scrubbing variant is removed (owner
+    // items 16+17, 2026-08-18): the cell swap mid-drag was the pop.
+    const QRectF& thumbCell = aThumb_;
     const QRectF thumbRect(snapTo(track.left() + track.width() * frac
                                   - thumbCell.width() / 2.0),
                            snapTo(track.center().y() - thumbCell.height() / 2.0),
@@ -1147,10 +1291,8 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
 OverlayModel::Region OverlayModel::regionAt(int x, int y) const {
     const QPointF p(x, y);
     if (dPlay_.contains(p)) return Region::PlayPause;
-    if (dGoToStart_.contains(p)) return Region::GoToStart;
     if (dRewind_.contains(p)) return Region::Rewind;
     if (dFfwd_.contains(p)) return Region::FastForward;
-    if (dGoToEnd_.contains(p)) return Region::GoToEnd;
     if (dMute_.contains(p)) return Region::Mute;
     if (dLoop_.contains(p)) return Region::Loop;
     if (dFullscreen_.contains(p)) return Region::Fullscreen;
@@ -1165,8 +1307,14 @@ double OverlayModel::fractionAt(int x) const {
     return std::clamp((x - dTrack_.left()) / std::max(1.0, dTrack_.width()), 0.0, 1.0);
 }
 
-void OverlayModel::reveal() {
+void OverlayModel::reveal(const char* source) {
     if (!enabled_) return;
+    if (revealLogEnabled()) {
+        fprintf(stderr, "[reveal] %8lld ms  reveal(%s)  opacity %.2f -> target 1.00  hover %d\n",
+                static_cast<long long>(revealLogMs()), source ? source : "?", opacity_,
+                static_cast<int>(hover_));
+        fflush(stderr);
+    }
     targetOpacity_ = 1.0;
     startAnimation();
     autoHideTimer_.start();
@@ -1184,6 +1332,22 @@ void OverlayModel::reveal() {
 }
 
 bool OverlayModel::onMouseMove(int x, int y) {
+    // A MOVE THAT DOES NOT MOVE IS NOT INPUT (owner items 3+7, 2026-08-18).
+    // Windows re-evaluates which window is under the cursor whenever any
+    // window's visibility changes and posts a synthetic WM_MOUSEMOVE at the
+    // UNCHANGED coordinate -- so the top chrome strip (a native window) hiding
+    // at the end of its own fade generated a "move", which revealed the
+    // chrome, which restarted the idle timer, which hid it again: the strip
+    // blinked on a perfect ~2.2s cycle with the pointer parked, windowed and
+    // fullscreen alike. Measured with TRACE_REVEAL_LOG=1: every `chrome
+    // HIDDEN` was followed within 2-5ms by a mousemove at the identical pixel,
+    // 46 of them across a run with zero physical pointer motion. Filtering on
+    // "did the coordinate change" removes the synthetic class exactly, because
+    // a real gesture cannot arrive at the pixel it is already on.
+    const bool moved = x != lastMoveX_ || y != lastMoveY_;
+    lastMoveX_ = x;
+    lastMoveY_ = y;
+
     // Before the enabled_ gate, because a pan can be in progress with the
     // docked bar selected. The delta is taken here rather than by the host, so
     // there is one drag anchor in the application rather than two.
@@ -1191,11 +1355,24 @@ bool OverlayModel::onMouseMove(int x, int y) {
         if (hooks_.panBy) hooks_.panBy(x - panLastX_, y - panLastY_);
         panLastX_ = x;
         panLastY_ = y;
-        if (enabled_) reveal();
+        if (enabled_ && moved) reveal("mousemove-pan");
         return true;
     }
     if (!enabled_) return false;
-    reveal();
+    if (!moved) {
+        if (revealLogEnabled()) {
+            fprintf(stderr, "[reveal] %8lld ms  mousemove %d,%d SYNTHETIC (filtered)\n",
+                    static_cast<long long>(revealLogMs()), x, y);
+            fflush(stderr);
+        }
+        return hover_ != Region::None;
+    }
+    if (revealLogEnabled()) {
+        fprintf(stderr, "[reveal] %8lld ms  mousemove %d,%d\n",
+                static_cast<long long>(revealLogMs()), x, y);
+        fflush(stderr);
+    }
+    reveal("mousemove");
 
     if (draggingTimeline_) {
         if (hooks_.seekToFraction) hooks_.seekToFraction(fractionAt(x));
@@ -1216,7 +1393,7 @@ bool OverlayModel::onMouseDown(int x, int y) {
         // than pressing a control the user cannot see. The press is NOT also
         // delivered to that control: a click has to land on something visible.
         const bool wasVisible = visible();
-        reveal();
+        reveal("mousedown");
         if (wasVisible) {
             const Region r = regionAt(x, y);
             if (r != Region::None) {
@@ -1298,8 +1475,6 @@ bool OverlayModel::onMouseUp(int x, int y) {
             // host already owns -- two exact seeks and a mute toggle -- so the
             // overlay still issues no command of its own and still holds no
             // playback state that could drift.
-            case Region::GoToStart:   if (hooks_.goToStart) hooks_.goToStart(); break;
-            case Region::GoToEnd:     if (hooks_.goToEnd) hooks_.goToEnd(); break;
             case Region::Mute:        if (hooks_.toggleMute) hooks_.toggleMute(); break;
             case Region::Loop:        if (hooks_.toggleLoop) hooks_.toggleLoop(); break;
             // The SAME action the double-click and F11 run, which is why this
@@ -1329,7 +1504,7 @@ bool OverlayModel::onMouseDoubleClick(int x, int y) {
     // gesture that must not disappear with the transport it is unrelated to.
     if (enabled_) {
         const bool wasVisible = visible();
-        reveal();
+        reveal("dblclick");
         // A double-click on a control is THAT CONTROL BEING PRESSED AGAIN, not a
         // request to change the window -- so it is forwarded as a press rather
         // than swallowed, and the release that follows turns it into a click the
@@ -1360,6 +1535,10 @@ bool OverlayModel::onMouseDoubleClick(int x, int y) {
 }
 
 void OverlayModel::onMouseLeave() {
+    // Forget the last coordinate: a genuine re-entry must always reveal, even
+    // in the unlikely case it lands on the exact pixel the pointer left from.
+    lastMoveX_ = INT_MIN;
+    lastMoveY_ = INT_MIN;
     if (hover_ == Region::None && pressed_ == Region::None) return;
     hover_ = Region::None;
     if (!draggingTimeline_) pressed_ = Region::None;
@@ -1401,6 +1580,11 @@ void OverlayModel::syncChrome() {
     const bool revealed = targetOpacity_ > 0.001 || opacity_ > 0.001;
     if (revealed == chromeRevealed_) return;
     chromeRevealed_ = revealed;
+    if (revealLogEnabled()) {
+        fprintf(stderr, "[reveal] %8lld ms  chrome %s\n",
+                static_cast<long long>(revealLogMs()), revealed ? "SHOWN" : "HIDDEN");
+        fflush(stderr);
+    }
     if (hooks_.setChromeRevealed) hooks_.setChromeRevealed(revealed);
 }
 

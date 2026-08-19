@@ -124,8 +124,6 @@ protected:
 private:
     void relayout();
 
-    QLabel* markLabel_ = nullptr;
-    QLabel* wordmarkLabel_ = nullptr;
     QLabel* titleLabel_ = nullptr;
     QMenuBar* menuBar_ = nullptr;
     QString mediaTitle_;

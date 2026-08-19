@@ -32,14 +32,9 @@ struct OverlayHooks {
     std::function<void()> rewind;
     std::function<void()> fastForward;
 
-    // GO TO START / GO TO END (UI redesign roadmap step 5). The owner's reading
-    // of the design's "previous / next": Trace has no playlists, so there is
-    // nothing to go previous or next TO, and |< >| means start/end in every
-    // NLE. Two exact seeks through the host's existing goToFrame(), so nothing
-    // about decoding changes and this struct gains commands rather than
-    // behaviour -- which is the rule every other entry here follows.
-    std::function<void()> goToStart;
-    std::function<void()> goToEnd;
+    // goToStart/goToEnd left this struct with their strip buttons (owner item
+    // 15, 2026-08-18). Home and End reach goToFrame() through their QActions
+    // directly and never needed a hook.
 
     // MUTE, as a command and a read. Two entries rather than one toggling
     // function returning the new state, because the glyph is drawn from

@@ -84,8 +84,6 @@ public:
         // which the proxy already handles: QAction::changed fires for checked
         // as well as for text and enabled, so the name follows a control whose
         // state changes without a second connection.
-        QAction* goToStart = nullptr;
-        QAction* goToEnd = nullptr;
         QAction* mute = nullptr;
         QAction* loop = nullptr;
         QAction* fullscreen = nullptr;
