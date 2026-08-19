@@ -227,7 +227,11 @@ add_executable(Trace WIN32
 )
 
 if(WIN32)
-  target_sources(Trace PRIVATE trace.rc)
+  # trace.manifest: the Windows 8+ supportedOS declaration, merged by the
+  # linker's mt step into its default manifest. Layered CHILD windows --
+  # which the TopChrome fade (owner item 11) depends on -- are silently
+  # ignored without it; see the comment in the manifest itself.
+  target_sources(Trace PRIVATE trace.rc trace.manifest)
 endif()
 
 target_include_directories(Trace PRIVATE ../src)
