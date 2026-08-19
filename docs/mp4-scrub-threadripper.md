@@ -387,3 +387,99 @@ Expected if the fix lands there: supply back near 100% on every leg, `paint cost
 ~16.7ms with `gate` ~33ms and `gated` large, p2p end in single-digit milliseconds, delta 0.
 Then scrub by hand — the feel is the owner's call, and `TRACE_SCRUB_PAINT_GATE=0` is the
 one-variable rollback if anything reads worse.
+
+---
+
+# The beta.3 residues, reproduced and triaged (2026-08-19, second session)
+
+The gate shipped and the Threadripper's beta.3 paste confirmed it (supply 100–124% on every
+leg). Three residues remained in that paste, and the owner still reports the feel differing
+from the 240Hz dev box. **The display physics half of that gap is not chased** — at 60Hz the
+picture updates at most 60 times a second against 240 here, and no software touches it. The
+three numeric residues were each reproduced on the dev box before anything was proposed.
+
+**Method.** Dev box at HEAD (`19b7e88`, the beta.3 build of 2026-08-19 16:33), physical panel
+switched to a true 5120x1440 @ 60Hz with `setrefresh.ps1` (restored to 240 after), selftest on
+`M&M_TopGun_1080.mp4`. Four runs: the fault model (60Hz + `TRACE_PRESENT_SYNC=1`) **twice
+back-to-back**, then two 240Hz controls — `TRACE_PRESENT_SYNC=1` and the bare default. All
+shipping config (HUD hidden, gate on), all exit 0, `delta 0` on every leg of every run.
+
+## Residue 1 — leg 1's elevated paint cost: REAL, DETERMINISTIC, AND ATTRIBUTED. It is the
+## gate pacing paints at exactly the refresh period under sustained above-refresh demand.
+
+| leg 1 (forward sweep) | paint cost | gate | paint gap avg/max | painted | hitch | supply |
+|---|---|---|---|---|---|---|
+| 60Hz + sync, run 1 | **16.53ms** | 33.06 | 17.7 / 33.7 | 86 | 2 | 97.5% |
+| 60Hz + sync, run 2 | **16.54ms** | 33.09 | 17.6 / 33.6 | 85 | 2 | 97.7% |
+| 240Hz + sync | 0.34ms | 4.17 | 6.7 / 12.1 | 224 | 0 | 99.6% |
+| 240Hz default | 0.38ms | 4.17 | 6.6 / 12.4 | 226 | 0 | 100.0% |
+| Threadripper beta.3 | 4.76ms | — | 23.0 / — | — | 8 | ~100% |
+
+**Not cold-start**: two back-to-back launches read 16.53 and 16.54 — identical to the digit,
+which no cache- or driver-warm-up effect produces. **Not "first leg after launch" either**:
+the same knob at 240Hz reads 0.34ms on leg 1 of a fresh launch. The discriminator is that
+**leg 1 is the only leg whose delivery is continuous at above-refresh rate for its whole
+duration** (pointer 156 f/s against a 60Hz drain; legs 2 and 4 demand more but in bursts
+broken by seeks and throw boundaries — their measured paint gaps average 17.9–19.1ms, above
+the refresh period — and leg 3's 59 f/s sits just under it).
+
+The mechanism: under sustained above-refresh demand the gate opens every `refresh period`
+exactly, so paints are submitted at precisely the display's drain rate. In the
+blocked-present class the flip queue therefore never drains, and **every present blocks for
+close to a full period — the cost EMA is measuring the display, not the machine, which is why
+it reads the 16.67ms refresh period to within 0.14ms and reproduces exactly.** The cost term
+then doubles the gate, presents get cheap, the EMA decays, the gate returns to the refresh
+period, and the queue refills — an oscillation that equilibrates just over the boundary
+(paint gap avg 17.7 against 16.67 here; 23.0 on the Threadripper's milder block class, i.e.
+**~43 painted pictures a second on a display that could show 60**). That deficit is leg 1's
+`hitch 2` here and very likely the Threadripper's leg-1 `hitch 8`, and it lands on exactly
+the gesture a fast review scrub is — the first residue is the one that matters.
+
+**Proposed fix (not built this session): the gate period should sit strictly above the
+refresh period — `refresh × 1.05` — so sustained painting submits below the drain rate and
+the queue never fills.** Derived from the machine (the refresh is read at runtime), no new
+constant class. On healthy last-one-wins boxes it is invisible: painting at 95% of the
+refresh rate misses at most one refresh in twenty, and painting faster than refresh already
+shows nothing — the shipped design's own argument. Validation gates: fault-model leg 1 must
+read paint cost ~0.3ms, paint gap ~17.5ms, hitch 0; 240Hz default must stay figure-for-figure
+at the beta.3 baseline; the four-leg selftest and the real-mouse `scrub.ps1` pair both.
+
+## Residue 2 — leg 2's p2p max ~1.6s: NOT A RESIDUE. It reads the same on the fully healthy
+## dev box and is the metric's recorded artefact class.
+
+| leg 2 (reversals) | p2p max | p2p end | supply | seeks | walk max | dec max | hitch |
+|---|---|---|---|---|---|---|---|
+| 60Hz + sync, run 1 | 1694.5ms | 8.8ms | 114.2% | 10 | 29f | 79.0ms | 7 |
+| 60Hz + sync, run 2 | 1535.1ms | 0.0ms | 114.0% | 10 | 29f | 76.2ms | 6 |
+| 240Hz + sync | 1533.7ms | 0.0ms | 113.8% | 10 | 29f | 89.0ms | 8 |
+| **240Hz default (healthy)** | **1695.5ms** | 8.2ms | 113.6% | 10 | 29f | 89.6ms | 9 |
+| Threadripper beta.3 | 1643ms | — | 112% | 10 | 29f | 84.9ms | 8 |
+
+Five configurations across two machines, including the dev box's bare shipping default at
+240Hz, read the same ~1.5–1.7s to within run variance — with `ui gap max` 2.1–2.5ms, so the
+thread never stopped for anything like 1.6s and no single decode exceeds 90ms. It is the
+artefact the reading guide already names: a reversal crosses the same frames twice, and a
+frame first crossed early in the drag and presented on the later pass is charged the whole
+interim. The scripted gesture makes the interim — and therefore the figure — reproducible
+across machines. **Quote `p2p end`, `behind` and `hitch` from that leg** (0–8.8ms, 0/40f,
+and the file's own class respectively, everywhere). The single 84.9ms decode in the paste is
+the 29-frame GOP walk and appears in every config including the healthy one. Optional
+instrument work, unscheduled: charge `p2p` from the *latest* crossing of a frame, so the
+reversal leg stops printing a number that reads as a 1.6-second freeze that never happened.
+
+## Residue 3 — hitch 8: leg 2's is THIS FILE'S OWN CLASS, not a Threadripper deviation;
+## leg 1's is residue 1.
+
+The "recorded hitch 1 class" belongs to the **4K H.264 pool file**, not this one — the
+validation section above records it explicitly ("on the 4K H.264 pool file the reversal leg
+reads … hitch 1 — that file's recorded class"). `M&M_TopGun_1080.mp4`'s reversal-leg class on
+the dev box is **hitch 8–9** (this doc's own validation: "hitch 9 vs 8", real mouse "hitch 8
+both"), and the healthy 240Hz control this session read **hitch 9**. These are decode-walk
+hitches — 10 seeks at ra-walk ~22f, walk max 29f, paint gap max 84–86ms in that leg on every
+config including the healthy one — and the Threadripper's 8 sits inside the class. Leg 1's
+hitch (0 healthy, 2 on the fault model, 8 there) is the one genuine deviation, and it is
+residue 1's mechanism, closed by the same fix.
+
+**Net: one real residue (leg 1's refresh-locked gate), one metric artefact, one
+misattributed baseline.** The remaining feel gap after residue 1 is fixed is the 60-vs-240Hz
+display physics plus this file's own walk hitches, both of which the dev box shows equally.

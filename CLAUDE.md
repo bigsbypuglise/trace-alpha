@@ -1382,6 +1382,19 @@ was the entire cost. Six things to carry.
   `TRACE_SCRUB_PAINT_GATE=0` as the tester rollback. Owner hand-test on the Threadripper
   is the open verification — expected paste: supply ~100% every leg, `paint cost` ≈ one
   refresh, `delta 0`.
+- **THE BETA.3 PASTE'S THREE RESIDUES ARE TRIAGED ON THE DEV BOX (2026-08-19, second
+  session; record in `docs/mp4-scrub-threadripper.md`, "beta.3 residues" section): one real,
+  one metric artefact, one misattributed baseline.** Leg 1's elevated paint cost is REAL and
+  deterministic — under sustained above-refresh demand the gate paces paints at exactly the
+  refresh period, the flip queue never drains, and every present blocks (the cost EMA reads
+  16.53/16.54ms across two back-to-back launches — it is measuring the 16.67ms refresh
+  period, not the machine; absent at 240Hz+sync, so not cold-start and not first-leg).
+  Proposed fix, NOT built: gate period `refresh × 1.05` so submission stays below the drain
+  rate. Leg 2's p2p max ~1.6s reads **1695.5ms on the bare healthy 240Hz default** — five
+  configs across two machines within variance; it is the recorded reversal-gesture artefact
+  (quote `p2p end`/`behind`/`hitch` from that leg). And hitch 8 on leg 2 is
+  `M&M_TopGun_1080`'s OWN recorded class (8–9; healthy control this session read 9) — the
+  "hitch 1 class" belongs to the 4K H.264 pool file. Leg 1's hitch is residue 1's mechanism.
 - **THE TWO PAINT-PACING REJECTIONS WERE HARDWARE-SPECIFIC PREMISES, the third this
   investigation overturned** (after the threading refutation and the dev-box-tuned
   constants). Both were measured on the 240Hz panel where paints cost 0.3ms and 98% landed
