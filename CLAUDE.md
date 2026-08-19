@@ -1286,6 +1286,53 @@ Four things to carry.
   `v0.2.0-beta.1`. Step 12 (frameless window) remains the owner's to schedule and is the
   next major interface item.
 
+**THE SCRUB SELF-DIAGNOSTIC IS BUILT AND VALIDATED (2026-08-19): `Trace.exe
+"--scrub-selftest=<clip>"`, the third selftest.** It exists for the Threadripper MP4 scrub
+report — **whose threading hypothesis is REFUTED**: `TRACE_DECODE_THREADS=8` and
+`TRACE_LONGGOP_SLICE_THREADS=1` both failed to help on that machine, and the fault reproduces
+on the validated 1080p pool file, so it is the machine and not the media. The machine is
+locked down, so the diagnostic is one command anyone can run: it opens the clip, drives three
+scripted drags through the REAL slider (setValue/setSliderDown — the transport's own route,
+so coalescing, press-jump, batching, lease and landing all run as shipped), and writes one
+pasteable block to stdout AND `trace-scrub-report.txt` beside the exe (the file exists so
+nobody fights GUI-subsystem capture semantics). Exit 6 = clip unopenable, 7 = structural leg
+failure; **slow numbers are the report, never a failure.** Full reading guide and the
+dev-box reference block: `docs/mp4-scrub-threadripper.md`. Five things to carry.
+
+- **The worker round trip is now measured in isolation, permanently.** `ScrubRequest`/
+  `ScrubResult` carry monotonic stamps (`scrubMonotonicNs()`, one clock both threads can
+  read), MainWindow accumulates per-media (`scrubRt_`), and the HUD's `worker` line gained
+  `rt avg/max wake deliv ovh (req N)`. `ovh` is round trip minus the batch's own decode —
+  the term that scales with the machine rather than the media, the leading hypothesis, and
+  previously invisible: playback decodes synchronously and pays none of it, which fits
+  "scrub degraded, playback fine" exactly. Request-level terms come from batch index 0 only,
+  because a batch publishes together and later frames share the stamps.
+- **THE HUD ITSELF IS ~2.5ms OF DELIVERY LATENCY PER REQUEST ON THE DEV BOX.** Shipping
+  config (HUD hidden): overhead 0.02ms avg, 4.2% of a 0.58ms round trip. `TRACE_HUD=1`:
+  deliver 2.50ms, overhead 81.5% of a 3.08ms round trip — the ~25-line string rebuild per
+  present, queued ahead of the next delivery. So the harness config and the shipping config
+  measure DIFFERENT transports; the selftest respects `TRACE_HUD`, prints `hud SHOWN|hidden`
+  on its knobs line, and a paste is only comparable to a paste in the same config. Every
+  recorded harness figure was taken HUD-on and inherits this instrument cost.
+- **Validated instrument-against-gesture, not against the record** (same box, build, day,
+  display 1920x1080@60 remote-class): selftest at `TRACE_HUD=1` vs a real-mouse `scrub.ps1`
+  run — forward sweep rt 3.08 vs 3.97ms, deliver 2.50 vs 2.67, supply ~100% both, hitch 0
+  both, delta 0 both; reversals rev-hit 97.8 vs 97.3%, walk max 29 both (the GOP), hitch 8
+  vs 8, delta 0 both. On the 4K H.264 pool file the reversal leg reads rev-hit 98.8%,
+  seeks 3, hitch 1, delta 0 — that file's recorded class. Playback regression flat: 4K H.264
+  cadence x2 **99.2/99.1%**, `drop 0`, `rephase 0`, buckets `~1x 118 / 1.5-2.5x 1`;
+  renderer selftest `d3d11 fellback=0 planar=1`.
+- **`ScrubDecodeWorker` counts budget cuts now** (`batchBudgetCuts()`): a batch ended by the
+  8ms budget with frames still wanted, as distinct from one that completed — the two ended
+  the loop identically before. Only counted when frames were still wanted, so a budget
+  expiring on a batch's last frame reports nothing.
+- **NOTHING IS ADAPTIVE YET, DELIBERATELY.** The batch cap of 4, the 8ms walk budget and the
+  60ms fill budget are dev-box-tuned suspects; `thread_count` (av_cpu_count) and the
+  byte-budgeted cache are the properly-derived model. Adapting the wrong one is worse than
+  adapting none — wait for the Threadripper's paste, and any adaptive version **must
+  reproduce the tuned values on the home box** (converging to anything but 4 there means it
+  is wrong).
+
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
 phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The
