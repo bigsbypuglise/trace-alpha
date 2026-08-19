@@ -361,8 +361,19 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path $PWD "dist\$env:DIST_NAME\Trace.exe"
 
-          $out = & $exe --renderer-selftest=d3d11 2>&1
-          $code = $LASTEXITCODE
+          # Trace links as a GUI-subsystem app (owner item 18, ca5b464), and
+          # pwsh does NOT wait for a bare GUI-app invocation even in the
+          # capture form: three runs threw here in ~0.5s with $LASTEXITCODE
+          # EMPTY and zero output lines, starting at exactly that commit. The
+          # capture form was verified to wait under Windows PowerShell 5.1,
+          # which is not the shell this step runs in. Start-Process -Wait
+          # reads the exit code off the process object, which cannot not wait.
+          $so = Join-Path $env:RUNNER_TEMP "renderer-selftest-out.txt"
+          $se = Join-Path $env:RUNNER_TEMP "renderer-selftest-err.txt"
+          $p = Start-Process -FilePath $exe -ArgumentList '--renderer-selftest=d3d11' `
+            -Wait -PassThru -RedirectStandardOutput $so -RedirectStandardError $se
+          $code = $p.ExitCode
+          $out = @(Get-Content $so; Get-Content $se)
           $out | ForEach-Object { Write-Host $_ }
 
           if ($code -ne 0) {
@@ -403,8 +414,15 @@ jobs:
           $ErrorActionPreference = 'Stop'
           $exe = Join-Path $PWD "dist\$env:DIST_NAME\Trace.exe"
 
-          $out = & $exe --window-shape-selftest 2>&1
-          $code = $LASTEXITCODE
+          # Start-Process -Wait for the same reason as the renderer step
+          # above: Trace is a GUI-subsystem app and pwsh does not wait for a
+          # bare invocation of one, capture form included.
+          $so = Join-Path $env:RUNNER_TEMP "shape-selftest-out.txt"
+          $se = Join-Path $env:RUNNER_TEMP "shape-selftest-err.txt"
+          $p = Start-Process -FilePath $exe -ArgumentList '--window-shape-selftest' `
+            -Wait -PassThru -RedirectStandardOutput $so -RedirectStandardError $se
+          $code = $p.ExitCode
+          $out = @(Get-Content $so; Get-Content $se)
           $out | ForEach-Object { Write-Host $_ }
 
           if ($code -ne 0) {
