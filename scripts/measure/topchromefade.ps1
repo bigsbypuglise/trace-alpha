@@ -1,4 +1,4 @@
-# Owner item 11 experiment: fading the NATIVE top chrome strip by layered-window
+﻿# Owner item 11 experiment: fading the NATIVE top chrome strip by layered-window
 # alpha (WS_EX_LAYERED + LWA_ALPHA). The pass/fail criterion is not "does the
 # opacity animate" -- it is WHAT IS REVEALED AS IT FADES. A layered child blends
 # against what is beneath it in the window tree, and the video is a sibling HWND,
@@ -7,9 +7,9 @@
 #
 # Mode 'blend' answers it with a PINNED alpha (TRACE_TOPCHROME_ALPHA=128), which
 # turns the 82ms mid-fade window into a stable state. Three captures per
-# renderer over BRIGHT footage, with the strip's backdrop forced off so the
-# strip's own content is the design's flat solid gradient (per-row hsd exactly
-# 0, the stripbackdrop.ps1 discriminator):
+# renderer over BRIGHT footage; the strip's own content is the design's flat
+# solid gradient (per-row hsd exactly 0) -- since the 2026-08-19 backdrop
+# removal that is the only content it has:
 #   A  strip pinned 255  -> the strip's own pixels, opaque
 #   V  strip hidden      -> the raw video under the strip band
 #   M  strip pinned 128  -> the question
@@ -20,8 +20,19 @@
 #                Win8+ supportedOS declaration and Trace.exe carries none)
 #   V         -> strip INVISIBLE at 255 (layered child not rendered at all)
 #
+# Mode 'rest' (owner item 8, option B, 2026-08-19) verifies the SHIPPING
+#              resting state: a default launch with NO pin, media open, chrome
+#              held. The strip rests at alpha 215 (TopChrome::kRestingAlpha),
+#              so the band must read A*(215/255) + V*(40/255) on d3d11 --
+#              while on cpu the layered alpha is IGNORED (native children
+#              share the top-level backing store) and PASS is the band reading
+#              A. THE TWO BACKENDS PASSING DIFFERENT PREDICTIONS IS THE OWNER
+#              DECISION, recorded here so a future session does not read the
+#              divergence as a defect. Run it once per -Renderer.
+#
 # Mode 'anim'  captures the strip band through a real auto-hide and prints the
 #              band mean over time -- the ramp profile of the actual fade.
+#              Since item 8 the ramp tops out at the resting alpha, not opaque.
 # Mode 'menus' verifies hit-testing survives the layered style: a click on File
 #              and an Alt+F mnemonic must both open a menu.
 # Mode 'loop'  is the items-3+7 regression watch: TRACE_REVEAL_LOG=1, pointer
@@ -29,7 +40,7 @@
 #              and unmapping is what fed the old blink cycle, and the layered
 #              style must not re-open it.
 param(
-    [ValidateSet('blend','anim','menus','loop')][string]$Mode = 'blend',
+    [ValidateSet('blend','rest','anim','menus','loop')][string]$Mode = 'blend',
     [Parameter(Mandatory = $true)][string]$Clip,
     [ValidateSet('d3d11','cpu')][string]$Renderer = 'd3d11',
     [string]$Exe,
@@ -96,7 +107,7 @@ function Capture-Client($h, $path) {
     return $bmp
 }
 
-# The stripbackdrop.ps1 band: the right end of the strip past the menus, rows
+# The strip band (the retired stripbackdrop.ps1's): the right end past the menus, rows
 # clear of the top edge and the 1px hairline. Returns per-pixel grayscale as a
 # double[], plus hsd and channel means. Stride-aware -- only the first width*4
 # bytes of each row are pixels.
@@ -157,13 +168,14 @@ function Band-Mean($bmp) {
     return $s / ($bmp.Width * $bmp.Height)
 }
 
-function MAE($a, $b, $scaleB = 1.0, $offset = $null) {
-    # mean |a - f(b)| where f is scale, or f = (b + offset)/2 for the blend case
+function MAE($a, $b, $scaleB = 1.0, $second = $null, $secondScale = 0.0) {
+    # mean |a - p| where p = b*scaleB + second*secondScale (second optional).
+    # The two-source form is the layered-blend prediction: strip*wS + video*wV.
     $n = $a.Count
     $s = 0.0
     for ($i = 0; $i -lt $n; $i++) {
-        if ($null -ne $offset) { $p = ($b[$i] + $offset[$i]) / 2.0 }
-        else { $p = $b[$i] * $scaleB }
+        $p = $b[$i] * $scaleB
+        if ($null -ne $second) { $p += $second[$i] * $secondScale }
         $s += [Math]::Abs($a[$i] - $p)
     }
     return [Math]::Round($s / $n, 2)
@@ -174,7 +186,7 @@ function Start-TraceRun($extraEnv, $errFile = $null) {
     Start-Sleep -Milliseconds 700
     Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Milliseconds 300
-    $names = @('TRACE_RENDERER','TRACE_HUD','TRACE_NO_AUDIO','TRACE_SETTINGS_FILE','TRACE_STRIP_BACKDROP','TRACE_TOPCHROME_ALPHA','TRACE_TOPCHROME_FADE','TRACE_REVEAL_LOG')
+    $names = @('TRACE_RENDERER','TRACE_HUD','TRACE_NO_AUDIO','TRACE_SETTINGS_FILE','TRACE_TOPCHROME_ALPHA','TRACE_TOPCHROME_FADE','TRACE_REVEAL_LOG')
     foreach ($n in $names) { Remove-Item "env:$n" -ErrorAction SilentlyContinue }
     $env:TRACE_RENDERER = $Renderer
     $env:TRACE_HUD = "0"
@@ -217,9 +229,8 @@ Write-Output "mode=$Mode  renderer=$Renderer  clip=$(Split-Path -Leaf $Clip)"
 Write-Output ""
 
 if ($Mode -eq 'blend') {
-    # A: strip pinned fully opaque. Backdrop off, so the strip's content is the
-    # flat solid gradient and its own hsd is exactly 0.
-    $h = Start-TraceRun @{ TRACE_STRIP_BACKDROP = '0'; TRACE_TOPCHROME_ALPHA = '255' }
+    # A: strip pinned fully opaque -- the strip's own flat solid gradient.
+    $h = Start-TraceRun @{ TRACE_TOPCHROME_ALPHA = '255' }
     Step-Into $h
     Park-Inside $h
     $bmpA = Capture-Client $h "$OutDir\$Renderer-A-alpha255.png"
@@ -231,7 +242,7 @@ if ($Mode -eq 'blend') {
     $V = Get-Band $bmpV; $bmpV.Dispose()
 
     # M: strip pinned to the midpoint.
-    $h = Start-TraceRun @{ TRACE_STRIP_BACKDROP = '0'; TRACE_TOPCHROME_ALPHA = '128' }
+    $h = Start-TraceRun @{ TRACE_TOPCHROME_ALPHA = '128' }
     Step-Into $h
     Park-Inside $h
     $bmpM = Capture-Client $h "$OutDir\$Renderer-M-alpha128.png"
@@ -243,7 +254,7 @@ if ($Mode -eq 'blend') {
     Write-Output ""
     if ($A.W -ne $V.W -or $A.W -ne $M.W) { Write-Output "band sizes differ -- captures not comparable"; exit 1 }
 
-    $errVideo   = MAE $M.Gray $A.Gray 1.0 $V.Gray          # M ~ (A+V)/2
+    $errVideo   = MAE $M.Gray $A.Gray 0.5 $V.Gray 0.5      # M ~ (A+V)/2
     $errBlack   = MAE $M.Gray $A.Gray (128.0/255.0)        # M ~ A*0.502
     $errNoAlpha = MAE $M.Gray $A.Gray 1.0                  # M ~ A (alpha ignored)
     $errNoStrip = MAE $M.Gray $V.Gray 1.0                  # M ~ V (strip invisible)
@@ -262,12 +273,67 @@ if ($Mode -eq 'blend') {
     Write-Output "Captures in $OutDir -- confirm by eye before believing the arithmetic."
 }
 
+if ($Mode -eq 'rest') {
+    # A: strip pinned fully opaque -- the strip's own flat solid gradient.
+    $h = Start-TraceRun @{ TRACE_TOPCHROME_ALPHA = '255' }
+    Step-Into $h
+    Park-Inside $h
+    $bmpA = Capture-Client $h "$OutDir\$Renderer-rest-A-alpha255.png"
+    $A = Get-Band $bmpA; $bmpA.Dispose()
+    # V: same launch, pointer parked outside -> strip hides -> raw video.
+    [TfWin]::SetCursorPos(5, 5) | Out-Null
+    Start-Sleep -Milliseconds 3400
+    $bmpV = Capture-Client $h "$OutDir\$Renderer-rest-V-hidden.png"
+    $V = Get-Band $bmpV; $bmpV.Dispose()
+
+    # R: the SHIPPING configuration -- no pin, no override. What the settled
+    # strip actually reads at rest. NOTE this assumes Windows' transparency
+    # setting is ON; with it off the strip correctly rests opaque and this
+    # mode would report OPAQUE on a correct build -- read the HUD's `strip`
+    # field (a215 vs opaque (windows)) before believing a FAIL.
+    $h = Start-TraceRun @{ }
+    Step-Into $h
+    Park-Inside $h
+    $bmpR = Capture-Client $h "$OutDir\$Renderer-rest-R-default.png"
+    $R = Get-Band $bmpR; $bmpR.Dispose()
+
+    Write-Output ("A  strip @255      hsd {0}  mean {1}  RGB {2}/{3}/{4}" -f $A.HSd, $A.Mean, $A.R, $A.G, $A.B)
+    Write-Output ("V  strip hidden    hsd {0}  mean {1}  RGB {2}/{3}/{4}" -f $V.HSd, $V.Mean, $V.R, $V.G, $V.B)
+    Write-Output ("R  default rest    hsd {0}  mean {1}  RGB {2}/{3}/{4}" -f $R.HSd, $R.Mean, $R.R, $R.G, $R.B)
+    Write-Output ""
+    if ($A.W -ne $V.W -or $A.W -ne $R.W) { Write-Output "band sizes differ -- captures not comparable"; exit 1 }
+
+    $wS = 215.0 / 255.0; $wV = 40.0 / 255.0
+    $errResting = MAE $R.Gray $A.Gray $wS $V.Gray $wV      # R ~ A*(215/255)+V*(40/255)
+    $errOpaque  = MAE $R.Gray $A.Gray 1.0                  # R ~ A (opaque at rest)
+    $errNoStrip = MAE $R.Gray $V.Gray 1.0                  # R ~ V (strip invisible)
+    Write-Output ("R vs A*0.843+V*0.157  [RESTING TRANSLUCENCY]  MAE {0}" -f $errResting)
+    Write-Output ("R vs A                [OPAQUE at rest]        MAE {0}" -f $errOpaque)
+    Write-Output ("R vs V                [strip INVISIBLE]       MAE {0}" -f $errNoStrip)
+    Write-Output ""
+    $best = @(
+        @{ n = 'RESTING TRANSLUCENCY (alpha 215)'; e = $errResting },
+        @{ n = 'OPAQUE at rest';                   e = $errOpaque },
+        @{ n = 'STRIP INVISIBLE';                  e = $errNoStrip }
+    ) | Sort-Object { $_.e } | Select-Object -First 1
+    Write-Output ("VERDICT: {0}  (MAE {1})" -f $best.n, $best.e)
+    # The owner decision of 2026-08-19 (item 8, option B): the two backends
+    # deliberately differ at rest. d3d11 must read the translucent blend; cpu
+    # ignores the layered alpha (native children share the top-level backing
+    # store) and must read OPAQUE. Neither result is a defect on its own
+    # renderer, and a cpu run reading translucent would be the surprise.
+    $want = if ($Renderer -eq 'd3d11') { 'RESTING TRANSLUCENCY (alpha 215)' } else { 'OPAQUE at rest' }
+    if ($best.n -eq $want) { Write-Output ("PASS for renderer={0}" -f $Renderer) }
+    else { Write-Output ("FAIL for renderer={0} -- expected {1}" -f $Renderer, $want) }
+    Write-Output "Captures in $OutDir -- confirm by eye before believing the arithmetic."
+}
+
 if ($Mode -eq 'anim') {
     # The real gesture: chrome up and settled, pointer leaves, auto-hide (2s)
     # then the 165ms fade. Capture just the strip band every ~30ms and print
     # the mean over time -- a fade is a ramp through intermediate values, a pop
     # is one step.
-    $h = Start-TraceRun @{ TRACE_STRIP_BACKDROP = '0' }
+    $h = Start-TraceRun @{ }
     Step-Into $h
     Park-Inside $h
     $r = New-Object TfWin+RECT
@@ -314,7 +380,7 @@ if ($Mode -eq 'anim') {
 }
 
 if ($Mode -eq 'menus') {
-    $h = Start-TraceRun @{ TRACE_STRIP_BACKDROP = '0' }
+    $h = Start-TraceRun @{ }
     Step-Into $h
     Park-Inside $h
     Start-Sleep -Milliseconds 300
@@ -376,7 +442,7 @@ public class TfClick {
 if ($Mode -eq 'loop') {
     $errFile = "$OutDir\$Renderer-reveal.log"
     Remove-Item $errFile -ErrorAction SilentlyContinue
-    $h = Start-TraceRun @{ TRACE_STRIP_BACKDROP = '0'; TRACE_REVEAL_LOG = '1' } $errFile
+    $h = Start-TraceRun @{ TRACE_REVEAL_LOG = '1' } $errFile
     Step-Into $h
     Park-Inside $h
     $markStart = (Get-Content $errFile -ErrorAction SilentlyContinue | Measure-Object -Line).Lines

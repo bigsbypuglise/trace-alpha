@@ -14,7 +14,23 @@
 # picture and not a different rendering (the HUD headers read `frame 116` and
 # `frame 120`). The states to compare are 01-04, paused at -Frame, and 08-12,
 # after the drag lands. 08-mid-drag is the best of them: the panel and the
-# dragged handle are both on screen and it reads 0 px, max delta 1.
+# dragged handle are both on screen.
+#
+# THE TOP STRIP BAND DIFFERS 100% ACROSS BACKENDS BY OWNER DECISION (item 8
+# option B, 2026-08-19) AND MUST BE EXCLUDED FROM THE COMPARISON. The strip
+# rests at layered alpha 215 on d3d11 -- the real video blends through it --
+# while the cpu backend ignores the layered alpha (native children share the
+# top-level backing store) and stays opaque. Measured on 08-mid-drag: the
+# strip band reads 5434 of 5434 samples differing at max delta 37, while the
+# video band BELOW the strip reads 25 of 61,864 (0.04%, the video band's own
+# backend class). abdiff.ps1's sampled band starts at 6% of the capture, which
+# at the default geometry clips the strip's bottom rows -- so a revealed-state
+# abdiff reading ~0.7% with every differing sample in its first row is this
+# decision, not a defect. Diff below the title bar + 38px strip, or read the
+# per-band split before concluding anything. The recorded "0 px, max delta 1"
+# standard for 08-mid-drag remains true OF THE VIDEO BAND; the empty-state
+# window (emptystate.ps1 captures) is still byte-comparable whole, because the
+# strip is deliberately held opaque there.
 #
 # This only became true once the interaction legs started registering. Before
 # spec phase 4 fixed the aim, all twelve captures were the same paused frame and
@@ -87,7 +103,7 @@ $w = $r.R - $r.L
 $cx = $r.L + [int]($w / 2)
 $panelTop = 0; $panelLeft = 0; $panelH = 0; $panelW = 0
 $iconY = 0; $trackY = 0; $playX = 0; $rewX = 0; $ffX = 0
-$startX = 0; $endX = 0; $muteX = 0; $loopX = 0; $shareX = 0; $fullX = 0; $trackX0 = 0
+$muteX = 0; $loopX = 0; $shareX = 0; $fullX = 0; $trackX0 = 0
 
 # THE TOP CHROME REVEALS WITH THE PANEL, SO THE DIFFERENCE IS NO LONGER ONE
 # REGION (UI redesign roadmap step 7). Both fade in on the same reveal state, so
@@ -202,32 +218,34 @@ $panelCx = $r.L + $panel.x + [int]($panel.w / 2)
 # fraction of the width would drift with the window and hit nothing. Every
 # figure below is (logical px from that end) / 56.
 #
-#   pad 14 + util 36 + gap 2 + play 40, all from layout():
-#     go-to-start  14 + 18                 =  32 -> 0.5714
-#     rewind       14 + 38 + 18            =  70 -> 1.2500
-#     play         14 + 76 + 20            = 110 -> 1.9643
-#     fast-forward 14 + 76 + 42 + 18       = 150 -> 2.6786
-#     go-to-end    14 + 76 + 42 + 38 + 18  = 188 -> 3.3571
-#     mute         + 38                    = 226 -> 4.0357
-#     loop         + 38                    = 264 -> 4.7143
+#   EIGHT CONTROLS SINCE OWNER ITEM 15 (2026-08-18) -- Go to Start and Go to
+#   End left the strip (Home/End keys keep the behaviour), so the cluster is
+#   rewind / play / fast-forward / mute / loop. This map was stale for one
+#   session after that change and every left-cluster aim landed one control
+#   off: the "go-to-end" tap toggled Loop and the "loop" tap sampled the frame
+#   readout, which is how the run read two FAILs on a correct build.
+#   pad 14, util 36, gap 2, play 40, all from layout():
+#     rewind       14 + 18                 =  32 -> 0.5714
+#     play         14 + 36 + 2 + 20        =  72 -> 1.2857
+#     fast-forward 14 + 78 + 2 + 18        = 112 -> 2.0000
+#     mute         + 38                    = 150 -> 2.6786
+#     loop         + 38                    = 188 -> 3.3571
 #   and from the RIGHT edge, share outermost:
 #     share        14 + 18                 =  32 -> 0.5714
 #     fullscreen   14 + 36 + 12 + 1 + 12 + 18 = 93 -> 1.6607
 $iconY  = $r.T + $panelTop + [int]($panelH * 0.5)
 # The track shares the strip's centre line now; it is no longer a separate row.
 $trackY = $iconY
-$startX = $panelLeft + [int]($panelH * 0.5714)
-$rewX   = $panelLeft + [int]($panelH * 1.2500)
-$playX  = $panelLeft + [int]($panelH * 1.9643)
-$ffX    = $panelLeft + [int]($panelH * 2.6786)
-$endX   = $panelLeft + [int]($panelH * 3.3571)
-$muteX  = $panelLeft + [int]($panelH * 4.0357)
-$loopX  = $panelLeft + [int]($panelH * 4.7143)
+$rewX   = $panelLeft + [int]($panelH * 0.5714)
+$playX  = $panelLeft + [int]($panelH * 1.2857)
+$ffX    = $panelLeft + [int]($panelH * 2.0000)
+$muteX  = $panelLeft + [int]($panelH * 2.6786)
+$loopX  = $panelLeft + [int]($panelH * 3.3571)
 $shareX = $panelLeft + $panelW - [int]($panelH * 0.5714)
 $fullX  = $panelLeft + $panelW - [int]($panelH * 1.6607)
-Write-Output ("OVERLAY strip {0}x{1} at ({2},{3}) - icons y={4}, start/rew/play/ff/end/mute/loop x={5}/{6}/{7}/{8}/{9}/{10}/{11}, full/share x={12}/{13}" -f `
-    $panelW, $panelH, $panel.x, $panelTop, ($iconY - $r.T), ($startX - $r.L), ($rewX - $r.L), ($playX - $r.L), `
-    ($ffX - $r.L), ($endX - $r.L), ($muteX - $r.L), ($loopX - $r.L), ($fullX - $r.L), ($shareX - $r.L))
+Write-Output ("OVERLAY strip {0}x{1} at ({2},{3}) - icons y={4}, rew/play/ff/mute/loop x={5}/{6}/{7}/{8}/{9}, full/share x={10}/{11}" -f `
+    $panelW, $panelH, $panel.x, $panelTop, ($iconY - $r.T), ($rewX - $r.L), ($playX - $r.L), `
+    ($ffX - $r.L), ($muteX - $r.L), ($loopX - $r.L), ($fullX - $r.L), ($shareX - $r.L))
 
 # 3. hover the Play control
 Pt $playX $iconY; Start-Sleep -Milliseconds 350
@@ -276,19 +294,21 @@ Shot "10-after-key"
 $fg = [O]::GetForegroundWindow()
 Write-Output ("OVERLAY foreground-is-main-window: {0}" -f ($fg -eq $h))
 
-# 8. THE FOUR CONTROLS UI REDESIGN ROADMAP STEP 5 ADDED, each asserted by an
-# observable rather than by "the click did not crash".
+# 8. THE STEP 5 CONTROLS, each asserted by an observable rather than by "the
+# click did not crash".
 #
-# Go to Start and Go to End are checked by MEASURING THE PLAYED TRACK, which is
-# the one thing on the strip that says where the playhead is and is readable
-# without OCR: the accent runs from the track's left edge to the thumb, so it is
-# ~0% of the track at frame 0 and ~100% at the last frame. Mute is checked by
-# the mute cell's own pixels changing, because the glyph swaps between volume
-# and volume-muted -- a click that did nothing would leave them identical.
+# Go to Start and Go to End are the HOME AND END KEYS since owner item 15 took
+# their buttons off the strip; the observable is unchanged -- MEASURING THE
+# PLAYED TRACK, the one thing on the strip that says where the playhead is and
+# is readable without OCR: the accent runs from the track's left edge to the
+# thumb, so it is ~0% of the track at frame 0 and ~100% at the last frame.
+# Mute is checked by the mute cell's own pixels changing, because the glyph
+# swaps between volume and volume-muted -- a click that did nothing would
+# leave them identical.
 #
-# Each has a NEGATIVE half by construction: Go to End must move the fill UP and
-# Go to Start must bring it back DOWN, so a build whose buttons do nothing fails
-# both rather than passing one by accident.
+# Each has a NEGATIVE half by construction: End must move the fill UP and Home
+# must bring it back DOWN, so a build where neither works fails both rather
+# than passing one by accident.
 function AccentFraction([string]$png) {
     $bmp = [System.Drawing.Bitmap]::FromFile($png)
     try {
@@ -309,22 +329,24 @@ function AccentFraction([string]$png) {
     } finally { $bmp.Dispose() }
 }
 
+# The pointer stays parked on the strip so the chrome holds through both
+# keypresses and the captures compare like with like.
 Pt $playX $iconY; Start-Sleep -Milliseconds 200
-Tap $endX $iconY; Start-Sleep -Milliseconds 700
-Shot "13-after-go-to-end"
-$fracEnd = AccentFraction (Join-Path $OutDir "13-after-go-to-end.png")
-Tap $startX $iconY; Start-Sleep -Milliseconds 700
-Shot "14-after-go-to-start"
-$fracStart = AccentFraction (Join-Path $OutDir "14-after-go-to-start.png")
-Write-Output ("OVERLAY go-to-end/start played-track fraction: {0} -> {1}" -f $fracEnd, $fracStart)
+[System.Windows.Forms.SendKeys]::SendWait("{END}"); Start-Sleep -Milliseconds 700
+Shot "13-after-end-key"
+$fracEnd = AccentFraction (Join-Path $OutDir "13-after-end-key.png")
+[System.Windows.Forms.SendKeys]::SendWait("{HOME}"); Start-Sleep -Milliseconds 700
+Shot "14-after-home-key"
+$fracStart = AccentFraction (Join-Path $OutDir "14-after-home-key.png")
+Write-Output ("OVERLAY End/Home played-track fraction: {0} -> {1}" -f $fracEnd, $fracStart)
 if ($fracEnd -lt 0 -or $fracStart -lt 0) {
     Write-Output "OVERLAY: FAIL - could not sample the played track"
 } elseif ($fracEnd -lt 0.55) {
-    Write-Output ("OVERLAY: FAIL - Go to End left the played track at {0}" -f $fracEnd)
+    Write-Output ("OVERLAY: FAIL - End left the played track at {0}" -f $fracEnd)
 } elseif ($fracStart -gt 0.12) {
-    Write-Output ("OVERLAY: FAIL - Go to Start left the played track at {0}" -f $fracStart)
+    Write-Output ("OVERLAY: FAIL - Home left the played track at {0}" -f $fracStart)
 } else {
-    Write-Output "OVERLAY go-to-end / go-to-start: PASS"
+    Write-Output "OVERLAY End / Home: PASS"
 }
 
 Tap $muteX $iconY; Start-Sleep -Milliseconds 450
