@@ -1094,9 +1094,15 @@ Five things to carry.
 - **Item 18 (console window) was `add_executable(Trace WIN32)`.** The TRACE_*_LOG knobs
   survive via `AttachConsole(ATTACH_PARENT_PROCESS)` at startup, only when the std handles are
   not already valid — so redirection (CI, harnesses) keeps its pipes. **PowerShell does not
-  wait for a bare GUI-app invocation and `$LASTEXITCODE` after one is garbage**; CI's capture
-  form (`$out = & $exe ... 2>&1`) waits and propagates, verified. A harness launching Trace
-  bare and reading the exit code must use the capture form or `Start-Process -Wait`.
+  wait for a bare GUI-app invocation and `$LASTEXITCODE` after one is garbage** — ~~CI's
+  capture form (`$out = & $exe ... 2>&1`) waits and propagates, verified~~ **CORRECTED
+  2026-08-19: that verification was Windows PowerShell 5.1 and does NOT transfer to pwsh 7,
+  which CI's selftest steps run in. Three CI runs went red on exactly this — the step threw in
+  ~0.5s with `$LASTEXITCODE` EMPTY and zero output lines, starting at this item's commit.
+  `Start-Process -Wait -PassThru` with file redirects is the only form that works in both
+  editions (fixed in the workflow at `86f1186`, validated in both directions on the shipped
+  binary). A harness launching Trace bare and reading the exit code must use `Start-Process
+  -Wait`; the capture form is only trustworthy under 5.1.**
 - **Item 13**: the D3D11 surface still returns `MA_NOACTIVATE` (child never takes focus) but
   now calls `SetForegroundWindow` on its root first — click-activates, and click-then-Space
   still toggles playback (probed with its negative control).
@@ -1226,6 +1232,54 @@ a physical-panel record; captures read the composited framebuffer so pixel judge
 `moved 0%` — the recorded 121-frame-clip artifact, clean on the header's named clip) ·
 lifecycle **83.5% / 0%** · `emptystate` all modes both backends plus `-Bar` ·
 `topchromefade` rest/anim/menus/loop, the loop leg identical to the item 11 record.
+
+**STEP 11 IS RE-CONSOLIDATED AT HEAD AND THE BETA RE-CUT IS PREPARED, NOT CUT (2026-08-19,
+`86f1186`; physical panel 5120x1440 @ 239.999Hz).** The full re-consolidation record is the
+banner at the top of roadmap §11 — read it there. Items 8/11/15 had changed what the step 11
+record asserts (eight controls, not ten; the strip-over-video row measures a deleted
+mechanism), and the audit found four real gaps at HEAD, all closed: popup **View** menu body
+**0 of 99,876 px, delta 0** across backends (re-checked because item 10 moved the style home
+into `Theme::apply`); `uiatree` on **both** backends reading eight controls + MenuBar + five
+MenuItems + the filename **on identical rects to the pixel**; §4 shipping-config opening
+geometry 16:9 `1280x720` / 9:16 `609x1083` **identical on both backends**; escape-hatch health
+cpu 4444 cadence **99.4% ×3** (`1 of 260`, the recorded class to the digit — one cold-start rep
+read 94.6%/`drop 11` and did not reproduce), cpu 4K H.264 **100.0% ×2** (`0 of 119`), cpu
+`-SnapRelease` **`delta 0`**, `hitch 0`, release 45.5ms with the landing async. Copy Current
+Frame: clipboard 3840x2160, toast drawn with the chrome hidden.
+
+Four things to carry.
+
+- **CI WAS RED FOR THREE RUNS AND THE CAUSE WAS ITEM 18's OWN VERIFICATION NOT TRANSFERRING
+  BETWEEN POWERSHELL EDITIONS.** The selftest steps run in **pwsh 7**, which does not wait for
+  a bare GUI-subsystem invocation *even in the capture form* — `$LASTEXITCODE` EMPTY, zero
+  output, thrown in ~0.5s, from the commit that linked Trace as WIN32. The capture form was
+  verified under 5.1, a different shell than CI uses. Fixed at `86f1186` with `Start-Process
+  -Wait -PassThru` + file redirects, validated in both directions locally (exit 0 with the
+  selftest line; exit 4 propagated with its FAIL line). **Any step or harness that launches
+  Trace bare and reads an exit code must use `Start-Process -Wait`.**
+- **CI IS READABLE FROM THIS BOX WITHOUT `gh`.** `git credential fill` yields a token the
+  GitHub REST API accepts (`Authorization: token …`) — run status, per-step conclusions and
+  the raw step logs are all reachable with `curl`. Every prior handoff said CI could not be
+  read from here; that was "no `gh` CLI" hardening into "no access". After the fix, the run at
+  `86f1186` is green with **all five verification steps read individually**: dependency gate ·
+  FFmpeg + audio detected · `6 required files present, 95.4 MB total` · **`renderer=d3d11
+  fellback=0 planar=1`** · `OK - 11 shapes x 4 scale factors`.
+- **THE SAME-COORDINATE REVEAL TRAP CAUGHT A THIRD SCRIPT-SHAPED VICTIM — ad-hoc harness code
+  this time.** Parking the pointer at the client centre with one `SetCursorPos` revealed
+  nothing because the pointer was already there (the items-3+7 filter: a move that does not
+  move is not input), and BOTH backends' UIA walks read no MenuBar — which looks exactly like
+  the accessibility regression it isn't. Jiggle through two points before any walk or capture
+  that needs the chrome up. `emptystate.ps1` already records this; it applies to *any* code
+  that reveals by pointer, not just that script.
+- **THE RELEASE STATE**: `docs/release-body-draft.md` is re-drafted at `86f1186` and
+  supersedes the 2026-08-18 draft, which described the deleted blur and a ten-control strip.
+  Version `0.3.0` and all three stage literals verified against the **HEAD binary** (`(beta)`
+  UTF-8, `Beta.` capital — a lowercase-only search misses it — and the mail subject; `0.2.0`
+  absent). Checklist items 1–3 are done; **the one open item is the owner's look at the
+  finished interface at the machine**, and the resting translucency landed last so it has not
+  been seen settled. **To cut: copy the draft over `docs/release-body.md`, commit, tag
+  `v0.3.0-beta.1`** — the workflow publishes `docs/release-body.md` as the release body.
+  Step 12 (frameless window) remains the owner's to schedule.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because

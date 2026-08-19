@@ -1,4 +1,48 @@
-# THE UI REDESIGN ROADMAP IS DONE EXCEPT STEP 12. A BETA RE-CUT IS PROPOSED AND NOT CUT.
+# THE UI REDESIGN ROADMAP IS DONE EXCEPT STEP 12. THE BETA RE-CUT IS PREPARED, CI IS GREEN, AND THE ONE OPEN ITEM IS THE OWNER'S LOOK.
+
+## 2026-08-19, SESSION: STEP 11 RE-CONSOLIDATED AT HEAD, CI UN-BROKEN, THE RE-CUT DRAFTED
+
+One commit (`86f1186`, the CI fix) plus the docs. **Physical panel, 5120x1440 @ 239.999Hz.**
+Full records: the banner at the top of roadmap §11, and the 2026-08-19 block in `CLAUDE.md`.
+
+**CI HAD BEEN RED FOR THREE RUNS AND NOBODY HAD READ IT.** The selftest steps run in pwsh 7,
+which does not wait for a bare GUI-subsystem invocation — capture form included. Item 18's
+"waits and propagates, verified" was a 5.1 verification that does not transfer; the step threw
+in ~0.5s with `$LASTEXITCODE` EMPTY and zero output. Fixed with `Start-Process -Wait -PassThru`
++ file redirects, validated in both directions locally. **Green at `86f1186` with all five
+verification steps read individually**, including `renderer=d3d11 fellback=0 planar=1`.
+
+**CI IS READABLE FROM THIS BOX**: `git credential fill` yields a token the GitHub REST API
+accepts — runs, per-step conclusions and raw logs, via `curl`. Stop writing "not readable, no
+`gh`" into handoffs.
+
+**STEP 11 WAS AUDITED AGAINST WHAT ITEMS 8/11/15 CHANGED, AND THE FOUR REAL GAPS WERE CLOSED**
+(roadmap §11 banner has the figures): popup View menu body **0 of 99,876 px delta 0** across
+backends · `uiatree` both backends, eight controls + MenuBar + five MenuItems on **identical
+rects to the pixel** (the first attempt reproduced the same-coordinate reveal trap — one
+`SetCursorPos` to a pixel the pointer already occupies reveals nothing, and both walks read no
+MenuBar; jiggle through two points) · §4 shipping-config geometry 16:9 `1280x720` / 9:16
+`609x1083` identical on both backends · escape hatch healthy (cpu 4444 **99.4% ×3** the
+recorded class, cpu 4K H.264 **100.0% ×2**, cpu `-SnapRelease` `delta 0` `hitch 0` release
+45.5ms async landing) · Copy Current Frame clipboard 3840x2160 with the toast drawn.
+**The strip band over video differing across backends is the item 8 owner decision, never a
+defect** — the §11 supersession banner says which rows of the old record that retires.
+
+**THE RE-CUT IS PREPARED AND NOT CUT.** `docs/release-body-draft.md` re-drafted at `86f1186`
+(the 2026-08-18 draft described the deleted blur and a ten-control strip). Version `0.3.0` and
+all three stage literals verified against the HEAD binary — note `Beta.` is capitalised and a
+lowercase search misses it. Checklist: version DONE, CI green DONE, transparency flip DONE.
+**Open: the owner's look at the finished interface at the machine** — the resting translucency
+(item 8) landed last and has not been seen settled. **To cut**: copy
+`docs/release-body-draft.md` over `docs/release-body.md`, commit, tag `v0.3.0-beta.1`. 47
+commits since `v0.2.0-beta.1` at the time of drafting. **Do not tag unasked.**
+
+**Step 12 (frameless window) remains the owner's to schedule** — the real fix for the
+duplicate top bar, and the highest-risk item left.
+
+---
+
+## Previous top state (2026-08-18): step 11 first closed, version agreed 0.3.0
 
 ## 2026-08-18, SIXTH SESSION: THE BACKDROP SHIPS, STEP 11 IS CLOSED, AND THE VERSION IS 0.3.0
 
@@ -636,8 +680,10 @@ created.
 ## Working notes
 
 - github.com is reachable from the Windows box and you can push directly. Verify with
-  `git remote -v` and `git rev-list --count @{u}..HEAD`. **`gh` is NOT installed**; the
-  git credential helper holds a usable token.
+  `git remote -v` and `git rev-list --count @{u}..HEAD`. **`gh` is NOT installed, but CI IS
+  readable from here** (established 2026-08-19): `git credential fill` yields a token the
+  GitHub REST API accepts, so run status, per-step conclusions and raw step logs are all
+  reachable with `curl`. Read the failing step's log before theorising.
 - **A `v*` tag publishes a real ZIP and marks the release prerelease.** The body comes
   from **`docs/release-body.md`**.
 - **CI has FIVE verification steps and they are separate claims.** Read them

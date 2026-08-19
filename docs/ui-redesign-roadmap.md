@@ -585,6 +585,42 @@ default on Windows 11.
 
 ### 11. Validate across both backends - **DONE 2026-08-18. CONSOLIDATED, NOT REPEATED, AND IT FOUND ONE DEFECT**
 
+> **RE-CONSOLIDATED AT HEAD, 2026-08-19 (`86f1186`, physical panel 5120x1440 @ 239.999Hz),
+> because three later passes changed what this record asserts**: the owner feedback pass
+> (eight strip controls, not ten — item 15; brand mark gone from the strip — item 1; the
+> style home moved into `Theme::apply` — item 10), item 11's layered-window fade, and item
+> 8's resting translucency. Two rows below are SUPERSEDED rather than stale: the "top strip
+> with the backdrop drawing, over video" row measures a mechanism item 8 deleted, and over
+> video the resting strip now differs across backends **by owner decision** (d3d11 rests
+> translucent at alpha 215, cpu rests opaque — measured 5434 of 5434 samples at max delta 37
+> in the item 8 record). **The strip-band difference over video is the decision, never a
+> defect to reconcile.** Every "ten controls" below reads eight as of item 15.
+>
+> **What was already re-verified at HEAD by the item-8 session**: the whole empty-state
+> window with both strips revealed still reads **0 of 972,800 px, max channel delta 0**
+> across backends (the empty-state strip deliberately rests opaque to preserve exactly this
+> instrument); `overlay.ps1` all legs PASS on both backends re-pointed at the eight-control
+> strip; 25 of 25 transitions; `topchromefade.ps1` rest/anim/menus/loop with the cpu leg's
+> PASS being "OPAQUE".
+>
+> **What was closed today, on the eight-control build**: popup **View** menu body **0 of
+> 99,876 px, max channel delta 0** across backends (`themeshot.ps1 -Renderer` both ways —
+> re-checked because item 10 moved the style home and added the `KeyboardCuesStyle` proxy;
+> mnemonic underlines were in force in both captures). `uiatree.ps1` on both backends,
+> pointer parked inside: **eight named controls, MenuBar, five MenuItems and the filename
+> Text on identical rects to the pixel** — and the first attempt reproduced the recorded
+> same-coordinate trap: a `SetCursorPos` to a pixel the pointer already occupies generates
+> no input since the items-3+7 filter, so the chrome never revealed and BOTH walks read no
+> MenuBar; jiggle through two points. §4 opening geometry, shipping configuration
+> (`TRACE_HUD=0`): 16:9 `client 1280x720` and 9:16 `609x1083`, **identical on both
+> backends**. Escape hatch health: cpu 4444 cadence **99.4% ×3** (`drop 0`,
+> `handler>budget 1 of 260` — the recorded class to the digit; one additional cold-start
+> rep read 94.6% with `drop 11` and did not reproduce in three later reps), cpu 4K H.264
+> **100.0% ×2** (`0 of 119`, `thr frame x16`), cpu `-SnapRelease` **`target 261 shown 261
+> delta 0`**, `walk 0f`, `hitch 0`, `land 0`, release 45.5ms with the landing async
+> (`async 5 sync 0`). Copy Current Frame: clipboard **3840x2160** and the toast drawn with
+> the chrome hidden.
+
 Display: **physical panel, 5120x1440 @ 239.999Hz**, so no figure here compares to the step 7
 block's 1920x1080 record. `renderer` was read off both HUDs before any cross-backend figure was
 believed -- `d3d11 +overlay` and `cpu +overlay`, both `backdrop on`.
