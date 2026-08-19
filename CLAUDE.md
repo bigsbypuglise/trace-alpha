@@ -1377,6 +1377,11 @@ was the entire cost. Six things to carry.
   than real use and a fix's validation gesture must be at least as demanding as the real
   one. The report also prints `painted/gated` and `paint cost/gate` per leg; on a
   throttled machine `paint cost` reads ≈ the refresh period, on a healthy one ~0.3ms.
+- **SHIPPED AS `v0.3.0-beta.3` (2026-08-19, tag at `d8c6cdc`, run `32307607412` green,
+  asset `trace-windows-x64.zip`).** The fix ships on by default; the release body names
+  `TRACE_SCRUB_PAINT_GATE=0` as the tester rollback. Owner hand-test on the Threadripper
+  is the open verification — expected paste: supply ~100% every leg, `paint cost` ≈ one
+  refresh, `delta 0`.
 - **THE TWO PAINT-PACING REJECTIONS WERE HARDWARE-SPECIFIC PREMISES, the third this
   investigation overturned** (after the threading refutation and the dev-box-tuned
   constants). Both were measured on the 240Hz panel where paints cost 0.3ms and 98% landed
