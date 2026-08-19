@@ -1217,21 +1217,6 @@ void MainWindow::setupUi() {
         // OverlayModel::setTopInset: with no media the strip is held up, so that
         // is the one state where the difference is permanently on screen.
         viewer_->setChromeTopInsetLogical(trace::ui::TopChrome::stripHeightLogical());
-        // UI redesign roadmap step 10, route 2 -- ON by default, subject to
-        // Windows' transparency setting (ViewerWidget::stripBackdropEnabled).
-        //
-        // The viewer computes the tiny blurred copy because it is where a frame
-        // arrives; the host hands it to the strip because the viewer has no
-        // business knowing what chrome exists. Same shape as setChromeRevealed:
-        // the model decides WHEN, the host decides WHAT WITH.
-        //
-        // Only wired in overlay mode. In bar mode there is no floating strip --
-        // QMainWindow's own menu bar is in the layout and has the window
-        // background behind it, not video -- so a backdrop would be a blur of
-        // pixels that are not there.
-        viewer_->setBackdropSink([this](const QImage& tiny) {
-            if (topChrome_) topChrome_->setBackdrop(tiny);
-        });
     }
 
     // Dev diagnostics HUD sits below the transport. It carries the perf
@@ -4740,15 +4725,17 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 dpiReshapeTimer_.start();
                 break;
             }
-            // UI roadmap step 10. The ONLY message here that is not about
-            // geometry, and it is taken for one reason: Windows' transparency
-            // setting can be flipped while Trace is running, and the strip
-            // backdrop honours it. Nothing about the window's size or shape is
-            // touched, and it does not return -- Qt's own handler still runs,
-            // which matters because WM_SETTINGCHANGE also carries font and
-            // metric changes Qt responds to itself.
+            // The ONLY message here that is not about geometry, and it is taken
+            // for one reason: Windows' transparency setting can be flipped
+            // while Trace is running, and the strip's resting alpha honours it
+            // (it gated the strip backdrop before the backdrop's removal on
+            // 2026-08-19 -- same promise, different mechanism). Nothing about
+            // the window's size or shape is touched, and it does not return --
+            // Qt's own handler still runs, which matters because
+            // WM_SETTINGCHANGE also carries font and metric changes Qt
+            // responds to itself.
             case WM_SETTINGCHANGE:
-                if (viewer_) viewer_->onSystemAppearanceChanged();
+                if (topChrome_) topChrome_->onSystemAppearanceChanged();
                 break;
             default: break;
         }
@@ -5862,14 +5849,6 @@ void MainWindow::syncTopChrome() {
     // media opening or closing under a held-up strip. With no media the strip
     // is forced visible above, so its alpha must be forced full with it.
     topChrome_->setFadeOpacity(currentMedia_ ? chromeFadeOpacity_ : 1.0);
-    // UI roadmap step 10 route 2.
-    //
-    // The backdrop is sampled per frame and gated on the reveal state, so this is
-    // what covers the moments the answer changes with NO frame arriving: a reveal
-    // or a hide, and media opening or closing. On a paused file that is every
-    // moment there is. One sample per reveal against one per frame is the whole
-    // saving, and this is what keeps it correct.
-    if (viewer_) viewer_->refreshBackdrop();
 }
 
 void MainWindow::showTransientMessage(const QString& text, int timeoutMs) {
@@ -7861,14 +7840,15 @@ void MainWindow::refreshHud(const QString& action) {
               // not the one asked for, and the two differ easily -- Qt and GDI
               // do not agree on which "Segoe UI Variable" families exist, and
               // a fallback to plain Segoe UI looks very nearly right in any
-              // screenshot. `backdrop` is the same claim for the strip: it is
-              // no longer decided by the launch, so a machine with Windows
-              // transparency switched off draws the solid fallback while the
-              // command line still says backdrop. Both are the silent
+              // screenshot. `strip` is the same claim for the top chrome's
+              // resting alpha (owner item 8): it is not decided by the launch
+              // -- Windows' transparency setting forces opaque -- and on the
+              // cpu backend the alpha is silently ignored, so a capture must
+              // carry what the strip believes it is doing. Both are the silent
               // degradation class `renderer` and `planar` are reported for.
               + QString(" | font %1").arg(trace::app::Theme::resolvedFontFamily())
-              + QString(" | backdrop %1")
-                .arg(viewer_ ? viewer_->backdropStateLabel() : QStringLiteral("?"))
+              + QString(" | strip %1")
+                .arg(topChrome_ ? topChrome_->stripStateLabel() : QStringLiteral("n/a"))
               + QString(" | dpr %1 scr %2 dpiChg %3%4 reshape %5")
                 .arg(QString::number(hudDpr, 'f', 2))
                 .arg(windowHandle() && windowHandle()->screen()

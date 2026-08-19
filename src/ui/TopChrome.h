@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QImage>
 #include <QString>
 #include <QWidget>
 
@@ -30,15 +29,27 @@ namespace trace::ui {
 //
 // WHY IT IS NATIVE, AND WHAT THAT COSTS. Plan section 18.4 measured this
 // exactly: over the shipped child-HWND video surface, ordinary Qt children are
-// neither visible NOR hit-testable, while native siblings are both -- and lose
-// translucency, because neither design puts the video pixels anywhere Qt can
-// blend against. So the strip is opaque, and the only way to a backdrop blur is
-// to PAINT one: see setBackdrop, which is roadmap step 10 route 2 and ships on.
+// neither visible NOR hit-testable, while native siblings are both -- and Qt
+// cannot blend them, because neither design puts the video pixels anywhere Qt
+// can reach. What section 18.4 could not rule out was DWM doing the blending
+// instead, and owner item 11 proved it does: a WS_EX_LAYERED uniform alpha on
+// this window composites against the real video on the d3d11 default (measured
+// MAE 0.16 against the per-pixel blend prediction). THE RESTING TRANSLUCENCY
+// RIDES ON THAT MECHANISM -- see setFadeOpacity, whose ramp tops out at
+// kRestingAlpha rather than opaque (owner item 8, option B, 2026-08-19).
 //
-// The design package supplies this case's own answer for when it cannot -- a
-// solid `#14161A` "fallback when transparency effects are disabled in Windows
-// Settings" -- and that sentence is now honoured literally rather than used as
-// cover for an opaque strip: with the setting off, the fallback is what draws.
+// THE TWO BACKENDS DELIBERATELY DIFFER HERE, BY OWNER DECISION (2026-08-19).
+// TRACE_RENDERER=cpu ignores the layered alpha for a known reason -- Qt's
+// native children share the top-level backing store, so the rows under the
+// strip hold a baked copy of the strip itself and strip-over-strip reads
+// opaque -- and the owner accepted the divergence rather than fund the
+// composited-quads rebuild. Any cross-backend comparison of the strip band
+// OVER VIDEO now measures this decision, not a defect; the empty state stays
+// comparable because the strip is held opaque there (see MainWindow's hook).
+//
+// The design package's solid `#14161A` "fallback when transparency effects are
+// disabled in Windows Settings" is still honoured literally: with the setting
+// off, the resting alpha is opaque and the fallback is exactly what shows.
 //
 // ITS PARENT IS THE CENTRAL WIDGET AND NOT THE VIEWER, AND THAT IS A MEASURED
 // REQUIREMENT. A native child of the VIEWER is a sibling of the D3D11 surface
@@ -93,42 +104,47 @@ public:
     // repeating the number.
     static int stripHeightLogical();
 
-    // UI redesign roadmap step 10, route 2 -- ON by default, off when Windows'
-    // transparency setting is off; TRACE_STRIP_BACKDROP overrides both ways.
+    // Owner item 11 (fade) plus owner item 8 option B (resting translucency),
+    // one mechanism: WS_EX_LAYERED plus SetLayeredWindowAttributes(LWA_ALPHA)
+    // on this widget's own HWND. Driven from OverlayModel's fade opacity
+    // through MainWindow, so the strip ramps in lockstep with the composited
+    // transport: same kFadeMs, same clock, no second timer.
     //
-    // A tiny blurred copy of the video this strip is covering, stretched across
-    // it as the background instead of the solid fallback. It is what lets the
-    // strip look like the design's `backdrop-filter: blur()` while REMAINING a
-    // real native window with a real QMenuBar in it -- the two things route 1
-    // (redraw the strip as composited quads) would have had to trade against
-    // each other.
-    //
-    // A NULL IMAGE MEANS "DRAW THE FALLBACK", and it stays a routine case
-    // rather than an error one: no media, a hidden strip, an unrecognised pixel
-    // layout, or Windows transparency switched off all arrive here as a null
-    // image and get the design package's own solid `#14161A`. This is a branch,
-    // never a dependency -- the strip draws correctly having never been given
-    // an image at all, which is exactly what bar mode does.
-    void setBackdrop(const QImage& tiny);
-
-    // Owner item 11 experiment (2026-08-18): fade the native strip with
-    // WHOLE-WINDOW opacity -- WS_EX_LAYERED plus SetLayeredWindowAttributes
-    // (LWA_ALPHA) on this widget's own HWND. Driven from OverlayModel's fade
-    // opacity through MainWindow, so the strip ramps in lockstep with the
-    // composited transport: same kFadeMs, same clock, no second timer.
+    // THE RAMP'S CEILING IS kRestingAlpha, NOT OPAQUE (owner decision,
+    // 2026-08-19): opacity 1.0 maps to the resting alpha, so the settled strip
+    // shows the real video through itself on the d3d11 default. The ceiling is
+    // opaque instead when Windows' transparency setting is off -- the design
+    // package's own fallback case -- and TRACE_TOPCHROME_ALPHA=N pins the
+    // alpha outright for measurement (a mid-fade state as a stable state, or
+    // =255 to force the opaque resting strip).
     //
     // Uniform alpha only, never UpdateLayeredWindow -- the paint path is
-    // untouched and the alpha is applied by the compositor. What the strip
-    // blends AGAINST mid-fade is the whole experiment: a layered child blends
-    // against what is beneath it in the window tree, and the video is a
-    // sibling HWND whose pixels may or may not be there. Measured, not read.
+    // untouched and the alpha is applied by the compositor. A layered child
+    // blends against what is beneath it in the window tree, and item 11
+    // measured that to be THE VIDEO on d3d11, not black.
     //
-    // TRACE_TOPCHROME_FADE=0 is the control: the style is never applied and
-    // setRevealed pops exactly as before. TRACE_TOPCHROME_ALPHA=N (0..255)
-    // pins the alpha so a mid-fade state can be captured as a stable state
-    // rather than an 82ms window.
+    // TRACE_TOPCHROME_FADE=0 is the full rollback: the style is never applied,
+    // setRevealed pops, and the strip rests opaque.
     void setFadeOpacity(double opacity01);
     static bool fadeEnabled();
+
+    // Re-reads Windows' transparency setting and re-applies the resting alpha
+    // if the effective answer moved. Driven from MainWindow's WM_SETTINGCHANGE
+    // handler -- that setting, unlike the environment overrides beside it, can
+    // be flipped while Trace is running, and a strip still translucent after
+    // the user turned system transparency off is the setting not being
+    // honoured. Inherited from the strip backdrop, whose removal this survived:
+    // the setting used to gate the painted blur and now gates the resting
+    // alpha, which is the same promise kept by a different mechanism.
+    void onSystemAppearanceChanged();
+
+    // What the strip's resting alpha is ACTUALLY doing, for the dev HUD:
+    // "a215", "opaque (windows)", "a128 (env)" or "opaque (fade off)".
+    // Reported because the answer is not decided by the launch -- a machine
+    // with Windows transparency off rests opaque while the command line says
+    // nothing, which is the silent-degradation class `renderer`, `planar` and
+    // `font` are reported for.
+    QString stripStateLabel() const;
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -142,17 +158,22 @@ protected:
 private:
     void relayout();
     void applyLayeredAlpha(int alpha);
+    // The alpha the current fade opacity maps to under the resting ceiling and
+    // any pin -- one expression, so setFadeOpacity and the settings-change
+    // reapply cannot disagree about what the strip should read.
+    int effectiveAlpha() const;
 
     // The last alpha applied. Starts at 0 so the first fade-in maps the window
     // transparent and ramps, rather than popping opaque for one tick.
     int fadeAlpha_ = 0;
+    // The model's fade opacity as last delivered, kept so a transparency-
+    // setting change can recompute the alpha without waiting for the next
+    // animation tick -- on a settled strip there is no next tick.
+    double fadeOpacity01_ = 0.0;
 
     QLabel* titleLabel_ = nullptr;
     QMenuBar* menuBar_ = nullptr;
     QString mediaTitle_;
-    // Step 10 route 2. Tiny (48x6) and stretched at paint time; see
-    // StripBackdrop for why the grid is the unit of cost rather than the band.
-    QImage backdrop_;
 };
 
 } // namespace trace::ui

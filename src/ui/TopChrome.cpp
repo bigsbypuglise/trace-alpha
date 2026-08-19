@@ -9,6 +9,7 @@
 #include <QPainter>
 #include <QPixmap>
 #include <QResizeEvent>
+#include <QSettings>
 
 #include <algorithm>
 #include <cmath>
@@ -37,19 +38,32 @@ namespace {
 constexpr int kStripHeight = 38;
 constexpr int kEdgePad = 12;
 
-// The design's strip is `rgba(22,22,24,0.66)` fading to `rgba(22,22,24,0.04)`
-// over a backdrop blur. A native window over the video swapchain cannot BLEND
-// with the video at all (plan section 18.4), so the blur is painted rather than
-// composited -- see setBackdrop. THESE COLOURS ARE WHAT DRAWS WHEN IT IS NOT:
-// the package's own stated fallback for the no-transparency case, solid
-// #14161A, which since the setting is honoured is now a state a user can
-// actually reach rather than a permanent condition. The vertical gradient is
-// kept in the only form an opaque strip can carry it -- top slightly lighter
-// than bottom -- so the shape of the design survives even though its
-// transparency does not.
+// THE STRIP'S OWN CONTENT IS THE DESIGN PACKAGE'S SOLID FALLBACK, AND THE
+// TRANSLUCENCY IS THE WINDOW'S, NOT THE PAINT'S (owner item 8, option B,
+// 2026-08-19). The strip paints this dark vertical gradient opaquely; the DWM
+// layered-window alpha then blends the whole strip -- content, labels,
+// filename -- with the real video beneath it on the d3d11 default. That
+// composes into a uniform dark scrim over the picture, which the 2026-08-19
+// alpha sweep measured as MORE legible over bright busy footage than the
+// painted backdrop blur it replaces: the blur was itself a bright copy of the
+// video, so a resting alpha under it counted the video twice and washed the
+// menu labels out by a215, while the solid content stays readable there.
+// That measurement is why route 2's StripBackdrop was REMOVED rather than
+// composed with the resting alpha -- record in
+// docs/ui-feedback-260818-progress.md, item 8.
 const QColor kStripTop(0x1A, 0x1B, 0x20);
 const QColor kStripBottom(0x14, 0x16, 0x1A);
 const QColor kHairline(255, 255, 255, 18);
+
+// THE RESTING ALPHA, PICKED FROM LEGIBILITY AND NOT FROM THE DESIGN'S CSS
+// (owner instruction): the design's rgba(22,22,24,0.66) scrim and a uniform
+// window alpha are different mechanisms, so its 0.66 does not transfer. Chosen
+// from a 155..255 sweep over the two hardest bands in the asset set -- the 4K
+// milk splash and the Marinelaverse end tag's bright saturated detail -- as
+// the lowest value at which every menu label stays cleanly separable where a
+// near-white element crosses it. 200 was marginal on the worst spot; 230
+// barely reads as translucent. 215 (~84%) is the pick.
+constexpr int kRestingAlpha = 215;
 
 const QColor kTitle(0xC7, 0xCD, 0xD4);
 // The empty-state mockup's own dimmer grey for "No media".
@@ -64,7 +78,8 @@ bool fadeKnob() {
 
 // Pin the layered alpha for measurement: a mid-fade frame is an 82ms window,
 // a pinned alpha is a stable state the harness can capture at leisure. -1
-// means not pinned.
+// means not pinned. =255 doubles as the override forcing the opaque resting
+// strip.
 int pinnedAlpha() {
     static const int v = [] {
         const QByteArray e = qgetenv("TRACE_TOPCHROME_ALPHA");
@@ -74,6 +89,47 @@ int pinnedAlpha() {
         return ok ? std::clamp(n, 0, 255) : -1;
     }();
     return v;
+}
+
+// Windows' transparency setting, tri-state: -1 no value found, 0 off, 1 on.
+// Moved here from ViewerWidget when the strip backdrop was removed -- the
+// setting used to gate the painted blur and now gates the resting alpha, so
+// its reader lives with its one consumer.
+//
+// ABSENT MEANS ON. `EnableTransparency` is written when the user touches the
+// toggle, so a machine that never has carries no value -- and the Windows
+// default is transparency on. Absent is nevertheless kept distinct, because a
+// path with a typo in it and an untouched machine produce the same boolean,
+// and the dev HUD label is the only proof the right key was read at all.
+//
+// QSettings::NativeFormat here is registry READING, not a settings home --
+// spec phase 11's rule is about writing. Nothing here writes.
+int readWindowsTransparency() {
+#ifdef Q_OS_WIN
+    QSettings personalize(
+        QStringLiteral(
+            R"(HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize)"),
+        QSettings::NativeFormat);
+    const QVariant v = personalize.value(QStringLiteral("EnableTransparency"));
+    if (!v.isValid()) return -1;
+    return v.toInt() != 0 ? 1 : 0;
+#else
+    return -1;
+#endif
+}
+
+// Cached because the answer is asked on every fade tick, and invalidated by
+// onSystemAppearanceChanged() (WM_SETTINGCHANGE) -- so the answer is live
+// without the registry read being.
+int& windowsTransparencyCache() {
+    static int v = readWindowsTransparency();
+    return v;
+}
+
+// The alpha a fully revealed strip settles at. Only an explicit registry 0
+// forces opaque; absent is on, per above.
+int restingCeiling() {
+    return windowsTransparencyCache() != 0 ? kRestingAlpha : 255;
 }
 
 } // namespace
@@ -149,8 +205,10 @@ void TopChrome::setRevealed(bool revealed) {
     // this is what makes the strip arrive transparent and ramp rather than
     // popping opaque for the first tick. On the very first show fadeAlpha_ is
     // its initial 0 for the same reason.
-    if (revealed && fadeEnabled())
-        applyLayeredAlpha(pinnedAlpha() >= 0 ? pinnedAlpha() : fadeAlpha_);
+    if (revealed && fadeEnabled()) {
+        fadeAlpha_ = effectiveAlpha();
+        applyLayeredAlpha(fadeAlpha_);
+    }
     setVisible(revealed);
     // A native sibling starts life below the video surface in z-order; raising
     // it on each show is cheaper than trying to keep the order correct across
@@ -178,13 +236,64 @@ void TopChrome::applyLayeredAlpha(int alpha) {
 #endif
 }
 
+// One expression for "what should the window's alpha read right now", shared
+// by the fade tick, the reveal edge and the settings-change reapply. The
+// ceiling is what makes the resting strip translucent: opacity 1.0 maps to
+// restingCeiling(), so the fade is a 0 -> resting ramp rather than a
+// 0 -> opaque one with a step at the end.
+//
+// WITH NO MEDIA THE STRIP RESTS OPAQUE, and mediaTitle_ is the media-presence
+// answer the strip already holds (empty means no media, the same encoding
+// setMediaTitle draws the dimmed "No media" from). Two reasons, one of them an
+// instrument: there is no picture behind the empty stage for translucency to
+// show, and the empty state is the one surface where the whole window is
+// byte-comparable across backends -- the step 11 record's 0-differing-pixels
+// standard. A translucent strip over the black stage would break that
+// comparison for a visual difference nobody can see; opaque keeps the
+// instrument. The owner-accepted d3d11/cpu divergence is over VIDEO.
+int TopChrome::effectiveAlpha() const {
+    if (pinnedAlpha() >= 0) return pinnedAlpha();
+    const int ceiling = mediaTitle_.isEmpty() ? 255 : restingCeiling();
+    return static_cast<int>(
+        std::lround(std::clamp(fadeOpacity01_, 0.0, 1.0) * ceiling));
+}
+
 void TopChrome::setFadeOpacity(double opacity01) {
     if (!fadeEnabled()) return;
-    int alpha = static_cast<int>(std::lround(std::clamp(opacity01, 0.0, 1.0) * 255.0));
-    if (pinnedAlpha() >= 0) alpha = pinnedAlpha();
+    fadeOpacity01_ = opacity01;
+    const int alpha = effectiveAlpha();
     if (alpha == fadeAlpha_) return;
     fadeAlpha_ = alpha;
     applyLayeredAlpha(alpha);
+}
+
+void TopChrome::onSystemAppearanceChanged() {
+    if (!fadeEnabled()) return;
+    const int was = windowsTransparencyCache();
+    const int now = readWindowsTransparency();
+    if (now == was) return;
+    windowsTransparencyCache() = now;
+    // Reapply only if the EFFECTIVE ceiling moved -- absent and on are both on,
+    // so a value appearing where there was none changes the reading without
+    // changing the picture. A settled strip has no next animation tick, so the
+    // reapply cannot wait for one; fadeOpacity01_ is held for exactly this.
+    const int alpha = effectiveAlpha();
+    if (alpha == fadeAlpha_) return;
+    fadeAlpha_ = alpha;
+    applyLayeredAlpha(alpha);
+}
+
+QString TopChrome::stripStateLabel() const {
+    if (!fadeEnabled()) return QStringLiteral("opaque (fade off)");
+    if (pinnedAlpha() >= 0) return QStringLiteral("a%1 (env)").arg(pinnedAlpha());
+    switch (windowsTransparencyCache()) {
+        case 0:  return QStringLiteral("opaque (windows)");
+        case 1:  return QStringLiteral("a%1").arg(kRestingAlpha);
+        // No value under the Personalize key: on, per the Windows default --
+        // printed distinctly, because this is also what a wrong key path would
+        // read and the two must not look alike.
+        default: return QStringLiteral("a%1 (unset)").arg(kRestingAlpha);
+    }
 }
 
 bool TopChrome::eventFilter(QObject* watched, QEvent* event) {
@@ -237,41 +346,9 @@ void TopChrome::relayout() {
     titleLabel_->raise();
 }
 
-// UI redesign roadmap step 10, route 2.
-//
-// The design's own strip is `rgba(22,22,24,0.66)` fading to `rgba(22,22,24,0.04)`
-// OVER A BACKDROP BLUR. With a blurred copy of the video underneath, both halves
-// of that can finally be drawn: the blur goes down first, then the package's own
-// scrim over it at the package's own alphas. The scrim is what keeps the menu
-// labels legible over a bright frame, and it is why this cannot simply be the
-// blurred video on its own.
-void TopChrome::setBackdrop(const QImage& tiny) {
-    // Cheap identity check first: this is called once per presented frame, and
-    // a paused file hands over the same image every time.
-    if (backdrop_.isNull() && tiny.isNull()) return;
-    backdrop_ = tiny;
-    update();
-}
-
 void TopChrome::paintEvent(QPaintEvent* event) {
     Q_UNUSED(event);
     QPainter p(this);
-    if (!backdrop_.isNull()) {
-        // The stretch IS most of the blur -- 48 cells across a 1280px strip is
-        // ~27px each, so bilinear interpolation between them is a far wider
-        // kernel than the design's own radius. SmoothPixmapTransform is what
-        // makes it an interpolation rather than 27px blocks.
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        p.drawImage(rect(), backdrop_);
-        // The package's scrim, over the blur, at the package's own alphas.
-        QLinearGradient scrim(0, 0, 0, height());
-        scrim.setColorAt(0.0, QColor(22, 22, 24, 168));  // 0.66
-        scrim.setColorAt(1.0, QColor(22, 22, 24, 10));   // 0.04
-        p.fillRect(rect(), scrim);
-        p.setPen(kHairline);
-        p.drawLine(0, height() - 1, width(), height() - 1);
-        return;
-    }
     QLinearGradient g(0, 0, 0, height());
     g.setColorAt(0.0, kStripTop);
     g.setColorAt(1.0, kStripBottom);
