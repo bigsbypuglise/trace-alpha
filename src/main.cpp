@@ -5,12 +5,46 @@
 #include <QTextStream>
 #include <cmath>
 
+#ifdef _WIN32
+#include <windows.h>
+#include <cstdio>
+#endif
+
 #include "app/MainWindow.h"
 #include "app/Theme.h"
 #include "app/WindowShape.h"
 #include "ui/ViewerWidget.h"
 
 namespace {
+
+#ifdef _WIN32
+// Trace links as a GUI-subsystem executable now (owner item 18: no console
+// window on launch), which means a process started from a terminal has no
+// console of its own -- and every diagnostic knob in the tree (TRACE_OPEN_LOG,
+// TRACE_SHAPE_LOG, TRACE_SETTINGS_LOG, TRACE_SEEK_LOG, TRACE_LUCID_LOG,
+// TRACE_THEME_LOG) writes to stderr with fprintf, as do the two selftests'
+// stdout reports. Without this they would all go quiet.
+//
+// The rule: if a std handle is already VALID, leave it alone -- that is a
+// redirection (CI capturing the selftest, a harness capturing stderr) and the
+// pipe must keep working. Only when a stream has no handle at all do we attach
+// the parent's console and bind the orphaned stream to it. Launched from
+// Explorer there is no parent console, AttachConsole fails, and the logs go
+// nowhere -- which is the correct behaviour for a double-clicked GUI app.
+void attachParentConsoleForDiagnostics() {
+    const auto handleValid = [](DWORD which) {
+        const HANDLE h = GetStdHandle(which);
+        return h != nullptr && h != INVALID_HANDLE_VALUE;
+    };
+    const bool outValid = handleValid(STD_OUTPUT_HANDLE);
+    const bool errValid = handleValid(STD_ERROR_HANDLE);
+    if (outValid && errValid) return;
+    if (!AttachConsole(ATTACH_PARENT_PROCESS)) return;
+    FILE* f = nullptr;
+    if (!outValid) freopen_s(&f, "CONOUT$", "w", stdout);
+    if (!errValid) freopen_s(&f, "CONOUT$", "w", stderr);
+}
+#endif
 
 // `Trace.exe --renderer-selftest`: build the viewer, let it adopt the renderer
 // TRACE_RENDERER selects, report what is ACTUALLY presenting, and exit.
@@ -263,15 +297,22 @@ int runWindowShapeSelfTest() {
 } // namespace
 
 int main(int argc, char* argv[]) {
+#ifdef _WIN32
+    // Before anything can print: the selftests below report on stdout and the
+    // TRACE_*_LOG knobs on stderr, and in a GUI-subsystem process neither
+    // stream exists until it is bound to a console.
+    attachParentConsoleForDiagnostics();
+#endif
     QApplication app(argc, argv);
     app.setApplicationName("Trace");
     app.setOrganizationName("Trace Project");
-    app.setStyle(QStyleFactory::create("Fusion"));
     // UI redesign roadmap step 10: typography, the palette and the popup-menu
     // surface, in one place. Before any window is built, and before the
     // self-tests below return -- the shape self-test measures nothing that
     // depends on it, but the font is an application-wide default and a window
-    // constructed ahead of it would carry the old one.
+    // constructed ahead of it would carry the old one. The style (Fusion,
+    // wrapped for the mnemonic-underline setting, owner item 10) moved in
+    // there too, so appearance has one home rather than two.
     trace::app::Theme::apply(app);
 
     // Before any window: the self-test wants the renderer and nothing else, and

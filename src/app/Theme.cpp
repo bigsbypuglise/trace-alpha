@@ -4,13 +4,51 @@
 #include <QByteArray>
 #include <QFont>
 #include <QFontDatabase>
+#include <QGuiApplication>
 #include <QPalette>
+#include <QProxyStyle>
 #include <QStringList>
+#include <QStyleFactory>
 
 #include <cstdio>
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
 namespace trace::app {
 namespace {
+
+// SH_UnderlineShortcut FROM THE SYSTEM SETTING (owner item 10, 2026-08-18).
+// The menu mnemonics' underlines are Windows keyboard-access cues, and
+// Windows' own default is to show them only after Alt is pressed -- controlled
+// by SPI_GETKEYBOARDCUES. Fusion draws them unconditionally, which is what the
+// owner saw. Answering the hint from the setting is better than hiding them
+// outright: the menus look the way he wants by default AND the cues stay for
+// keyboard and screen-reader users -- the population the phase 14 work exists
+// to protect -- and for anyone whose Windows setting says "always show".
+//
+// The setting is queried live rather than cached, so a change in Windows
+// Settings takes effect at the next menu paint with no restart.
+class KeyboardCuesStyle final : public QProxyStyle {
+public:
+    using QProxyStyle::QProxyStyle;
+
+    int styleHint(StyleHint hint, const QStyleOption* option, const QWidget* widget,
+                  QStyleHintReturn* returnData) const override {
+#ifdef Q_OS_WIN
+        if (hint == SH_UnderlineShortcut) {
+            BOOL cues = TRUE;
+            if (SystemParametersInfoW(SPI_GETKEYBOARDCUES, 0, &cues, 0) && cues) return 1;
+            // Cues off: underline only while Alt is held, which is the native
+            // Windows behaviour the setting describes. QMenuBar repaints on
+            // Alt, so the hint is re-asked at the right moments.
+            return (QGuiApplication::queryKeyboardModifiers() & Qt::AltModifier) ? 1 : 0;
+        }
+#endif
+        return QProxyStyle::styleHint(hint, option, widget, returnData);
+    }
+};
 
 // The design package's own values, read out of
 // assets/source/260817-trace-ui-v2/Trace-App-Mockups.html rather than chosen
@@ -90,6 +128,12 @@ QFont buildApplicationFont(const QFont& base) {
 QString Theme::resolvedFontFamily() { return g_resolvedFamily; }
 
 void Theme::apply(QApplication& app) {
+    // The application style, wrapped so menu mnemonic underlines honour
+    // SPI_GETKEYBOARDCUES (owner item 10). Fusion stays the base -- this
+    // replaces main.cpp's bare setStyle("Fusion") rather than adding a second
+    // style site, keeping this file the one home for app-wide appearance.
+    app.setStyle(new KeyboardCuesStyle(QStyleFactory::create(QStringLiteral("Fusion"))));
+
     app.setFont(buildApplicationFont(app.font()));
 
     QPalette p = app.palette();

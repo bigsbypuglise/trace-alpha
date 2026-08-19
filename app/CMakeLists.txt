@@ -141,7 +141,13 @@ if(TRACE_FXC)
     PROPERTIES HEADER_FILE_ONLY TRUE VS_TOOL_OVERRIDE "None")
 endif()
 
-add_executable(Trace
+# WIN32: GUI subsystem, so Windows does not create a console on every launch
+# (owner item 18, 2026-08-18 -- the console was never a portable-ZIP artifact,
+# it was this missing keyword). Qt6::Core supplies the WinMain shim through
+# Qt6::EntryPointPrivate when WIN32_EXECUTABLE is set, so main() is unchanged.
+# The TRACE_*_LOG stderr knobs survive via AttachConsole in main.cpp -- a GUI
+# process has no console of its own to write to.
+add_executable(Trace WIN32
   ../src/main.cpp
   ../src/app/MainWindow.h
   ../src/app/MainWindow.cpp
