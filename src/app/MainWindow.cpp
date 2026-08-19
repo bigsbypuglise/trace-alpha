@@ -236,6 +236,16 @@ bool asyncScrubEnabled() {
     return on;
 }
 
+// Whether the drag chain's PAINTING is gated to the display refresh period
+// (the 2026-08-19 refresh-cap fix; see the block comment at paintScrubFrameNow
+// in MainWindow.h). Default on. 0 restores paint-per-frame -- the negative
+// control in the same binary, and the pre-fix behaviour every recorded scrub
+// figure was taken under.
+bool scrubPaintGateEnabled() {
+    static const bool on = [] { return qgetenv("TRACE_SCRUB_PAINT_GATE") != "0"; }();
+    return on;
+}
+
 // Whether the EXACT landing -- a groove click, a slider release, a frame step --
 // is decoded on the worker instead of on the UI thread. Default on;
 // TRACE_ASYNC_LANDING=0 restores the synchronous landing in the same binary and
@@ -1095,6 +1105,17 @@ MainWindow::MainWindow() {
     scrubTimer_.setInterval(kScrubCoalesceMs);
     connect(&scrubTimer_, &QTimer::timeout, this, [this]() {
         flushVideoScrub(false);
+    });
+
+    // The paint gate's trailing paint: a delivery inside the gate window marks
+    // the frame pending, and this fires at the gate boundary so the newest
+    // delivered frame always reaches the screen even when the chain then goes
+    // quiet. Precise, because at 240Hz the gate period is 4.17ms and a coarse
+    // timer's rounding is bigger than the interval.
+    scrubPaintGateTimer_.setSingleShot(true);
+    scrubPaintGateTimer_.setTimerType(Qt::PreciseTimer);
+    connect(&scrubPaintGateTimer_, &QTimer::timeout, this, [this]() {
+        if (scrubGatePaintPending_) paintScrubFrameNow();
     });
 
     // Measures the UI thread from outside the work it is doing. A 1ms timer can
@@ -3235,6 +3256,12 @@ void MainWindow::releaseCurrentMedia() {
     scrubPaintGapLastMs_ = scrubPaintGapMaxMs_ = scrubPaintGapSumMs_ = 0.0;
     scrubPaintGapSamples_ = scrubPaintsWasted_ = scrubPaintStalls_ = 0;
     scrubPaintHitches_ = 0;
+    // The gate's trailing paint must not fire into the next media: it paints
+    // videoFrameBuffer_, which is about to be replaced below.
+    scrubPaintGateTimer_.stop();
+    scrubGatePaintPending_ = false;
+    scrubPaintsGated_ = 0;
+    scrubPaintCostEmaMs_ = 0.0;
     // Per media, like the paint gaps beside it: a round trip carried across an
     // open would mix two files' figures, and the scrub selftest leans on this
     // reset to make each of its legs a clean sample.
@@ -6951,6 +6978,70 @@ void MainWindow::notePresentedScrubFrame(long long frame) {
     }
 }
 
+// The one place a drag-chain frame reaches the screen: the upload (setFrame),
+// the synchronous repaint, and the paint-gap statistics, which therefore keep
+// measuring PAINTS whichever side of the gate a build is on. Also the gate
+// timer's target -- it repaints whatever videoFrameBuffer_ holds NOW, which is
+// what makes a late firing harmless: after a landing or a new drag frame the
+// buffer is already the newer picture, so the worst a stale timer can do is
+// present the current frame again.
+double MainWindow::scrubPaintGatePeriodMs() const {
+    const QScreen* scr = screen();
+    const double refreshHz = (scr && scr->refreshRate() > 1.0)
+        ? scr->refreshRate() : 60.0;
+    const double refreshMs = 1000.0 / refreshHz;
+    // 2x the paint cost = at most half the thread's wall time inside paints,
+    // leaving the other half for the chain the paints exist to display.
+    return std::max(refreshMs, 2.0 * scrubPaintCostEmaMs_);
+}
+
+void MainWindow::paintScrubFrameNow() {
+    scrubGatePaintPending_ = false;
+    scrubPaintGateTimer_.stop();
+    if (!viewer_ || videoFrameBuffer_.isNull()) return;
+
+    QElapsedTimer paintCostTimer;
+    paintCostTimer.start();
+    viewer_->setFrame(videoFrameBuffer_);
+
+    const qint64 nowNs = scrubPresentClock_.isValid()
+        ? scrubPresentClock_.nsecsElapsed() : 0;
+    if (!scrubPresentClock_.isValid()) scrubPresentClock_.start();
+    // repaint(), not update(): the whole point of this call is that the frame
+    // is on screen when it returns, and an update() here would hand the paint
+    // back to the event loop the chain is already saturating.
+    viewer_->repaint();
+
+    // What one paint costs on THIS machine, blocks included -- the term that
+    // turns the gate from a refresh pacer into a duty-cycle bound on the
+    // machine class where presents throttle. Instant attack, slow decay; see
+    // the member's comment.
+    const double costMs =
+        static_cast<double>(paintCostTimer.nsecsElapsed()) / 1'000'000.0;
+    if (costMs > scrubPaintCostEmaMs_) {
+        scrubPaintCostEmaMs_ = costMs;
+    } else {
+        scrubPaintCostEmaMs_ += 0.2 * (costMs - scrubPaintCostEmaMs_);
+    }
+
+    if (scrubLastPresentNs_ >= 0) {
+        const double gapMs =
+            static_cast<double>(nowNs - scrubLastPresentNs_) / 1'000'000.0;
+        const QScreen* scr = screen();
+        const double refreshHz = (scr && scr->refreshRate() > 1.0)
+            ? scr->refreshRate() : 60.0;
+        const double refreshMs = 1000.0 / refreshHz;
+        scrubPaintGapLastMs_ = gapMs;
+        scrubPaintGapMaxMs_ = std::max(scrubPaintGapMaxMs_, gapMs);
+        scrubPaintGapSumMs_ += gapMs;
+        ++scrubPaintGapSamples_;
+        if (gapMs < refreshMs) ++scrubPaintsWasted_;
+        if (gapMs > refreshMs * 2.0) ++scrubPaintStalls_;
+        if (gapMs > kScrubHitchMs) ++scrubPaintHitches_;
+    }
+    scrubLastPresentNs_ = nowNs;
+}
+
 void MainWindow::noteScrubResultTiming(const trace::core::ScrubResult& result) {
     if (result.postedNs < 0) return;
     const qint64 nowNs = trace::core::scrubMonotonicNs();
@@ -7194,37 +7285,15 @@ void MainWindow::onScrubResult() {
             continue;
         }
 
-        // Present. Identical to the synchronous walk's loop body, minus the
-        // decode: the frame is already here.
+        // Deliver. Identical to the synchronous walk's loop body, minus the
+        // decode: the frame is already here. Delivery and painting are
+        // SEPARATE steps since the refresh-cap fix (2026-08-19): every frame
+        // updates the playhead, the lag model and videoFrameBuffer_, and the
+        // paint decision below decides whether the screen is touched for it.
         videoFrameBuffer_ = result.frame;
         lastRequestedFrame_ = result.requestedFrame;
         lastDeliveredFrame_ = result.frame.frameIndex;
         playback_.setCurrentFrame(result.frame.frameIndex);
-        viewer_->setFrame(videoFrameBuffer_);
-
-        const qint64 nowNs = scrubPresentClock_.isValid()
-            ? scrubPresentClock_.nsecsElapsed() : 0;
-        if (!scrubPresentClock_.isValid()) scrubPresentClock_.start();
-        // repaint(), not update(): update() coalesces, and a chain of them
-        // would decode every frame and display only the last, which is a jump
-        // and is the behaviour the shuttle exists to remove.
-        viewer_->repaint();
-        if (scrubLastPresentNs_ >= 0) {
-            const double gapMs =
-                static_cast<double>(nowNs - scrubLastPresentNs_) / 1'000'000.0;
-            const QScreen* scr = screen();
-            const double refreshHz = (scr && scr->refreshRate() > 1.0)
-                ? scr->refreshRate() : 60.0;
-            const double refreshMs = 1000.0 / refreshHz;
-            scrubPaintGapLastMs_ = gapMs;
-            scrubPaintGapMaxMs_ = std::max(scrubPaintGapMaxMs_, gapMs);
-            scrubPaintGapSumMs_ += gapMs;
-            ++scrubPaintGapSamples_;
-            if (gapMs < refreshMs) ++scrubPaintsWasted_;
-            if (gapMs > refreshMs * 2.0) ++scrubPaintStalls_;
-            if (gapMs > kScrubHitchMs) ++scrubPaintHitches_;
-        }
-        scrubLastPresentNs_ = nowNs;
 
         activeScrubFrame_ = result.frame.frameIndex;
         notePresentedScrubFrame(activeScrubFrame_);
@@ -7232,6 +7301,44 @@ void MainWindow::onScrubResult() {
         // land this properly even if it is already the one on screen.
         scrubShownExact_ = false;
         presentedAny = true;
+
+        if (!scrubPaintGateEnabled()) {
+            // The pre-fix behaviour, exactly: one setFrame and one synchronous
+            // repaint per delivered frame. repaint(), not update(): update()
+            // coalesces, and a chain of them would decode every frame and
+            // display only the last, which is a jump and is the behaviour the
+            // shuttle exists to remove. This is the control every recorded
+            // scrub figure was taken under.
+            paintScrubFrameNow();
+        } else {
+            // At most one paint per gate period, always of the newest
+            // delivered frame. The period is the refresh period -- painting
+            // faster shows nothing, since interval-0 flip presents are
+            // last-one-wins -- OR twice the observed paint cost when paints
+            // block, which bounds painting to half the thread and keeps the
+            // chain fed however expensive the present is (the Threadripper's
+            // chain was paying a full present per 0.8ms decode). A frame
+            // arriving inside the window is marked pending and the
+            // single-shot paints it at the boundary, so the trailing frame
+            // always lands and a gap in deliveries never leaves an unpainted
+            // frame waiting.
+            const double gateMs = scrubPaintGatePeriodMs();
+            const double sinceMs =
+                (scrubPresentClock_.isValid() && scrubLastPresentNs_ >= 0)
+                    ? static_cast<double>(scrubPresentClock_.nsecsElapsed()
+                                          - scrubLastPresentNs_) / 1'000'000.0
+                    : gateMs;
+            if (sinceMs >= gateMs) {
+                paintScrubFrameNow();
+            } else {
+                ++scrubPaintsGated_;
+                scrubGatePaintPending_ = true;
+                if (!scrubPaintGateTimer_.isActive()) {
+                    scrubPaintGateTimer_.start(std::max(
+                        1, static_cast<int>(std::ceil(gateMs - sinceMs))));
+                }
+            }
+        }
 
         // Measured rather than derived from VideoPerfStats averages, which
         // pool seek-walk decodes and read several times the true sequential
@@ -8329,7 +8436,14 @@ void MainWindow::refreshHud(const QString& action) {
             const QScreen* smoothScr = screen();
             const double smoothHz = (smoothScr && smoothScr->refreshRate() > 1.0)
                 ? smoothScr->refreshRate() : 60.0;
-            const QString l7b = QString("smooth | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
+            // `gated` is deliveries the paint gate declined to paint at once
+            // (refresh-cap fix, 2026-08-19). Non-zero is the gate working, not
+            // frames lost: every gated frame updated the playhead and the lag
+            // model, and the newest one is painted when the gate opens. It
+            // also says the gap figures beside it are measuring gated paints,
+            // which read differently from every pre-gate record -- `wasted`
+            // in particular collapses toward 0 by construction.
+            const QString l7b = QString("smooth | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | gated %11 | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
                 .arg(QString::number(scrubPaintGapLastMs_, 'f', 1))
                 .arg(QString::number(gapAvg, 'f', 1))
                 .arg(QString::number(scrubPaintGapMaxMs_, 'f', 1))
@@ -8339,7 +8453,8 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(scrubPaintGapSamples_)
                 .arg(QString::number(2000.0 / smoothHz, 'f', 1))
                 .arg(scrubPaintHitches_)
-                .arg(QString::number(kScrubHitchMs, 'f', 0));
+                .arg(QString::number(kScrubHitchMs, 'f', 0))
+                .arg(scrubPaintsGated_);
 
             // Responsiveness of the thread rather than of the picture. `ui gap`
             // is measured by a 1ms timer that only fires when the event loop is
@@ -8794,7 +8909,8 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
         << "ms | ease " << selfTestFormat2(kScrubEase) << " | async scrub "
         << (asyncScrubEnabled() ? "on" : "OFF") << " | async landing "
         << (asyncLandingEnabled() ? "on" : "OFF") << " | sampling "
-        << (scrubSamplingEnabled() ? "on" : "OFF")
+        << (scrubSamplingEnabled() ? "on" : "OFF") << " | paint gate "
+        << (scrubPaintGateEnabled() ? "on" : "OFF")
         // The HUD state changes what the run measures, twice over: a visible
         // HUD rebuilds its ~25-line string on every present (measured here as
         // ~2.5ms of `deliver` per request on the dev box), and it takes height
@@ -8804,7 +8920,9 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
         // taken with the HUD forced on.
         << " | hud " << (viewState_.showHud ? "SHOWN" : "hidden") << "\n";
     rep << "rerun knobs: TRACE_ASYNC_SCRUB=0 (sync walk) | TRACE_SCRUB_BATCH=0 "
-           "(no batching) | TRACE_DECODE_THREADS=N | TRACE_LONGGOP_SLICE_THREADS=1 "
+           "(no batching) | TRACE_SCRUB_PAINT_GATE=0 (paint per frame) | "
+           "TRACE_PRESENT_SYNC=1 (model a vsync-throttled present) | "
+           "TRACE_DECODE_THREADS=N | TRACE_LONGGOP_SLICE_THREADS=1 "
            "| TRACE_SCRUB_FILL_MS=N (decoder default 60)\n";
 
     if (clipPath.isEmpty()) {
@@ -9001,7 +9119,10 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
             << "ms) | stalls " << scrubPaintStalls_ << " of " << scrubPaintGapSamples_
             << " (>" << selfTestFormat1(refreshMs * 2.0) << "ms) | paint gap "
             << selfTestFormat1(gapAvg) << "/" << selfTestFormat1(scrubPaintGapMaxMs_)
-            << "ms (avg/max) | ui gap " << selfTestFormat2(uiGapAvg) << "/"
+            << "ms (avg/max) | painted " << (scrubPaintGapSamples_ + 1) << " gated "
+            << scrubPaintsGated_ << " | paint cost " << selfTestFormat2(scrubPaintCostEmaMs_)
+            << "ms gate " << selfTestFormat2(scrubPaintGatePeriodMs())
+            << "ms | ui gap " << selfTestFormat2(uiGapAvg) << "/"
             << selfTestFormat1(uiServiceGapMaxMs_) << "ms | over "
             << selfTestFormat1(kUiServiceGapMs) << "ms: " << uiServiceGapsOver_ << " of "
             << uiServiceSamples_ << "\n";
@@ -9062,6 +9183,32 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
         const double span = std::min(0.8, (3.0 * fps * 2.0) / frames);
         if (!runLeg(QStringLiteral("slow forward drag, ~3x speed for 2s, settle, release"),
                     {{0.15, 0.15 + span, 2.0}}, 400.0)) {
+            anyLegFailed = true;
+        }
+    }
+
+    // Leg 4: rapid back-and-forth -- short throws around the middle of the
+    // timeline, direction changes as fast as a hand makes them. Owner
+    // instruction (2026-08-19): the -Reversals shape is MILDER than real use,
+    // and a fix's validation gesture must be at least as demanding as the real
+    // one -- a milder harness gesture is how a fix passes the test and still
+    // feels broken, which this project has recorded twice (a leg that cannot
+    // fail, and a leg that cannot pass).
+    //
+    // Ten throws of 16% of the timeline at 150ms each: ~6.7 direction changes
+    // a second, ~260 source frames/s of pointer demand inside each throw on
+    // the 241-frame pool file. Every reversal is a chance to supersede a walk
+    // in flight and to land a backward step outside the cache, so this is the
+    // worst case for both the cancellation path and the present cadence.
+    {
+        std::vector<Seg> segs;
+        for (int i = 0; i < 10; ++i) {
+            const double a = (i % 2 == 0) ? 0.42 : 0.58;
+            const double b = (i % 2 == 0) ? 0.58 : 0.42;
+            segs.push_back({a, b, 0.15});
+        }
+        if (!runLeg(QStringLiteral("rapid back-and-forth, 10 short throws at 150ms each, settle, release"),
+                    segs, 400.0)) {
             anyLegFailed = true;
         }
     }

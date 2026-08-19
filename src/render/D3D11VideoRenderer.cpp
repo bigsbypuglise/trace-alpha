@@ -1188,7 +1188,21 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     // would silently become the frame scheduler while the audio clock still
     // believes it is one. See plan section 9 -- vsync becomes the phase
     // authority there, deliberately and with the composition rule stated.
-    swapChain_->Present(0, 0);
+    //
+    // TRACE_PRESENT_SYNC=1 is a DIAGNOSTIC, never a configuration: it presents
+    // at sync interval 1, i.e. every present waits for a vblank. It exists to
+    // MODEL the machine class the Threadripper scrub report turned out to be
+    // (2026-08-19, docs/mp4-scrub-threadripper.md): presents there throttle at
+    // the display refresh -- one paint per 16.7ms against 0.8ms of decode --
+    // while on this box interval-0 flip presents never block even at a true
+    // 60Hz, so the throttle is a driver/composition property that cannot be
+    // reproduced here by changing the refresh rate alone. With this set, it
+    // can. Do not ship it on: it makes the present a frame scheduler, which is
+    // exactly what the comment above rules out.
+    static const UINT presentSyncInterval = [] {
+        return qgetenv("TRACE_PRESENT_SYNC") == "1" ? 1u : 0u;
+    }();
+    swapChain_->Present(presentSyncInterval, 0);
 
     const double totalMs = static_cast<double>(timer.nsecsElapsed()) / 1'000'000.0;
     stats_.lastPaintTotalMs = totalMs;

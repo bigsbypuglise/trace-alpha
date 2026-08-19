@@ -1113,6 +1113,59 @@ private:
     long long scrubPaintStalls_ = 0;
     long long scrubPaintHitches_ = 0;
 
+    // ---- The scrub paint gate (2026-08-19, the refresh-cap fix) -----------
+    //
+    // Decode is DECOUPLED from presentation during the async drag chain: every
+    // frame is still decoded, delivered, counted and cached in order, but the
+    // screen is painted at most once per display refresh period, always with
+    // the newest delivered frame. Painting faster than the refresh cannot show
+    // anything -- interval-0 flip presents are last-one-wins -- and on machines
+    // where presents THROTTLE at the refresh (the Threadripper report: pinned
+    // at 57.8-59.6 f/s presented against 0.8ms decode, paint gap 16.4-17.0ms
+    // against a 59.98Hz monitor) every extra paint blocks the UI thread for
+    // the rest of a refresh, which makes the paint the entire cost of the
+    // chain. The dev box does not block at 60Hz (measured: the same selftest
+    // at a true 5120x1440@60 is byte-for-byte the 240Hz run), so the throttle
+    // is a driver/composition property, not the refresh rate alone --
+    // TRACE_PRESENT_SYNC=1 is the in-binary model of that machine class.
+    //
+    // paintScrubFrameNow() is the ONE place a chain frame reaches the screen:
+    // setFrame (the upload), repaint, and the paint-gap statistics. A delivery
+    // inside the gate window marks the frame pending and arms a single-shot
+    // for the remainder, so the trailing frame always lands and a delivery
+    // stall still paints the newest frame at the gate boundary. The timer
+    // firing after a landing is harmless by construction: it repaints
+    // videoFrameBuffer_, which the landing has already replaced.
+    //
+    // Scope: the drag chain's presents only. The landing, the release, the
+    // reverse shuttle (already paced by the tick), playback and the
+    // synchronous walk (TRACE_ASYNC_SCRUB=0, the control) are untouched.
+    // TRACE_SCRUB_PAINT_GATE=0 restores paint-per-frame in the same binary.
+    void paintScrubFrameNow();
+    // The effective gate period: the refresh period, or twice the observed
+    // paint cost, whichever is longer. The second term is what makes the gate
+    // work on the machine class it exists for -- when presents BLOCK, a paint
+    // costs a refresh (or worse), and a gate pegged to the nominal refresh
+    // then admits paints back to back: each one blocks past the period, so
+    // the gate is always open and the thread is 100% paint. Measured under
+    // TRACE_PRESENT_SYNC=1: paints cost ~250ms on this box's fault model and
+    // the refresh-only gate read `gated 0` -- it never fired at all, because
+    // deliveries were slower than the period. Bounding paints to half the
+    // thread's wall time keeps the chain fed however expensive the present
+    // is; on a healthy machine the cost term reads ~0.6ms against a 4.17ms
+    // refresh and never binds, so the shipped boxes stay on the pure refresh
+    // gate.
+    double scrubPaintGatePeriodMs() const;
+    QTimer scrubPaintGateTimer_;
+    bool scrubGatePaintPending_ = false;
+    long long scrubPaintsGated_ = 0;
+    // Observed wall cost of one chain paint (setFrame + repaint, i.e. upload +
+    // draw + present + any block inside it). Instant attack, slow decay: one
+    // blocked paint must raise the gate immediately -- an averaging-in would
+    // repeat the block several times before learning -- while a one-off
+    // compositor hiccup fades back out instead of gating the session.
+    double scrubPaintCostEmaMs_ = 0.0;
+
     // How long the event loop went unserviced, which is a different question
     // from how long a paint took to arrive. Every other scrub metric is
     // measured from inside the work; this one is measured from outside it, by a
