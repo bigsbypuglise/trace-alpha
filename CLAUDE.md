@@ -1041,6 +1041,83 @@ and reported `panel-mean 0` with every interaction leg failing at once, which, l
 `transitions.ps1`'s 25 identical failures, is a statement about the harness's inputs and not about
 the build. Re-run before building a control.
 
+**THE 2026-08-18 OWNER FEEDBACK PASS IS DONE FOR 15 OF 18 ITEMS; THE TOP-BAR GROUP (1's
+architecture, 8, 11) IS DELIBERATELY STOPPED PENDING AN OWNER CHOICE.** The triage is
+`docs/ui-feedback-260818.md` and the item-by-item record is
+`docs/ui-feedback-260818-progress.md` — read both before reopening anything here. **Four items
+reverse an earlier decision and each is recorded as the owner deciding again with the thing on
+screen, not as drift**: item 4 supersedes §4 item 7's centring (opening media now anchors the
+frame's top-left; centring survives only the first shaping of a session); item 5 overrides the
+delivered empty-mark art (the INK is centred, measured from the art's own alpha at
+rasterisation so replacement art re-centres itself); item 6 reverses phase 14's Loop
+persistence (Loop starts off every session, still survives a file change within one; the
+`playback/loop` key is never read again — note the poisoned-ini hypothesis was NOT confirmed
+on this box, its ini had no loop key at all); item 15 reverses step 5's Go to Start/End
+buttons (gone from strip, atlas, `.qrc`, asset tree, hooks, Region enum and the accessibility
+proxies — **eight strip controls now** — while Home/End stay bound).
+
+Five things to carry.
+
+- **THE REVEAL CYCLE (items 3+7) WAS THE TOP CHROME'S OWN HIDE, AND THE TRIAGE HYPOTHESIS WAS
+  WRONG — fourth session running that a control corrected a plausible reading.** Not the
+  cursor-hide feedback loop: the windowed phases cycle with the cursor never hidden. Windows
+  posts a synthetic `WM_MOUSEMOVE` at the UNCHANGED coordinate whenever a window's visibility
+  changes under the pointer, and the native strip hiding at the end of its own fade is such a
+  change — measured with the new permanent `TRACE_REVEAL_LOG=1` (source-tagged reveal/auto-
+  hide/chrome/mousemove lines): every `chrome HIDDEN` was followed within 2–5ms by a mousemove
+  at the identical pixel, 46 in a run with zero physical motion, a perfect ~2.2s blink.
+  **Fix**: a move that does not move is not input (same-coordinate filter in `onMouseMove`,
+  reset on leave), plus the pointer resting ON the strip holds the chrome via `holdVisible` —
+  the auto-hide's own "never hide under the pointer" rule, which also covers the one case the
+  filter cannot (the strip showing over a parked pointer hands the surface a real leave).
+- **HIDDEN CHROME NOW MEANS HIDDEN, AND THAT EXPOSED A LATENT SHORTCUT HOLE: `QShortcutMap`
+  declines a shortcut whose only widget is not visible, and since step 7 the menu bar lives in
+  the auto-hiding strip.** Ctrl+O was the ONE shortcut action not also `addAction`'d onto the
+  window and it silently did nothing with the strip hidden — it survived since step 7 only
+  because the blink loop kept the strip up ~90% of the time. Hoisted now; every menu action
+  with a shortcut must be window-hoisted, and this is the check to run when adding one.
+- **Item 18 (console window) was `add_executable(Trace WIN32)`.** The TRACE_*_LOG knobs
+  survive via `AttachConsole(ATTACH_PARENT_PROCESS)` at startup, only when the std handles are
+  not already valid — so redirection (CI, harnesses) keeps its pipes. **PowerShell does not
+  wait for a bare GUI-app invocation and `$LASTEXITCODE` after one is garbage**; CI's capture
+  form (`$out = & $exe ... 2>&1`) waits and propagates, verified. A harness launching Trace
+  bare and reading the exit code must use the capture form or `Start-Process -Wait`.
+- **Item 13**: the D3D11 surface still returns `MA_NOACTIVATE` (child never takes focus) but
+  now calls `SetForegroundWindow` on its root first — click-activates, and click-then-Space
+  still toggles playback (probed with its negative control).
+- **Item 16's thumb pop was item 17's 13→16px cell swap mid-drag** — the scrub-grow variant is
+  deleted, one fixed cell, cannot resample. Track ends are rounded (item 2) via half-circle
+  atlas cells sliced 1:1 at draw time, baked alphas, both track heights. Readouts carry
+  tabular figures (`tnum`) and the position is left-aligned (item 9, superseding the mockup's
+  right-align). The open/close toasts are gone, Copy Frame's stays (item 14). Mnemonic
+  underlines follow `SPI_GETKEYBOARDCUES` via a `KeyboardCuesStyle` proxy installed in
+  `Theme::apply` — the style home moved there from main.cpp (item 10). The strip's mark and
+  wordmark are gone (item 1's approved interim; `brand-mark-*` left the `.qrc` and working
+  copies, returns at step 12).
+
+**Regression flat, no control binary built — figures compared against their recorded classes**
+(physical panel for scrub/lifecycle, 1920x1080-class geometry for cadence; quote from the runs):
+4K H.264 cadence ×2 **99.1/99.2%** `0 of 120` identical buckets · 4444 ×2 **99.8/99.8%**
+`0 of 260` · 4444 `-SnapRelease` **`target 261 shown 261 delta 0`** full-res planar, `release
+20.5ms`, `hitch 0`, `land 0` · **25 of 25 transitions** (one `R -> Space` "no window after
+restart" harness flake, re-ran clean — the recorded phase 11 class) · `emptystate` all four
+modes both backends plus `-Bar`, mark ink offset **+0.5** (the item 5 target; the harness's
+launch assertion now expects ~0, recorded in the script) · `uiatree` eight named controls +
+MenuBar/5 items · lifecycle **84% moving / 0% control** · shape selftest 44 rows OK ·
+`verify_trace_assets --strict` green through both asset removals with no script edit. **One
+expected paints difference**: idle runs with the pointer inside the window no longer blink the
+chrome every 2.2s, so paint counts can read lower than older records — that is the bug being
+gone.
+
+**Items 8 and 11 (top strip translucency + fade) are UNANSWERED BY DESIGN and block on one
+owner choice** — accept the native strip (blur backdrop already gives the design's look when
+revealed; pops rather than fades), or rebuild it as composited quads (fade + translucency, at
+the cost of re-doing the menu accessibility by hand that the real `QMenuBar` gives free — a
+phase-14-scale effort plus a new Narrator listen). A cheap measured experiment exists between
+them (uniform-alpha `WS_EX_LAYERED` fade on the native strip — §18.4 warns this class fails,
+so measure, never assume). **The backdrop decision interacts: composited quads would moot
+`TRACE_STRIP_BACKDROP`; native keeps the blur as the only route to the design's look.**
+
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
 phase 13 has to render a Keyboard Shortcuts window and a switch cannot be enumerated. **The
