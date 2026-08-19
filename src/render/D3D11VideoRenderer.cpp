@@ -136,14 +136,25 @@ LRESULT D3D11VideoRenderer::handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wp,
             return 0;
         }
 
-        case WM_MOUSEACTIVATE:
-            // Do not take activation. Keyboard belongs to the Qt window --
-            // stepping, J-K-L, Escape and the fullscreen shortcut all live
-            // there, and a click on the video must not silently move focus out
-            // of it. This is what makes "keyboard focus returns" true by
+        case WM_MOUSEACTIVATE: {
+            // Do not take activation FOR THE CHILD. Keyboard belongs to the Qt
+            // window -- stepping, J-K-L, Escape and the fullscreen shortcut all
+            // live there, and a click on the video must not silently move focus
+            // out of it. This is what makes "keyboard focus returns" true by
             // construction rather than by restoring it afterwards.
+            //
+            // But MA_NOACTIVATE alone also stopped the TOP-LEVEL window coming
+            // forward, so with another app in front, clicking the picture did
+            // nothing while clicking the top strip (an ordinary Qt widget)
+            // activated Trace (owner item 13, 2026-08-18). Activate the
+            // top-level explicitly and still decline focus for this child --
+            // the click is real input to this process, which is what entitles
+            // SetForegroundWindow to succeed here.
+            const HWND top = GetAncestor(hwnd, GA_ROOT);
+            if (top && GetForegroundWindow() != top) SetForegroundWindow(top);
             handled = true;
             return MA_NOACTIVATE;
+        }
 
         case WM_MOUSEMOVE: {
             if (!mouseTracking_) {
