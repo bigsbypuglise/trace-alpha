@@ -5,10 +5,18 @@
 #include <QObject>
 
 #include <algorithm>
+#include <chrono>
 #include <deque>
 #include <utility>
 
 namespace trace::core {
+
+qint64 scrubMonotonicNs() {
+    return static_cast<qint64>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
 
 ScrubDecodeWorker::ScrubDecodeWorker() = default;
 
@@ -41,6 +49,7 @@ void ScrubDecodeWorker::start(VideoDecoderFFmpeg* decoder, QObject* notifyTarget
     resultsStale_.store(0);
     lastBatchDecoded_.store(0);
     maxBatchDecoded_.store(0);
+    batchBudgetCuts_.store(0);
     lastCancelWaitMs_ = 0.0;
     maxCancelWaitMs_ = 0.0;
 
@@ -91,6 +100,9 @@ void ScrubDecodeWorker::post(const ScrubRequest& request) {
         // the post-mortem.
         if (pending_.has_value()) ++requestsCoalesced_;
         pending_ = request;
+        // Stamped here rather than by the caller so every posting site carries
+        // it. This is the "post" end of the round trip the results report.
+        pending_->postedNs = scrubMonotonicNs();
         leaseRevoked_ = false;
     }
     ++requestsPosted_;
@@ -181,6 +193,9 @@ void ScrubDecodeWorker::run() {
 
         // --- the decoder is this thread's, exclusively, until inDecoder_ is
         // cleared below. The UI thread does not touch it in this window. ---
+        // The "wake" end of the round trip: post -> here is condition-variable
+        // scheduling, which is a property of the machine rather than the media.
+        const qint64 dequeuedNs = scrubMonotonicNs();
         activeGeneration_.store(request.generation, std::memory_order_release);
         workerActive_.store(true, std::memory_order_release);
         decoder_->setPlaybackDirection(request.direction);
@@ -206,6 +221,9 @@ void ScrubDecodeWorker::run() {
             ScrubResult result;
             result.requestedFrame = request.frame + request.direction * i;
             result.generation = request.generation;
+            result.postedNs = request.postedNs;
+            result.dequeuedNs = dequeuedNs;
+            result.batchIndex = static_cast<int>(produced.size());
 
             QElapsedTimer decodeTimer;
             decodeTimer.start();
@@ -240,6 +258,11 @@ void ScrubDecodeWorker::run() {
             if (request.batchBudgetMs > 0.0
                 && static_cast<double>(batchTimer.nsecsElapsed()) / 1'000'000.0
                        >= request.batchBudgetMs) {
+                // Only a cut when frames were still wanted: a budget that
+                // expires on the batch's last frame ended nothing early, and
+                // counting it would report the budget as binding on every
+                // completed batch.
+                if (i + 1 < wanted) ++batchBudgetCuts_;
                 break;
             }
         }
@@ -252,6 +275,16 @@ void ScrubDecodeWorker::run() {
         if (decoded > maxBatchDecoded_.load()) maxBatchDecoded_.store(decoded);
 
         const long long latest = latestGeneration_.load(std::memory_order_acquire);
+        // Publish stamps, filled in after the loop because a batch is published
+        // together: the total is not known until the last frame, and every
+        // result of the batch shares one publish instant by construction.
+        const qint64 publishedNs = scrubMonotonicNs();
+        double batchDecodeTotalMs = 0.0;
+        for (const auto& r : produced) batchDecodeTotalMs += r.decodeMs;
+        for (auto& r : produced) {
+            r.publishedNs = publishedNs;
+            r.batchDecodeTotalMs = batchDecodeTotalMs;
+        }
         for (const auto& r : produced) {
             if (r.generation != latest) ++resultsStale_;
         }

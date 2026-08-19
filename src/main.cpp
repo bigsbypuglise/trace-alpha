@@ -330,6 +330,36 @@ int main(int argc, char* argv[]) {
         if (arg == QStringLiteral("--window-shape-selftest")) return runWindowShapeSelfTest();
     }
 
+    // `Trace.exe --scrub-selftest=<clip>` (or `--scrub-selftest <clip>`): the
+    // scrub diagnostic. Unlike the two selftests above it needs the FULL
+    // application -- the drag it scripts runs through MainWindow's real slider,
+    // coalescing timer, worker lease and landing, because a reduced harness
+    // would measure a path nobody scrubs on. It therefore builds and shows the
+    // real window, drives the gesture itself, prints one pasteable block to
+    // stdout AND writes trace-scrub-report.txt beside the exe, then exits.
+    //
+    // It exists for the machine-dependent scrub report (2026-08-19,
+    // docs/mp4-scrub-threadripper.md): the affected machine is locked down, so
+    // the discriminating numbers -- above all the worker round trip, split from
+    // decode -- have to come from one command anyone can run. NOT a CI step:
+    // it needs a real clip and a real desktop, and its numbers only mean
+    // anything relative to another machine's run of the same command.
+    {
+        const QStringList args = app.arguments();
+        for (qsizetype i = 0; i < args.size(); ++i) {
+            const QString& arg = args.at(i);
+            if (!arg.startsWith(QStringLiteral("--scrub-selftest"))) continue;
+            const qsizetype eq = arg.indexOf(QLatin1Char('='));
+            QString clip = eq < 0 ? QString() : arg.mid(eq + 1);
+            // Space-separated form, so a quoted path does not have to share
+            // quotes with the option: Trace.exe --scrub-selftest "C:\a b\c.mp4"
+            if (clip.isEmpty() && i + 1 < args.size()) clip = args.at(i + 1);
+            trace::app::MainWindow win;
+            win.show();
+            return win.runScrubSelfTest(clip);
+        }
+    }
+
     QIcon appIcon;
     appIcon.addFile(QStringLiteral(":/icons/trace-16.png"));
     appIcon.addFile(QStringLiteral(":/icons/trace-32.png"));

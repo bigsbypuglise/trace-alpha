@@ -27,6 +27,11 @@
 
 #include <QClipboard>
 #include <QCoreApplication>
+#include <QDateTime>
+#include <QDir>
+#include <QFile>
+#include <QProcessEnvironment>
+#include <QTextStream>
 #include <QGuiApplication>
 #include <QDesktopServices>
 #include <QEventLoop>
@@ -37,10 +42,14 @@
 #include <QWidget>
 #include <QtGlobal>
 
+#include <QSysInfo>
+
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <limits>
 #include <numeric>
+#include <vector>
 
 #ifdef Q_OS_WIN
 // For the WM_SIZING / WM_ENTERSIZEMOVE / WM_EXITSIZEMOVE counters in
@@ -3226,6 +3235,10 @@ void MainWindow::releaseCurrentMedia() {
     scrubPaintGapLastMs_ = scrubPaintGapMaxMs_ = scrubPaintGapSumMs_ = 0.0;
     scrubPaintGapSamples_ = scrubPaintsWasted_ = scrubPaintStalls_ = 0;
     scrubPaintHitches_ = 0;
+    // Per media, like the paint gaps beside it: a round trip carried across an
+    // open would mix two files' figures, and the scrub selftest leans on this
+    // reset to make each of its legs a clean sample.
+    scrubRt_ = ScrubRoundTrip{};
     stopUiServiceMeasurement();
     uiServiceGapMaxMs_ = uiServiceGapSumMs_ = 0.0;
     uiServiceSamples_ = uiServiceGapsOver_ = 0;
@@ -6938,6 +6951,43 @@ void MainWindow::notePresentedScrubFrame(long long frame) {
     }
 }
 
+void MainWindow::noteScrubResultTiming(const trace::core::ScrubResult& result) {
+    if (result.postedNs < 0) return;
+    const qint64 nowNs = trace::core::scrubMonotonicNs();
+
+    ++scrubRt_.frames;
+    scrubRt_.decodeSumMs += result.decodeMs;
+    scrubRt_.decodeMaxMs = std::max(scrubRt_.decodeMaxMs, result.decodeMs);
+
+    // Request-level terms from the batch's first frame only: the batch is
+    // published together, so every frame of it shares one set of stamps and
+    // counting them all would multiply one round trip by the batch size.
+    if (result.batchIndex != 0) return;
+
+    const auto ms = [](qint64 fromNs, qint64 toNs) {
+        return static_cast<double>(toNs - fromNs) / 1'000'000.0;
+    };
+    const double rt = ms(result.postedNs, nowNs);
+    const double wake = result.dequeuedNs >= result.postedNs
+        ? ms(result.postedNs, result.dequeuedNs) : 0.0;
+    const double deliver = result.publishedNs > 0 && nowNs >= result.publishedNs
+        ? ms(result.publishedNs, nowNs) : 0.0;
+    // Everything the request paid that was not decode: wake + in-worker
+    // bookkeeping + publish-to-drain. This is the term a machine can change
+    // while the file and the code stay identical.
+    const double overhead = std::max(0.0, rt - result.batchDecodeTotalMs);
+
+    ++scrubRt_.requests;
+    scrubRt_.rtSumMs += rt;
+    scrubRt_.rtMaxMs = std::max(scrubRt_.rtMaxMs, rt);
+    scrubRt_.wakeSumMs += wake;
+    scrubRt_.wakeMaxMs = std::max(scrubRt_.wakeMaxMs, wake);
+    scrubRt_.deliverSumMs += deliver;
+    scrubRt_.deliverMaxMs = std::max(scrubRt_.deliverMaxMs, deliver);
+    scrubRt_.overheadSumMs += overhead;
+    scrubRt_.overheadMaxMs = std::max(scrubRt_.overheadMaxMs, overhead);
+}
+
 void MainWindow::startUiServiceMeasurement() {
     // Reset per gesture: the interesting figure is the worst gap during *this*
     // drag, not the worst since the app launched.
@@ -7039,6 +7089,11 @@ void MainWindow::onScrubResult() {
     scrubInFlightDir_ = 0;
 
     while (scrubWorker_.takeResult(result)) {
+        // Timing first and unconditionally, like the telemetry below: a stale
+        // or abandoned result still crossed the thread boundary, and the round
+        // trip is a property of that boundary rather than of whether the frame
+        // was used.
+        noteScrubResultTiming(result);
         // Telemetry first, and unconditionally: a dropped result still says
         // what the decoder did, and the HUD should show the work that was
         // done rather than only the work that was used.
@@ -8450,7 +8505,18 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(scrubDirection_ > 0 ? "FWD" : scrubDirection_ < 0 ? "REV" : "--")
                 .arg(scrubReversals_);
 
-            const QString l7d = QString("worker %1 | posted %2 coalesced %3 | abandoned %4 stale %5 | cancel %6/%7ms | ckpt %8ms")
+            // `rt` is the cross-thread round trip per REQUEST -- post to
+            // drained -- with its machine-dependent halves beside it: `wake` is
+            // post to worker dequeue (condition-variable scheduling) and
+            // `deliv` publish to drained (the queued hop plus event-loop
+            // latency). `ovh` is the round trip minus the batch's own decode,
+            // i.e. what the request paid that no decoder change can remove. On
+            // the 720p ComfyUI file that overhead was 97% of the delivery
+            // interval, and it is the leading hypothesis for the Threadripper
+            // MP4 report -- nothing else on this HUD reports it in isolation.
+            const double rtN = scrubRt_.requests > 0
+                ? static_cast<double>(scrubRt_.requests) : 1.0;
+            const QString l7d = QString("worker %1 | posted %2 coalesced %3 | abandoned %4 stale %5 | cancel %6/%7ms | ckpt %8ms | rt %9/%10ms wake %11/%12 deliv %13/%14 ovh %15/%16 (req %17)")
                 .arg(asyncScrubEnabled() ? (decoderLeased_ ? "LEASED" : "async") : "OFF")
                 .arg(scrubWorker_.requestsPosted())
                 .arg(scrubWorker_.requestsCoalesced())
@@ -8458,7 +8524,16 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(scrubWorker_.resultsStale())
                 .arg(QString::number(scrubWorker_.lastCancelWaitMs(), 'f', 2))
                 .arg(QString::number(scrubWorker_.maxCancelWaitMs(), 'f', 2))
-                .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2));
+                .arg(QString::number(perf.maxCheckpointGapMs, 'f', 2))
+                .arg(QString::number(scrubRt_.rtSumMs / rtN, 'f', 2))
+                .arg(QString::number(scrubRt_.rtMaxMs, 'f', 1))
+                .arg(QString::number(scrubRt_.wakeSumMs / rtN, 'f', 2))
+                .arg(QString::number(scrubRt_.wakeMaxMs, 'f', 1))
+                .arg(QString::number(scrubRt_.deliverSumMs / rtN, 'f', 2))
+                .arg(QString::number(scrubRt_.deliverMaxMs, 'f', 1))
+                .arg(QString::number(scrubRt_.overheadSumMs / rtN, 'f', 2))
+                .arg(QString::number(scrubRt_.overheadMaxMs, 'f', 1))
+                .arg(scrubRt_.requests);
 
             line = l1 + "\n" + l0 + "\n" + l2 + "\n" + l3 + "\n" + l4 + "\n" + l5 + "\n" + l5b + "\n" + l6
                  + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l7g + "\n" + l7h + "\n" + l8 + "\n" + l9
@@ -8544,6 +8619,454 @@ void MainWindow::prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMod
     if (clearQueue) {
         videoSource->clearPlaybackQueue();
     }
+}
+
+// ---- --scrub-selftest --------------------------------------------------
+//
+// See the declaration in MainWindow.h for what this is for and why it lives in
+// this file. Shape notes that matter to anyone editing it:
+//
+//  - IT DRIVES THE SHIPPING PATH, NOT A REDUCED ONE. The gesture goes through
+//    the real timelineSlider_ -- setValue / setSliderDown, which is exactly how
+//    the floating transport has driven the scrub state machine since phase 6 --
+//    so the coalescing timer, the press-jump, the batch chain, the worker
+//    lease, the landing and the release all run as shipped. A bespoke
+//    decode-loop harness would measure a path nobody scrubs on.
+//
+//  - EACH LEG REOPENS THE MEDIA. releaseCurrentMedia() resets the reverse
+//    cache, the worker counters, the paint gaps, the round-trip accumulator
+//    and the per-media walk estimate, so every leg is a cold, cleanly-counted
+//    sample -- the same reason the measurement harnesses restart Trace per run.
+//
+//  - THE GESTURE IS TIME-BASED, NEVER STEP-COUNT-BASED. The pointer position
+//    is a function of elapsed wall time, so a slow machine gets the same hand
+//    motion and shows its deficit as lag -- a step-counted sweep would slow the
+//    hand down to match the machine and hide exactly what this exists to see.
+//    Pacing is ~4ms per update, matching scrub.ps1's own spin.
+//
+//  - THE WINDOW IS RESIZED TO ONE FIXED LOGICAL SIZE ON EVERY LEG, after the
+//    section 4 shaping that openPath performs. Window size drives preview size
+//    and therefore cache depth (section 22.8 measured stalls 46 -> 136 from
+//    window size alone), so leaving each machine's work area to pick the size
+//    would put a confound inside the one number the two machines are being
+//    compared on. `win`/`display` are printed per leg regardless, so a machine
+//    whose work area cannot hold the standard size is visible rather than
+//    silently different.
+namespace {
+
+// 16:9 media fits this at 1280x720 with the HUD hidden and chrome 0x0, which
+// is the class most recorded scrub figures were taken in.
+constexpr int kScrubSelfTestWinW = 1280;
+constexpr int kScrubSelfTestWinH = 760;
+
+QString selfTestFormat1(double v) { return QString::number(v, 'f', 1); }
+QString selfTestFormat2(double v) { return QString::number(v, 'f', 2); }
+
+#ifdef Q_OS_WIN
+QString selfTestCpuName() {
+    // Registry READING, the LucidLinkIntegration precedent -- nothing here
+    // writes. This key is where Windows itself keeps the marketing name.
+    QSettings reg(QStringLiteral(
+                      "HKEY_LOCAL_MACHINE\\HARDWARE\\DESCRIPTION\\System\\CentralProcessor\\0"),
+                  QSettings::NativeFormat);
+    const QString name =
+        reg.value(QStringLiteral("ProcessorNameString")).toString().simplified();
+    return name.isEmpty() ? QStringLiteral("unknown") : name;
+}
+
+// GetActiveProcessorCount over ALL groups, not std::thread::hardware_concurrency:
+// the machine this exists for has 64 logical processors, which is exactly the
+// boundary where processor groups start mattering.
+int selfTestLogicalCores() {
+    return static_cast<int>(GetActiveProcessorCount(ALL_PROCESSOR_GROUPS));
+}
+int selfTestProcessorGroups() {
+    return static_cast<int>(GetActiveProcessorGroupCount());
+}
+int selfTestPhysicalCores() {
+    DWORD len = 0;
+    GetLogicalProcessorInformationEx(RelationProcessorCore, nullptr, &len);
+    if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || len == 0) return 0;
+    std::vector<char> buf(len);
+    if (!GetLogicalProcessorInformationEx(
+            RelationProcessorCore,
+            reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buf.data()),
+            &len)) {
+        return 0;
+    }
+    int cores = 0;
+    for (DWORD off = 0; off < len;) {
+        auto* info = reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(
+            buf.data() + off);
+        if (info->Relationship == RelationProcessorCore) ++cores;
+        off += info->Size;
+    }
+    return cores;
+}
+#endif
+
+} // namespace
+
+int MainWindow::runScrubSelfTest(const QString& clipPath) {
+    QString report;
+    QTextStream rep(&report);
+
+    // Everything below prints into `report` first and reaches stdout AND a
+    // file at the end, in one write -- so a run that dies partway still leaves
+    // whatever was gathered, and the person running it never has to fight
+    // GUI-subsystem shell semantics to capture the output (the pwsh-vs-5.1
+    // wait trap is a documented CI casualty; a file sidesteps it entirely).
+    const auto finish = [&](int code) {
+        rep << "==== END TRACE SCRUB SELFTEST (exit " << code << ") ====\n";
+        rep.flush();
+
+        QString outPath =
+            QCoreApplication::applicationDirPath() + "/trace-scrub-report.txt";
+        QFile f(outPath);
+        if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+            // Beside the exe first (a portable ZIP is writable and the file is
+            // then next to the thing that made it); %TEMP% when it is not.
+            outPath = QDir::tempPath() + "/trace-scrub-report.txt";
+            f.setFileName(outPath);
+            if (!f.open(QIODevice::WriteOnly | QIODevice::Text)) {
+                outPath.clear();
+            }
+        }
+        bool wrote = false;
+        if (f.isOpen()) {
+            wrote = f.write(report.toUtf8()) >= 0;
+            f.close();
+        }
+
+        QTextStream out(stdout);
+        out << report;
+        if (wrote) out << "report written to: " << QDir::toNativeSeparators(outPath) << Qt::endl;
+        out.flush();
+        return code;
+    };
+
+    rep << "==== TRACE SCRUB SELFTEST ====\n";
+    rep << "build: Trace " << QStringLiteral(TRACE_VERSION_STRING) << " (beta) | Qt "
+        << QString::fromLatin1(qVersion()) << " | run "
+        << QDateTime::currentDateTime().toString(Qt::ISODate) << "\n";
+#ifdef Q_OS_WIN
+    rep << "machine: " << selfTestCpuName() << " | logical " << selfTestLogicalCores()
+        << " | physical cores " << selfTestPhysicalCores() << " | groups "
+        << selfTestProcessorGroups() << " | av_cpu_count "
+        << trace::core::VideoDecoderFFmpeg::cpuCount() << "\n";
+#else
+    rep << "machine: av_cpu_count " << trace::core::VideoDecoderFFmpeg::cpuCount() << "\n";
+#endif
+    rep << "os: " << QSysInfo::prettyProductName() << " (" << QSysInfo::kernelVersion()
+        << ")\n";
+    {
+        const QScreen* scr = screen();
+        rep << "screen: " << (scr ? scr->name() : QStringLiteral("?")) << " "
+            << (scr ? scr->geometry().width() : 0) << "x"
+            << (scr ? scr->geometry().height() : 0) << " @ "
+            << selfTestFormat2(scr ? scr->refreshRate() : 0.0) << "Hz | dpr "
+            << selfTestFormat2(devicePixelRatioF()) << "\n";
+    }
+    // The configuration the run happened under. A paste whose environment is
+    // invisible cannot be compared with anything -- this is the harness-header
+    // rule (transitions.ps1's 25 identical failures) applied to a report.
+    {
+        rep << "env:";
+        const QProcessEnvironment env = QProcessEnvironment::systemEnvironment();
+        const QStringList keys = env.keys();
+        QStringList traceKeys;
+        for (const QString& k : keys) {
+            if (k.startsWith(QStringLiteral("TRACE_"))) traceKeys << k;
+        }
+        traceKeys.sort();
+        if (traceKeys.isEmpty()) {
+            rep << " (no TRACE_* variables set)";
+        } else {
+            for (const QString& k : traceKeys) rep << " " << k << "=" << env.value(k);
+        }
+        rep << "\n";
+    }
+    // The three constants the scrub path tunes on the dev box, plus the
+    // switches, printed from the SAME readers the shipping path uses -- which
+    // is the reason this function lives in MainWindow.cpp at all.
+    rep << "knobs: batch cap " << scrubBatchCap() << " | walk budget "
+        << selfTestFormat1(scrubWalkBudgetMs()) << "ms | coalesce " << kScrubCoalesceMs
+        << "ms | ease " << selfTestFormat2(kScrubEase) << " | async scrub "
+        << (asyncScrubEnabled() ? "on" : "OFF") << " | async landing "
+        << (asyncLandingEnabled() ? "on" : "OFF") << " | sampling "
+        << (scrubSamplingEnabled() ? "on" : "OFF")
+        // The HUD state changes what the run measures, twice over: a visible
+        // HUD rebuilds its ~25-line string on every present (measured here as
+        // ~2.5ms of `deliver` per request on the dev box), and it takes height
+        // from the viewer, which moves preview size and cache depth. Hidden is
+        // the shipping configuration and the default; TRACE_HUD=1 is the
+        // harness-comparable configuration, since every recorded figure was
+        // taken with the HUD forced on.
+        << " | hud " << (viewState_.showHud ? "SHOWN" : "hidden") << "\n";
+    rep << "rerun knobs: TRACE_ASYNC_SCRUB=0 (sync walk) | TRACE_SCRUB_BATCH=0 "
+           "(no batching) | TRACE_DECODE_THREADS=N | TRACE_LONGGOP_SLICE_THREADS=1 "
+           "| TRACE_SCRUB_FILL_MS=N (decoder default 60)\n";
+
+    if (clipPath.isEmpty()) {
+        rep << "FAIL: no clip. Usage: Trace.exe \"--scrub-selftest=C:\\path\\clip.mp4\"\n";
+        return finish(6);
+    }
+    const QFileInfo fi(clipPath);
+    if (!fi.exists() || !fi.isFile()) {
+        rep << "FAIL: clip not found: " << clipPath << "\n";
+        return finish(6);
+    }
+    const QString absPath = fi.absoluteFilePath();
+    rep << "clip: " << QDir::toNativeSeparators(absPath) << "\n";
+
+    // Event pumping. This is the selftest's stand-in for the idle event loop a
+    // real drag runs inside: deliveries (QueuedConnection), the coalescing
+    // timer and repaints are all serviced here. It spins rather than sleeps,
+    // for scrub.ps1's own stated reason -- a gesture that pauses overstates how
+    // well the shuttle keeps up -- and because a sleep would add its own
+    // latency to the delivery half of the round trip being measured.
+    const auto pumpMs = [](double ms) {
+        QElapsedTimer t;
+        t.start();
+        while (static_cast<double>(t.nsecsElapsed()) / 1'000'000.0 < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+        }
+    };
+    const auto pumpUntil = [](const std::function<bool()>& done, double timeoutMs) {
+        QElapsedTimer t;
+        t.start();
+        while (static_cast<double>(t.nsecsElapsed()) / 1'000'000.0 < timeoutMs) {
+            if (done()) return true;
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 2);
+        }
+        return done();
+    };
+
+    // One segment of a drag: from/to are fractions of the timeline (0..1).
+    struct Seg {
+        double from;
+        double to;
+        double secs;
+    };
+
+    bool anyLegFailed = false;
+    int legIndex = 0;
+
+    // Runs one gesture leg against a FRESH open of the clip and appends its
+    // block to the report. Returns false only on a structural failure --
+    // nothing presented, the landing never settled, or the release landed off
+    // target. Slow numbers are the report, not a failure.
+    const auto runLeg = [&](const QString& title, const std::vector<Seg>& segs,
+                            double settleMs) -> bool {
+        ++legIndex;
+        rep << "-- leg " << legIndex << ": " << title << " --\n";
+
+        if (!openPath(absPath) || !currentMedia_.has_value()
+            || currentMedia_->kind != MediaKind::VideoFile) {
+            rep << "FAIL: clip did not open as a video file\n";
+            return false;
+        }
+        pumpMs(250.0);
+        // After openPath's section 4 shaping, so it sticks (nothing reshapes
+        // again without a DPI change).
+        resize(kScrubSelfTestWinW, kScrubSelfTestWinH);
+        pumpMs(300.0);
+
+        QSlider* s = timelineSlider_;
+        const long long maxF = std::max<long long>(1, s->maximum());
+        const auto frameAt = [maxF](double t01) {
+            const double clamped = std::clamp(t01, 0.0, 1.0);
+            return static_cast<long long>(std::llround(clamped * static_cast<double>(maxF)));
+        };
+
+        // The press, in the order a real gesture arrives: the groove click's
+        // absolute set lands first (SH_Slider_AbsoluteSetButtons), then
+        // sliderPressed. setSliderDown emits the press/release signals, which
+        // is the same route the floating transport has used since phase 6.
+        s->setValue(static_cast<int>(frameAt(segs.front().from)));
+        pumpMs(60.0);
+        s->setSliderDown(true);
+        pumpMs(20.0);
+
+        for (const Seg& seg : segs) {
+            QElapsedTimer sw;
+            sw.start();
+            for (;;) {
+                const double t =
+                    (static_cast<double>(sw.nsecsElapsed()) / 1'000'000'000.0) / seg.secs;
+                if (t >= 1.0) break;
+                s->setValue(static_cast<int>(frameAt(seg.from + (seg.to - seg.from) * t)));
+                pumpMs(4.0);
+            }
+            s->setValue(static_cast<int>(frameAt(seg.to)));
+        }
+        if (settleMs > 0.0) pumpMs(settleMs);
+        s->setSliderDown(false);
+
+        // The release's landing, however long it takes -- the wait is bounded
+        // so a wedged chain reports as a failure instead of hanging the run.
+        const bool settled = pumpUntil(
+            [&]() { return !landingPending_ && !scrubWorker_.busy(); }, 10000.0);
+        pumpMs(150.0);
+        captureDecoderTelemetry();
+
+        const auto& perf = hudPerf_;
+        const auto& drawPerf = viewer_->perfStats();
+
+        const long long presented = scrubPresentedFrames_;
+        const long long delta =
+            (lastRequestedFrame_ >= 0 && lastDeliveredFrame_ >= 0)
+                ? lastRequestedFrame_ - lastDeliveredFrame_
+                : 0;
+        const long long legSeeks = perf.seekSamples - scrubSeeksAtGestureStart_;
+        const double revHit = perf.reverseCacheLookups > 0
+            ? 100.0 * static_cast<double>(perf.reverseCacheHits)
+                  / static_cast<double>(perf.reverseCacheLookups)
+            : 0.0;
+        const double supply = scrubPointerFps_ > 0.1
+            ? 100.0 * scrubDecodeFps_ / scrubPointerFps_
+            : 0.0;
+        const double rtN = scrubRt_.requests > 0
+            ? static_cast<double>(scrubRt_.requests) : 1.0;
+        const double decN = scrubRt_.frames > 0
+            ? static_cast<double>(scrubRt_.frames) : 1.0;
+        const double gapAvg = scrubPaintGapSamples_ > 0
+            ? scrubPaintGapSumMs_ / static_cast<double>(scrubPaintGapSamples_)
+            : 0.0;
+        const double uiGapAvg = uiServiceSamples_ > 0
+            ? uiServiceGapSumMs_ / static_cast<double>(uiServiceSamples_)
+            : 0.0;
+        const QScreen* scr = screen();
+        const double refreshMs =
+            (scr && scr->refreshRate() > 1.0) ? 1000.0 / scr->refreshRate() : 16.7;
+        const double dpr = devicePixelRatioF();
+
+        rep << "media: " << videoDecoder_.metadata().pixelFormatName << " "
+            << videoDecoder_.metadata().codecName
+            << " " << videoDecoder_.metadata().width << "x" << videoDecoder_.metadata().height
+            << " " << QString::number(videoDecoder_.metadata().fps, 'f', 3) << "fps "
+            << videoDecoder_.metadata().frameCount << "f | "
+            << (videoDecoder_.metadata().intraOnly ? "intra-only" : "long-GOP")
+            << " | thr " << (perf.threadTypeIsFrame ? "frame" : "slice") << " x"
+            << perf.threadCount << " | renderer " << viewer_->rendererName()
+            << (viewer_->overlayEnabled() ? " +overlay" : " +bar") << "\n";
+        rep << "win " << static_cast<int>(std::lround(width() * dpr)) << "x"
+            << static_cast<int>(std::lround(height() * dpr)) << " | display "
+            << drawPerf.lastDrawSize.width() << "x" << drawPerf.lastDrawSize.height()
+            << " | dst " << perf.dstPixelFormat << "\n";
+        rep << "pointer " << selfTestFormat1(scrubPointerFps_) << " f/s | presented "
+            << presented << " f | dec " << selfTestFormat1(scrubDecodeFps_)
+            << " f/s | supply " << selfTestFormat1(supply) << "% | behind "
+            << scrubLagLastFrames_ << "/" << scrubLagMaxFrames_ << "f (end/max) | p2p "
+            << selfTestFormat1(scrubPointerToPreviewMs_) << "/"
+            << selfTestFormat1(scrubPointerToPreviewMaxMs_) << "ms (end/max)\n";
+        // THE HEADLINE SPLIT. `round trip` is post -> drained per request;
+        // `wake` and `deliver` are its two cross-thread hops; `overhead` is the
+        // round trip minus the batch's own decode -- the term that scales with
+        // the machine rather than the media, and the leading hypothesis.
+        rep << "round trip/request " << selfTestFormat2(scrubRt_.rtSumMs / rtN) << "/"
+            << selfTestFormat1(scrubRt_.rtMaxMs) << "ms (avg/max) | wake "
+            << selfTestFormat2(scrubRt_.wakeSumMs / rtN) << "/"
+            << selfTestFormat1(scrubRt_.wakeMaxMs) << " | deliver "
+            << selfTestFormat2(scrubRt_.deliverSumMs / rtN) << "/"
+            << selfTestFormat1(scrubRt_.deliverMaxMs) << " | overhead "
+            << selfTestFormat2(scrubRt_.overheadSumMs / rtN) << "/"
+            << selfTestFormat1(scrubRt_.overheadMaxMs) << " (req " << scrubRt_.requests
+            << ")\n";
+        rep << "decode/frame " << selfTestFormat2(scrubRt_.decodeSumMs / decN) << "/"
+            << selfTestFormat1(scrubRt_.decodeMaxMs) << "ms (avg/max, n "
+            << scrubRt_.frames << ") | overhead share "
+            << selfTestFormat1(scrubRt_.rtSumMs > 0.0
+                                   ? 100.0 * scrubRt_.overheadSumMs / scrubRt_.rtSumMs
+                                   : 0.0)
+            << "% of round trip\n";
+        rep << "requests " << scrubWorker_.requestsPosted() << " | coalesced "
+            << scrubWorker_.requestsCoalesced() << " | stale "
+            << scrubWorker_.resultsStale() << " | batch cap " << scrubBatchCap()
+            << " achieved-avg "
+            << selfTestFormat2(static_cast<double>(scrubRt_.frames) / rtN) << " last "
+            << scrubWorker_.lastBatchDecoded() << " max " << scrubWorker_.maxBatchDecoded()
+            << " | budget-cut " << scrubWorker_.batchBudgetCuts() << " of "
+            << scrubWorker_.requestsPosted() << " | stride " << scrubStride_ << "\n";
+        rep << "seeks " << legSeeks << " | ra-walk " << selfTestFormat2(mediaWalkPerSeek())
+            << "f/seek | walk max " << scrubWalkMaxFrames_ << "f | rev-hit "
+            << selfTestFormat1(revHit) << "% (" << perf.reverseCacheHits << "/"
+            << perf.reverseCacheLookups << ") | cache " << perf.cacheOccupancy << "/"
+            << perf.cacheCapacity << " ("
+            << selfTestFormat1(static_cast<double>(perf.cacheBytes) / (1024.0 * 1024.0))
+            << "/"
+            << selfTestFormat1(static_cast<double>(perf.cacheBudgetBytes) / (1024.0 * 1024.0))
+            << " MB) ins " << perf.cacheInserts << "\n";
+        rep << "hitch " << scrubPaintHitches_ << " (>" << selfTestFormat1(kScrubHitchMs)
+            << "ms) | stalls " << scrubPaintStalls_ << " of " << scrubPaintGapSamples_
+            << " (>" << selfTestFormat1(refreshMs * 2.0) << "ms) | paint gap "
+            << selfTestFormat1(gapAvg) << "/" << selfTestFormat1(scrubPaintGapMaxMs_)
+            << "ms (avg/max) | ui gap " << selfTestFormat2(uiGapAvg) << "/"
+            << selfTestFormat1(uiServiceGapMaxMs_) << "ms | over "
+            << selfTestFormat1(kUiServiceGapMs) << "ms: " << uiServiceGapsOver_ << " of "
+            << uiServiceSamples_ << "\n";
+        rep << "release " << selfTestFormat1(scrubReleaseLatencyMs_) << "ms | landing async "
+            << landingsAsync_ << " sync " << landingsSync_ << " sup " << landingsSuperseded_
+            << " | target " << lastRequestedFrame_ << " shown " << lastDeliveredFrame_
+            << " delta " << delta << "\n";
+
+        bool ok = true;
+        if (presented <= 0) {
+            rep << "FAIL: the drag presented no frames\n";
+            ok = false;
+        }
+        if (!settled) {
+            rep << "FAIL: the release never settled (landing pending or worker busy after 10s)\n";
+            ok = false;
+        }
+        if (settled && delta != 0) {
+            rep << "FAIL: the release landed off target (delta " << delta << ")\n";
+            ok = false;
+        }
+        rep << (ok ? "leg PASS" : "leg FAIL") << "\n";
+        return ok;
+    };
+
+    // Leg 1: scrub.ps1's default gesture -- the whole clip in 1.5s, released
+    // the instant the sweep ends (-SnapRelease), which is the only gesture that
+    // reliably catches a decode in flight and exercises cancellation.
+    if (!runLeg(QStringLiteral("forward sweep, whole clip in 1.5s, snap release"),
+                {{0.0, 1.0, 1.5}}, 0.0)) {
+        anyLegFailed = true;
+    }
+
+    // Leg 2: scrub.ps1 -Reversals, segment for segment -- hard direction
+    // changes under one continuous press, running into both ends, 400ms settle
+    // before the release. The gesture set that found the decode error in
+    // 2523d77, and the one the recorded reversal-drag figures come from.
+    if (!runLeg(QStringLiteral("reversal drag (scrub.ps1 -Reversals shape), settle, release"),
+                {{0.0, 1.0, 0.5},
+                 {1.0, 0.0, 0.5},
+                 {0.0, 0.5, 0.3},
+                 {0.5, 1.0, 0.4},
+                 {1.0, 0.5, 0.3},
+                 {0.5, 0.0, 0.5}},
+                400.0)) {
+        anyLegFailed = true;
+    }
+
+    // Leg 3: a slow forward drag at ~3x playback speed from the 15% mark. No
+    // recorded counterpart -- its control is the same leg on the dev box. It
+    // exists because a fixed per-request cost shows CLEANEST at low demand: at
+    // 3x the decoder trivially keeps up on any H.264 file, so `p2p` here is
+    // nearly pure latency, where leg 1 mixes latency with throughput.
+    {
+        const auto& vm = videoDecoder_.metadata();
+        const double fps = vm.fps > 1.0 ? vm.fps : 24.0;
+        const double frames = static_cast<double>(std::max<long long>(1, vm.frameCount - 1));
+        const double span = std::min(0.8, (3.0 * fps * 2.0) / frames);
+        if (!runLeg(QStringLiteral("slow forward drag, ~3x speed for 2s, settle, release"),
+                    {{0.15, 0.15 + span, 2.0}}, 400.0)) {
+            anyLegFailed = true;
+        }
+    }
+
+    return finish(anyLegFailed ? 7 : 0);
 }
 
 } // namespace trace::app

@@ -68,6 +68,31 @@ public:
     // blocks startup. Exists so playback can be driven from a script.
     void openMediaPath(const QString& path);
 
+    // `Trace.exe --scrub-selftest=<clip>`: open the clip, drive the SHIPPING
+    // scrub path with scripted drags through the real timeline slider, and
+    // print one pasteable diagnostic block (stdout, plus a file beside the
+    // exe). One invocation, no interaction, no arguments beyond the clip.
+    //
+    // It exists because the machine showing poor MP4 scrub (2026-08-19,
+    // docs/mp4-scrub-threadripper.md) is locked down: nobody can run harnesses
+    // or hand experiments there, so the discriminating numbers have to come
+    // from one command anyone can run. The fields are chosen to separate the
+    // live hypotheses -- above all the worker round trip (post to delivery,
+    // split from decode), which nothing else reports in isolation: playback
+    // decodes synchronously on the UI thread, so a machine-dependent
+    // cross-thread cost would hurt scrub and leave playback untouched, which
+    // is exactly the reported symptom. Defined in MainWindow.cpp rather than
+    // its own file because the knob readers it must quote (scrubBatchCap,
+    // scrubWalkBudgetMs, asyncScrubEnabled...) live in this file's anonymous
+    // namespace, and re-reading the env with duplicated defaults is the drift
+    // this project keeps paying for.
+    //
+    // Exit 6: no clip / the clip did not open as video. Exit 7: a gesture leg
+    // failed structurally (nothing presented, landing timed out, or the
+    // release landed off-target). Slow numbers are the REPORT, never a
+    // failure -- capturing them on the affected machine is the whole point.
+    int runScrubSelfTest(const QString& clipPath);
+
 protected:
     void keyPressEvent(QKeyEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
@@ -1157,6 +1182,34 @@ private:
     void resetScrubLagModel();
     void notePointerTarget(long long frame);
     void notePresentedScrubFrame(long long frame);
+
+    // The worker round trip, split. Every other scrub figure is throughput or
+    // lag; none of them can see a fixed per-request cost that scales with the
+    // machine rather than the media -- which is the leading hypothesis for the
+    // Threadripper MP4 report, and was the whole cost on the 720p ComfyUI file
+    // (0.12ms of decode inside a 3.56ms delivery interval, 97% round trip).
+    //
+    // Accumulated per delivered result in onScrubResult from the stamps the
+    // worker carries (ScrubResult::postedNs/dequeuedNs/publishedNs). Request-
+    // level terms are taken from batchIndex 0 only -- the batch publishes
+    // together, so later frames share the same stamps and would double-count.
+    // Reset per media in releaseCurrentMedia, like the paint-gap counters.
+    struct ScrubRoundTrip {
+        long long requests = 0;   // request-level samples (batchIndex 0)
+        double rtSumMs = 0.0;     // post -> drained on the UI thread
+        double rtMaxMs = 0.0;
+        double wakeSumMs = 0.0;   // post -> worker dequeue (cv scheduling)
+        double wakeMaxMs = 0.0;
+        double deliverSumMs = 0.0; // publish -> drained (queued hop + loop)
+        double deliverMaxMs = 0.0;
+        double overheadSumMs = 0.0; // round trip minus the batch's decode
+        double overheadMaxMs = 0.0;
+        long long frames = 0;     // every delivered result
+        double decodeSumMs = 0.0; // per-frame decode, worker-measured
+        double decodeMaxMs = 0.0;
+    };
+    ScrubRoundTrip scrubRt_;
+    void noteScrubResultTiming(const trace::core::ScrubResult& result);
 
     // Preview sampling. Short-window estimates, kept separate from the
     // gesture-cumulative figures above: those are for reading afterwards, these

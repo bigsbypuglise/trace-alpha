@@ -579,6 +579,14 @@ struct VideoDecoderFFmpeg::Impl {
 #endif
 };
 
+int VideoDecoderFFmpeg::cpuCount() {
+#ifdef TRACE_WITH_FFMPEG
+    return av_cpu_count();
+#else
+    return 0;
+#endif
+}
+
 VideoDecoderFFmpeg::VideoDecoderFFmpeg() : impl_(new Impl()) {}
 
 VideoDecoderFFmpeg::~VideoDecoderFFmpeg() {

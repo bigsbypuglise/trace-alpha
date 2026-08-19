@@ -17,6 +17,20 @@ class QObject;
 
 namespace trace::core {
 
+// Monotonic nanoseconds on one clock BOTH threads can read, so a timestamp
+// taken on the UI thread and one taken on the worker are subtractable. Two
+// QElapsedTimer instances are not: each measures from its own start(). On
+// Windows both this and QElapsedTimer sit on QueryPerformanceCounter, so the
+// cost is one QPC read.
+//
+// It exists for the round-trip split (--scrub-selftest): post-to-delivery for
+// a scrub request, separated from the decode inside it. The leading hypothesis
+// for the Threadripper MP4 scrub report is that the CROSS-THREAD cost is the
+// machine-dependent term -- playback decodes synchronously on the UI thread and
+// is reported fine there, which is exactly the split a per-request itinerary
+// can see and no throughput figure can.
+qint64 scrubMonotonicNs();
+
 // One frame of the scrub shuttle, asked for by the UI thread.
 //
 // `generation` is a value of MainWindow::requestGeneration_ sampled when the
@@ -62,6 +76,10 @@ struct ScrubRequest {
     // of a batch -- rather than UI-thread occupancy, which is what the same
     // number bounds on the synchronous path.
     double batchBudgetMs = 0.0;
+    // When post() accepted this request, on scrubMonotonicNs()'s clock.
+    // Stamped by post() itself, not by the caller, so every request carries it
+    // whichever of the four posting sites built the struct.
+    qint64 postedNs = -1;
 };
 
 struct ScrubResult {
@@ -84,6 +102,25 @@ struct ScrubResult {
     // out the decoder's counters are being written by this thread.
     VideoPerfStats perf;
     IoPhaseStats io[static_cast<int>(IoPhase::Count)];
+
+    // The request's cross-thread itinerary, on scrubMonotonicNs()'s clock. The
+    // consumer stamps its own "now" when it drains the result; the differences
+    // split one round trip into post->wake (condition-variable scheduling),
+    // decode (the work), and publish->drain (QueuedConnection plus event-loop
+    // latency). Those are the terms the machine can change while the file and
+    // the code stay identical, which is why they are carried per result rather
+    // than inferred from throughput.
+    qint64 postedNs = -1;    // post() accepted the request (UI thread)
+    qint64 dequeuedNs = -1;  // the worker picked it up
+    qint64 publishedNs = -1; // the whole batch was pushed and notify sent
+    // Decode time of the WHOLE batch this result belongs to. The batch is
+    // published together, so the first result's post-to-drain time includes
+    // every decode in it; overhead is round trip minus THIS, not minus the one
+    // frame's decodeMs.
+    double batchDecodeTotalMs = 0.0;
+    // Position within the batch. 0 carries the request-level timing; frames
+    // after it share the same stamps and would double-count the round trip.
+    int batchIndex = 0;
 };
 
 // Runs random-access scrub decode off the UI thread.
@@ -155,6 +192,11 @@ public:
     // that the budget collapsed the batch rather than that the rule never ran.
     long long lastBatchDecoded() const { return lastBatchDecoded_.load(); }
     long long maxBatchDecoded() const { return maxBatchDecoded_.load(); }
+    // Batches ended by the wall-clock budget with frames still wanted. This is
+    // the 8ms walk budget -- one of the three constants tuned on the dev box --
+    // actually binding, as distinct from a batch that simply completed: the two
+    // end the loop the same way and only this counter tells them apart.
+    long long batchBudgetCuts() const { return batchBudgetCuts_.load(); }
 
 private:
     void run();
@@ -203,6 +245,7 @@ private:
     std::atomic<long long> resultsStale_{0};
     std::atomic<long long> lastBatchDecoded_{0};
     std::atomic<long long> maxBatchDecoded_{0};
+    std::atomic<long long> batchBudgetCuts_{0};
     double lastCancelWaitMs_ = 0.0;
     double maxCancelWaitMs_ = 0.0;
 };

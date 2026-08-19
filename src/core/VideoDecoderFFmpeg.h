@@ -344,6 +344,14 @@ public:
     VideoDecoderFFmpeg();
     ~VideoDecoderFFmpeg();
 
+    // av_cpu_count(), i.e. what FFmpeg believes this machine's logical CPU
+    // count is -- the input to the intra-only thread default and the number the
+    // Threadripper report's whole depth argument runs through. Exposed so the
+    // scrub selftest can print the INPUT beside the applied count
+    // (VideoPerfStats::threadCount) rather than inferring one from the other.
+    // 0 when this build has no FFmpeg.
+    static int cpuCount();
+
     bool open(const QString& path, QString& error);
     void close();
     bool isOpen() const;
