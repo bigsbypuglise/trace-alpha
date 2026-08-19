@@ -251,7 +251,80 @@ shipping renderer. Full record in the session summary; the durable facts:
 
 **Item 8 is NOT closed by this**: at rest the strip is still opaque over the painted blur.
 What changed is that a uniform resting translucency is now *possible* on d3d11 — an owner
-option, deliberately not taken here because cpu cannot match it.
+option, deliberately not taken here because cpu cannot match it. **Taken the next day — see
+the item 8 section below.**
+
+### Item 8 — CLOSED (2026-08-19): the strip rests translucent, and the blur is REMOVED
+
+**Owner decision, option B: the resting strip is partially transparent, accepting that d3d11
+and cpu deliberately differ on the top strip.** The mechanism is item 11's — the fade's
+`SetLayeredWindowAttributes(LWA_ALPHA)` ramp now tops out at **`TopChrome::kRestingAlpha =
+215`** instead of opaque, so the fade is a 0 → 215 ramp and the settled strip shows the real
+video through itself on the d3d11 default. One constant plus its plumbing, as predicted.
+
+**THE ALPHA WAS PICKED FROM LEGIBILITY OVER BRIGHT BUSY FOOTAGE, NOT FROM THE DESIGN'S CSS**
+(owner instruction — the CSS scrim and a uniform window alpha are different mechanisms).
+Swept 155..255 × blur on/off over the two hardest bands in the asset set: the 4K milk splash
+(`Splash_1.mp4`) and the Marinelaverse end tag's bright saturated high-frequency detail, with
+the menus open, using `TRACE_TOPCHROME_ALPHA` pins on the pre-change binary — so the whole
+sweep ran before a line of code moved. 230 barely reads as translucent; 200 goes marginal
+where a near-white element crosses a label; **215 (~84%) keeps every label cleanly separable
+on the worst frame and still reads as real translucency.** Captures in the session record.
+
+**THE SWEEP ANSWERED THE BLUR QUESTION THE OPPOSITE WAY ROUND FROM THE INTUITION, AND THAT IS
+WHY StripBackdrop IS REMOVED RATHER THAN COMPOSED.** The expectation was that translucency
+alone might fail on busy footage — sharp detail under the labels is precisely what the
+design's blur exists to suppress — and the blur would stay underneath. Measured, the
+composition is inverted: **the painted blur is itself a bright copy of the video, so a
+resting alpha under it counts the video twice** and washes the labels out by a215 and badly
+by a200 — while the solid dark strip content under the same alpha composes into a uniform
+dark scrim that is *more* legible over bright footage than the shipping blur-at-opaque was.
+Translucency alone reads well; translucency plus blur reads worse than either alone. So:
+
+- `src/ui/StripBackdrop.{h,cpp}` deleted; `TopChrome::setBackdrop`, the backdrop paint
+  branch, `ViewerWidget`'s per-frame sampling/publishing (`refreshBackdrop`,
+  `setBackdropSink`) and `TRACE_STRIP_BACKDROP` all left with it. The strip paints the design
+  package's solid fallback gradient, always; the translucency is the window's, applied by DWM.
+- **The Windows transparency honour SURVIVES the removal, re-purposed**: the
+  `EnableTransparency` tri-state read moved into `TopChrome` and now gates the resting alpha —
+  setting off → the strip rests opaque, which is exactly the package's "solid #14161A when
+  transparency effects are disabled" case. `WM_SETTINGCHANGE` re-applies it live. The dev
+  HUD's `backdrop` field is replaced by **`strip`**: `a215` / `a215 (unset)` /
+  `opaque (windows)` / `aN (env)` / `opaque (fade off)` / `n/a` in bar mode.
+- `scripts/measure/stripbackdrop.ps1` and `backdropcost.ps1` retired with the mechanism;
+  `topchromefade.ps1` gains **`-Mode rest`**, which verifies the shipping resting state per
+  renderer with the accepted divergence written in as the expectation: d3d11 must match
+  `strip*(215/255) + video*(40/255)` and **cpu must read opaque** — measured **MAE 0.21** and
+  **0.1** against their own predictions respectively.
+
+**THE EMPTY-STATE STRIP DELIBERATELY RESTS OPAQUE** (`mediaTitle_` empty is the gate): there
+is no picture behind the empty stage for translucency to show, and the empty-state window is
+the one surface byte-comparable across backends — re-measured after the change at **0 of
+972,800 px differing, max channel delta 0**, the step 11 standard preserved as a working
+instrument. **The owner-accepted divergence is over VIDEO**: the strip band there reads 5434
+of 5434 samples differing at max delta 37 across backends (08-mid-drag), while the video band
+below it reads 25 of 61,864 — so any cross-backend comparison must exclude the strip band or
+expect it, and `overlay.ps1`'s header now says so. **Record the strip-band difference as this
+decision, never as a defect to reconcile.**
+
+**One stale harness found in passing, defeated by item 15 rather than by this change**:
+`overlay.ps1` still mapped the ten-control strip, so on the eight-control strip every
+left-cluster aim landed one control off — its "go-to-end" tap toggled Loop and its "loop" tap
+sampled the frame readout, reading two FAILs on a correct build. Re-pointed to the
+eight-control offsets, and its Go to Start/End leg drives `Home`/`End` (where item 15 moved
+the behaviour) with the same played-track observable: 0.817 → 0, loop accent 0/68/0 (the
+recorded figure), all legs PASS on both backends.
+
+**Regression flat** (1920x1200 @ 59.999Hz — the Parsec-class display, so no figure is
+comparable to a physical-panel record; captures read the composited framebuffer, so pixel
+judgements stand): 4K H.264 cadence ×2 **99.1/99.1%** `0 of 120` identical buckets · 4444 ×2
+**99.8/99.8%** `0 of 260` · 4444 `-SnapRelease` **`target 261 shown 261 delta 0`** full-res
+planar, `release 21.9ms`, `hitch 0`, `land 0` · 4K H.264 reversals `rev-hit 97.3%`, `seeks 6`,
+`hitch 1`, `delta 0` · **25 of 25 transitions** (a first run on `Splash_1.mp4` failed
+`F -> ffBtn` with `moved 0%` — the harness's own recorded 121-frame-clip artifact, clean on
+the header's named clip) · lifecycle **83.5% moving / 0% control** · `emptystate` all four
+modes both backends plus `-Bar` (641-row stage) · `topchromefade` rest/anim/menus/loop
+(`SHOWN 0 / HIDDEN 1 / filtered 1`, identical to the item 11 record).
 
 **One harness defect found and fixed on the way** (`emptystate.ps1 -Mode transport`): it
 revealed with a single `SetCursorPos` to a fixed pixel, and every run parks the pointer on

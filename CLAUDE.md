@@ -777,7 +777,11 @@ Applying it costs nothing measurable (4444 x2: 99.8%, `drop 0`, `handler>budget 
 `hitch 0`, buckets identical) but that is **a null result on a no-op** and is not evidence that a
 real transparency route would be free.
 
-**ROUTE 2 IS BUILT AND MEASURED FLAT (`efa3160`), AND IT SHIPS ON AS OF `a4c6bb2`.** The
+**ROUTE 2 IS BUILT AND MEASURED FLAT (`efa3160`), AND IT SHIPS ON AS OF `a4c6bb2` — BUT THE
+PAINTED BLUR IS REMOVED ON 2026-08-19 (owner item 8, option B; see that entry below): the strip
+rests at layered alpha 215 instead, `StripBackdrop.*` and `TRACE_STRIP_BACKDROP` are gone, and
+the alpha sweep measured blur-under-alpha as the worst combination. This block and the three
+after it are the record of what was built, not the shipping strip.** The
 top strip paints a tiny blurred copy of the video it covers as its background, under the design
 package's own `rgba(22,22,24,0.66)` -> `0.04` scrim -- so the design's look is reached **while the
 menu bar stays a real `QMenuBar` in a real native window**, which is exactly what route 1
@@ -844,11 +848,11 @@ design's purely vertical fallback gradient, reading 0 on all six `bd=0` rows and
 chrome revealed defeats the gate on purpose. Harnesses: `scripts/measure/stripbackdrop.ps1`,
 `scripts/measure/backdropcost.ps1`.
 
-**IT SHIPS ON (owner, 2026-08-18, `a4c6bb2`) AND IT HONOURS WINDOWS' TRANSPARENCY SETTING** -- see
-the entry below for the three-valued knob, the tri-state registry read and the HUD's `backdrop`
-field. The solid `#14161A` is still the fallback and is now a state a user can actually reach
-rather than a permanent condition. **DirectComposition and rebuilding the strip as video quads are
-both explicitly NOT to be pursued** (owner, 2026-08-18).
+**IT SHIPPED ON (owner, 2026-08-18, `a4c6bb2`) AND WAS REMOVED 2026-08-19 with item 8's resting
+translucency** -- the tri-state registry read survives in `TopChrome` gating the resting alpha,
+the solid `#14161A` is what the strip paints always (the translucency is the window's), and the
+HUD field is `strip` now. **DirectComposition and rebuilding the strip as video quads remain
+explicitly NOT to be pursued** (owner, 2026-08-18).
 
 **STEP 10's TYPOGRAPHY HALF IS DONE (2026-08-18, `d91f026`): `src/app/Theme.*`, one home for the
 application font, the palette and the popup-menu surface.** `main.cpp` had a hand-rolled grey
@@ -897,8 +901,11 @@ buckets and percentiles identical; `scrub -SnapRelease` **`target 261 shown 261 
 full-res planar with **`hitch 0`** on both, release 19.9 vs 21.1ms.
 
 **THE STRIP BACKDROP SHIPS ON BY DEFAULT AND HONOURS WINDOWS' TRANSPARENCY SETTING (owner,
-2026-08-18, `a4c6bb2`).** Roadmap step 10 route 2 was built default-off and left as the last open
-owner decision; the decision is to ship it. `TRACE_STRIP_BACKDROP` is **three-valued** now --
+2026-08-18, `a4c6bb2`). SUPERSEDED 2026-08-19 — the blur is removed with item 8's resting
+translucency; what survives is the transparency-setting honour, re-purposed to gate the resting
+alpha inside `TopChrome`, and the tri-state/HUD reasoning below, which now applies to the
+`strip` field.** Roadmap step 10 route 2 was built default-off and left as the last open
+owner decision; the decision was to ship it. `TRACE_STRIP_BACKDROP` was **three-valued** --
 `0` forces off (the rollback), `1` forces on (the override), **unset asks Windows**.
 
 - **HONOURING THE SETTING IS THE DESIGN PACKAGE'S OWN INSTRUCTION, NOT AN ADDITION TO IT.** The
@@ -941,7 +948,11 @@ full-res planar, `hitch 0`, `land 0`, release 21.3 against 21.1ms. `emptystate` 
 both backends plus the `-Bar` control. **25 of 25 transitions.**
 
 **THE TRANSPARENCY GATE IS CLOSED ON HARDWARE (owner flipped the toggle, 2026-08-18), AND THE
-WHOLE TRUTH TABLE IS MEASURED.** With `EnableTransparency` set to **0** and the variable unset,
+WHOLE TRUTH TABLE IS MEASURED. (2026-08-19: the blur this table gated is removed — item 8 —
+but the gate itself survives in `TopChrome`, deciding the resting alpha; the registry rows'
+meaning carries over as `strip a215` vs `opaque (windows)`, and the env column is now
+`TRACE_TOPCHROME_ALPHA`'s pin rather than the deleted `TRACE_STRIP_BACKDROP`.)** With
+`EnableTransparency` set to **0** and the variable unset,
 the HUD reads **`backdrop off (windows)`** and the strip reads **`hsd 0.00`** at mean RGB
 `23.17/24.62/29.17` -- **byte-identical to the `TRACE_STRIP_BACKDROP=0` fallback**, which is what
 says the two routes to "off" reach the same paint rather than merely both looking dark. The owner
@@ -971,11 +982,12 @@ other half is measured: 30 broadcasts carrying the `ImmersiveColorSet` lParam wi
 normally carries. The process the owner tested was closed before it could be sampled from here,
 so the live half rests on their observation and on that mechanism, not on a pixel figure.
 
-**`scripts/measure/stripbackdrop.ps1` GAINED `-Mode shipping`**, which launches with the variable
-**unset** and the HUD on. Setting it to `1` and calling that the shipping configuration would be
-testing the override rather than the default, and the two reach the same picture by different
-branches. It prints `hsd` beside a capture carrying Trace's own `backdrop` field, and PASS
-requires the two to **agree** -- a disagreement is the gate and the drawing having different
+**`scripts/measure/stripbackdrop.ps1` GAINED `-Mode shipping`** (retired 2026-08-19 with the
+script; `topchromefade.ps1 -Mode rest` carries the same principle now), which launched with the
+variable **unset** and the HUD on. Setting it to `1` and calling that the shipping configuration
+would be testing the override rather than the default, and the two reach the same picture by
+different branches. It printed `hsd` beside a capture carrying Trace's own state field, and PASS
+required the two to **agree** -- a disagreement is the gate and the drawing having different
 opinions.
 
 **ROADMAP STEP 11 IS DONE (2026-08-18): THE BOTH-BACKEND PASS, CONSOLIDATED RATHER THAN REPEATED,
@@ -995,7 +1007,10 @@ panel, `renderer` read off both HUDs first.
   to one backend, which is exactly how `overlay.ps1`'s cpu half went unrun for a whole phase).
 - **THE TOP STRIP WITH THE BACKDROP DRAWING, over video -- the one surface that can only be
   compared there -- reads 0 px above tolerance 2 at max channel delta 2**, better than step 10's
-  recorded 1847 px / delta 7.
+  recorded 1847 px / delta 7. **(Superseded 2026-08-19 by item 8: over video the strip band now
+  differs 100% across backends BY OWNER DECISION -- d3d11 rests translucent at alpha 215, cpu
+  rests opaque -- measured 5434 of 5434 samples at max delta 37. The empty-state figure below is
+  the one that still holds, because the empty-state strip deliberately rests opaque.)**
 - **SIX PIXELS ARE THE ONLY CHROME DIFFERENCE ANYWHERE AND THEY LOOK LIKE THE FAULT THIS STEP
   EXISTS TO CATCH.** Over *video* the transport band carries six pixels at delta 247, at
   x 116..123 / y 716..727 -- the play glyph's two diagonal edges, white on one backend and
@@ -1151,6 +1166,66 @@ failure mode, and a real hide is a ~165ms ramp with four intermediate frames. Re
 the painted blur, which remains the route to the design's look. A uniform resting alpha is
 now *possible* on d3d11 but would diverge from cpu; that is an owner option, not taken. The
 composited-quads rebuild (option 2) is moot for the fade and no longer justified by it.
+**(Taken the next day — item 8 is CLOSED, entry below.)**
+
+**ITEM 8 IS CLOSED (2026-08-19): THE STRIP RESTS TRANSLUCENT AND THE PAINTED BLUR IS
+REMOVED — owner decision, option B, accepting that d3d11 and cpu deliberately differ on the
+top strip.** The fade's `LWA_ALPHA` ramp tops out at **`TopChrome::kRestingAlpha = 215`**
+instead of opaque, so the settled strip shows the real video through itself on the d3d11
+default; cpu ignores the layered alpha (the recorded backing-store reason) and rests opaque.
+Record in `docs/ui-feedback-260818-progress.md` item 8. Five things to carry.
+
+- **THE ALPHA CAME FROM A LEGIBILITY SWEEP, NOT THE DESIGN'S CSS** (owner instruction — the
+  CSS scrim and a uniform window alpha are different mechanisms). 155..255 × blur on/off over
+  the two hardest bands in the asset set (the 4K milk splash and the Marinelaverse end tag's
+  bright saturated detail), menus open, `TRACE_TOPCHROME_ALPHA` pins on the pre-change binary
+  so the sweep ran before any code moved. 230 barely reads translucent, 200 goes marginal
+  where a near-white element crosses a label, **215 keeps every label separable on the worst
+  frame**.
+- **THE SWEEP INVERTED THE BLUR INTUITION, AND THAT MEASUREMENT IS WHY StripBackdrop IS
+  DELETED RATHER THAN COMPOSED.** The painted blur is itself a bright copy of the video, so a
+  resting alpha under it counts the video twice and washes the labels out by a215 — while the
+  solid dark strip content under the same alpha composes into a uniform scrim that is MORE
+  legible over bright footage than the shipping blur-at-opaque was. Translucency alone reads
+  well; translucency plus blur reads worse than either alone. `StripBackdrop.{h,cpp}`,
+  `TopChrome::setBackdrop`, `ViewerWidget::refreshBackdrop`/`setBackdropSink`,
+  `TRACE_STRIP_BACKDROP`, `stripbackdrop.ps1` and `backdropcost.ps1` all left. **Do not
+  rebuild the blur to compose with the resting alpha — that combination is the measured worst
+  case.**
+- **THE WINDOWS TRANSPARENCY HONOUR SURVIVES, RE-PURPOSED**: the `EnableTransparency`
+  tri-state read lives in `TopChrome` now and gates the resting alpha — setting off → the
+  strip rests opaque, exactly the package's own "solid #14161A when transparency effects are
+  disabled" case; `WM_SETTINGCHANGE` re-applies it live. The HUD's `backdrop` field is
+  **`strip`**: `a215` / `a215 (unset)` / `opaque (windows)` / `aN (env)` /
+  `opaque (fade off)` / `n/a` in bar mode. Verified: d3d11 resting band matches
+  `strip*(215/255) + video*(40/255)` at **MAE 0.21** against 22.61 for opaque; cpu reads
+  opaque at MAE 0.1. `topchromefade.ps1 -Mode rest` is the check, and **its cpu leg's PASS is
+  "OPAQUE"** — the accepted divergence is written into the harness as the expectation.
+- **THE EMPTY-STATE STRIP DELIBERATELY RESTS OPAQUE** (gated on `mediaTitle_` being empty):
+  nothing is behind the empty stage for translucency to show, and it preserves the one
+  surface byte-comparable across backends — re-measured after the change at **0 of 972,800 px,
+  max channel delta 0**, the step 11 standard intact as a working instrument. **The accepted
+  divergence is over VIDEO**: the strip band there reads **5434 of 5434 samples differing at
+  max delta 37** across backends while the video band below reads 25 of 61,864 — so a
+  cross-backend diff of any revealed state must exclude the strip band (abdiff's 6% band
+  start clips the strip's bottom rows and reads ~0.7% from that alone; `overlay.ps1`'s header
+  records it). **The strip-band difference is this decision, never a defect to reconcile.**
+- **`overlay.ps1` HAD BEEN STALE SINCE ITEM 15 AND ACCUSED A CORRECT BUILD IN PASSING** — it
+  still mapped the ten-control strip, so on eight controls every left-cluster aim landed one
+  control off: its "go-to-end" tap toggled Loop and its "loop" tap sampled the frame readout,
+  two FAILs on a correct build. Re-pointed to the eight-control offsets; its Go to Start/End
+  leg drives `Home`/`End` (where item 15 moved the behaviour) with the same played-track
+  observable. All legs PASS on both backends, loop accent 0/68/0 — the recorded figure.
+
+**Regression flat** (1920x1200 @ 59.999Hz, the Parsec-class display — no figure comparable to
+a physical-panel record; captures read the composited framebuffer so pixel judgements stand):
+4K H.264 cadence ×2 **99.1/99.1%** `0 of 120` identical buckets · 4444 ×2 **99.8/99.8%**
+`0 of 260` · 4444 `-SnapRelease` **`target 261 shown 261 delta 0`** full-res planar,
+`release 21.9ms`, `hitch 0`, `land 0` · reversals `rev-hit 97.3%`, `seeks 6`, `hitch 1`,
+`delta 0` · **25 of 25 transitions** (first run on `Splash_1.mp4` failed `F -> ffBtn` at
+`moved 0%` — the recorded 121-frame-clip artifact, clean on the header's named clip) ·
+lifecycle **83.5% / 0%** · `emptystate` all modes both backends plus `-Bar` ·
+`topchromefade` rest/anim/menus/loop, the loop leg identical to the item 11 record.
 
 **SPEC PHASE 3 IS DONE (2026-08-10, `4de678e`).** `keyPressEvent`'s flat switch is a
 **`ShortcutTable`** (`src/app/ShortcutTable.*`) and `keyPressEvent` is two lines, because
@@ -3753,28 +3828,26 @@ synchronous path is the comparison. **Depth 1 is worse than off** -- a depth-1 q
 overlap -- and **depth 2 is the minimum that overlaps**; the byte budget clamps 8K to 2 by
 itself. Worth ~+10% on the 8K plate and nothing on a file that already meets budget, where it
 simply moves the decode off the UI thread),
-**`TRACE_STRIP_BACKDROP`** (2026-08-18, roadmap step 10 route 2, **SHIPPED ON** by owner
-decision: the top chrome strip paints a tiny blurred copy of the video it covers as its
-background instead of the solid `#14161A`. **Three-valued** -- `0` forces it off and is the
-ROLLBACK, `1` forces it on and is the OVERRIDE, and **unset asks Windows** by reading
-`HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize\EnableTransparency`,
-because the design package supplies the solid colour as the fallback for exactly that setting
-being off. **Gated on the reveal state since `2a3c634`**, so it samples nothing while the strip
-is hidden, which is most of an ordinary run. Measured flat with the chrome held revealed for
-the whole run -- the WORST case, on purpose -- on the three files that bound the set: 4K 60fps
-at a 16.67ms budget 100.0%, 4444 99.8% with `handler>budget 0 of 260`, 8K inside its own
-variance. It is the ONLY route to the design's blur, because Mica/Acrylic blur the desktop
-behind the WINDOW rather than the video behind the ELEMENT and reach the title bar only.
-**Read the HUD's `backdrop` field rather than the command line** -- the answer is no longer
-decided by the launch),
-**`TRACE_TOPCHROME_FADE=0`** (2026-08-18, owner item 11: back to the top strip popping on and
-off instead of fading by layered-window alpha. **Default is the fade**; this is the rollback
-and the control, and it never applies `WS_EX_LAYERED` at all. The fade is real only on the
-d3d11 default — cpu ignores the alpha for a known backing-store reason and keeps the pop
-either way — and **it depends on `app/trace.manifest`'s Windows 8+ supportedOS declaration**,
-without which the alpha is silently ignored on both. `TRACE_TOPCHROME_ALPHA=N` (0..255) pins
-the alpha so a mid-fade state can be captured as a stable state; measurement knob only.
-Harness: `scripts/measure/topchromefade.ps1`),
+~~`TRACE_STRIP_BACKDROP`~~ (**gone as of 2026-08-19** -- the painted strip blur it gated was
+removed with owner item 8's resting translucency, because the alpha sweep measured
+blur-under-a-resting-alpha as the worst combination for label legibility. The
+`EnableTransparency` tri-state read it introduced SURVIVES, moved into `TopChrome` and gating
+the resting alpha instead: Windows transparency off means the strip rests opaque, exactly the
+package's own solid `#14161A` fallback case, and `WM_SETTINGCHANGE` still applies it live.
+**Read the HUD's `strip` field rather than the command line** -- the answer is still not
+decided by the launch, and on cpu the layered alpha is silently ignored, so a capture must
+carry what the strip believes it is doing),
+**`TRACE_TOPCHROME_FADE=0`** (2026-08-18, owner item 11; widened 2026-08-19 by item 8: back to
+the top strip popping on and off, OPAQUE AT REST, instead of fading by layered-window alpha to
+a resting alpha of 215. **Default is the fade-to-resting-translucency**; this is the full
+rollback for both and it never applies `WS_EX_LAYERED` at all. The fade and the resting
+translucency are real only on the d3d11 default — cpu ignores the alpha for a known
+backing-store reason and keeps the opaque pop either way, an owner-accepted divergence — and
+**both depend on `app/trace.manifest`'s Windows 8+ supportedOS declaration**, without which
+the alpha is silently ignored on both. `TRACE_TOPCHROME_ALPHA=N` (0..255) pins the alpha so a
+mid-fade state can be captured as a stable state; `=255` doubles as the opaque-resting
+override. Harness: `scripts/measure/topchromefade.ps1` — its `rest` mode checks the shipping
+resting blend per renderer, with cpu's PASS being "opaque"),
 **`TRACE_THEME_LOG=1`** (2026-08-18, roadmap step 10: print the font family that ACTUALLY
 resolved and the `Segoe UI Variable` families **Qt** can see, which are not the ones GDI lists.
 It exists because the first build of `src/app/Theme.*` asked for a family Qt does not enumerate,
@@ -3828,16 +3901,14 @@ still **down**, since the release is what lands a full-resolution frame.
 **Never use Trace as its own reference here** — §20.3 spent a session on a
 CPU-vs-GPU difference where both sides were the same 2x2 tap.
 
-**The step 10 strip backdrop has two harnesses now** (2026-08-18), and no other script reaches
-either state. **`stripbackdrop.ps1`** answers "is the blur drawing, is it fresh, and does it go
-away" in four modes -- `live` / `revive` / `pausereveal` / `endreveal` / `close`. **The
-discriminator is horizontal variation within a strip row, not colour**: the design's fallback is a
-purely vertical gradient, so its `hsd` is exactly **0** and a blur of video cannot be, which puts
-a zero on one side of the question rather than a threshold. It reads the **client** rect, never
-`GetWindowRect`, and samples the **right end** of the strip past the menus -- the `bd=0` leg
-reading 0.000 is what proves the band is clean rather than merely quiet.
-**`backdropcost.ps1`** is the on/off cost A/B, and **every run proves its own premise from the
-same capture the figures come from** by reporting that same `strip hsd`.
+**~~The step 10 strip backdrop's two harnesses~~ RETIRED WITH THE BLUR, 2026-08-19** —
+`stripbackdrop.ps1` and `backdropcost.ps1` measured a mechanism that no longer exists and are
+deleted; `topchromefade.ps1 -Mode rest` is the resting-strip check now. Two things they
+established are carried rather than lost: the `hsd`-is-exactly-0 discriminator reasoning (a
+purely vertical gradient has zero horizontal variation, a copy of video cannot — note that on
+d3d11 the RESTING strip now blends real video, so its band `hsd` is nonzero BY DESIGN and
+`hsd 0` at rest would now mean the translucency is broken or cpu), and the two auto-hide facts
+in the next paragraph, which every chrome harness depends on.
 
 **TWO HARNESS FACTS THEY ESTABLISHED, BOTH ABOUT THE AUTO-HIDE.** **A stationary pointer anywhere
 INSIDE the client holds the chrome up indefinitely** -- probed at three positions on a paused

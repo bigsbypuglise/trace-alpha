@@ -387,6 +387,19 @@ so `GetCursorInfo` sees only one of them — verify by the handle, not the flag.
 
 ### 10. Windows 11 visual conversion - **DONE 2026-08-18. Typography `d91f026`; the blur SHIPS ON at `a4c6bb2`, honouring Windows' transparency setting. Mica/Acrylic cannot do it, route 2 can**
 
+> **ROUTE 2's PAINTED BLUR IS REMOVED, 2026-08-19 (owner feedback item 8, option B).** The
+> strip rests at layered alpha 215 now — real translucency on d3d11 via item 11's
+> `LWA_ALPHA` mechanism — and the 155..255 alpha sweep measured that a resting alpha UNDER
+> the painted blur double-counts the video (the blur is itself a bright copy of it) and
+> washes the menu labels out, while the solid fallback under the same alpha reads better
+> than the blur ever did over bright footage. `StripBackdrop.*`, `TRACE_STRIP_BACKDROP`,
+> `stripbackdrop.ps1` and `backdropcost.ps1` are gone; the `EnableTransparency` tri-state
+> read survives inside `TopChrome`, gating the resting alpha instead of the blur, and the
+> HUD's `backdrop` field is now `strip`. Everything below is retained as the record of what
+> was built and measured, not as a description of the shipping strip. Record in
+> `docs/ui-feedback-260818-progress.md`, item 8. **The Mica/Acrylic finding above is
+> untouched and still binding.**
+
 **DWM BACKDROP EFFECTS REACH THE TITLE BAR AND NOTHING ELSE.** Applied to Trace's live main
 window: `DwmExtendFrameIntoClientArea(-1)`, `DWMWA_SYSTEMBACKDROP_TYPE` at all four values, the
 undocumented `SetWindowCompositionAttribute(ACCENT_ENABLE_ACRYLICBLURBEHIND)` and legacy
