@@ -166,6 +166,33 @@ PowerShell `-match 'K'` matches the k in "packet" (case-insensitive — the firs
 called every file all-keyframe), and `Start-Process -PassThru` needs `.Handle` cached or
 `ExitCode` reads empty under 5.1.
 
+**THE BETA.4 THUMB EXCURSIONS ARE FIXED (2026-08-20, same phase): the strip's thumb had TWO
+POSITION SOURCES during a drag, and the fix gives it one — the slider.** Owner report from the
+Threadripper: scrub good, thumb animation bad — frame analysis of the recordings showed
+single-frame excursions of 100–350px that immediately revert, clustered at direction changes,
+spiking toward the decoder's lag side. Record in `docs/thumb-two-writers.md`. The cause:
+`OverlayHooks::positionFraction` (thumb + played track) and `positionText` read
+`playback_.state().currentFrame`, which during an async drag is written alternately by the
+pointer (`queueVideoScrubFrame`) and by **every delivered chain frame** (`onScrubResult`) — and
+a delivered frame on part 2's keyframe-landing path differs from the pointer by up to a GOP by
+design, so any paint between the delivery write and the next pointer write drew the thumb at
+the decoder's position (the gated `paintScrubFrameNow` fires directly after a delivery — the
+worst sampling moment). **The fix: while `isSliderDown()`, both hooks read the slider's value**
+— phase 6's contract ("the strip's track is a picture of `timelineSlider_`") enforced at the
+read; the delivered-frame write into `currentFrame` stays because it is the playhead. Inert
+outside a held slider by construction. The slider itself was never contaminated
+(`syncTransportBar` is `isSliderDown()`-guarded); bar mode never had the bug (Qt draws the
+docked thumb from the slider). **Reproduced before fixing** with the new
+`scripts/measure/thumbtrack.ps1` (press on the overlay track, hard reversals, one strip-band
+capture per pointer step, rightmost-accent tracking — the only accent on the strip is the
+played track/thumb ring while Loop is off; excursion = ≥60px step with immediate ≥half
+reversion, impossible for a real thumb under a monotone leg): pre-fix on the fault model (60Hz
++ `TRACE_PRESENT_SYNC=1`, WeLo) **4 excursions, max 73px, all spiking upward during backward
+legs** — the recordings' signature to the direction; fixed **0 on WeLo and Universe under the
+fault model, 0 at the 240Hz default with the thumb within 19px of the hand** (the coalesce
+window). Regression: `scrubbar.ps1` full-pool PASS on the fixed binary, `delta 0` everywhere —
+the change touches two read hooks and no decode, landing or scrub-chain path.
+
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase

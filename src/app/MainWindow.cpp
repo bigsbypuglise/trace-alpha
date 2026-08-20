@@ -1346,7 +1346,26 @@ void MainWindow::installOverlayHooks() {
         const auto mode = playback_.state().mode;
         return mode == PlaybackMode::PlayingForward || mode == PlaybackMode::PlayingReverse;
     };
+    // THE THUMB BELONGS TO THE HAND WHILE THE HAND IS ON IT. During an async
+    // drag playback_.state().currentFrame has two writers -- the pointer
+    // (queueVideoScrubFrame) and every delivered chain frame (onScrubResult)
+    // -- and a delivered frame legitimately trails the pointer, by up to a
+    // GOP on the sampled/keyframe-landing path. A paint landing between the
+    // delivery write and the next pointer write therefore drew the thumb at
+    // the decoder's position and the following paint snapped it back: the
+    // beta.4 single-frame thumb excursions, 100-350px on the Threadripper
+    // recordings, clustered at direction changes, spiking toward the
+    // decoder's lag side. While the slider is held, its value is the one
+    // source (phase 6's contract: the strip's track is a picture of
+    // timelineSlider_); the PICTURE may trail, the thumb may not.
     hooks.positionFraction = [this]() {
+        if (timelineSlider_ && timelineSlider_->isSliderDown()) {
+            const int maxFrame = timelineSlider_->maximum();
+            if (maxFrame <= 0) return 0.0;
+            return std::clamp(static_cast<double>(timelineSlider_->value())
+                                  / static_cast<double>(maxFrame),
+                              0.0, 1.0);
+        }
         const auto st = playback_.state();
         if (st.maxFrame <= 0) return 0.0;
         return static_cast<double>(st.currentFrame) / static_cast<double>(st.maxFrame);
@@ -1367,6 +1386,14 @@ void MainWindow::installOverlayHooks() {
     // readout asserting a position that does not exist.
     hooks.positionText = [this]() {
         if (!currentMedia_.has_value()) return QString();
+        // Same two-writer flicker as positionFraction: while the slider is
+        // held the readout prints the position being set, not the frame the
+        // decoder happened to deliver between pointer moves.
+        if (timelineSlider_ && timelineSlider_->isSliderDown()) {
+            return readoutTextAt(
+                static_cast<long long>(timelineSlider_->value()),
+                /*labelled=*/false);
+        }
         return readoutTextAt(playback_.state().currentFrame, /*labelled=*/false);
     };
     hooks.durationText = [this]() {
