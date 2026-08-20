@@ -1389,8 +1389,18 @@ was the entire cost. Six things to carry.
   refresh period, the flip queue never drains, and every present blocks (the cost EMA reads
   16.53/16.54ms across two back-to-back launches — it is measuring the 16.67ms refresh
   period, not the machine; absent at 240Hz+sync, so not cold-start and not first-leg).
-  Proposed fix, NOT built: gate period `refresh × 1.05` so submission stays below the drain
-  rate. Leg 2's p2p max ~1.6s reads **1695.5ms on the bare healthy 240Hz default** — five
+  **THE FIX IS BUILT AND VALIDATED THE SAME DAY: the gate period is `refresh × 1.05`**, one
+  line in `scrubPaintGatePeriodMs()`, no decode/threading change. Fault-model leg 1: paint
+  cost 16.53 → 5.5ms, supply 97.5 → 100.3%, p2p end 50 → 0.7ms, release 32.7 → 0.0ms; a
+  margin-independent residual (hitch 3, cost ~5.5) remains under the model and a
+  `× 1.10` diagnostic proved the margin is not its lever — attributed to the model's
+  2-buffer/interval-1 shape having no queue slack where the Threadripper's real class keeps
+  DXGI's frame latency 3; the next Threadripper paste is the confirmation. Healthy 240Hz is
+  figure-for-figure against the same-day pre-fix control (selftest all four legs; real-mouse
+  M&M forward delta 0/hitch 0 and reversals rev-hit 97.3%/seeks 12/walk max 29/hitch 8 to
+  the digit; 4K H.264 reversals hitch 1; 4444 `-SnapRelease` target 261 shown 261 delta 0
+  full-res planar release 22.2ms hitch 0; cadence ×2 100.0/100.0% `drop 0` identical
+  buckets). Leg 2's p2p max ~1.6s reads **1695.5ms on the bare healthy 240Hz default** — five
   configs across two machines within variance; it is the recorded reversal-gesture artefact
   (quote `p2p end`/`behind`/`hitch` from that leg). And hitch 8 on leg 2 is
   `M&M_TopGun_1080`'s OWN recorded class (8–9; healthy control this session read 9) — the

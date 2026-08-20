@@ -435,14 +435,14 @@ period, and the queue refills — an oscillation that equilibrates just over the
 `hitch 2` here and very likely the Threadripper's leg-1 `hitch 8`, and it lands on exactly
 the gesture a fast review scrub is — the first residue is the one that matters.
 
-**Proposed fix (not built this session): the gate period should sit strictly above the
-refresh period — `refresh × 1.05` — so sustained painting submits below the drain rate and
-the queue never fills.** Derived from the machine (the refresh is read at runtime), no new
-constant class. On healthy last-one-wins boxes it is invisible: painting at 95% of the
-refresh rate misses at most one refresh in twenty, and painting faster than refresh already
-shows nothing — the shipped design's own argument. Validation gates: fault-model leg 1 must
-read paint cost ~0.3ms, paint gap ~17.5ms, hitch 0; 240Hz default must stay figure-for-figure
-at the beta.3 baseline; the four-leg selftest and the real-mouse `scrub.ps1` pair both.
+**Proposed fix: the gate period should sit strictly above the refresh period —
+`refresh × 1.05` — so sustained painting submits below the drain rate and the queue never
+fills.** Derived from the machine (the refresh is read at runtime), no new constant class. On
+healthy last-one-wins boxes it is invisible: painting at 95% of the refresh rate misses at
+most one refresh in twenty, and painting faster than refresh already shows nothing — the
+shipped design's own argument. **BUILT AND VALIDATED the same day — see "The gate margin"
+section below**, including the honest half: the fault model keeps a small margin-independent
+residual that is attributed to the model's own swapchain shape, not to the margin.
 
 ## Residue 2 — leg 2's p2p max ~1.6s: NOT A RESIDUE. It reads the same on the fully healthy
 ## dev box and is the metric's recorded artefact class.
@@ -483,3 +483,58 @@ residue 1's mechanism, closed by the same fix.
 **Net: one real residue (leg 1's refresh-locked gate), one metric artefact, one
 misattributed baseline.** The remaining feel gap after residue 1 is fixed is the 60-vs-240Hz
 display physics plus this file's own walk hitches, both of which the dev box shows equally.
+
+---
+
+# The gate margin (2026-08-19, third session): `refresh × 1.05`, built and validated
+
+One line in `MainWindow::scrubPaintGatePeriodMs()`:
+`max(refreshMs, 2 × costEma)` → `max(refreshMs * 1.05, 2 × costEma)`. Nothing else in this
+pass — no decode or threading policy was touched.
+
+## Fault model (60Hz + `TRACE_PRESENT_SYNC=1`), leg 1, `M&M_TopGun_1080.mp4`
+
+| leg 1 (forward sweep) | pre-fix ×2 | fixed ×2 |
+|---|---|---|
+| paint cost EMA | **16.53 / 16.54ms** (= the refresh period) | **5.65 / 5.54ms** |
+| supply | 97.5 / 97.7% | **100.2 / 100.3%** |
+| behind at end | 5 / 7 frames | **0 / 0** |
+| p2p end | 50.0 / 50.1ms | **0.7 / 0.9ms** |
+| release | 32.7 / 34.6ms | **0.0 / 0.0ms** |
+| dec f/s | 152.6 / 152.4 | 157.4 / 157.4 |
+| hitch | 2 / 2 | 3 / 3 |
+| delta | 0 | 0 |
+
+The sustained phase lock is gone — the cost EMA no longer reads the display's period, the
+chain runs at full supply, and the release that used to absorb a blocked present lands
+instantly. Legs 2–4 stay inside their classes (leg 2 hitch 8/9 against the file's own 8–9
+class; leg 3 hitch 0; leg 4 hitch 3 against an observed 1–4 spread).
+
+**The honest half: `hitch 3` and a ~5.5ms cost EMA remain on leg 1 under the model, and the
+margin is NOT the lever for them — measured, not assumed.** A diagnostic build at
+`refresh × 1.10` reads cost 8.63 / hitch 4 — no better — so the residual does not scale with
+the margin. The attribution: the in-binary model presents at sync interval 1 into a
+**2-buffer** flip swapchain, which leaves no queue slack at all, so occasional
+delivery-timing jitter still lands a present that blocks a full refresh. The Threadripper's
+real class is a driver/composition throttle over the same swapchain with DXGI's default
+frame latency of 3 in force, so the expectation — to be confirmed by the next Threadripper
+paste, not asserted — is that the residual is the model's, not the machine's. What the paste
+should show for leg 1 there: `paint cost` well below 4.76ms, `paint gap` avg near 17.5ms
+(against the pre-margin 23.0), and the leg-1 hitches gone or near it.
+
+## Healthy 240Hz, all figure-for-figure against the same-day pre-fix control
+
+Selftest, bare default: leg 1 hitch 0 both, paint gap 6.6/12.3 vs 6.6/12.4ms, painted 224 vs
+226, supply 100.0 both; leg 2 hitch 9 vs 9, rev-hit 97.8 vs 97.9%, seeks 10 both, walk max
+29 both; leg 3 identical; leg 4 hitch 4 vs 4; `delta 0` on every leg of both builds. The
+gate reads 4.38ms (4.17 × 1.05) and the cost term still never binds (0.32–0.36ms).
+
+Real mouse, physical panel, bar mode widened to 1280 (`win 1264x1083`,
+`display 1041x586/1066x600` per run): `M&M` forward `-SnapRelease` **`target 240 shown 240
+delta 0`**, hitch 0, behind 0/5f, release 3.7ms; `M&M` `-Reversals` **rev-hit 97.3%
+(439/451), seeks 12, walk max 29f, hitch 8, delta 0** — the recorded pre-fix control to the
+digit; 4K H.264 `-Reversals` **rev-hit 97.3%, seeks 6, hitch 1, delta 0**, release 46.9ms —
+that file's recorded class; 4444 `-SnapRelease` **`target 261 shown 261 delta 0` full-res
+`YUV444P12 planar`, release 22.2ms, hitch 0, `land 0`** — the recorded landing standard.
+Cadence, 4K H.264 ×2, `TRACE_NO_AUDIO=1`, scratch INI: **100.0 / 100.0% of real time**, 120
+frames, `drop 0`, `rephase 0`, all 119 gaps ~1×, `handler>budget 0 of 119`.

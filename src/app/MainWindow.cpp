@@ -6990,9 +6990,17 @@ double MainWindow::scrubPaintGatePeriodMs() const {
     const double refreshHz = (scr && scr->refreshRate() > 1.0)
         ? scr->refreshRate() : 60.0;
     const double refreshMs = 1000.0 / refreshHz;
+    // The 5% margin keeps sustained painting strictly below the display's
+    // drain rate. At exactly the refresh period, a leg whose deliveries
+    // outpace the refresh submits at precisely the rate the display consumes,
+    // so on the blocked-present class the flip queue never drains and every
+    // present blocks ~a full period (measured: leg 1 paint cost pinned at
+    // 16.53/16.54ms against a 16.67ms refresh, two launches). Painting at 95%
+    // of the refresh rate misses at most one refresh in twenty, which
+    // last-one-wins presentation cannot show.
     // 2x the paint cost = at most half the thread's wall time inside paints,
     // leaving the other half for the chain the paints exist to display.
-    return std::max(refreshMs, 2.0 * scrubPaintCostEmaMs_);
+    return std::max(refreshMs * 1.05, 2.0 * scrubPaintCostEmaMs_);
 }
 
 void MainWindow::paintScrubFrameNow() {
