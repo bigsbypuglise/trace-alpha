@@ -433,7 +433,13 @@ private:
     // `batch` is how many consecutive frames from `frame` the one request
     // covers. Defaulted so the reverse shuttle and every other caller keep the
     // original one-frame behaviour without naming it.
-    void postScrubStep(long long frame, int direction, long long batch = 1);
+    //
+    // `kfLand`/`kfFloor` (2026-08-20): a sampled BACKWARD step on long-GOP may
+    // let the decoder deliver the keyframe its seek lands on instead of
+    // walking to `frame`; the floor is the pointer, so a landing can never
+    // pass the hand. Defaulted off so every existing caller is unchanged.
+    void postScrubStep(long long frame, int direction, long long batch = 1,
+                       bool kfLand = false, long long kfFloor = -1);
     void onScrubResult();
     // Which way the request currently in flight was walking. 0 when nothing is
     // outstanding. Compared against the direction the pointer now implies, so
@@ -1288,6 +1294,13 @@ private:
     long long scrubStride_ = 1;
     long long scrubFramesSkipped_ = 0;
     long long scrubSampledSteps_ = 0;
+    // Sampled steps that landed on a keyframe short of their strided target
+    // (long-GOP backward sampling, 2026-08-20). Counted at the delivery
+    // boundary from requested-vs-delivered, so it reports what actually
+    // happened rather than what was asked for. Zero on intra-only media and
+    // on every unflagged gesture, which is the check that the mechanism has
+    // not crept anywhere it does not belong.
+    long long scrubKfLandings_ = 0;
     // What random access costs on this media: the mean number of frames a
     // request has had to walk to reach its target, accumulated over the media
     // rather than decayed. An EMA was tried and is wrong here for the same
@@ -1314,7 +1327,12 @@ private:
     // has already opened and pay for a new one. One frame is deliberately
     // strict: on an all-intra file the true mean is a small fraction.
     static constexpr double kRandomAccessWalkLimit = 1.0;
-    long long computeScrubStride(long long gap) const;
+    // Direction matters since long-GOP backward sampling (2026-08-20): on
+    // long-GOP media a stride above 1 is only ever returned for backward
+    // steps, where the keyframe landing makes it affordable. Forward long-GOP
+    // stays at 1 -- a forward strided Scrub request would seek, and walking
+    // back up from the landed keyframe costs more than the walk it saves.
+    long long computeScrubStride(long long gap, int direction) const;
     // How many consecutive frames one asynchronous request should cover. Takes
     // the stride as an argument rather than recomputing it, because the two
     // must be decided together: a stride above 1 forces this to 1.

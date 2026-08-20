@@ -356,7 +356,18 @@ public:
     void close();
     bool isOpen() const;
 
-    bool decodeFrameAt(long long frameIndex, VideoFrame& outFrame, QString& error, RequestMode mode = RequestMode::Playback);
+    // `keyframeLand` (Scrub mode only): this is a SAMPLED drag-preview step on
+    // long-GOP media, and if satisfying it takes a seek, the keyframe the seek
+    // lands on may be DELIVERED instead of walked past -- provided it is not
+    // before `keyframeFloor` (the pointer), so a landing can never overshoot
+    // the hand. The walk after the seek was the whole of section 15's measured
+    // catastrophe for long-GOP striding; this removes it by construction, the
+    // same trade the reverse shuttle's keyframe snap makes, but with the seek
+    // itself as the ground truth instead of a learned grid. The delivered
+    // frame carries its own true index -- nothing is mislabelled -- and exact
+    // requests (Step, Playback, unflagged Scrub) are untouched.
+    bool decodeFrameAt(long long frameIndex, VideoFrame& outFrame, QString& error, RequestMode mode = RequestMode::Playback,
+                       bool keyframeLand = false, long long keyframeFloor = -1);
     void setPlaybackDirection(int direction);
     void clearForwardQueue();
     void setHandoffTiming(double handoffMs);

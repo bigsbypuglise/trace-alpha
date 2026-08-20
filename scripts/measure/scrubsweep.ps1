@@ -27,11 +27,19 @@
 param(
     [Parameter(Mandatory)][string]$Pass,
     [switch]$PresentSync,
-    [string]$Exe = (Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'build\app\Release\Trace.exe'),
+    # TRACE_SCRUB_GOP_SAMPLE=0: long-GOP never samples -- the pre-2026-08-20
+    # behaviour and the in-binary control for the keyframe-landing change.
+    [switch]$DisableGopSample,
+    [string]$Exe = '',
     [string]$Root = 'C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets',
     [string]$OutDir = (Join-Path $env:TEMP 'trace-scrubsweep')
 )
 $ErrorActionPreference = 'Stop'
+# $PSScriptRoot is empty when a param default is evaluated under -File, so the
+# repo-relative default is resolved here in the body instead.
+if (-not $Exe) {
+    $Exe = Join-Path (Split-Path (Split-Path $PSScriptRoot -Parent) -Parent) 'build\app\Release\Trace.exe'
+}
 $repDir = Join-Path $OutDir "reports\$Pass"
 New-Item -ItemType Directory -Force $repDir | Out-Null
 $csv = Join-Path $OutDir "results-$Pass.csv"
@@ -45,6 +53,7 @@ Get-ChildItem env: | Where-Object { $_.Name -like 'TRACE_*' } | ForEach-Object {
 }
 $env:TRACE_SETTINGS_FILE = Join-Path $OutDir 'scratch-settings.ini'
 if ($PresentSync) { $env:TRACE_PRESENT_SYNC = '1' }
+if ($DisableGopSample) { $env:TRACE_SCRUB_GOP_SAMPLE = '0' }
 
 $files = @(
     '3_1080p_H264_MP4\Universe_rc07_I_9x16_Online.mp4'
@@ -131,6 +140,7 @@ foreach ($rel in $files) {
             batch_max   = Get-Num $blk 'achieved-avg [\d.]+ last \d+ max (\d+)'
             budget_cut  = Get-Num $blk 'budget-cut (\d+) of'
             stride      = Get-Num $blk 'stride (\d+)'
+            kf_land     = Get-Num $blk 'kf-land (\d+)'
             seeks       = Get-Num $blk 'seeks (\d+)'
             ra_walk     = Get-Num $blk 'ra-walk ([\d.]+)f'
             walk_max    = Get-Num $blk 'walk max (\d+)f'

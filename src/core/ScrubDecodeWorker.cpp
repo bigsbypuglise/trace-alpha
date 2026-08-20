@@ -232,8 +232,15 @@ void ScrubDecodeWorker::run() {
             // steady number of outstanding references across requests, exactly
             // as the UI thread's videoFrameBuffer_ does. Copying it into the
             // result is a refcount bump.
+            // The keyframe landing applies to the batch's FIRST frame only. A
+            // flagged request always has batch 1 (sampling and batching are
+            // mutually exclusive by computeScrubBatch), so `i == 0` is belt
+            // rather than policy -- but a later caller that got that wrong
+            // would otherwise deliver keyframes for frames it promised were
+            // consecutive.
             const bool ok = decoder_->decodeFrameAt(
-                result.requestedFrame, workerFrame_, error, request.mode);
+                result.requestedFrame, workerFrame_, error, request.mode,
+                request.keyframeLand && i == 0, request.keyframeFloor);
             result.decodeMs =
                 static_cast<double>(decodeTimer.nsecsElapsed()) / 1'000'000.0;
 

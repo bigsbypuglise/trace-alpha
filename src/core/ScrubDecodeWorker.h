@@ -68,6 +68,17 @@ struct ScrubRequest {
     // this batches the ASKING, never the showing. It is not sampling and it
     // does not skip.
     long long batch = 1;
+
+    // A SAMPLED backward drag step on long-GOP media (section 15's stride with
+    // the intra-only gate widened, 2026-08-20): if satisfying this request
+    // takes a seek, the decoder may deliver the keyframe the seek lands on
+    // instead of walking up to `frame` -- but never a frame before
+    // `keyframeFloor`, which is the pointer, so a landing cannot overshoot the
+    // hand. False is the original behaviour and is what every caller except
+    // the drag chain's sampled backward steps uses, so the shuttle, the
+    // landing and the batch path are untouched by these fields existing.
+    bool keyframeLand = false;
+    long long keyframeFloor = -1;
     // Wall-clock ceiling on one batch, checked after each frame. This is what
     // makes the batch safe on heavy media without a codec- or size-conditional
     // branch: at 23ms a frame, ProRes 4444 exceeds any sane budget on its first

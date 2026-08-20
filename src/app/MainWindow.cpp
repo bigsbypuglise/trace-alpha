@@ -376,6 +376,18 @@ bool scrubSamplingEnabled() {
     return on;
 }
 
+// The long-GOP half of sampling (2026-08-20): backward drag-preview steps may
+// stride with a keyframe landing when demand exceeds supply. TRACE_SCRUB_GOP_SAMPLE=0
+// restores the pre-change behaviour -- long-GOP always walks every frame --
+// and is the in-binary control for the part-2 sweep. Separate from
+// TRACE_SCRUB_SAMPLE because the two mechanisms have different risk profiles:
+// intra striding was validated in 2026-08 and this gate must be revertable
+// without touching it.
+bool scrubGopSampleEnabled() {
+    static const bool on = [] { return qgetenv("TRACE_SCRUB_GOP_SAMPLE") != "0"; }();
+    return on;
+}
+
 // Ceiling on how far one preview step may advance. Bounded so a momentary bad
 // estimate cannot turn a drag into a slideshow of distant frames.
 int scrubMaxStride() {
@@ -6804,14 +6816,15 @@ void MainWindow::resetScrubLagModel() {
     scrubStride_ = 1;
     scrubFramesSkipped_ = 0;
     scrubSampledSteps_ = 0;
+    scrubKfLandings_ = 0;
     scrubGestureClock_.start();
 }
 
-long long MainWindow::computeScrubStride(long long gap) const {
+long long MainWindow::computeScrubStride(long long gap, int direction) const {
     if (gap <= 1) return 1;
     if (!scrubSamplingEnabled()) return 1;
 
-    // Sampling is only free where random access is free.
+    // ARBITRARY sampling is only free where random access is free.
     //
     // On an all-intra codec a seek lands on the target and a strided step costs
     // exactly what an adjacent one costs, so showing every Nth frame is a
@@ -6844,7 +6857,30 @@ long long MainWindow::computeScrubStride(long long gap) const {
     // -- and the decoder has known it since open, where it already picks the
     // threading mode from it. `ra-walk` is kept in the HUD as the empirical
     // check on this answer rather than as the answer.
-    if (!videoDecoder_.metadata().intraOnly) return 1;
+    //
+    // LONG-GOP MAY STRIDE BACKWARD SINCE 2026-08-20, AND ONLY BACKWARD, AND
+    // ONLY BECAUSE THE SAMPLE POINTS STOP BEING ARBITRARY. The part-1 sweep
+    // (docs/scrub-population-sweep.md) measured the class this closes: a
+    // reversal gesture demanding more frames per second than the decoder
+    // supplies ended 216 frames / 1.7s behind the pointer on the worst file,
+    // with every fixed subsystem healthy -- the deficit WAS the never-skip
+    // rule, on exactly the files where this gate kept sampling off. The same
+    // deficit on ProRes ends at the pointer because sampling strides it.
+    //
+    // What makes it safe now where the measurement above said catastrophe: a
+    // strided backward step carries the keyframe-landing flag, so on a cache
+    // miss the decoder delivers the keyframe its seek lands on instead of
+    // walking up to a mid-GOP target. The walk WAS the catastrophe -- the seek
+    // itself is 1-3ms on H.264 -- and the landing removes it by construction,
+    // the reverse shuttle's snap trade with the seek as the ground truth
+    // instead of a learned grid. Forward stays at 1: a forward strided Scrub
+    // request seeks, and walking back up from the landed keyframe costs more
+    // than the stride saves. The demand/supply controller below is unchanged
+    // and shared, so intra behaviour is identical to the digit.
+    if (!videoDecoder_.metadata().intraOnly) {
+        if (direction >= 0) return 1;
+        if (!scrubGopSampleEnabled()) return 1;
+    }
     // No estimate yet -- the first frames of a gesture walk consecutively,
     // which is also the right answer for a drag that turns out to be slow.
     // Three presented frames is enough for the rate to mean anything and short
@@ -7128,7 +7164,8 @@ void MainWindow::queueVideoScrubFrame(long long frameIndex) {
     scrubTimer_.start(kScrubCoalesceMs);
 }
 
-void MainWindow::postScrubStep(long long frame, int direction, long long batch) {
+void MainWindow::postScrubStep(long long frame, int direction, long long batch,
+                               bool kfLand, long long kfFloor) {
     if (!isVideoScrubActive() || frame < 0) return;
     // One request in flight at a time. This is not a queue depth limit for its
     // own sake: the shuttle's next target is derived from the frame that was
@@ -7164,6 +7201,8 @@ void MainWindow::postScrubStep(long long frame, int direction, long long batch) 
     // exhausts it and the batch collapses to 1 with no media-conditional branch.
     request.batch = std::max<long long>(1, batch);
     request.batchBudgetMs = scrubWalkBudgetMs();
+    request.keyframeLand = kfLand;
+    request.keyframeFloor = kfFloor;
     scrubInFlightDir_ = direction;
     // What this step actually skipped over, recorded where the decision is
     // made rather than recomputed from the result -- the two can differ if the
@@ -7303,6 +7342,19 @@ void MainWindow::onScrubResult() {
         lastDeliveredFrame_ = result.frame.frameIndex;
         playback_.setCurrentFrame(result.frame.frameIndex);
 
+        // A delivery short of its strided target is a keyframe landing (or,
+        // rarely, an overshoot onto the first frame at/after a target the
+        // stream does not carry). Counted here, at the delivery boundary,
+        // because this is what actually happened rather than what was asked
+        // for -- and the frames it skipped join the sampling ledger the same
+        // way a planned stride's do.
+        if (result.requestedFrame >= 0
+            && result.frame.frameIndex != result.requestedFrame) {
+            ++scrubKfLandings_;
+            scrubFramesSkipped_ +=
+                std::llabs(result.requestedFrame - result.frame.frameIndex);
+        }
+
         activeScrubFrame_ = result.frame.frameIndex;
         notePresentedScrubFrame(activeScrubFrame_);
         // Shuttled, so possibly a preview-resolution frame: the release must
@@ -7401,9 +7453,29 @@ void MainWindow::onScrubResult() {
         } else {
             const int dir = pendingScrubFrame_ > activeScrubFrame_ ? 1 : -1;
             const long long gap = std::llabs(pendingScrubFrame_ - activeScrubFrame_);
-            const long long stride = computeScrubStride(gap);
-            postScrubStep(activeScrubFrame_ + dir * stride, dir,
-                          computeScrubBatch(gap, stride));
+            const long long stride = computeScrubStride(gap, dir);
+            // Sampled backward steps on long-GOP carry the keyframe landing;
+            // the floor is the pointer as it stands NOW, the freshest bound
+            // on how far a landing may go. The step is EASED, not the bare
+            // stride: one hop costs one seek whether it spans one GOP or ten,
+            // so covering a constant fraction of the remaining distance is
+            // what makes convergence exponential -- the first smoke run
+            // hopped `active - stride` (stride ~3, diluted by the gesture's
+            // forward walk rate, the gate comment's "mean per request"
+            // failure in a new costume) and a 400-frame deficit converged at
+            // one GOP per hop, ending 157 frames behind where the unsampled
+            // control ended 216. Same kScrubEase as the synchronous walk and
+            // the batch: hops shrink as the picture arrives, and the floor
+            // keeps the landing short of the hand.
+            const bool kfLand =
+                stride > 1 && dir < 0 && !videoDecoder_.metadata().intraOnly;
+            const long long step = kfLand
+                ? std::max(stride, static_cast<long long>(
+                      std::ceil(static_cast<double>(gap) * kScrubEase)))
+                : stride;
+            postScrubStep(activeScrubFrame_ + dir * step, dir,
+                          computeScrubBatch(gap, stride), kfLand,
+                          kfLand ? pendingScrubFrame_ : -1);
         }
     }
 
@@ -7559,8 +7631,20 @@ void MainWindow::flushVideoScrub(bool forceExact) {
             scrubWorker_.supersede(supersedeInFlightRequests());
         }
         const long long gap = std::llabs(targetFrame - walkFrom);
-        const long long stride = computeScrubStride(gap);
-        postScrubStep(walkFrom + dir * stride, dir, computeScrubBatch(gap, stride));
+        const long long stride = computeScrubStride(gap, dir);
+        // Same keyframe-landing rule as the chain site: sampled backward steps
+        // on long-GOP may land on the keyframe the seek reaches, floored at
+        // the pointer so a landing never passes the hand, with the step eased
+        // over the remaining gap (see the chain site for why the bare stride
+        // converged too slowly to matter).
+        const bool kfLand =
+            stride > 1 && dir < 0 && !videoDecoder_.metadata().intraOnly;
+        const long long step = kfLand
+            ? std::max(stride, static_cast<long long>(
+                  std::ceil(static_cast<double>(gap) * kScrubEase)))
+            : stride;
+        postScrubStep(walkFrom + dir * step, dir, computeScrubBatch(gap, stride),
+                      kfLand, kfLand ? targetFrame : -1);
         refreshHud("Scrub");
         return;
     }
@@ -8601,9 +8685,17 @@ void MainWindow::refreshHud(const QString& action) {
             // high-water mark: on heavy media the budget cuts a batch of 4 to
             // 1, and `cap 4 last 1` is how that is told apart from a rule that
             // never ran.
-            const QString l7f = QString("sample %1 | stride %2 | batch cap %8 last %9 max %10 | skipped %3 over %4 steps | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
+            // Long-GOP reads `bwd` rather than the old flat `GATED` since the
+            // keyframe landing (2026-08-20): backward steps may sample there,
+            // forward never does. `kf-land` is the count of deliveries that
+            // actually landed on a keyframe short of their strided target --
+            // 0 on intra media and on every unflagged gesture by construction.
+            const QString l7f = QString("sample %1 | stride %2 | batch cap %8 last %9 max %10 | skipped %3 over %4 steps | kf-land %11 | ctrl ptr %5 f/s cap %6 f/s | ra-walk %7f/seek")
                 .arg(!scrubSamplingEnabled() ? "OFF"
-                     : !videoDecoder_.metadata().intraOnly ? "GATED"
+                     : !videoDecoder_.metadata().intraOnly
+                         ? (!scrubGopSampleEnabled() ? "GATED"
+                            : (scrubStride_ > 1 || scrubKfLandings_ > 0) ? "ON-bwd"
+                                                                         : "idle-bwd")
                      : scrubStride_ > 1 ? "ON" : "idle")
                 .arg(scrubStride_)
                 .arg(scrubFramesSkipped_)
@@ -8613,7 +8705,8 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(mediaWalkPerSeek(), 'f', 2))
                 .arg(scrubBatchCap())
                 .arg(scrubWorker_.lastBatchDecoded())
-                .arg(scrubWorker_.maxBatchDecoded());
+                .arg(scrubWorker_.maxBatchDecoded())
+                .arg(scrubKfLandings_);
 
             const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3%% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
                 .arg(QString::number(scrubPointerFps_, 'f', 1))
@@ -8917,7 +9010,8 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
         << "ms | ease " << selfTestFormat2(kScrubEase) << " | async scrub "
         << (asyncScrubEnabled() ? "on" : "OFF") << " | async landing "
         << (asyncLandingEnabled() ? "on" : "OFF") << " | sampling "
-        << (scrubSamplingEnabled() ? "on" : "OFF") << " | paint gate "
+        << (scrubSamplingEnabled() ? "on" : "OFF") << " | gop-sample "
+        << (scrubGopSampleEnabled() ? "on" : "OFF") << " | paint gate "
         << (scrubPaintGateEnabled() ? "on" : "OFF")
         // The HUD state changes what the run measures, twice over: a visible
         // HUD rebuilds its ~25-line string on every present (measured here as
@@ -8928,7 +9022,8 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
         // taken with the HUD forced on.
         << " | hud " << (viewState_.showHud ? "SHOWN" : "hidden") << "\n";
     rep << "rerun knobs: TRACE_ASYNC_SCRUB=0 (sync walk) | TRACE_SCRUB_BATCH=0 "
-           "(no batching) | TRACE_SCRUB_PAINT_GATE=0 (paint per frame) | "
+           "(no batching) | TRACE_SCRUB_GOP_SAMPLE=0 (long-GOP never samples) | "
+           "TRACE_SCRUB_PAINT_GATE=0 (paint per frame) | "
            "TRACE_PRESENT_SYNC=1 (model a vsync-throttled present) | "
            "TRACE_DECODE_THREADS=N | TRACE_LONGGOP_SLICE_THREADS=1 "
            "| TRACE_SCRUB_FILL_MS=N (decoder default 60)\n";
@@ -9113,7 +9208,8 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
             << selfTestFormat2(static_cast<double>(scrubRt_.frames) / rtN) << " last "
             << scrubWorker_.lastBatchDecoded() << " max " << scrubWorker_.maxBatchDecoded()
             << " | budget-cut " << scrubWorker_.batchBudgetCuts() << " of "
-            << scrubWorker_.requestsPosted() << " | stride " << scrubStride_ << "\n";
+            << scrubWorker_.requestsPosted() << " | stride " << scrubStride_
+            << " | kf-land " << scrubKfLandings_ << "\n";
         rep << "seeks " << legSeeks << " | ra-walk " << selfTestFormat2(mediaWalkPerSeek())
             << "f/seek | walk max " << scrubWalkMaxFrames_ << "f | rev-hit "
             << selfTestFormat1(revHit) << "% (" << perf.reverseCacheHits << "/"

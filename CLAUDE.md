@@ -98,8 +98,26 @@ and §15's sampling. Fidelity is still owed to the frame rewind *stops* on.
 OUTRANKS THE UI ROADMAP** (owner; charter `docs/scrub-reliability-phase.md` — read it before
 planning any scrub or playback work; it lists what is already built and must not be
 reimplemented). **Part 1, the population characterisation, is DONE (2026-08-20)** — the full
-record is `docs/scrub-population-sweep.md` and part 2 (the class-level fix, later session,
-after the owner reads the table) must start from it. The sweep: `--scrub-selftest` over 22
+record is `docs/scrub-population-sweep.md`. **Part 2, the class-level fix, is BUILT AND
+MEASURED (2026-08-20, same day): long-GOP backward sampling with keyframe landings** — record
+in `docs/scrub-gop-sampling.md`, control `TRACE_SCRUB_GOP_SAMPLE=0`, **owner feel test at the
+machine still pending**. The shape: §15's stride controller now returns strides for long-GOP
+**backward only**; a sampled backward step carries a flag letting the decoder deliver the
+keyframe its seek lands on (floored at the pointer, so a landing never passes the hand)
+instead of walking to a mid-GOP target — the walk WAS §15's measured catastrophe, and the
+seek landing is the ground truth, so there is NO learned grid and irregular GOPs are exact.
+The step is EASED (`max(stride, ceil(gap × kScrubEase))`) because the first cut hopped one
+GOP per seek against a 400-frame deficit and barely moved the end state — one hop costs one
+seek whatever it spans. Measured, full pool × (fix / same-binary control / 60Hz): WeLo leg 2
+`behind end 216 → 0`, `p2p end 1668 → 85ms`; Universe `241 → 57ms`; Jeep (the 0.82 boundary
+file) `210 → 152ms`; **all 264 legs `delta 0`, `kf-land 0` on every intra row and every
+unflagged gesture, the other nineteen files flat within noise**. Regression flat: cadence
+99.1-99.2%/99.8% recorded classes, 4444 `-SnapRelease` `delta 0`/`hitch 0`/`kf-land 0`, 4K
+H.264 reversals `delta 0`/`hitch 1` with the strides riding the cache (`kf-land 0` there —
+the mechanism degrades to the cache, not past it), 25/25 transitions, lifecycle 97.7%/0%.
+**Forward halves still trail by design** (forward never samples; behind max mid-gesture
+unchanged) — forward keyframe hopping is the recorded follow-up only if the owner's hand
+finds it. The sweep: `--scrub-selftest` over 22
 files × 4 legs × 3 display passes (240Hz, 60Hz, 60Hz+`TRACE_PRESENT_SYNC=1`) on `ebc1fa7`,
 run plain, with GOP structure from ffprobe beside it. **All 264 legs `delta 0` — the
 exactness contract holds across the whole population; the fault is the drag preview
@@ -3959,6 +3977,13 @@ behaviour it replaces and the in-binary negative control. It is *not* a sampling
 frame is still decoded, delivered and presented individually and in order, and a §15 stride
 above 1 forces it to 1. On heavy media the 8ms walk budget collapses it to 1 by itself, so
 ProRes 4444 reads `batch cap 4 last 1 max 1` and is unchanged),
+**`TRACE_SCRUB_GOP_SAMPLE=0`** (2026-08-20: long-GOP never samples — the pre-part-2
+behaviour and the in-binary control for the keyframe-landing change; see
+`docs/scrub-gop-sampling.md`. Default on: backward drag-preview steps on long-GOP media may
+stride when demand exceeds supply, with the decoder delivering the keyframe its seek lands
+on, floored at the pointer. Deliberately separate from `TRACE_SCRUB_SAMPLE`, which governs
+the validated intra path and must stay revertable independently. The HUD's `kf-land` count
+is the engagement check — 0 on intra media and unflagged gestures by construction),
 **`TRACE_SCRUB_PAINT_GATE=0`** (2026-08-19: back to one synchronous paint per delivered
 drag frame — the pre-fix behaviour every recorded scrub figure was taken under, and the
 rollback for the scrub paint gate. Default is the gate: at most one paint per

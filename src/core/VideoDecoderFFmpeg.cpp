@@ -1531,8 +1531,14 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
 #endif
 }
 
-bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFrame, QString& error, RequestMode mode) {
+bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFrame, QString& error, RequestMode mode,
+                                       bool keyframeLand, long long keyframeFloor) {
 #ifdef TRACE_WITH_FFMPEG
+    // The keyframe landing is a drag-preview behaviour and nothing else may
+    // inherit it: Step is the exact-landing contract (delta 0), Playback is the
+    // shuttle and the tick. Narrowed here rather than trusted to callers.
+    const bool wantKeyframeLand =
+        keyframeLand && mode == RequestMode::Scrub && keyframeFloor >= 0;
     // Per request, so a caller reading it after a false return is reading this
     // request's answer and not the previous one's.
     lastRequestAbandoned_ = false;
@@ -2159,6 +2165,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
                                         ? impl_->frame->best_effort_timestamp
                                         : impl_->frame->pts;
                 long long decodedFrame;
+                const bool firstAfterSeek = impl_->seekResolvePending;
                 if (impl_->seekResolvePending) {
                     // First frame after a frame-exact seek: trust the stream
                     // timestamp so the keyframe keeps its true index and the
@@ -2179,6 +2186,46 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
                 impl_->prevDecodedPts = impl_->lastDecodedPts;
                 impl_->lastDecodedPts = pts;
                 impl_->lastDecodedFrame = decodedFrame;
+
+                // The keyframe landing: a sampled backward drag step delivers
+                // the keyframe the seek landed on instead of walking up to the
+                // strided target. The walk after the seek is exactly what
+                // section 15 measured as catastrophic for long-GOP striding
+                // (hits 85% -> 13%, and it runs away); at this speed the walked
+                // frames buy nothing, because the next sample leaves this GOP
+                // anyway. Same trade as the reverse shuttle's snap, with the
+                // seek itself as the ground truth -- no learned grid, so an
+                // irregular GOP structure (WeLo's 3..23) is handled exactly.
+                //
+                // The floor is the pointer: a landing below it would put the
+                // picture PAST the hand, and the chain would then ping-pong
+                // across it. When the keyframe is below the floor the request
+                // falls through to the exact walk, whose fills cover the
+                // final approach -- coarse hops far out, exact frames near the
+                // pointer, and the release untouched either way.
+                //
+                // First frame after the seek only. Anything later is already
+                // mid-walk, and delivering from there would be paying the walk
+                // AND skipping -- both costs, neither benefit.
+                if (firstAfterSeek && wantKeyframeLand
+                    && decodedFrame < target && decodedFrame >= keyframeFloor) {
+                    if (!convertCurrentFrame(outFrame)) {
+                        error = "Frame conversion failed";
+                        ++perfStats_.staleSuccessPrevented;
+                        return WalkResult::Exhausted;
+                    }
+                    outFrame.frameIndex = decodedFrame;
+                    currentFrame_ = decodedFrame;
+                    // The honesty telemetry: the frame is labelled as what it
+                    // IS, and the request/delivery split is published rather
+                    // than papered over. delta 0 remains the release's
+                    // property, never the preview's.
+                    perfStats_.previewApproximate = true;
+                    perfStats_.previewTargetFrame = target;
+                    perfStats_.previewDisplayedFrame = decodedFrame;
+                    pushReverseCache(outFrame);
+                    return WalkResult::Produced;
+                }
 
                 if (decodedFrame < target) {
                     ++walkFrames;
@@ -2520,6 +2567,8 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     Q_UNUSED(frameIndex);
     Q_UNUSED(outFrame);
     Q_UNUSED(mode);
+    Q_UNUSED(keyframeLand);
+    Q_UNUSED(keyframeFloor);
     error = "FFmpeg support not enabled at build time.";
     return false;
 #endif
