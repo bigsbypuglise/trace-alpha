@@ -137,8 +137,31 @@ five-constants hypothesis is thereby largely refuted; its contrast clause (adapt
 mechanisms produce no reports) is confirmed and sharpened. **Caution recorded for part 2:
 this does not license "open the gate" by itself — §15 measured naive long-GOP striding as
 catastrophic (hits 85→13%), and reconciling that with this class boundary is part 2's actual
-problem.** Harnesses: `scripts/measure/scrubsweep.ps1` + `gopprobe.ps1` (part 3 will turn
-them into the standing regression with a pass bar). Two new traps in their headers:
+problem.** Harnesses: `scripts/measure/scrubsweep.ps1` + `gopprobe.ps1`. **Part 3, the
+standing regression, is DONE (2026-08-20, same session as part 2): `scripts/measure/
+scrubbar.ps1` — one command, one PASS/FAIL verdict over the whole pool, exit 0/1; record in
+`docs/scrub-pass-bar.md`.** The per-file bar is `scripts/measure/scrub-pass-bar.csv`,
+**derived** (`-Generate`) from three fresh fix-config sweeps — two at 240Hz, one at 60Hz
+(per-cell max, so the bar holds on both displays; TheraTears leg 1 diverges ~19 vs ~79ms
+across them) — never hand-maintained, with a two-way population check so a file added to the
+pool turns the verdict red until the bar is regenerated. Barred: row present, exit 0, leg
+PASS, `delta` exactly 0 (hard-coded — the contract, not a tuned value), `behind_end`/
+`p2p_end` at measured + max(floor, 15%, **2 decode intervals at the cell's worst observed
+decode rate**). Deliberately NOT barred: `p2p_max`/`behind_max` (recorded gesture artefact),
+`hitch`, `supply` — a bar on a noisy metric produces flaky failures, **and the first
+two-sweep bar flaked its own pass-proof exactly that way** (Universe's converged end spans
+44–130ms across five fix runs where two samples read 55–57; the 8K plate's end state varies
+by ±1 decode interval ~60ms against a flat 30ms floor) — the third sample and the
+decode-scaled floor are the fix. The 15% is set by the boundary file: Jeep leg 2 reads
+144–160ms fixed vs 199.6–210 control (39ms between the distributions at their closest), bar
+191 splitting the gap — **Jeep leg 2 is the recorded flake-risk row; a Jeep-only failure is
+boundary variance to re-run, WeLo or Universe failing is decisive.** **Proven able to fail
+before believed**: `-DisableGopSample` fails exactly WeLo (`behind_end 216`, `p2p 1681.5`),
+Universe (245.2 vs 161) and Jeep (199.6 vs 191) on leg 2 with the other nineteen passing,
+plus three checker-level negative controls (doctored delta, missing file, added file). Not a
+CI step — real media, real desktop. After any intentional scrub change: regenerate from
+fresh sweeps at both displays (give the generator every clean sweep you have) and **re-run
+the fail-proof before committing the new bar**. Two traps in the sweep harness headers:
 PowerShell `-match 'K'` matches the k in "packet" (case-insensitive — the first GOP probe
 called every file all-keyframe), and `Start-Process -PassThru` needs `.Handle` cached or
 `ExitCode` reads empty under 5.1.

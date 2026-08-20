@@ -137,5 +137,6 @@ Seedance HEVC reference row is unchanged.
   frame seconds behind. `TRACE_SCRUB_GOP_SAMPLE=0` is the A/B.
 - **Forward halves trail by design** (behind max mid-gesture unchanged); forward keyframe
   hopping is the recorded follow-up if the owner's hand finds it.
-- Part 3 (the standing regression with a per-file pass bar) is unstarted and now has two
-  sweeps' worth of reference data to set bars from.
+- ~~Part 3 (the standing regression with a per-file pass bar) is unstarted~~ **DONE
+  2026-08-20, the following session — `scripts/measure/scrubbar.ps1` + the derived
+  `scrub-pass-bar.csv`; record in `docs/scrub-pass-bar.md`.**
