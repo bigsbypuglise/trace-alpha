@@ -94,7 +94,38 @@ else" was already an instance of. **The owner extended this to the reverse shutt
 accelerated reverse is now the third instance of the same rule, alongside the drag preview
 and §15's sampling. Fidelity is still owed to the frame rewind *stops* on.
 
-**THE INTERFACE PASS IS THE OPEN PHASE as of 2026-08-10** — the owner chose it and lifted
+**THE SCRUB-AND-PLAYBACK RELIABILITY PHASE IS THE OPEN PHASE as of 2026-08-19, AND IT
+OUTRANKS THE UI ROADMAP** (owner; charter `docs/scrub-reliability-phase.md` — read it before
+planning any scrub or playback work; it lists what is already built and must not be
+reimplemented). **Part 1, the population characterisation, is DONE (2026-08-20)** — the full
+record is `docs/scrub-population-sweep.md` and part 2 (the class-level fix, later session,
+after the owner reads the table) must start from it. The sweep: `--scrub-selftest` over 22
+files × 4 legs × 3 display passes (240Hz, 60Hz, 60Hz+`TRACE_PRESENT_SYNC=1`) on `ebc1fa7`,
+run plain, with GOP structure from ffprobe beside it. **All 264 legs `delta 0` — the
+exactness contract holds across the whole population; the fault is the drag preview
+trailing, never the landing.** The reading, compressed: **60Hz ≡ 240Hz on every file** (the
+paint gate made the display a non-variable, so the panel was NOT hiding a systemic weakness);
+the sync pass is contained by the gate and its per-file differences are noise (this box's
+model blocks ~250ms/paint, far harsher than the Threadripper class it models — do not rank
+files on that pass); **the bad set is display-independent and is exactly the long-GOP H.264
+files whose reversal-gesture pointer demand exceeds decode supply** — WeLo 1x1 720f at
+dec/ptr 0.53 ends 216 frames / 1.7s behind; Universe 9x16 412f (the reported file) at 0.77
+peaks 176 behind; Jeep 4K60 at 0.82 mild; every H.264 at ≥0.96 is clean, severity monotone
+in the ratio. **The separator is the §15 sampling gate, not any of the five fixed
+constants**: the 1x1/4x5 ProRes rows face a WORSE ratio (0.29) and end at the pointer
+because sampling strides them, while the constants measure healthy on the failing files
+(overhead 0.7% of round trip, batch 3.2 of cap 4, budget cuts minor). The standing
+five-constants hypothesis is thereby largely refuted; its contrast clause (adaptive
+mechanisms produce no reports) is confirmed and sharpened. **Caution recorded for part 2:
+this does not license "open the gate" by itself — §15 measured naive long-GOP striding as
+catastrophic (hits 85→13%), and reconciling that with this class boundary is part 2's actual
+problem.** Harnesses: `scripts/measure/scrubsweep.ps1` + `gopprobe.ps1` (part 3 will turn
+them into the standing regression with a pass bar). Two new traps in their headers:
+PowerShell `-match 'K'` matches the k in "packet" (case-insensitive — the first GOP probe
+called every file all-keyframe), and `Start-Process -PassThru` needs `.Handle` cached or
+`ExitCode` reads empty under 5.1.
+
+**THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
 runs the playback and scrub regression, and a feature that costs smoothness loses.
