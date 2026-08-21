@@ -81,20 +81,26 @@
          at owner item 15, 2026-08-18: artwork follows behaviour, in both
          directions. Home and End remain the keyboard route.
 
-         The package ships no volume-muted art, and the retired 260807 set
-         is no help either: because its prev-clip is a DOUBLE TRIANGLE, i.e. the same
-         shape as rewind, so using it would have put one glyph on two controls.
-         volume is the package's own master, promoted out of source/; only
-         volume-muted is new, and it is volume's speaker body with the waves
-         replaced by a cross. -->
-    <!-- Mute is a two-state control and NOT a level, which is why there is no
-         volume-low here: the owner's step 5 decision is a mute button with no
-         slider, so a third state would be art with no behaviour behind it. -->
+         The volume glyph set is the Trace_AudioSlider package's (2026-08-20,
+         designer option 1b), which superseded the step 5 pair: the 260817
+         package's volume master and the volume-muted authored beside it. The
+         step 5 decision "mute button, no volume slider" was REVERSED by the
+         owner on tester feedback the same day, and the inline slider ships behind
+         TRACE_VOLUME_SLIDER (0 restores the mute-only button exactly). -->
     <file alias="volume-24.png">../assets/interface/common/volume-24.png</file>
     <file alias="volume-48.png">../assets/interface/common/volume-48.png</file>
 
     <file alias="volume-muted-24.png">../assets/interface/common/volume-muted-24.png</file>
     <file alias="volume-muted-48.png">../assets/interface/common/volume-muted-48.png</file>
+
+    <!-- The expanded state of the volume control (the Trace_AudioSlider package,
+         option 1b, 2026-08-20): speaker only, waves replaced by the inline
+         slider the strip draws beside it. All three volume glyphs are that
+         package's; the earlier volume/volume-muted pair was superseded by this
+         delivery. The slider itself is code-drawn (track/fill/thumb from the
+         timeline's own cells) so it ships no PNG; the package says so. -->
+    <file alias="volume-open-24.png">../assets/interface/common/volume-open-24.png</file>
+    <file alias="volume-open-48.png">../assets/interface/common/volume-open-48.png</file>
 
     <!-- Loop, the design package's own master. It sat in source/ from the
          2026-08-17 swap because the strip had no loop button, which was the

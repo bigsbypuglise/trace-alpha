@@ -4,6 +4,7 @@
 
 #include <QAudioDevice>
 #include <QAudioFormat>
+#include <QAudio>
 #include <QAudioSink>
 #include <QElapsedTimer>
 #include <QIODevice>
@@ -298,6 +299,11 @@ struct AudioOutput::Impl {
     double startSeconds = 0.0;
     bool playing = false;
     bool muted = false;
+    // The UI's 0..1 volume fraction and the linear sink gain it maps to. Two
+    // members so stats() can report the fraction the user set rather than
+    // un-mapping the gain.
+    double volumeFraction = 1.0;
+    double volumeGain = 1.0;
     bool disabledByEnv = false;
 
     // Buffer geometry, resolved at start() against the sink the driver actually
@@ -434,6 +440,8 @@ long long AudioOutput::clockUpdateCount() const { return 0; }
 bool AudioOutput::ended() const { return true; }
 void AudioOutput::setMuted(bool) {}
 bool AudioOutput::isMuted() const { return false; }
+void AudioOutput::setVolume(double) {}
+double AudioOutput::volume() const { return 1.0; }
 AudioPerfStats AudioOutput::stats() const { return {}; }
 
 #else
@@ -620,7 +628,7 @@ void AudioOutput::start(double startSeconds) {
     impl_->startupFillMs = static_cast<double>(prime.nsecsElapsed()) / 1e6;
 
     impl_->feed->open(QIODevice::ReadOnly);
-    impl_->sink->setVolume(impl_->muted ? 0.0 : 1.0);
+    impl_->sink->setVolume(impl_->muted ? 0.0 : impl_->volumeGain);
     impl_->sink->start(impl_->feed.get());
     impl_->playing = true;
 
@@ -741,7 +749,23 @@ bool AudioOutput::ended() const {
 void AudioOutput::setMuted(bool muted) {
     if (!impl_) return;
     impl_->muted = muted;
-    if (impl_->sink) impl_->sink->setVolume(muted ? 0.0 : 1.0);
+    if (impl_->sink) impl_->sink->setVolume(muted ? 0.0 : impl_->volumeGain);
+}
+
+void AudioOutput::setVolume(double fraction) {
+    if (!impl_) return;
+    const double f = std::clamp(fraction, 0.0, 1.0);
+    impl_->volumeFraction = f;
+    // Perceptual mapping: a linear sink gain makes the top half of the slider
+    // nearly inaudible as a change and the bottom half a cliff. QtAudio's own
+    // conversion is the documented answer for exactly this UI.
+    impl_->volumeGain = QtAudio::convertVolume(f, QtAudio::LogarithmicVolumeScale,
+                                               QtAudio::LinearVolumeScale);
+    if (impl_->sink && !impl_->muted) impl_->sink->setVolume(impl_->volumeGain);
+}
+
+double AudioOutput::volume() const {
+    return impl_ ? impl_->volumeFraction : 1.0;
 }
 
 bool AudioOutput::isMuted() const {

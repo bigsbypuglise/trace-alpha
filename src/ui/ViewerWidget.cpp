@@ -445,6 +445,19 @@ void ViewerWidget::mouseDoubleClickEvent(QMouseEvent* event) {
     if (!overlayModel_.onMouseDoubleClick(p.x(), p.y())) QWidget::mouseDoubleClickEvent(event);
 }
 
+// The CPU backend's wheel path (the volume slider, 2026-08-20). Unhandled
+// wheels keep their old propagation -- this widget never consumed one before,
+// so the default QWidget path is exactly what shipped.
+void ViewerWidget::wheelEvent(QWheelEvent* event) {
+    const QPoint p = toDevice(event->position());
+    const double steps = static_cast<double>(event->angleDelta().y()) / 120.0;
+    if (steps != 0.0 && overlayModel_.onWheel(p.x(), p.y(), steps)) {
+        event->accept();
+        return;
+    }
+    QWidget::wheelEvent(event);
+}
+
 void ViewerWidget::leaveEvent(QEvent* event) {
     if (overlayModel_.enabled()) overlayModel_.onMouseLeave();
     QWidget::leaveEvent(event);

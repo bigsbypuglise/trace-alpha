@@ -119,6 +119,23 @@ constexpr double kSeparatorHeightLogical = 18.0;
 // elision in layout().
 constexpr double kTrackMinLogical = 48.0;
 
+// THE INLINE VOLUME SLIDER (Trace_AudioSlider package, option 1b, 2026-08-20;
+// owner decision on tester feedback, reversing step 5's "mute button, no
+// volume slider"). Every number is the package's own README: a ~74px slider
+// sliding out in the transport row itself, collapsing after ~1.5s idle; track
+// 4px in the timeline's own white-0.22, fill in the accent, thumb an 11px
+// white dot. The track and fill reuse the timeline's atlas cells because the
+// package says the slider "uses the existing timeline drawing"; only the thumb
+// is a new cell, because 11px plain white is not the timeline's 13px ringed
+// dot.
+constexpr double kVolumeSliderLogical = 74.0;
+constexpr double kVolumeThumbLogical = 11.0;
+constexpr int kVolumeCollapseMs = 1500;
+// One wheel notch. 5% reaches silence-to-full in 20 notches, which is the
+// common player convention; the fraction is the UI's, and the host owns the
+// perceptual mapping onto the sink.
+constexpr double kVolumeWheelStep = 0.05;
+
 // THE ACCENT, AND IT IS THE ONLY PLACE COLOUR APPEARS IN THE TRANSPORT.
 // `#5AC8E8` from HANDOFF.md, applied to the played portion of the track and to
 // the thumb's ring and to nothing else -- which is the handoff's own rule
@@ -268,6 +285,16 @@ bool OverlayModel::enabledByEnvironment() {
     return on;
 }
 
+// The rollback the owner required for the volume slider: =0 restores the
+// step 5 mute-only button exactly, without a rebuild -- same pattern as
+// TRACE_SCRUB_GOP_SAMPLE and TRACE_SCRUB_PAINT_GATE. Read once; MainWindow's
+// hooks, HUD line and accessibility proxy count all ask this same function so
+// the application cannot half-enable it.
+bool OverlayModel::volumeSliderEnabled() {
+    static const bool on = qgetenv("TRACE_VOLUME_SLIDER") != QByteArray("0");
+    return on;
+}
+
 OverlayModel::OverlayModel() {
     animTimer_.setInterval(kAnimTickMs);
     animTimer_.setSingleShot(false);
@@ -281,7 +308,7 @@ OverlayModel::OverlayModel() {
         // the spec's hold list -- a popup menu, a tooltip, a child control
         // holding focus -- is application state the overlay cannot see, so it
         // is asked for rather than guessed at.
-        if (hover_ != Region::None || draggingTimeline_
+        if (hover_ != Region::None || draggingTimeline_ || draggingVolume_
             || (hooks_.holdVisible && hooks_.holdVisible())) {
             if (revealLogEnabled()) {
                 fprintf(stderr, "[reveal] %8lld ms  auto-hide HELD  hover %d drag %d hostHold %d\n",
@@ -310,9 +337,26 @@ OverlayModel::OverlayModel() {
         }
     });
 
+    // The volume slider's idle collapse -- the package's ~1.5s. A second timer
+    // beside the auto-hide rather than a shared one, because they answer
+    // different questions: the auto-hide is "is the whole transport wanted",
+    // this is "is the level still being adjusted", and the slider must collapse
+    // while the strip stays up.
+    volumeCollapseTimer_.setInterval(kVolumeCollapseMs);
+    volumeCollapseTimer_.setSingleShot(true);
+    QObject::connect(&volumeCollapseTimer_, &QTimer::timeout, [this]() {
+        // Never collapse under the pointer or mid-drag -- the auto-hide's own
+        // rule, applied to the smaller surface.
+        if (hover_ == Region::Mute || hover_ == Region::Volume || draggingVolume_) {
+            volumeCollapseTimer_.start();
+            return;
+        }
+        collapseVolume();
+    });
+
     // Reserve once. The draw path must not allocate, and the quad count is
     // fixed by the design rather than by the media.
-    quads_.reserve(12);
+    quads_.reserve(24);
 }
 
 OverlayModel::~OverlayModel() = default;
@@ -397,6 +441,18 @@ void OverlayModel::layout() {
     dPlay_ = cell(x, playPx_);            x += playPx_ + buttonGap;
     dFfwd_ = cell(x, utilPx_);            x += utilPx_ + buttonGap;
     dMute_ = cell(x, utilPx_);            x += utilPx_ + buttonGap;
+    // The inline volume slider, out only while expanded. Its width comes off
+    // the timeline's middle, which is what "in the transport row itself" costs
+    // and why the elision below already handles the narrow-window case. The
+    // rect is the DRAWN 4px track; the hit band is volumeHitRect().
+    if (volumeSliderEnabled() && volumeExpanded_) {
+        const double volW = snap(kVolumeSliderLogical * s);
+        const double volH = std::max(1.0, snap(kTrackLogical * s));
+        dVolume_ = QRectF(snap(x), snap(cy - volH / 2.0), volW, volH);
+        x += volW + buttonGap;
+    } else {
+        dVolume_ = QRectF();
+    }
     dLoop_ = cell(x, utilPx_);            x += utilPx_;
     const double leftEnd = x;
 
@@ -486,11 +542,16 @@ std::vector<OverlayModel::ControlRect> OverlayModel::controlRects() const {
     // Start and Go to End are gone from the strip (owner item 15, 2026-08-18);
     // Home and End remain the keyboard route and the proxy descriptions for
     // the remaining controls still name their keys.
-    rects.reserve(8);
+    rects.reserve(9);
     rects.push_back({Region::Rewind, dRewind_});
     rects.push_back({Region::PlayPause, dPlay_});
     rects.push_back({Region::FastForward, dFfwd_});
     rects.push_back({Region::Mute, dMute_});
+    // Present whenever the FEATURE is on, empty while collapsed: the proxy
+    // count has to be stable (OverlayAccessibility parks everything on a size
+    // mismatch), and an empty rect is the honest answer for a control that is
+    // not on screen right now.
+    if (volumeSliderEnabled()) rects.push_back({Region::Volume, volumeHitRect()});
     rects.push_back({Region::Loop, dLoop_});
     rects.push_back({Region::Timeline, trackHitRect()});
     rects.push_back({Region::Fullscreen, dFullscreen_});
@@ -509,6 +570,46 @@ QRectF OverlayModel::trackHitRect() const {
     // nothing and start a scrub from a point outside the track's own mapping.
     const double half = std::max(0.0, (dStrip_.height() - dTrack_.height()) / 2.0);
     return dTrack_.adjusted(0, -half, 0, half);
+}
+
+// The volume slider's hit band: strip height vertically (trackHitRect's rule),
+// widened half a thumb either side so the thumb itself is grabbable at the
+// ends. Empty while collapsed, which is what makes Region::Volume unreachable
+// then.
+QRectF OverlayModel::volumeHitRect() const {
+    if (dVolume_.isEmpty()) return QRectF();
+    const double half = std::max(0.0, (dStrip_.height() - dVolume_.height()) / 2.0);
+    const double thumbHalf = snapTo(kVolumeThumbLogical * dpr_) / 2.0;
+    return dVolume_.adjusted(-thumbHalf, -half, thumbHalf, half);
+}
+
+void OverlayModel::expandVolume() {
+    if (!enabled_ || !volumeSliderEnabled()) return;
+    if (!volumeExpanded_) {
+        volumeExpanded_ = true;
+        // A real layout change, not a paint effect: Loop and the timeline move
+        // over, layoutRevision_ bumps, and the accessibility proxies re-sync
+        // from the same rects -- the phase 14 mechanism doing its job.
+        layout();
+        if (hooks_.requestRepaint) hooks_.requestRepaint();
+    }
+    volumeCollapseTimer_.start();
+}
+
+void OverlayModel::collapseVolume() {
+    volumeCollapseTimer_.stop();
+    if (draggingVolume_ && hooks_.setVolumeDragging) hooks_.setVolumeDragging(false);
+    draggingVolume_ = false;
+    if (!volumeExpanded_) return;
+    volumeExpanded_ = false;
+    if (hover_ == Region::Volume) hover_ = Region::None;
+    if (pressed_ == Region::Volume) pressed_ = Region::None;
+    layout();
+    if (hooks_.requestRepaint) hooks_.requestRepaint();
+}
+
+double OverlayModel::volumeFractionAt(int x) const {
+    return std::clamp((x - dVolume_.left()) / std::max(1.0, dVolume_.width()), 0.0, 1.0);
 }
 
 void OverlayModel::rebuildAtlas() {
@@ -547,13 +648,14 @@ void OverlayModel::rebuildAtlas() {
     // same set of events that already rebuilt it.
     const double kStripCellW = std::max(1.0, dStrip_.width());
 
-    // play x2, then nine utility glyphs, one thumb cell, the flat patches, the
-    // four track end-cap circles and the strip column, with 4px between them.
-    // Undercounting here silently clips the LAST cell, which is why the count
-    // is spelled out.
+    // play x2, then ten utility glyphs (volume-open joined at the volume-slider
+    // change, 2026-08-20), the timeline thumb cell, the volume thumb cell, the
+    // flat patches, the four track end-cap circles and the strip column, with
+    // 4px between them. Undercounting here silently clips the LAST cell, which
+    // is why the count is spelled out.
     const int atlasW = static_cast<int>(std::ceil(std::max(
         kStripCellW,
-        play * 4 + util * 12 + thumbCell + 32 + 64 + 4 * 20)));
+        play * 4 + util * 14 + thumbCell * 2 + 32 + 64 + 4 * 22)));
     const int atlasH = static_cast<int>(std::ceil(stripH + rowH + 16));
     if (atlasW <= 0 || atlasH <= 0) return;
 
@@ -619,6 +721,12 @@ void OverlayModel::rebuildAtlas() {
     util3(aFfwd_, "fast-forward");
     util3(aVolume_, "volume");
     util3(aVolumeMuted_, "volume-muted");
+    // The expanded state's glyph (speaker only, waves replaced by the slider
+    // beside it). Its cell exists whether or not the slider feature is on --
+    // an atlas cell is generated art, not a shipped asset, so the
+    // artwork-follows-behaviour rule is about the .qrc entry, which arrived in
+    // the same commit as the behaviour.
+    util3(aVolumeOpen_, "volume-open");
     util3(aLoop_, "loop");
     // The same glyph in the accent, for Loop ON. Its own cell rather than a
     // draw-time tint, because `brighten` scales RGB uniformly and cannot turn
@@ -652,6 +760,18 @@ void OverlayModel::rebuildAtlas() {
         x += dst.width() + 4;
     };
     thumbCellAt(aThumb_, thumbPx_);
+
+    // The volume slider's thumb: the package's 11px plain white dot, no ring.
+    // Its own cell rather than a reuse of the timeline's -- the two thumbs are
+    // specified differently and sharing a cell would couple their art.
+    {
+        const double volDot = std::max(1.0, snapTo(kVolumeThumbLogical * s));
+        aVolumeThumb_ = QRectF(x, row, volDot, volDot);
+        p.setPen(Qt::NoPen);
+        p.setBrush(QColor(255, 255, 255));
+        p.drawEllipse(aVolumeThumb_);
+        x += volDot + 4;
+    }
 
     // TRACK END CAPS (owner item 2, 2026-08-18): the timeline track gets round
     // ends, radius = half the track height. Full circles at the track's two
@@ -1159,7 +1279,18 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
     control(dRewind_, aRewind_, Region::Rewind);
     control(dPlay_, playing ? aPause_ : aPlay_, Region::PlayPause);
     control(dFfwd_, aFfwd_, Region::FastForward);
-    control(dMute_, muted ? aVolumeMuted_ : aVolume_, Region::Mute);
+    // The speaker's three states (Trace_AudioSlider package): muted -- or the
+    // level dragged to zero, which the owner item specifies must READ as muted
+    // -- wins; then the expanded "waves replaced by the slider" glyph; then the
+    // rest state. With the slider feature off the fraction read is skipped
+    // entirely and this is the old two-state control to the pixel.
+    const bool volSlider = volumeSliderEnabled();
+    const double volFrac = (volSlider && hooks_.volumeFraction)
+        ? std::clamp(hooks_.volumeFraction(), 0.0, 1.0) : 1.0;
+    const QRectF& muteCell = (muted || (volSlider && volFrac <= 0.0005))
+        ? aVolumeMuted_
+        : ((volSlider && volumeExpanded_) ? aVolumeOpen_ : aVolume_);
+    control(dMute_, muteCell, Region::Mute);
     // LOOP IS THE ONE CONTROL WHOSE STATE IS NOT A SECOND GLYPH, because the
     // package ships ONE loop glyph where it ships a volume/volume-muted pair.
     // On is drawn at the accent; off is the same neutral ink as its neighbours.
@@ -1246,6 +1377,54 @@ const std::vector<OverlayQuad>& OverlayModel::buildFrame(QSize surfacePixels) {
                            thumbCell.width(), thumbCell.height());
     push(thumbRect, thumbCell, a, 1.0f, OverlayQuad::Source::Atlas);
 
+    // THE INLINE VOLUME SLIDER, while expanded: the timeline's own track cells
+    // (white-0.22 background, accent fill, round caps at the 4px base height --
+    // the package says the slider "uses the existing timeline drawing") and the
+    // 11px white thumb. Drawn here rather than beside the Mute control because
+    // pushCapped and the cap cells live in this section; z-order is irrelevant,
+    // nothing overlaps it. The thumb's centre travels left+r .. right-r, so at
+    // 0 and 1 it sits flush with the rounded ends instead of overhanging the
+    // neighbouring control's cell.
+    if (volSlider && volumeExpanded_ && !dVolume_.isEmpty()) {
+        // Explicit cap quads rather than pushCapped: that lambda captures the
+        // TIMELINE's capR, which follows the timeline's own hover-grow, and the
+        // volume track is always the 4px base height. Its caps are the BASE cap
+        // cells, so its radius is theirs.
+        const double vr = std::min(aTrackCapBg_.width() / 2.0, dVolume_.width() / 2.0);
+        push(QRectF(dVolume_.left(), dVolume_.top(), vr, dVolume_.height()),
+             QRectF(aTrackCapBg_.left(), aTrackCapBg_.top(), vr, aTrackCapBg_.height()),
+             a, 1.0f, OverlayQuad::Source::Atlas);
+        push(QRectF(dVolume_.right() - vr, dVolume_.top(), vr, dVolume_.height()),
+             QRectF(aTrackCapBg_.right() - vr, aTrackCapBg_.top(), vr, aTrackCapBg_.height()),
+             a, 1.0f, OverlayQuad::Source::Atlas);
+        if (dVolume_.width() > 2.0 * vr)
+            push(QRectF(dVolume_.left() + vr, dVolume_.top(), dVolume_.width() - 2.0 * vr,
+                        dVolume_.height()),
+                 aTrackBgSample_, a, 1.0f, OverlayQuad::Source::Atlas);
+
+        const double thumbR = aVolumeThumb_.width() / 2.0;
+        const double travel = std::max(0.0, dVolume_.width() - 2.0 * thumbR);
+        const double thumbCx = dVolume_.left() + thumbR + travel * volFrac;
+        const double fillW = snapTo(thumbCx - dVolume_.left());
+        // The filled portion: an accent left cap plus a square-ended run to the
+        // thumb, the timeline's own accent-meets-thumb shape.
+        if (fillW > 0.0) {
+            const double fr = std::min(std::min(aTrackCapAccent_.width() / 2.0, vr), fillW);
+            push(QRectF(dVolume_.left(), dVolume_.top(), fr, dVolume_.height()),
+                 QRectF(aTrackCapAccent_.left(), aTrackCapAccent_.top(), fr,
+                        aTrackCapAccent_.height()),
+                 a, 1.0f, OverlayQuad::Source::Atlas);
+            if (fillW > fr)
+                push(QRectF(dVolume_.left() + fr, dVolume_.top(), fillW - fr,
+                            dVolume_.height()),
+                     aAccentSample_, a, 1.0f, OverlayQuad::Source::Atlas);
+        }
+        push(QRectF(snapTo(thumbCx - thumbR),
+                    snapTo(dVolume_.center().y() - aVolumeThumb_.height() / 2.0),
+                    aVolumeThumb_.width(), aVolumeThumb_.height()),
+             aVolumeThumb_, a, 1.0f, OverlayQuad::Source::Atlas);
+    }
+
     // The two readouts, each half of one image. Skipped when layout() elided
     // them on a narrow strip, and when there is no media to have a position in.
     if (!readout_.isNull() && readoutPx_ > 0.0) {
@@ -1294,6 +1473,9 @@ OverlayModel::Region OverlayModel::regionAt(int x, int y) const {
     if (dRewind_.contains(p)) return Region::Rewind;
     if (dFfwd_.contains(p)) return Region::FastForward;
     if (dMute_.contains(p)) return Region::Mute;
+    // Before the timeline for the same reason the buttons are; empty while
+    // collapsed, so this is unreachable then.
+    if (!dVolume_.isEmpty() && volumeHitRect().contains(p)) return Region::Volume;
     if (dLoop_.contains(p)) return Region::Loop;
     if (dFullscreen_.contains(p)) return Region::Fullscreen;
     if (dShare_.contains(p)) return Region::Share;
@@ -1379,9 +1561,20 @@ bool OverlayModel::onMouseMove(int x, int y) {
         if (hooks_.requestRepaint) hooks_.requestRepaint();
         return true;
     }
+    if (draggingVolume_) {
+        if (hooks_.setVolumeFraction) hooks_.setVolumeFraction(volumeFractionAt(x));
+        volumeCollapseTimer_.start();
+        if (hooks_.requestRepaint) hooks_.requestRepaint();
+        return true;
+    }
 
     const Region was = hover_;
     hover_ = visible() ? regionAt(x, y) : Region::None;
+    // The package's "hovering the speaker slides out the slider". Expanding
+    // re-lays the strip, so it goes through expandVolume() -- which also
+    // restarts the idle collapse -- and hovering the slider itself keeps it
+    // alive the same way.
+    if (hover_ == Region::Mute || hover_ == Region::Volume) expandVolume();
     if (was != hover_ && hooks_.requestRepaint) hooks_.requestRepaint();
     return hover_ != Region::None;
 }
@@ -1398,6 +1591,18 @@ bool OverlayModel::onMouseDown(int x, int y) {
             const Region r = regionAt(x, y);
             if (r != Region::None) {
                 pressed_ = r;
+                if (r == Region::Volume) {
+                    // The volume drag. Its OWN routing, never setScrubbing: a
+                    // press here sets a level, and must not touch the slider
+                    // that owns the scrub state machine. The dragging edge goes
+                    // first, so the host snapshots the pre-drag level before
+                    // the press value lands.
+                    draggingVolume_ = true;
+                    volumeCollapseTimer_.start();
+                    if (hooks_.setVolumeDragging) hooks_.setVolumeDragging(true);
+                    if (hooks_.setVolumeFraction)
+                        hooks_.setVolumeFraction(volumeFractionAt(x));
+                }
                 if (r == Region::Timeline) {
                     draggingTimeline_ = true;
                     // Press first, then position: this is the slider's own
@@ -1451,6 +1656,13 @@ bool OverlayModel::onMouseUp(int x, int y) {
     const Region was = pressed_;
     pressed_ = Region::None;
 
+    if (draggingVolume_) {
+        draggingVolume_ = false;
+        if (hooks_.setVolumeDragging) hooks_.setVolumeDragging(false);
+        volumeCollapseTimer_.start();
+        if (hooks_.requestRepaint) hooks_.requestRepaint();
+        return true;
+    }
     if (draggingTimeline_) {
         draggingTimeline_ = false;
         if (hooks_.setScrubbing) hooks_.setScrubbing(false);
@@ -1534,6 +1746,27 @@ bool OverlayModel::onMouseDoubleClick(int x, int y) {
     return false;
 }
 
+// "Scroll wheel over the button also adjusts" -- the package's own words. Over
+// the Mute button (collapsed or not) or the expanded slider: expand, nudge the
+// level by 5% a notch, and consume the event. Everywhere else it is not ours,
+// and the false return keeps whatever propagation the event had before this
+// existed -- nothing else in Trace consumes a wheel over the video today.
+bool OverlayModel::onWheel(int x, int y, double steps) {
+    if (!enabled_ || !volumeSliderEnabled() || steps == 0.0) return false;
+    if (!visible()) return false;
+    const Region r = regionAt(x, y);
+    if (r != Region::Mute && r != Region::Volume) return false;
+    reveal("wheel-volume");
+    expandVolume();
+    if (hooks_.volumeFraction && hooks_.setVolumeFraction) {
+        const double f = std::clamp(hooks_.volumeFraction() + steps * kVolumeWheelStep,
+                                    0.0, 1.0);
+        hooks_.setVolumeFraction(f);
+    }
+    if (hooks_.requestRepaint) hooks_.requestRepaint();
+    return true;
+}
+
 void OverlayModel::onMouseLeave() {
     // Forget the last coordinate: a genuine re-entry must always reveal, even
     // in the unlikely case it lands on the exact pixel the pointer left from.
@@ -1541,7 +1774,7 @@ void OverlayModel::onMouseLeave() {
     lastMoveY_ = INT_MIN;
     if (hover_ == Region::None && pressed_ == Region::None) return;
     hover_ = Region::None;
-    if (!draggingTimeline_) pressed_ = Region::None;
+    if (!draggingTimeline_ && !draggingVolume_) pressed_ = Region::None;
     autoHideTimer_.start();
     if (hooks_.requestRepaint) hooks_.requestRepaint();
 }
@@ -1563,7 +1796,13 @@ void OverlayModel::tickAnimation() {
     if (std::abs(targetOpacity_ - opacity_) < 0.001) {
         opacity_ = targetOpacity_;
         animTimer_.stop();
-        if (opacity_ <= 0.0) hover_ = Region::None;
+        if (opacity_ <= 0.0) {
+            hover_ = Region::None;
+            // A hidden transport starts its next reveal collapsed: an expanded
+            // slider surviving a fade-out would reappear seconds later with the
+            // pointer nowhere near it.
+            collapseVolume();
+        }
     }
     // Before syncChrome, so when a fade-out lands on 0 the strip's alpha is
     // already 0 by the time the revealed=false edge unmaps it.

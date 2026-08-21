@@ -1321,9 +1321,42 @@ void MainWindow::installOverlayHooks() {
     // media-dependent, but the guard is written for both rather than for the
     // one that happens to be gated today.
     hooks.toggleMute = [this]() {
-        if (muteAction_ && muteAction_->isEnabled()) muteAction_->toggle();
+        if (!muteAction_ || !muteAction_->isEnabled()) return;
+        // The owner item's "clicking unmute makes it audible again" when the
+        // LEVEL was dragged to zero: the mute flag is not set there, so
+        // toggling it would mute a silent file -- the click restores the last
+        // non-zero level instead. Recorded default pending the owner's answer
+        // on what unmute restores in this case.
+        if (trace::render::OverlayModel::volumeSliderEnabled()
+            && !muteAction_->isChecked() && volumeFraction_ <= 0.0005) {
+            setVolumeFraction(lastNonZeroVolumeFraction_ > 0.0005
+                                  ? lastNonZeroVolumeFraction_ : 1.0);
+            return;
+        }
+        muteAction_->toggle();
     };
     hooks.isMuted = [this]() { return audio_.isMuted(); };
+    // The volume slider's two entries (2026-08-20). The fraction is the UI's;
+    // setVolumeFraction owns the semantics (last-non-zero memory, implicit
+    // unmute on raising the level, the sink gain through AudioOutput).
+    hooks.volumeFraction = [this]() { return volumeFraction_; };
+    hooks.setVolumeFraction = [this](double f) { setVolumeFraction(f); };
+    hooks.setVolumeDragging = [this](bool down) {
+        if (down) {
+            volumeDragStartFraction_ = volumeFraction_;
+            volumeDragging_ = true;
+            return;
+        }
+        volumeDragging_ = false;
+        // A drag that settled audible remembers where it settled; one that
+        // ended at zero remembers where it STARTED, which is what the unmute
+        // click restores.
+        if (volumeFraction_ > 0.0005) {
+            lastNonZeroVolumeFraction_ = volumeFraction_;
+        } else if (volumeDragStartFraction_ > 0.0005) {
+            lastNonZeroVolumeFraction_ = volumeDragStartFraction_;
+        }
+    };
     // Loop. toggle() reaches loopAction_'s handler because that action has been
     // connected on `toggled` since spec phase 14 -- which is what Mute was not,
     // and is why Mute's button flipped a tick and changed nothing for one build.
@@ -4089,6 +4122,15 @@ void MainWindow::setupTransportControls() {
     // reported PASS on the broken build.
     connect(muteAction_, &QAction::toggled, this, [this](bool on) {
         audio_.setMuted(on);
+        // Unmuting with the level dragged to zero (the M key's route -- the
+        // strip's click handles this case before it reaches the flag): silent
+        // "unmuted" audio is indistinguishable from broken audio, so the last
+        // audible level comes back here too and M matches the click.
+        if (!on && trace::render::OverlayModel::volumeSliderEnabled()
+            && volumeFraction_ <= 0.0005) {
+            setVolumeFraction(lastNonZeroVolumeFraction_ > 0.0005
+                                  ? lastNonZeroVolumeFraction_ : 1.0);
+        }
         refreshHud(on ? "Mute" : "Unmute");
         if (viewer_) viewer_->revealOverlay("mute-toggle");
     });
@@ -5692,6 +5734,31 @@ void MainWindow::prefetchNeighbors() {
         cf.channels = info.channels;
         frameCache_.put(cf);
     }
+}
+
+// The one writer of the volume level (the inline slider, 2026-08-20). Every
+// route -- the slider drag, the wheel over the speaker, the restore-from-zero
+// click -- lands here, so the memory of the last audible level and the
+// implicit unmute cannot half-apply.
+//
+// A GAIN, NEVER THE CLOCK: AudioOutput::setVolume touches the sink's volume
+// and nothing else. Audio stays the master clock at 1x and the picture never
+// learns the level changed.
+void MainWindow::setVolumeFraction(double fraction) {
+    const double f = std::clamp(fraction, 0.0, 1.0);
+    if (std::abs(f - volumeFraction_) < 1e-4) return;
+    volumeFraction_ = f;
+    if (f > 0.0005) {
+        // Mid-drag values are transient -- the drag edges above decide what is
+        // remembered when the hand comes off.
+        if (!volumeDragging_) lastNonZeroVolumeFraction_ = f;
+        // Raising the level while muted is asking to hear it -- the common
+        // player convention, and the counterpart of "dragging to zero reads as
+        // muted". setChecked, not toggle: the handler below applies the audio.
+        if (muteAction_ && muteAction_->isChecked()) muteAction_->setChecked(false);
+    }
+    audio_.setVolume(f);
+    refreshHud("Volume");
 }
 
 void MainWindow::togglePlayPause() {
@@ -8450,7 +8517,17 @@ void MainWindow::refreshHud(const QString& action) {
                     .arg(audioStats.codecName)
                     .arg(audioStats.sampleRate)
                     .arg(audioStats.channels)
-                    .arg(audioStats.muted ? " MUTED" : "")
+                    // The volume token rides the slider feature's own knob, so
+                    // TRACE_VOLUME_SLIDER=0 restores the old line byte for byte
+                    // -- the rollback covers the instrument as well as the
+                    // control.
+                    .arg(QString("%1%2")
+                             .arg(audioStats.muted ? " MUTED" : "")
+                             .arg(trace::render::OverlayModel::volumeSliderEnabled()
+                                      ? QString(" vol %1%")
+                                            .arg(static_cast<int>(
+                                                std::lround(volumeFraction_ * 100.0)))
+                                      : QString()))
                     .arg(audioClockStalled_ ? "STALLED"
                          : audioClockPriming_ ? "PRIMING"
                          : audioDriving_ ? "MASTER" : "idle")

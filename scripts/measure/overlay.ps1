@@ -382,6 +382,15 @@ if ($muteDelta -lt 20) {
     Write-Output "OVERLAY mute: PASS"
 }
 
+# THE VOLUME SLIDER (2026-08-20): hovering or tapping Mute above slid the
+# inline slider out, which shifts Loop right by ~76px while it is expanded --
+# so the collapsed-layout $loopX below would land on the slider and set a
+# volume instead of toggling Loop, exactly the stale-offset class owner item
+# 15's re-point records. Park on Play (a hover that holds the chrome up but is
+# not Mute/Volume, so it does NOT hold the slider) until the ~1.5s idle
+# collapse returns the strip to the collapsed layout these offsets describe.
+Pt $playX $iconY; Start-Sleep -Milliseconds 2200
+
 # LOOP, and its state is the one the strip shows by COLOUR rather than by a
 # second glyph -- so this samples for the ACCENT in the control's cell rather
 # than counting changed pixels. It presses TWICE and ends in the state it

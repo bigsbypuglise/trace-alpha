@@ -753,6 +753,26 @@ private:
     // enabled state from the action a control runs. It is checkable, so the
     // menu tick and the strip's glyph read the same state.
     QAction* muteAction_ = nullptr;
+    // THE VOLUME LEVEL (the inline slider, 2026-08-20; owner decision on tester
+    // feedback, reversing step 5's "no volume slider"). The UI's 0..1 fraction;
+    // AudioOutput owns the perceptual mapping onto the sink gain. SESSION-ONLY,
+    // deliberately not persisted -- mute is not persisted either, and Loop's
+    // persistence was an owner REVERSAL (item 6) -- recorded as a default
+    // pending an owner call, not a settled decision. lastNonZero_ is what a
+    // click on the muted-reading speaker restores when the level was DRAGGED to
+    // zero: unlike an explicit mute there is no prior audible state to return
+    // to, so the last non-zero level this session stands in (also a recorded
+    // default pending the owner's answer; it starts at 1.0, so a fresh session
+    // restores to full).
+    double volumeFraction_ = 1.0;
+    double lastNonZeroVolumeFraction_ = 1.0;
+    // The drag edges (OverlayHooks::setVolumeDragging): while a drag is live,
+    // its ramp values must not overwrite lastNonZero_ -- a drag to zero passes
+    // through 60, 40, 20, 5 on its way, and "restore" must mean the pre-drag
+    // level, not 5%.
+    bool volumeDragging_ = false;
+    double volumeDragStartFraction_ = 1.0;
+    void setVolumeFraction(double fraction);
     // Both created in setupSharedActions(), which runs BEFORE setupMenus():
     // the menu adds the action, it does not define it. Before spec phase 2 the
     // fullscreen toggle was four lines written twice -- once for the menu and

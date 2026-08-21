@@ -45,6 +45,23 @@ struct OverlayHooks {
     std::function<void()> toggleMute;
     std::function<bool()> isMuted;
 
+    // VOLUME (owner decision 2026-08-20, on tester feedback, reversing step 5's
+    // "mute button, no volume slider"): a read and a command, the mute shape.
+    // The fraction is the UI's 0..1 -- the HOST owns the mapping to a sink gain
+    // (perceptual, inside AudioOutput) and owns the muted-at-zero semantics, so
+    // the model never caches a level and never talks to the audio clock. The
+    // slider is NOT a picture of timelineSlider_: a volume drag must never
+    // issue a seek, so it has its own press routing through these two entries
+    // and touches nothing the scrub path owns.
+    std::function<double()> volumeFraction;
+    std::function<void(double)> setVolumeFraction;
+    // The drag edges, setScrubbing's shape. The host needs them for one thing:
+    // a drag that ends at zero must restore the PRE-DRAG level on the next
+    // unmute click, and without the edges the host would remember the drag's
+    // own ramp values (a drag to zero passes through 60, 40, 20, 5 -- and
+    // "restore" would mean 5%).
+    std::function<void(bool)> setVolumeDragging;
+
     // LOOP, the same shape as mute: a command and a read, never a cached
     // state. `loopAction_` has existed as a shared checkable QAction since spec
     // phase 14 and is already connected on `toggled` rather than `triggered`,

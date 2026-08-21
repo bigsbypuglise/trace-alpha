@@ -294,7 +294,24 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
          QAccessible::ButtonMenu},
     };
 
-    for (const auto& spec : specs) {
+    // The proxy list has to match controlRects() ENTRY FOR ENTRY -- sync()
+    // parks everything on a size mismatch, deliberately -- so the volume
+    // slider's proxy exists exactly when the model reports its region: gated on
+    // the same volumeSliderEnabled() the model reads, inserted at Volume's
+    // reading-order position (after Mute), and parked at an empty rect while
+    // the slider is collapsed, which is the honest geometry for a control that
+    // is not on screen.
+    std::vector<Spec> list(std::begin(specs), std::end(specs));
+    if (trace::render::OverlayModel::volumeSliderEnabled()) {
+        list.insert(list.begin() + 4,
+                    Spec{Region::Volume, nullptr, QT_TR_NOOP("Volume"),
+                         QT_TR_NOOP("Audio volume. Slides out beside Mute while the "
+                                    "pointer is over it; scrolling the mouse wheel over "
+                                    "the Mute button adjusts the level."),
+                         QAccessible::Slider});
+    }
+
+    for (const auto& spec : list) {
         auto* proxy = new ProxyWidget(host_, spec.action, spec.role);
         // The NAME comes from the action when there is one, so it is the same
         // string the menus and tooltips use and cannot drift into a second

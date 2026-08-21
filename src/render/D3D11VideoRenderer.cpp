@@ -193,6 +193,24 @@ LRESULT D3D11VideoRenderer::handleSurfaceMessage(HWND hwnd, UINT msg, WPARAM wp,
             handled = true;
             return 0;
 
+        case WM_MOUSEWHEEL: {
+            // UNLIKE every other mouse message here, a wheel's lParam is in
+            // SCREEN coordinates -- Win32's own inconsistency, and converting
+            // is what keeps the model in the one coordinate space it lays out
+            // in. Only claimed when the model consumed it (the volume control);
+            // otherwise DefWindowProc forwards it up exactly as before this
+            // case existed.
+            POINT pt{GET_X_LPARAM(lp), GET_Y_LPARAM(lp)};
+            ScreenToClient(hwnd, &pt);
+            const double steps =
+                static_cast<double>(GET_WHEEL_DELTA_WPARAM(wp)) / WHEEL_DELTA;
+            if (overlayModel_ && overlayModel_->onWheel(pt.x, pt.y, steps)) {
+                handled = true;
+                return 0;
+            }
+            break;
+        }
+
         case WM_LBUTTONDBLCLK:
             // Only arrives because the window class carries CS_DBLCLKS. Note the
             // sequence Windows sends is down, up, DBLCLK, up -- so the overlay

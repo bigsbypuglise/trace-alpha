@@ -112,6 +112,18 @@ public:
     void setMuted(bool muted);
     bool isMuted() const;
 
+    // Playback volume, as the UI's 0..1 fraction (the volume slider,
+    // 2026-08-20). Mapped onto the sink's linear gain PERCEPTUALLY inside this
+    // class -- QtAudio::convertVolume's logarithmic-to-linear -- so half slider
+    // sounds like half volume rather than reading -6dB as barely quieter.
+    // A GAIN ON THE SINK AND NOTHING ELSE: it never touches the audio clock,
+    // the ring or the decode thread, which is the roadmap's own rule -- audio
+    // owns rate and position during 1x playback, and that is what removed the
+    // hold/skip churn. Composes with mute: the sink gets 0 while muted and this
+    // gain otherwise, and unmuting restores it.
+    void setVolume(double fraction);
+    double volume() const;
+
     AudioPerfStats stats() const;
 
 private:

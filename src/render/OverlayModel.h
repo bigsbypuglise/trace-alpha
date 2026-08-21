@@ -80,6 +80,11 @@ public:
         PlayPause,
         FastForward,
         Mute,
+        // The inline volume slider (Trace_AudioSlider package, option 1b,
+        // 2026-08-20). Sits between Mute and Loop while expanded; while
+        // collapsed its rect is empty and the region is unreachable. Only
+        // present at all when volumeSliderEnabled().
+        Volume,
         Loop,
         Timeline,
         Fullscreen,
@@ -101,6 +106,14 @@ public:
     // both -- an overlay that appears only on the default renderer would be a
     // difference between the shipping path and its own control.
     static bool enabledByEnvironment();
+
+    // Whether the inline volume slider exists at all. TRACE_VOLUME_SLIDER=0 is
+    // the owner-required rollback: it restores the step 5 mute-only button
+    // EXACTLY -- layout, hit regions, glyph choice, control count and wheel
+    // behaviour all revert without a rebuild. Default on. Static and read once,
+    // like enabledByEnvironment, because MainWindow (hooks, HUD, the proxy
+    // tree) and this model must give the same answer.
+    static bool volumeSliderEnabled();
 
     void setSurfaceSize(QSize devicePixels);
     // Device pixels of the surface's TOP EDGE that the transient top chrome
@@ -214,6 +227,12 @@ public:
     // surface, and it runs even when the overlay itself is switched off -- the
     // gesture belongs to the window, not to the transport.
     bool onMouseDoubleClick(int x, int y);
+    // Wheel over the volume control (or the Mute button while collapsed)
+    // adjusts the level -- the design package's "scroll over the button also
+    // adjusts". `steps` is in wheel notches (WHEEL_DELTA units), fractional for
+    // precision wheels. Returns false everywhere else so the event keeps its
+    // existing propagation; nothing but volume consumes a wheel today.
+    bool onWheel(int x, int y, double steps);
     void onMouseLeave();
 
     // Pointer motion anywhere over the video reveals the overlay and restarts
@@ -261,6 +280,13 @@ private:
     // The track's HIT rect, which is much taller than its drawn one. One
     // definition, shared by regionAt() and controlRects().
     QRectF trackHitRect() const;
+    // Same rule for the volume slider: the drawn track is a 4px hairline, the
+    // hit band is the strip's height. Empty while collapsed.
+    QRectF volumeHitRect() const;
+    // Expand the slider (idempotent) and restart its idle-collapse timer.
+    void expandVolume();
+    void collapseVolume();
+    double volumeFractionAt(int x) const;
     void startAnimation();
     void tickAnimation();
     // Pushes the top chrome's shown/hidden state at the host, on transitions
@@ -305,7 +331,12 @@ private:
     QRectF aStrip_, aStripSample_;
     QRectF aPlay_, aPause_;
     QRectF aRewind_, aFfwd_;
-    QRectF aVolume_, aVolumeMuted_, aLoop_, aLoopOn_, aFullscreen_, aExitFullscreen_, aShare_;
+    QRectF aVolume_, aVolumeMuted_, aVolumeOpen_, aLoop_, aLoopOn_, aFullscreen_,
+        aExitFullscreen_, aShare_;
+    // The volume slider's thumb: an 11px plain white dot (the package's spec),
+    // NOT the timeline's ringed 13px thumb -- a shared cell would tie the two
+    // controls' art together for no reason.
+    QRectF aVolumeThumb_;
     // One thumb cell. The 16px scrub variant (aThumbScrub_) is removed -- the
     // owner cut the grow-while-scrubbing animation (items 16+17, 2026-08-18).
     QRectF aThumb_;
@@ -325,6 +356,11 @@ private:
     // Destination rects, in surface device pixels.
     QRectF dStrip_, dPlay_, dRewind_, dFfwd_, dMute_, dLoop_;
     QRectF dFullscreen_, dShare_, dSeparator_, dTrack_;
+    // The volume slider's drawn track (4px), between Mute and Loop. Empty while
+    // collapsed or with the feature off -- layout() is the one writer, so the
+    // rect and the layout revision move together and the accessibility proxy
+    // follows for free.
+    QRectF dVolume_;
     // The two readout cells. Empty when the strip is too narrow to carry them
     // -- see layout()'s elision -- which is also how buildFrame knows not to
     // draw them.
@@ -384,6 +420,16 @@ private:
     int lastMoveX_ = INT_MIN;
     int lastMoveY_ = INT_MIN;
     bool draggingTimeline_ = false;
+    // The volume drag, deliberately its OWN state beside the timeline's: the
+    // two gestures are mutually exclusive by construction (one press, one
+    // control) but must never share plumbing -- a volume drag that reached
+    // setScrubbing would issue seeks.
+    bool draggingVolume_ = false;
+    // Whether the inline slider is out. Layout state, not paint state: layout()
+    // reads it, so expanding and collapsing re-lay the strip and bump
+    // layoutRevision_, which is what re-syncs the accessibility proxies.
+    bool volumeExpanded_ = false;
+    QTimer volumeCollapseTimer_;
     // Mirrors what the host was last told, so reveal() on every pointer move
     // does not call across the hook once per move to say the same thing. The
     // chrome mirror is the same idea and exists for the same reason: showing a
