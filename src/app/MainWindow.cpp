@@ -1356,6 +1356,7 @@ void MainWindow::installOverlayHooks() {
         } else if (volumeDragStartFraction_ > 0.0005) {
             lastNonZeroVolumeFraction_ = volumeDragStartFraction_;
         }
+        persistVolumeFraction();
     };
     // Loop. toggle() reaches loopAction_'s handler because that action has been
     // connected on `toggled` since spec phase 14 -- which is what Mute was not,
@@ -4102,6 +4103,20 @@ void MainWindow::setupTransportControls() {
     // and `M` are one action rather than two call sites onto AudioOutput. It
     // stays reachable with no media -- muting is a device state, not a property
     // of the file -- which is why it is absent from syncMediaDependentActions.
+    // The persisted volume level (owner, 2026-08-21). Seeded before the mute
+    // action so the two audio states arrive together, gated on the slider
+    // feature so the rollback keeps today's behaviour exactly -- a stored gain
+    // applied with no UI to show it would be silent degradation. impl_ inside
+    // AudioOutput outlives open()/close(), so one seed covers every file this
+    // session opens.
+    if (trace::render::OverlayModel::volumeSliderEnabled()) {
+        volumeFraction_ = std::clamp(
+            trace::app::settings().value(QLatin1String(kVolumeKey), 1.0).toDouble(),
+            0.0, 1.0);
+        if (volumeFraction_ > 0.0005) lastNonZeroVolumeFraction_ = volumeFraction_;
+        audio_.setVolume(volumeFraction_);
+    }
+
     muteAction_ = new QAction(tr("&Mute"), this);
     muteAction_->setCheckable(true);
     // BEFORE the connect, so seeding the tick from the device does not fire the
@@ -5745,7 +5760,12 @@ void MainWindow::prefetchNeighbors() {
 // and nothing else. Audio stays the master clock at 1x and the picture never
 // learns the level changed.
 void MainWindow::setVolumeFraction(double fraction) {
-    const double f = std::clamp(fraction, 0.0, 1.0);
+    // Quantised to 0.1% steps: the wheel's repeated 0.05 subtractions
+    // accumulate binary crumbs (five notches down stored 0.7499999999999998 in
+    // the settings file), and a 74px track cannot express finer than ~1.4%
+    // anyway. The quantised value is what the HUD prints, what persists, and
+    // what the gain is computed from -- one value, not a display rounding.
+    const double f = std::clamp(std::round(fraction * 1000.0) / 1000.0, 0.0, 1.0);
     if (std::abs(f - volumeFraction_) < 1e-4) return;
     volumeFraction_ = f;
     if (f > 0.0005) {
@@ -5758,7 +5778,17 @@ void MainWindow::setVolumeFraction(double fraction) {
         if (muteAction_ && muteAction_->isChecked()) muteAction_->setChecked(false);
     }
     audio_.setVolume(f);
+    // Settled values only: a drag persists once, at its end, from the drag
+    // edges below -- the INI must not be written per pointer move.
+    if (!volumeDragging_) persistVolumeFraction();
     refreshHud("Volume");
+}
+
+// Owner decision 2026-08-21: volume persists between sessions. Through the one
+// settings home, gated on the slider feature (the seed's comment says why).
+void MainWindow::persistVolumeFraction() {
+    if (!trace::render::OverlayModel::volumeSliderEnabled()) return;
+    trace::app::settings().setValue(QLatin1String(kVolumeKey), volumeFraction_);
 }
 
 void MainWindow::togglePlayPause() {

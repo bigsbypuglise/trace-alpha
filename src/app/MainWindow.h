@@ -773,6 +773,9 @@ private:
     bool volumeDragging_ = false;
     double volumeDragStartFraction_ = 1.0;
     void setVolumeFraction(double fraction);
+    // Write the level to the settings home. Called at settled values only --
+    // never per drag move, which would hit the INI dozens of times a second.
+    void persistVolumeFraction();
     // Both created in setupSharedActions(), which runs BEFORE setupMenus():
     // the menu adds the action, it does not define it. Before spec phase 2 the
     // fullscreen toggle was four lines written twice -- once for the menu and
@@ -1578,6 +1581,12 @@ private:
     // decision -- Loop starts off every session and survives only a file
     // change within one. A stale key in an existing trace.ini is never read.)
     static constexpr const char* kAlwaysOnTopKey = "view/alwaysOnTop";
+    // The volume level (owner decision 2026-08-21: volume PERSISTS between
+    // sessions -- the answer to the second recorded default in
+    // docs/volume-slider.md). Read and written only while the slider feature
+    // is on, so TRACE_VOLUME_SLIDER=0 keeps the mute-only behaviour exactly,
+    // including "no stored gain silently in force with no UI to see it".
+    static constexpr const char* kVolumeKey = "audio/volume";
     // Where Report an Issue sends mail. Owner decision, 2026-08-11: a mailto
     // rather than the repository, which is private.
     static constexpr const char* kIssueEmail = "bigsbypuglise@gmail.com";

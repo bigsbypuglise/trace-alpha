@@ -18,9 +18,9 @@
 # Expanded, the 74px slider plus a 2px gap sit between them:
 #   slider track = 170 .. 244, loop centre = 264
 param(
-    [ValidateSet("on", "off")] [string]$Mode = "on",
+    [ValidateSet("on", "off", "persist")] [string]$Mode = "on",
     [string]$Clip = "C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets\3_1080p_H264_MP4\M&M_TopGun_1080.mp4",
-    [string]$OutDir = "$env:TEMP	race_volumeslider",
+    [string]$OutDir = (Join-Path $env:TEMP "trace_volumeslider"),
     # Extra NAME=VALUE pairs for the launch -- the cross-backend leg is
     # -ExtraEnv TRACE_RENDERER=cpu.
     [string[]]$ExtraEnv = @()
@@ -47,13 +47,23 @@ public class VolWin {
 }
 "@
 
+# A SCRATCH SETTINGS FILE, because volume is PERSISTED (owner, 2026-08-21):
+# without it every run would write its final level into the machine's real
+# settings -- the Loop/cadence poisoning class -- and each run would inherit
+# the previous one's level instead of starting at a known 100%.
+$scratchIni = Join-Path $env:TEMP "volumeslider-scratch.ini"
+if (Test-Path $scratchIni) { Remove-Item $scratchIni -Force }
 # HUD HIDDEN for the interaction legs: the dev HUD is a widget BELOW the
 # viewer, so with it shown the strip is not at the client bottom and every
 # geometry-derived aim here lands on HUD text -- exactly what this script's
 # first run did. The vol token is read from a final capture after pressing H.
-$envs = @("TRACE_NO_AUDIO=0", "TRACE_HUD=0")
+$envs = @("TRACE_NO_AUDIO=0", "TRACE_HUD=0", "TRACE_SETTINGS_FILE=$scratchIni")
 if ($Mode -eq "off") { $envs += "TRACE_VOLUME_SLIDER=0" }
 $envs += $ExtraEnv
+# Park the cursor away from where the strip will be BEFORE launching: a
+# previous run leaves it on the speaker, the window opens under the cursor, and
+# the collapsed baseline is then captured already-expanded.
+[VolWin]::SetCursorPos(100, 100) | Out-Null
 & $restart -Clip $Clip -Env $envs -SettleSeconds 5
 $p = Get-Process -Name Trace -ErrorAction SilentlyContinue | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
 if (-not $p) { Write-Output "no window"; exit 1 }
@@ -120,6 +130,68 @@ function SliderTrackPixels([string]$png) {
 $collapsed = SliderTrackPixels "01-revealed-collapsed"
 $expanded = SliderTrackPixels "02-hover-mute"
 Write-Output ("VOLUME slider pixels collapsed/hover: {0} / {1}" -f $collapsed, $expanded)
+
+if ($Mode -eq "persist") {
+    # Wheel to 75% over the speaker, close GRACEFULLY (QSettings flushes on
+    # destruction), and relaunch on the same scratch INI: the stored level must
+    # come back in force -- the HUD's vol token and the INI line are the two
+    # observables.
+    [VolWin]::SetCursorPos($muteX, $iconY) | Out-Null; Start-Sleep -Milliseconds 600
+    for ($i = 0; $i -lt 5; $i++) {
+        [VolWin]::mouse_event([VolWin]::WHEEL, 0, 0, -120, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 120
+    }
+    Start-Sleep -Milliseconds 400
+    Get-Process -Name Trace -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+    Start-Sleep -Milliseconds 1500
+    Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force
+    $iniLine = (Get-Content $scratchIni -ErrorAction SilentlyContinue | Select-String "volume")
+    Write-Output ("VOLUME persist: ini says '{0}'" -f $iniLine)
+    & $restart -Clip $Clip -Env $envs -SettleSeconds 5
+    $p2 = Get-Process -Name Trace | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+    if (-not $p2) { Write-Output "VOLUME persist: FAIL - no window on relaunch"; exit 1 }
+    [VolWin]::SetForegroundWindow($p2.MainWindowHandle) | Out-Null
+    Start-Sleep -Milliseconds 400
+    $ws2 = New-Object -ComObject WScript.Shell
+    $ws2.SendKeys("h"); Start-Sleep -Milliseconds 800
+    Shot "07-persist-relaunch-hud"
+    if ("$iniLine" -match "0\.75|0\.75$|=0\.75") { Write-Output "VOLUME persist: INI PASS (0.75 stored)" }
+    else { Write-Output "VOLUME persist: FAIL - 0.75 not found in the scratch ini" }
+    Write-Output "read the relaunch HUD's vol token off 07-persist-relaunch-hud.png (expect vol 75%)"
+    Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force
+    exit 0
+}
+
+if ($Mode -eq "persist") {
+    # Volume persists between sessions (owner, 2026-08-21). The pointer is
+    # already hovering the speaker from the 02 shot: wheel to 75%, close
+    # GRACEFULLY (QSettings flushes on destruction), check the scratch INI,
+    # relaunch on the same INI, and read the vol token off the relaunch HUD.
+    for ($i = 0; $i -lt 5; $i++) {
+        [VolWin]::mouse_event([VolWin]::WHEEL, 0, 0, -120, [UIntPtr]::Zero)
+        Start-Sleep -Milliseconds 120
+    }
+    Start-Sleep -Milliseconds 400
+    Get-Process -Name Trace -ErrorAction SilentlyContinue | ForEach-Object { $_.CloseMainWindow() | Out-Null }
+    Start-Sleep -Milliseconds 1500
+    Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force
+    $iniLine = (Get-Content $scratchIni -ErrorAction SilentlyContinue | Select-String "volume")
+    Write-Output ("VOLUME persist: ini says '{0}'" -f $iniLine)
+    if ("$iniLine" -match "0\.75|0\.75$|=0\.75") { Write-Output "VOLUME persist: INI PASS (0.75 stored)" }
+    else { Write-Output "VOLUME persist: FAIL - 0.75 not found in the scratch ini" }
+    # Relaunch on the same INI -- the seed must put the stored level in force.
+    & $restart -Clip $Clip -Env $envs -SettleSeconds 5
+    $p2 = Get-Process -Name Trace | Where-Object { $_.MainWindowHandle -ne 0 } | Select-Object -First 1
+    if (-not $p2) { Write-Output "VOLUME persist: FAIL - no window on relaunch"; exit 1 }
+    [VolWin]::SetForegroundWindow($p2.MainWindowHandle) | Out-Null
+    Start-Sleep -Milliseconds 400
+    $ws2 = New-Object -ComObject WScript.Shell
+    $ws2.SendKeys("h"); Start-Sleep -Milliseconds 800
+    Shot "07-persist-relaunch-hud"
+    Write-Output "read the relaunch HUD's vol token off 07-persist-relaunch-hud.png (expect vol 75%)"
+    Get-Process -Name Trace -ErrorAction SilentlyContinue | Stop-Process -Force
+    exit 0
+}
 
 if ($Mode -eq "off") {
     # DELTA, not an absolute: bright picture pixels behind the translucent
