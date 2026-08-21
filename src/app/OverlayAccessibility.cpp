@@ -267,9 +267,13 @@ OverlayAccessibility::OverlayAccessibility(QWidget* host,
         // is the one the strip shows by COLOUR rather than by a second glyph --
         // which a screen reader cannot see at all, so the role carrying it is
         // doing more work here than anywhere else on the strip.
+        // The description followed owner item 6 (2026-08-18): Loop starts off
+        // every session now and only survives a file change WITHIN one, so the
+        // old "and between sessions" clause was a screen reader announcing a
+        // behaviour the owner removed.
         {Region::Loop, commands_.loop, QT_TR_NOOP("Loop"),
-         QT_TR_NOOP("Repeat playback when it reaches the end. The setting is "
-                    "remembered between files and between sessions."),
+         QT_TR_NOOP("Repeat playback when it reaches the end. The setting lasts "
+                    "for this session and starts off next time."),
          QAccessible::CheckBox},
         // Slider, not Button: it is a position along a range, and that is what
         // it should announce as even though this proxy carries no value. A
