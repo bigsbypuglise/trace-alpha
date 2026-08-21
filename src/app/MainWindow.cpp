@@ -7955,6 +7955,22 @@ void MainWindow::refreshHud(const QString& action) {
         playbackEndFrame_ = -1;
     }
 
+    // THE PLAYBACK SPEED MENU FOLLOWS THE ENGINE FROM HERE, for the same
+    // reason the flag above is cleared here: this runs after every transport
+    // action, and the alternative is a sync call at each of the dozen sites
+    // that can change the rate -- which is exactly what shipped, and it missed
+    // the commonest one. Pausing with Space or K never re-synced, so pausing a
+    // 0.5x run left "0.5x" ticked over a paused file, and the Play that
+    // followed ran at 1x with the menu still claiming 0.5x -- the tester
+    // report's checkmark disagreement, and the one state the spec names as
+    // forbidden ("the checked item must reflect the effective playback rate").
+    // A shuttle press reaching 2x now ticks the 2x item too, which that same
+    // sentence asks for. setChecked is a no-op when nothing changed, so the
+    // per-tick cost is six double compares; it sits ABOVE the showHud early
+    // return because the menu must be honest in the shipping (HUD-hidden)
+    // configuration, not only under a harness.
+    syncPlaybackSpeedActions();
+
     // Hidden means NOT BUILT. Everything below this point formats strings for
     // overlay_, and overlay_ is the widget H just hid -- several hundred bytes of
     // QString construction on the UI thread, on every transport action and every
