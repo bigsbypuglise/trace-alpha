@@ -62,6 +62,7 @@ public:
     void setViewTransform(const ViewTransform& transform) override;
     void setPixelAspect(double par) override;
     void setViewScale(const ViewScale& view) override;
+    void setHostFullscreen(bool fullscreen) override { hostFullscreen_ = fullscreen; }
 
     QString name() const override { return name_; }
     const RenderStats& stats() const override { return stats_; }
@@ -167,6 +168,9 @@ private:
     ViewTransform viewTransform_{};
     double pixelAspect_ = 1.0;
     ViewScale viewScale_{};
+    // Pushed by the host per paint; combined with viewScale_.fitToWindow to
+    // decide the fullscreen-fit magnification filter (owner, 2026-08-21).
+    bool hostFullscreen_ = false;
 
     // Mirrors cbuffer YuvParams in YuvToRgb.ps.hlsl. Held rather than built on
     // the stack because the colour terms come from the frame (setFrame) and the

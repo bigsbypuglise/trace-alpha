@@ -199,6 +199,15 @@ public:
     // divergence ddb38ca had to fix for the fit that had no scale at all.
     virtual void setViewScale(const ViewScale& view) { (void)view; }
 
+    // Whether the host WINDOW is fullscreen (owner decision 2026-08-21, the
+    // fullscreen-aliasing item): the fullscreen FIT filters its magnification,
+    // while deliberate zoom -- Actual Size, Zoom In, fullscreen or not -- keeps
+    // phase 15's nearest. The renderer cannot ask the window itself (a child
+    // HWND has no business walking its ancestors' Qt state), so the host pushes
+    // the flag; ViewerWidget does it per paint, which is one bool compare and
+    // needs no window-state event plumbing.
+    virtual void setHostFullscreen(bool fullscreen) { (void)fullscreen; }
+
     // Identifies the backend in the HUD, so a fallback is visible rather than
     // silent -- a GPU path that quietly never engages is the failure mode worth
     // designing against.
@@ -242,6 +251,15 @@ QRect viewDeviceRect(QSize contentDisplayed, QSize deviceHost, const ViewScale& 
 // clamps the value it STORES and the renderer clamps the value it DRAWS, and
 // the two agreeing by inspection is not the same as by construction.
 QPointF clampPan(QSize picture, QSize deviceHost, QPointF pan);
+
+// Whether the fullscreen fit filters its magnification (owner decision
+// 2026-08-21, docs/fullscreen-aliasing-investigation.md option 2 narrowed to
+// fullscreen: testers on panels larger than the source saw phase 15's nearest
+// stair-step the fullscreen picture, and fullscreen is not deliberate zoom).
+// TRACE_FS_MAG_FILTER=0 restores nearest there -- the rollback and the A/B
+// control. Shared by both backends so one variable moves both, the
+// TRACE_MAG_FILTER pattern.
+bool fullscreenFitFilterEnabled();
 
 // The largest scale this reference may be drawn at. IT IS A HARD BACKEND LIMIT
 // EXPRESSED ONCE, not a taste judgement about how far a review tool should

@@ -140,4 +140,12 @@ std::unique_ptr<VideoRenderer> createRenderer() {
     return createCpuRenderer();
 }
 
+// See the header. qgetenv, read once, the same shape as every other render
+// knob -- and it lives here rather than in each backend because a knob spelled
+// twice is a knob that can be half-applied.
+bool fullscreenFitFilterEnabled() {
+    static const bool on = qgetenv("TRACE_FS_MAG_FILTER") != QByteArray("0");
+    return on;
+}
+
 } // namespace trace::render

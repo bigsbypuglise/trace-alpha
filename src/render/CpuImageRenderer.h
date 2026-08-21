@@ -31,6 +31,7 @@ public:
     void setViewTransform(const ViewTransform& transform) override { transform_ = transform; }
     void setPixelAspect(double par) override { pixelAspect_ = par; }
     void setViewScale(const ViewScale& view) override { viewScale_ = view; }
+    void setHostFullscreen(bool fullscreen) override { hostFullscreen_ = fullscreen; }
     QString name() const override { return QStringLiteral("cpu"); }
     const RenderStats& stats() const override { return stats_; }
 
@@ -55,6 +56,9 @@ private:
     ViewTransform transform_{};
     double pixelAspect_ = 1.0;
     ViewScale viewScale_{};
+    // Pushed by the host per paint; combined with viewScale_.fitToWindow to
+    // decide the fullscreen-fit magnification filter (owner, 2026-08-21).
+    bool hostFullscreen_ = false;
     RenderStats stats_{};
 
     // Non-owning; the host owns it. Null when there is no overlay.

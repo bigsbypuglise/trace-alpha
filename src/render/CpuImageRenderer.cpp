@@ -128,8 +128,14 @@ void CpuImageRenderer::paint(QWidget* host) {
             // magnification joins it instead of being a second exception.
             const bool reducing = drawn.width() < displayed.width()
                                   || drawn.height() < displayed.height();
+            // The fullscreen FIT filters its magnification (owner,
+            // 2026-08-21) -- same predicate as the D3D11 backend's, and the
+            // deliberate-zoom case keeps nearest because fitToWindow is false
+            // there. TRACE_FS_MAG_FILTER=0 is the rollback.
+            const bool fsFitFilter = hostFullscreen_ && viewScale_.fitToWindow
+                                     && fullscreenFitFilterEnabled();
             const bool filtered = resampled && !nearestScaleForced()
-                                  && (reducing || magnifyLinearForced());
+                                  && (reducing || magnifyLinearForced() || fsFitFilter);
             p.setRenderHint(QPainter::SmoothPixmapTransform, filtered);
             stats_.lastDrawWasScaled = resampled;
             stats_.lastDrawWasFiltered = filtered;

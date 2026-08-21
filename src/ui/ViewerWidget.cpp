@@ -504,6 +504,12 @@ void ViewerWidget::paintEvent(QPaintEvent* event) {
     // inset would move the empty state's mark rather than merely be out of date.
     overlayModel_.setTopInset(chromeTopInsetLogical_ * devicePixelRatioF());
 
+    // Per paint, one bool compare, and it is what makes the fullscreen-fit
+    // magnification filter (owner, 2026-08-21) need no window-state event
+    // plumbing: F11 always repaints, so the flag cannot be stale for a drawn
+    // frame.
+    renderer_->setHostFullscreen(window() && window()->isFullScreen());
+
     renderer_->paint(this);
 
     // Fold the backend's numbers into the widget's, so the HUD reads one struct

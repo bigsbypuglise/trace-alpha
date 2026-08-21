@@ -1096,7 +1096,14 @@ void D3D11VideoRenderer::paint(QWidget* host) {
     // Magnification takes the point sampler: owner decision, spec phase 15.
     const bool reducing = fitted.width() < sourceOnScreenAxes.width()
                           || fitted.height() < sourceOnScreenAxes.height();
-    const bool magnifyLinear = magnifyLinearFilter();
+    // The fullscreen FIT filters its magnification (owner, 2026-08-21):
+    // fullscreen is not deliberate zoom, and testers on panels larger than the
+    // source saw nearest stair-step the picture. Actual Size and the zoom
+    // ladder keep phase 15's nearest, fullscreen included, because
+    // fitToWindow is false there. TRACE_FS_MAG_FILTER=0 is the rollback.
+    const bool fsFitFilter = hostFullscreen_ && viewScale_.fitToWindow
+                             && fullscreenFitFilterEnabled();
+    const bool magnifyLinear = magnifyLinearFilter() || fsFitFilter;
 
     D3D11_VIEWPORT vp = {};
     vp.TopLeftX = static_cast<float>(dest.x());
