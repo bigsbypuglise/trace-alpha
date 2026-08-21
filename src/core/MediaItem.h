@@ -6,7 +6,11 @@
 
 namespace trace::core {
 
-enum class MediaKind { Unknown, VideoFile, StillImage, ImageSequence };
+// AudioFile: sound with no picture. frameSource_ stays null for it -- the
+// transport runs on a synthetic frame index (duration x a nominal rate), and
+// every frames-available consumer is expected to ask the kind rather than
+// assume media-open implies frames-open.
+enum class MediaKind { Unknown, VideoFile, StillImage, ImageSequence, AudioFile };
 
 struct MediaItem {
     std::string path;

@@ -88,6 +88,14 @@ public:
     // "relevant keyboard input reveals it". Mouse reveals are handled inside the
     // model, on both backends' own input paths.
     void revealOverlay(const char* source = "host") { overlayModel_.reveal(source); }
+    // Audio-only media: the empty-state MARK stays (there is no picture) but
+    // the "Drop media or File > Open" hint must not -- a file IS open. Routed
+    // through the widget because the model is private; see
+    // OverlayModel::setPicturelessMediaOpen.
+    void setPicturelessMediaOpen(bool open) {
+        overlayModel_.setPicturelessMediaOpen(open);
+        update();
+    }
     // How much of the viewer's TOP EDGE the transient top chrome covers, in
     // logical pixels (UI redesign roadmap step 7). Held here in LOGICAL units
     // and converted at paint time, because the model wants device pixels and the

@@ -109,6 +109,19 @@ public:
     // clock past this point so a short audio track cannot truncate playback.
     bool ended() const;
 
+    // The container's claim about the stream's length, in seconds; 0 when
+    // nothing is open or the container states none. Read live off the open
+    // demuxer -- open() is the only thing that changes it, so it is stable for
+    // the life of a file. Added for audio-only media, whose synthetic frame
+    // count is derived from it.
+    double durationSeconds() const;
+    // The FILE's sample rate and channel count, as distinct from the DEVICE's
+    // that stats() reports -- stats().sampleRate is the output mix format, which
+    // is the right thing for the sync diagnostics and the wrong thing for an
+    // inspector describing the media.
+    int sourceSampleRate() const;
+    int sourceChannels() const;
+
     void setMuted(bool muted);
     bool isMuted() const;
 

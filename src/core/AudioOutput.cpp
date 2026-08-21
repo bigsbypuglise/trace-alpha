@@ -438,6 +438,9 @@ double AudioOutput::peekClock() const { return 0.0; }
 bool AudioOutput::clockReady() const { return false; }
 long long AudioOutput::clockUpdateCount() const { return 0; }
 bool AudioOutput::ended() const { return true; }
+double AudioOutput::durationSeconds() const { return 0.0; }
+int AudioOutput::sourceSampleRate() const { return 0; }
+int AudioOutput::sourceChannels() const { return 0; }
 void AudioOutput::setMuted(bool) {}
 bool AudioOutput::isMuted() const { return false; }
 void AudioOutput::setVolume(double) {}
@@ -744,6 +747,28 @@ long long AudioOutput::clockUpdateCount() const {
 bool AudioOutput::ended() const {
     if (!impl_) return true;
     return impl_->decodeEnded && impl_->ring.used() == 0;
+}
+
+double AudioOutput::durationSeconds() const {
+    if (!impl_ || !impl_->fmt) return 0.0;
+    // The container's overall duration first (AV_TIME_BASE units), the stream's
+    // own claim as the fallback. Never synthesised: a file that states neither
+    // reports 0 and the caller decides what to do about an unknown length.
+    if (impl_->fmt->duration > 0)
+        return static_cast<double>(impl_->fmt->duration) / static_cast<double>(AV_TIME_BASE);
+    if (impl_->streamIndex >= 0) {
+        const AVStream* st = impl_->fmt->streams[impl_->streamIndex];
+        if (st && st->duration > 0) return static_cast<double>(st->duration) * av_q2d(st->time_base);
+    }
+    return 0.0;
+}
+
+int AudioOutput::sourceSampleRate() const {
+    return (impl_ && impl_->codec) ? impl_->codec->sample_rate : 0;
+}
+
+int AudioOutput::sourceChannels() const {
+    return (impl_ && impl_->codec) ? impl_->codec->ch_layout.nb_channels : 0;
 }
 
 void AudioOutput::setMuted(bool muted) {

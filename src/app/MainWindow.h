@@ -404,6 +404,18 @@ private:
     void startAudioForPlayback();
     void stopAudio();
 
+    // Audio-only media: sound with no picture. frameSource_ is null for it, so
+    // every frames-available consumer asks this rather than assuming media-open
+    // implies frames-open. The transport runs on a synthetic frame index --
+    // duration x kAudioNominalFps -- which is what keeps the slider, readouts,
+    // Go To and the accessibility proxies working unchanged.
+    bool audioOnlyMedia() const;
+    // The play tick for an audio file: advances the synthetic playhead from the
+    // audio clock (wall clock while the device primes), never decodes, and
+    // stops or loops at the end. Called from the tick lambda before anything
+    // that assumes a frameSource_.
+    void runAudioOnlyTick();
+
     // Runs while a remote read is outstanding: keeps the event loop alive so
     // the window still repaints and input is still accepted, and raises the
     // buffering state once the wait is long enough for a user to notice.

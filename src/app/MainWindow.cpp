@@ -87,6 +87,27 @@ using trace::core::PrimaryReadoutMode;
 
 namespace {
 
+// The synthetic frame rate for audio-only media. An audio file has no frames,
+// but the transport, slider, readouts, Go To and the accessibility proxies all
+// speak in frame indices -- so an audio file gets duration x this rate as its
+// frame count and everything downstream works unchanged. 24 rather than
+// anything cleverer because it is the fallback readoutTextAt and refreshHud
+// already use for a null frameSource_, so the three cannot disagree. The
+// default readout for audio is Seconds/Elapsed, never Frame Count: a
+// synthesised frame number presented as primary would be dishonest in a tool
+// whose pillar is trustworthiness, and the doc records the rate for anyone who
+// selects Frame Count deliberately.
+constexpr double kAudioNominalFps = 24.0;
+
+// The audio-only extension set openPath dispatches on. Decoding is FFmpeg's,
+// so the constraint is "commonly reviewed audio" rather than capability.
+bool isAudioOnlyExtension(const QString& ext) {
+    return ext == QLatin1String("wav") || ext == QLatin1String("mp3")
+        || ext == QLatin1String("m4a") || ext == QLatin1String("aac")
+        || ext == QLatin1String("flac") || ext == QLatin1String("ogg")
+        || ext == QLatin1String("opus");
+}
+
 // Coalescing window for slider events, so a burst of moves costs one decode
 // rather than one each. Deliberately NOT used to pace shuttle catch-up.
 // Spec section 4: "reserve a safe margin around the outer window". Per side, in
@@ -506,6 +527,17 @@ MainWindow::MainWindow() {
         // return rather than a call at the end. armNextPresent() is a no-op
         // when playTimer_ is inactive, so the stop paths inside stay correct.
         const auto armNext = qScopeGuard([this]() { armNextPresent(); });
+
+        // Audio-only media has no frameSource_, so the guard below would end
+        // its run on the first tick. Its whole tick is its own small path: no
+        // decode, no prefetch, no shuttle -- the playhead follows the audio
+        // clock and the picture is the empty-state mark. The armNext guard
+        // above still re-arms it, and stopping the timer inside makes that a
+        // no-op, exactly as on the video path.
+        if (audioOnlyMedia()) {
+            runAudioOnlyTick();
+            return;
+        }
 
         if (!frameSource_ || !frameSource_->canPlay()) return;
         // A tick delivered by the event pump that runs during a slow remote
@@ -2267,7 +2299,9 @@ void MainWindow::syncTimeDisplayActions() {
         timeDisplayTimecodeAction_->setEnabled(hasSourceTimecode_);
     }
     if (goToTimecodeAction_) goToTimecodeAction_->setEnabled(hasSourceTimecode_);
-    if (goToFrameAction_) goToFrameAction_->setEnabled(frameSource_ && frameSource_->maxFrame() >= 0);
+    // The playback state rather than frameSource_: audio-only media has a
+    // range and no source, and the two agree for every frames-backed kind.
+    if (goToFrameAction_) goToFrameAction_->setEnabled(playback_.state().maxFrame >= 0);
 }
 
 // Parsed ONCE per media open, not per HUD refresh. The HUD rebuilds several
@@ -2495,7 +2529,12 @@ void MainWindow::syncViewTransformActions() {
 // something, and there is nothing for it to mean.
 void MainWindow::syncViewScaleActions() {
     if (!viewer_) return;
-    const bool haveMedia = currentMedia_.has_value();
+    // A picture to scale, not merely media: audio-only files draw the
+    // empty-state mark, and Actual Size on a mark is a command that visibly
+    // does nothing. Pan follows for free -- it only engages past fit, which is
+    // unreachable with the zoom actions disabled.
+    const bool haveMedia = currentMedia_.has_value()
+                        && currentMedia_->kind != MediaKind::AudioFile;
     const bool fit = viewer_->isFitToWindow();
     // Within a thousandth of 1:1 rather than exactly, because the scale can be
     // reached by the ladder (exactly 1.0) or by the cap (a computed double).
@@ -2667,8 +2706,10 @@ long long MainWindow::frameForSourceTimecode(const QString& text) const {
 // out from under an open prompt. A hand-rolled non-modal panel would have had to
 // reimplement all four of those.
 void MainWindow::promptGoToFrame() {
-    if (!frameSource_) return;
-    const long long maxFrame = frameSource_->maxFrame();
+    if (!frameSource_ && !audioOnlyMedia()) return;
+    // The playback state's maxFrame -- goToFrame's own currency, and the only
+    // one audio-only media has.
+    const long long maxFrame = playback_.state().maxFrame;
     if (maxFrame < 0) return;
 
     bool ok = false;
@@ -2781,7 +2822,70 @@ trace::app::InspectorSnapshot MainWindow::buildInspectorSnapshot() const {
     using trace::app::InspectorSection;
 
     trace::app::InspectorSnapshot snap;
-    if (!currentMedia_.has_value() || !frameSource_) return snap;
+    const bool audioOnly = audioOnlyMedia();
+    if (!currentMedia_.has_value() || (!frameSource_ && !audioOnly)) return snap;
+
+    // Audio-only media: its own compact snapshot, built here and returned,
+    // because every row below this block describes a picture the file does not
+    // have. Same rules as the rest of the function -- no QFileInfo, no stat, no
+    // decoder poll; the duration and stream facts were read at open and are
+    // stable for the life of the file.
+    if (audioOnly) {
+        const QString audioPath = QString::fromStdString(currentMedia_->path);
+        snap.sourcePath = shareState_.canonicalPath.isEmpty() ? audioPath
+                                                              : shareState_.canonicalPath;
+        const int audioSlash = std::max(snap.sourcePath.lastIndexOf(QLatin1Char('/')),
+                                        snap.sourcePath.lastIndexOf(QLatin1Char('\\')));
+        snap.fileName = audioSlash >= 0 ? snap.sourcePath.mid(audioSlash + 1) : snap.sourcePath;
+
+        InspectorSection general;
+        general.title = tr("General");
+        general.fields.push_back({tr("File name"), snap.fileName, FieldOrigin::File});
+        general.fields.push_back({tr("Source path"), snap.sourcePath, FieldOrigin::File, true});
+        general.fields.push_back({tr("File size"), formatByteSize(openedFileBytes_), FieldOrigin::File});
+        general.fields.push_back({tr("Video format"), tr("None (audio file)"), FieldOrigin::Encoded});
+
+        const double totalSeconds = audio_.durationSeconds();
+        if (totalSeconds > 0.0) {
+            const int hours = static_cast<int>(totalSeconds) / 3600;
+            const int minutes = (static_cast<int>(totalSeconds) % 3600) / 60;
+            const double seconds = totalSeconds - hours * 3600.0 - minutes * 60.0;
+            const QString duration =
+                hours > 0 ? tr("%1:%2:%3")
+                                .arg(hours)
+                                .arg(minutes, 2, 10, QLatin1Char('0'))
+                                .arg(seconds, 6, 'f', 3, QLatin1Char('0'))
+                          : tr("%1:%2").arg(minutes).arg(seconds, 6, 'f', 3, QLatin1Char('0'));
+            general.fields.push_back({tr("Duration"), duration, FieldOrigin::Encoded});
+        }
+        snap.sections.push_back(std::move(general));
+
+        InspectorSection audioSection;
+        audioSection.title = tr("Audio details");
+        const auto as = audio_.stats();
+        audioSection.fields.push_back(
+            {tr("Codec"), as.codecName.isEmpty() ? tr("Unknown") : as.codecName,
+             FieldOrigin::Encoded});
+        if (audio_.sourceSampleRate() > 0) {
+            audioSection.fields.push_back(
+                {tr("Sample rate"), tr("%1 Hz").arg(audio_.sourceSampleRate()), FieldOrigin::Encoded});
+        }
+        if (audio_.sourceChannels() > 0) {
+            audioSection.fields.push_back(
+                {tr("Channels"), QString::number(audio_.sourceChannels()), FieldOrigin::Encoded});
+        }
+        // The transport's currency, labelled as Trace's own doing: a synthetic
+        // index presented as a file property is exactly what the origin tags
+        // exist to prevent.
+        audioSection.fields.push_back(
+            {tr("Transport frame index"),
+             tr("%1 frames at a nominal %2 fps (synthesised by Trace - the file has no frames)")
+                 .arg(std::max(0LL, playback_.state().maxFrame) + 1)
+                 .arg(QString::number(kAudioNominalFps, 'f', 0)),
+             FieldOrigin::Playback});
+        snap.sections.push_back(std::move(audioSection));
+        return snap;
+    }
 
     const QString path = QString::fromStdString(currentMedia_->path);
     // The canonical path the Share gate computed at open, not a fresh
@@ -3417,6 +3521,8 @@ void MainWindow::closeMedia() {
     // it to whatever was opened next, which the phase 10 rule forbids.
     if (viewer_) {
         viewer_->setFrame(trace::core::VideoFrame{});
+        // Nothing is open any more, so the hint returns with the empty state.
+        viewer_->setPicturelessMediaOpen(false);
         viewer_->setViewTransform(trace::render::ViewTransform{});
         // Back to square pixels and no container rotation, and back to the
         // 16:9 minimum. Leaving a 9:16 floor behind would constrain the empty
@@ -3467,6 +3573,23 @@ void MainWindow::closeMedia() {
 // false on a failed landing is deliberate: a wrap that could not decode its
 // first frame must stop, not spin at the boundary.
 bool MainWindow::loopWrap(int direction) {
+    // Loop applies to audio-only media too -- a menu item that silently stopped
+    // applying on one media kind would mean something different per file. No
+    // landing decode exists to pay: the wrap is a seek of the device alone.
+    if (audioOnlyMedia()) {
+        if (!loopEnabled_ || direction <= 0) return false;
+        if (playback_.state().maxFrame <= 0) return false;
+        playback_.setCurrentFrame(0);
+        syncTransportBar();
+        // After the playhead moves, for startAudioForPlayback's own reason: it
+        // takes its offset from the current frame.
+        stopAudio();
+        startAudioForPlayback();
+        beginPlaybackTimeline();
+        ++loopWraps_;
+        return true;
+    }
+
     if (!loopEnabled_ || !frameSource_) return false;
     const long long maxFrame = playback_.state().maxFrame;
     // Nothing to loop: a still, or a one-frame sequence. Wrapping would
@@ -3621,9 +3744,17 @@ void MainWindow::syncPlaybackSpeedActions() {
 // can be read.
 void MainWindow::syncMediaDependentActions() {
     const bool haveMedia = currentMedia_.has_value();
+    // Frames-backed media, as distinct from media at all. Audio-only files have
+    // a transport and no picture, so everything that copies, transforms or
+    // scales a frame is disabled for them -- disabled rather than left to fail,
+    // because a command that appears actionable and refuses is the showInfo
+    // failure. Speeds too: audio is 1x forward only (the standing rule), and a
+    // rate menu whose every rung silences the one thing the file is would be a
+    // menu of ways to mute it.
+    const bool haveFrames = haveMedia && currentMedia_->kind != MediaKind::AudioFile;
     if (closeMediaAction_) closeMediaAction_->setEnabled(haveMedia);
-    if (copyFrameAction_) copyFrameAction_->setEnabled(haveMedia);
-    for (auto* action : speedActions_) action->setEnabled(haveMedia);
+    if (copyFrameAction_) copyFrameAction_->setEnabled(haveFrames);
+    for (auto* action : speedActions_) action->setEnabled(haveFrames);
     // Deliberately NOT beside the Copy Current Frame line above. Loop and Copy
     // Current Frame are separate commits so either can be reverted alone, and
     // two one-line additions on adjacent lines make `git revert` conflict on
@@ -3634,11 +3765,11 @@ void MainWindow::syncMediaDependentActions() {
     // The view transforms need a picture to transform; the aspect lock needs a
     // shape to lock to. Both are harmless with nothing open and both would be
     // commands that visibly do nothing, which is the showInfo failure.
-    if (rotateLeftAction_) rotateLeftAction_->setEnabled(haveMedia);
-    if (rotateRightAction_) rotateRightAction_->setEnabled(haveMedia);
-    if (flipHorizontalAction_) flipHorizontalAction_->setEnabled(haveMedia);
-    if (flipVerticalAction_) flipVerticalAction_->setEnabled(haveMedia);
-    if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(haveMedia);
+    if (rotateLeftAction_) rotateLeftAction_->setEnabled(haveFrames);
+    if (rotateRightAction_) rotateRightAction_->setEnabled(haveFrames);
+    if (flipHorizontalAction_) flipHorizontalAction_->setEnabled(haveFrames);
+    if (flipVerticalAction_) flipVerticalAction_->setEnabled(haveFrames);
+    if (resetViewTransformAction_) resetViewTransformAction_->setEnabled(haveFrames);
     // UI redesign roadmap step 5. Gated here for the same reason every other
     // transport command is: goToFrame() range-checks and returns on its own, so
     // an ungated Home would be safe -- and would be a control that appears
@@ -3712,8 +3843,12 @@ void MainWindow::copyCurrentFrame() {
 // slider release uses, which is the spec's "use the existing exact-frame seek
 // path" -- and is why neither prompt needed any decoder work at all.
 void MainWindow::goToFrame(long long frame, const char* action) {
-    if (!frameSource_) return;
-    const long long maxFrame = frameSource_->maxFrame();
+    const bool audioOnly = audioOnlyMedia();
+    if (!frameSource_ && !audioOnly) return;
+    // The playback state's maxFrame: identical to frameSource_->maxFrame() for
+    // every frames-backed kind (resetForNewMedia sets it from the same count),
+    // and the only answer that exists for audio-only media.
+    const long long maxFrame = playback_.state().maxFrame;
     if (maxFrame < 0 || frame < 0 || frame > maxFrame) return;
 
     // A run in progress owns the decoder lease and the playhead; end it before
@@ -3731,11 +3866,16 @@ void MainWindow::goToFrame(long long frame, const char* action) {
     userPlayIntent_ = false;
     playback_.setCurrentFrame(frame);
     supersedeInFlightRequests();
-    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 0, true);
+    if (!audioOnly) {
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 0, true);
 
-    QString error;
-    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-        if (!error.isEmpty()) showTransientMessage(error, 3000);
+        QString error;
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
+            if (!error.isEmpty()) showTransientMessage(error, 3000);
+        }
+    } else if (viewer_) {
+        // No frame to land; the readout paint is the whole landing.
+        viewer_->update();
     }
     syncTransportBar();
     if (viewer_) viewer_->revealOverlay("goto-frame");
@@ -4094,8 +4234,12 @@ void MainWindow::setupTransportControls() {
     goToEndAction_ = new QAction(tr("Go to &End"), this);
     goToEndAction_->setShortcut(QKeySequence(Qt::Key_End));
     connect(goToEndAction_, &QAction::triggered, this, [this]() {
-        if (!frameSource_) return;
-        goToFrame(frameSource_->maxFrame(), "Go to End");
+        // The playback state's maxFrame, goToFrame's own currency -- identical
+        // to frameSource_->maxFrame() for frames-backed media, and the only
+        // answer audio-only media has (its frameSource_ is null by design).
+        const long long maxFrame = playback_.state().maxFrame;
+        if (maxFrame < 0) return;
+        goToFrame(maxFrame, "Go to End");
     });
     addAction(goToEndAction_);
 
@@ -4238,6 +4382,16 @@ void MainWindow::setupTransportControls() {
         }
 
         playback_.setCurrentFrame(static_cast<long long>(timelineSlider_->value()));
+        // Audio-only media: the release IS the seek -- resumePlaybackAfterScrub
+        // below restarts the device at the new offset when the drag interrupted
+        // playback (AudioOutput::start(startSeconds), which already does exactly
+        // this). Nothing decodes; the drag itself was silent by construction.
+        if (audioOnlyMedia()) {
+            if (viewer_) viewer_->update();
+            resumePlaybackAfterScrub();
+            refreshHud("Scrub");
+            return;
+        }
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         QString error;
         if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
@@ -4265,6 +4419,14 @@ void MainWindow::setupTransportControls() {
         }
 
         playback_.setCurrentFrame(static_cast<long long>(value));
+
+        // Audio-only media: the drag moves the playhead and the readout and
+        // nothing else -- deliberately silent, per the standing audio rule.
+        if (audioOnlyMedia()) {
+            if (viewer_) viewer_->update();
+            refreshHud("Scrub");
+            return;
+        }
 
         prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
         QString error;
@@ -4929,9 +5091,11 @@ void MainWindow::syncTransportBar() {
     prevFrameAction_->setEnabled(hasAnyMedia);
     nextFrameAction_->setEnabled(hasAnyMedia);
     // Both shuttle controls need somewhere to run, which a single still frame
-    // is not.
-    if (fastForwardAction_) fastForwardAction_->setEnabled(hasPlayableRange);
-    if (rewindAction_) rewindAction_->setEnabled(hasPlayableRange);
+    // is not -- and a decoder to run on, which audio-only media does not have:
+    // the shuttle is a decode pipeline, and audio is 1x forward only.
+    const bool canShuttle = hasPlayableRange && !audioOnlyMedia();
+    if (fastForwardAction_) fastForwardAction_->setEnabled(canShuttle);
+    if (rewindAction_) rewindAction_->setEnabled(canShuttle);
     playPauseAction_->setEnabled(hasPlayableRange);
     playPauseAction_->setText(playing ? "Pause" : "Play");
 
@@ -4952,7 +5116,9 @@ void MainWindow::syncTransportBar() {
 }
 
 void MainWindow::openFileDialog() {
-    const QString filter = "Media (*.mp4 *.mov *.png *.jpg *.jpeg *.tif *.tiff *.exr);;All Files (*.*)";
+    const QString filter =
+        "Media (*.mp4 *.mov *.png *.jpg *.jpeg *.tif *.tiff *.exr "
+        "*.wav *.mp3 *.m4a *.aac *.flac *.ogg *.opus);;All Files (*.*)";
     const QString path = QFileDialog::getOpenFileName(this, "Open Media", {}, filter);
     if (!path.isEmpty()) openPath(path);
 }
@@ -5367,7 +5533,47 @@ bool MainWindow::openPath(const QString& path) {
         }
     }
 
-    if (!frameSource_) {
+    // Audio-only media: the fourth kind beside video, sequence and still, and
+    // the one that leaves frameSource_ null. AudioOutput already owns its own
+    // demuxer, decode thread, seek and master clock -- built independent of the
+    // video decoder on purpose -- so opening it IS the open. The transport runs
+    // on a synthetic frame index, duration x kAudioNominalFps, which is what
+    // keeps the slider, readouts, Go To and the accessibility proxies working
+    // with no second code path.
+    if (isAudioOnlyExtension(ext)) {
+        QString audioErr;
+        if (!audio_.open(path, audioErr)) {
+            // open() returns false for "no stream", "device missing" and the
+            // TRACE_NO_AUDIO control alike; the message states which.
+            showTransientMessage(
+                audioErr.isEmpty()
+                    ? tr("Could not open audio: %1").arg(fi.fileName())
+                    : audioErr,
+                3000);
+            refreshHud("Open failed");
+            return false;
+        }
+        const double duration = audio_.durationSeconds();
+        if (!(duration > 0.0)) {
+            audio_.close();
+            showTransientMessage(tr("Audio file states no duration: %1").arg(fi.fileName()), 3000);
+            refreshHud("Open failed");
+            return false;
+        }
+        item.kind = MediaKind::AudioFile;
+        item.frameCount = std::max(1LL, static_cast<long long>(
+                                            std::llround(duration * kAudioNominalFps)));
+        playback_.resetForNewMedia(item.frameCount - 1);
+        playback_.setCurrentFrame(0);
+        // releaseCurrentMedia does not clear this (the frames-backed kinds
+        // always overwrite it), and an audio file never will -- left standing,
+        // currentDisplayAspect() would read the PREVIOUS media's size and
+        // section 4 would reshape the window to a picture that is gone. An
+        // audio file has no aspect ratio; the window must be left alone.
+        currentImage_.reset();
+    }
+
+    if (!frameSource_ && item.kind != MediaKind::AudioFile) {
         const auto seq = trace::core::SequenceParser::detect(item.path);
         if (seq.has_value()) {
             item.kind = MediaKind::ImageSequence;
@@ -5424,6 +5630,17 @@ bool MainWindow::openPath(const QString& path) {
     // here is what stops a file WITH timecode handing its mode to a file
     // WITHOUT one.
     refreshSourceTimecode();
+    // Audio defaults to a TIME readout, never Frame Count: the frame index is
+    // synthesised (duration x kAudioNominalFps), and a synthesised number as
+    // the primary readout is the one way this feature reads dishonestly in a
+    // tool whose pillar is trustworthiness. A default, not a lock -- the menu
+    // still offers Frame Count for anyone who wants the synthetic index, and
+    // the doc states the rate.
+    if (item.kind == MediaKind::AudioFile
+        && viewState_.readoutMode == PrimaryReadoutMode::Frame) {
+        viewState_.readoutMode = PrimaryReadoutMode::Elapsed;
+        syncTimeDisplayActions();
+    }
     // Same shape and the same reason (spec phase 8): computed here so no
     // surface has to probe the filesystem to draw itself.
     refreshShareState();
@@ -5482,21 +5699,34 @@ bool MainWindow::openPath(const QString& path) {
     }
     syncViewScaleActions();
 
-    prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
-    // Before the first frame: the decoder sizes scrub previews from this, and a
-    // file opened into an already-sized window never gets a resize event to
-    // tell it.
-    syncScrubPreviewSize();
-    syncPlanarOutput();
+    if (currentMedia_->kind == MediaKind::AudioFile) {
+        // No frame to load; what must land on screen is the empty-state mark.
+        // The renderers ask their own "is there a picture" member, so clearing
+        // the outgoing frame is all it takes -- setMediaPresent stays a
+        // two-state answer and the mark draws for free. The HINT is suppressed:
+        // "Drop media or File > Open" over an open file is the wrong statement.
+        if (viewer_) {
+            viewer_->setFrame(trace::core::VideoFrame{});
+            viewer_->setPicturelessMediaOpen(true);
+        }
+    } else {
+        if (viewer_) viewer_->setPicturelessMediaOpen(false);
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
+        // Before the first frame: the decoder sizes scrub previews from this,
+        // and a file opened into an already-sized window never gets a resize
+        // event to tell it.
+        syncScrubPreviewSize();
+        syncPlanarOutput();
 
-    QString error;
-    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
-        if (!error.isEmpty()) showTransientMessage(error, 3000);
-        refreshHud("Open failed");
-        return false;
+        QString error;
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
+            if (!error.isEmpty()) showTransientMessage(error, 3000);
+            refreshHud("Open failed");
+            return false;
+        }
+
+        if (currentMedia_->kind == MediaKind::ImageSequence) prefetchNeighbors();
     }
-
-    if (currentMedia_->kind == MediaKind::ImageSequence) prefetchNeighbors();
 
     const auto fps = frameSource_ ? std::max(1.0, frameSource_->fps()) : 24.0;
     // Video runs a short scheduler tick and decides presentation from the
@@ -5797,7 +6027,12 @@ void MainWindow::togglePlayPause() {
     // on screen rather than from where the reverse pipeline had run ahead to.
     endShuttleRun(/*landExactly=*/true);
 
-    if (!frameSource_ || !frameSource_->canPlay()) {
+    // Audio-only media plays with no frameSource_; its playable-range test is
+    // the same question asked of the playback state instead.
+    const bool audioOnly = audioOnlyMedia();
+    const bool playable = audioOnly ? playback_.state().maxFrame > 0
+                                    : (frameSource_ && frameSource_->canPlay());
+    if (!playable) {
         playback_.pause();
         syncTransportBar();
         return;
@@ -5819,13 +6054,17 @@ void MainWindow::togglePlayPause() {
         if (playbackAtEnd_) {
             playback_.setCurrentFrame(0);
             playbackAtEnd_ = false;
-            QString error;
-            // Step, not Playback: this is a jump to a new position, and the
-            // frame is being landed on rather than decoded in sequence.
-            prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
-            if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
-                && !error.isEmpty()) {
-                showTransientMessage(error, 3000);
+            // Audio-only media has no frame to land; the rewind is the playhead
+            // move alone and the device restart below seeks the demuxer.
+            if (!audioOnly) {
+                QString error;
+                // Step, not Playback: this is a jump to a new position, and the
+                // frame is being landed on rather than decoded in sequence.
+                prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step, 1, true);
+                if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
+                    && !error.isEmpty()) {
+                    showTransientMessage(error, 3000);
+                }
             }
             // The slider still reads the old position, and startAudioForPlayback
             // below takes its start offset from the current frame.
@@ -6087,6 +6326,25 @@ void MainWindow::stepOneFrame(int delta, const char* hudLabel) {
 
     if (delta < 0) playback_.stepBackward();
     else           playback_.stepForward();
+
+    // Audio-only media: a step is the playhead move alone -- one synthetic
+    // frame, 1/24s at the nominal rate. Nothing decodes and nothing lands; the
+    // controller has already paused, so only the machinery stop remains.
+    if (audioOnlyMedia()) {
+        userPlayIntent_ = false;
+        if (playTimer_.isActive()) {
+            playTimer_.stop();
+            stopAudio();
+            playbackClock_.invalidate();
+            playbackAccumulatorMs_ = 0.0;
+        }
+        syncTransportBar();
+        // The strip's readout is painted by the viewer, and no frame arrives
+        // to schedule that paint.
+        if (viewer_) viewer_->update();
+        refreshHud(hudLabel);
+        return;
+    }
 
     prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step,
                         delta < 0 ? -1 : 1, true);
@@ -6831,7 +7089,13 @@ void MainWindow::armNextPresent() {
 // reclaimDecoder() is the one place that performs it.
 void MainWindow::resumePlaybackAfterScrub() {
     if (!userPlayIntent_) return;
-    if (!frameSource_ || !frameSource_->canPlay()) return;
+    // Audio-only media resumes with no frameSource_ -- the release seeks the
+    // device through startPlaybackRun's ordinary startAudioForPlayback.
+    if (audioOnlyMedia()) {
+        if (playback_.state().maxFrame <= 0) return;
+    } else if (!frameSource_ || !frameSource_->canPlay()) {
+        return;
+    }
     // The landing was deferred -- storage was mid-read, so flushVideoScrub
     // re-armed instead of decoding. Resuming now would play from a frame the
     // release has not landed yet. Staying paused is the safe half of that
@@ -6869,13 +7133,21 @@ void MainWindow::resumePlaybackAfterScrub() {
 // predicate that says what the rule says.
 bool MainWindow::audioShouldDrive() const {
     if (!audio_.hasAudio()) return false;
-    if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::VideoFile) return false;
+    // A video file with a track, or an audio-only file -- the second is the
+    // whole point of the file: sound IS the media, and the synthetic playhead
+    // follows the same device clock the video path does.
+    if (!currentMedia_.has_value()
+        || (currentMedia_->kind != MediaKind::VideoFile
+            && currentMedia_->kind != MediaKind::AudioFile)) return false;
     const auto st = playback_.state();
     return st.mode == PlaybackMode::PlayingForward && std::abs(st.speed - 1.0) < 1e-4;
 }
 
 void MainWindow::startAudioForPlayback() {
-    if (!audioShouldDrive() || !frameSource_) {
+    // audioShouldDrive() already implies an eligible media kind, so the old
+    // `|| !frameSource_` term is gone: audio-only media has no frameSource_ by
+    // design and must still get its device started.
+    if (!audioShouldDrive()) {
         stopAudio();
         return;
     }
@@ -6886,10 +7158,106 @@ void MainWindow::startAudioForPlayback() {
     audioClockStalled_ = false;
     audioClockStall_.start();
 
-    const double fps = std::max(1.0, frameSource_->fps());
+    // The synthetic rate for audio-only media, the source's for video; the
+    // start offset must be computed in the same currency the playhead is in.
+    const double fps = frameSource_ ? std::max(1.0, frameSource_->fps()) : kAudioNominalFps;
     const double startSeconds = static_cast<double>(playback_.state().currentFrame) / fps;
     audio_.start(startSeconds);
     audioDriving_ = audio_.isPlaying();
+}
+
+bool MainWindow::audioOnlyMedia() const {
+    return currentMedia_.has_value() && currentMedia_->kind == MediaKind::AudioFile;
+}
+
+// The play tick for an audio file. The shape mirrors the video tick's
+// audio-mastered path with everything frame-shaped removed: the device clock
+// picks the playhead position (wall-clock accumulator while the device primes,
+// exactly as clockReady()'s contract requires), nothing decodes, and reaching
+// the end stops -- or wraps, because Loop applying to every media kind is what
+// keeps the menu item meaning one thing.
+void MainWindow::runAudioOnlyTick() {
+    const auto playbackState = playback_.state();
+    if (playbackState.mode != PlaybackMode::PlayingForward) {
+        // Audio-only media never plays reverse and never shuttles; any other
+        // mode means something stopped the run without stopping the timer.
+        playTimer_.stop();
+        stopAudio();
+        userPlayIntent_ = false;
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+        return;
+    }
+    if (audioDriving_ && !audioShouldDrive()) stopAudio();
+
+    const double frameDurationMs = 1000.0 / kAudioNominalFps;
+    tickFrameDurationMs_ = frameDurationMs;
+    syncPresentTimeline(frameDurationMs);
+
+    // The wall-clock accumulator, fed the way the video tick feeds it
+    // (nanoseconds, never restart() -- the millisecond truncation is a measured
+    // rate deficit). It is the position source until the device clock is ready
+    // and the handover if audio ever stalls.
+    if (!playbackClock_.isValid()) {
+        playbackClock_.start();
+        playbackAccumulatorMs_ = 0.0;
+    } else {
+        const qint64 elapsedNs = playbackClock_.nsecsElapsed();
+        playbackClock_.start();
+        playbackAccumulatorMs_ += static_cast<double>(elapsedNs) / 1'000'000.0;
+    }
+
+    const long long beforeFrame = playbackState.currentFrame;
+    const long long maxFrame = playbackState.maxFrame >= 0 ? playbackState.maxFrame : beforeFrame;
+
+    const bool audioActive = audioDriving_ && audio_.isPlaying()
+                          && !audio_.ended() && audio_.clockReady();
+    audioClockPriming_ = audioDriving_ && audio_.isPlaying()
+                      && !audio_.ended() && !audio_.clockReady();
+
+    long long target = beforeFrame;
+    if (audioActive) {
+        // The one place the audio control loop is stepped, same rule as the
+        // video tick. The synthetic playhead never moves backward mid-run: the
+        // clock's small early wobble must not read as the transport scrubbing.
+        const double audioSeconds = audio_.advanceClock();
+        target = std::max(beforeFrame,
+                          static_cast<long long>(std::llround(audioSeconds * kAudioNominalFps)));
+        // Drained but not consumed: the accumulator keeps a clean handover if
+        // the device stalls, and the cap stops a stall banking fast-forward.
+        playbackAccumulatorMs_ = std::min(playbackAccumulatorMs_, 4.0 * frameDurationMs);
+    } else {
+        int steps = static_cast<int>(std::floor(playbackAccumulatorMs_ / frameDurationMs));
+        if (steps < 1) steps = 1;
+        playbackAccumulatorMs_ -= steps * frameDurationMs;
+        if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
+        target = beforeFrame + steps;
+    }
+
+    playback_.setCurrentFrame(std::clamp(target, 0LL, maxFrame));
+
+    // The strip's thumb and readout are quads built inside the viewer's paint,
+    // and with no frame arriving nothing else schedules one.
+    if (viewer_) viewer_->update();
+
+    // End of the media: the synthetic count reached, or the stream played out
+    // early (the duration and the packets can honestly disagree).
+    if (playback_.state().currentFrame >= maxFrame || audio_.ended()) {
+        if (loopWrap(1)) {
+            refreshHud("Play loop");
+            return;
+        }
+        playTimer_.stop();
+        stopAudio();
+        playback_.pause();
+        userPlayIntent_ = false;
+        playbackClock_.invalidate();
+        playbackAccumulatorMs_ = 0.0;
+        playbackAtEnd_ = true;
+        playbackEndFrame_ = playback_.state().currentFrame;
+        syncPlaybackSpeedActions();
+    }
+    refreshHud("Play");
 }
 
 void MainWindow::stopAudio() {
@@ -8905,6 +9273,24 @@ void MainWindow::refreshHud(const QString& action) {
                  + "\n" + l7 + "\n" + l7b + "\n" + l7c + "\n" + l7d + "\n" + l7e + "\n" + l7f + "\n" + l7g + "\n" + l7h + "\n" + l8 + "\n" + l9
                  + (l10.isEmpty() ? QString() : "\n" + l10)
                  + "\n" + lio1 + "\n" + lprobe + "\n" + lresp + "\n" + lio2 + "\n" + lio3 + "\n" + lio4;
+        } else if (currentMedia_->kind == MediaKind::AudioFile) {
+            // The audio-file line. The frame count is stated WITH its nominal
+            // rate beside it, because the index is synthetic and the HUD must
+            // not present it as a property of the file.
+            const auto as = audio_.stats();
+            line = QString("Audio | %1 | %2 %3Hz ch:%4 | dur %5s | F:%6/%7 @ %8fps nominal | Seconds: %9 | clk %10s %11%12")
+                .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
+                .arg(as.codecName)
+                .arg(audio_.sourceSampleRate())
+                .arg(audio_.sourceChannels())
+                .arg(QString::number(audio_.durationSeconds(), 'f', 3))
+                .arg(st.currentFrame)
+                .arg(std::max(0LL, st.maxFrame))
+                .arg(QString::number(kAudioNominalFps, 'f', 0))
+                .arg(trace::core::TimeFormat::formatSeconds(sec))
+                .arg(QString::number(as.clockSeconds, 'f', 3))
+                .arg(as.playing ? QStringLiteral("PLAYING") : QStringLiteral("idle"))
+                .arg(as.muted ? QStringLiteral(" muted") : QString());
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             // ZERO-BASED, and against the last valid INDEX rather than the

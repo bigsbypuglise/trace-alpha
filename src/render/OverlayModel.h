@@ -202,6 +202,13 @@ public:
     // incoming one lands -- and true when an open failed. Each backend passes
     // the same member its own draw branch reads, so the two cannot disagree.
     void setMediaPresent(bool present) { mediaPresent_ = present; }
+    // Audio-only media is open: there is no picture, so the empty-state MARK
+    // still draws (mediaPresent_ above stays the renderer's own answer and
+    // stays false), but the "Drop media or File > Open" hint would be telling
+    // the user to open a file that is already open. Suppresses the hint line
+    // alone; rebuildEmpty's cache keys on the elided text, so the flip
+    // rebuilds naturally on the next paint.
+    void setPicturelessMediaOpen(bool open) { picturelessMediaOpen_ = open; }
     // Bumped every time layout() moves a control rect. Same promise the atlas
     // and text revisions make -- a revision that does not move means the rects
     // did not -- and it exists for the same reason: so a consumer can tell
@@ -400,6 +407,7 @@ private:
     bool atlasDirty_ = true;
     bool enabled_ = false;
     bool mediaPresent_ = false;
+    bool picturelessMediaOpen_ = false;
 
     Region hover_ = Region::None;
     Region pressed_ = Region::None;

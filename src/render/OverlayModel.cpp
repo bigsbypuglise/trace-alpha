@@ -991,7 +991,13 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
     // and the mark is not.
     const int maxTextW = std::max(static_cast<int>(markPx),
                                   static_cast<int>(surfacePixels.width() - snap(32.0 * s)));
-    const QString shown = fm.elidedText(emptyHintText(), Qt::ElideRight, maxTextW);
+    // With audio-only media open the hint would be an instruction to open a
+    // file that is already open, so the mark stands alone. An empty string
+    // rather than a second branch: the cache test, the layout arithmetic and
+    // the draw below all degrade correctly for it.
+    const QString shown = picturelessMediaOpen_
+        ? QString()
+        : fm.elidedText(emptyHintText(), Qt::ElideRight, maxTextW);
 
     if (!empty_.isNull() && std::abs(markPx - emptyMarkPx_) < 0.5 && shown == emptyTextCached_)
         return;
@@ -999,8 +1005,11 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
     const double gap = snap(kEmptyGapLogical * s);
     const double lineH = fm.height();
     const double textW = fm.horizontalAdvance(shown);
+    const bool hasHint = !shown.isEmpty();
     const int w = static_cast<int>(std::ceil(std::max(markPx, textW)));
-    const int h = static_cast<int>(std::ceil(markPx + gap + lineH));
+    // No hint, no reserved line: the image ends at the mark, so the centring
+    // arithmetic in buildFrame centres the mark itself.
+    const int h = static_cast<int>(std::ceil(hasHint ? markPx + gap + lineH : markPx));
     if (w <= 0 || h <= 0) return;
 
     QImage image(w, h, QImage::Format_ARGB32_Premultiplied);
@@ -1053,9 +1062,11 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
 
     // The CSS line box, followed literally: the gap is measured to the top of
     // the line, and the glyphs sit an ascent below that.
-    p.setFont(font);
-    p.setPen(QColor(255, 255, 255, kEmptyTextAlpha));
-    p.drawText(QPointF(snap((w - textW) / 2.0), markPx + gap + fm.ascent()), shown);
+    if (hasHint) {
+        p.setFont(font);
+        p.setPen(QColor(255, 255, 255, kEmptyTextAlpha));
+        p.drawText(QPointF(snap((w - textW) / 2.0), markPx + gap + fm.ascent()), shown);
+    }
     p.end();
 
     empty_ = image;
