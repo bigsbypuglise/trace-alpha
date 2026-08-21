@@ -20,7 +20,7 @@
 param(
     [ValidateSet("on", "off")] [string]$Mode = "on",
     [string]$Clip = "C:\Users\andre\Documents\Claude_Cowork\Trace_Testing_Assets\3_1080p_H264_MP4\M&M_TopGun_1080.mp4",
-    [string]$OutDir = "$PSScriptRoot\out-volumeslider",
+    [string]$OutDir = "$env:TEMP	race_volumeslider",
     # Extra NAME=VALUE pairs for the launch -- the cross-backend leg is
     # -ExtraEnv TRACE_RENDERER=cpu.
     [string[]]$ExtraEnv = @()
