@@ -214,6 +214,13 @@ existing Step path**, no new decode behaviour. **Bind `Home` and `End` at the sa
 neither is bound today, and a button without a key is the asymmetry `ShortcutTable` exists to
 avoid. The resulting layout is the conventional pro one: `|◀ ◀◀ ▶ ▶▶ ▶|`.
 
+**DECISION 2 IS REVERSED (owner, 2026-08-20, on tester feedback): the inline volume slider
+IS BUILT** — the designer's option 1b, package `assets/source/Trace_AudioSlider.zip`, record
+in `docs/volume-slider.md`, behind `TRACE_VOLUME_SLIDER` (0 restores the mute-only button
+exactly). Recorded as the owner deciding again with testers' evidence, not as drift. The
+decision's own guardrails were followed to the letter: volume is a gain on the sink, never
+the clock, and `M` still works. The text below stays as the record of what step 5 decided.
+
 **DECISION 2 — a MUTE BUTTON, and NO volume slider.** `M` already mutes and has no visible
 control, so the button closes a gap rather than adding a feature, and the design package already
 carries `volume` / `volume-low` / `volume-muted` art. A slider is more surface in the panel being

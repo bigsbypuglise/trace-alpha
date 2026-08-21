@@ -193,6 +193,85 @@ fault model, 0 at the 240Hz default with the thumb within 19px of the hand** (th
 window). Regression: `scrubbar.ps1` full-pool PASS on the fixed binary, `delta 0` everywhere —
 the change touches two read hooks and no decode, landing or scrub-chain path.
 
+**THE 2026-08-20 TESTER TRIAGE: FULLSCREEN ALIASING DIAGNOSED (nothing built), THE VOLUME
+SLIDER SHIPPED BEHIND `TRACE_VOLUME_SLIDER`, AND THE SPEED-MENU CHECKMARK FIXED.** Three
+tester-driven items, three records: `docs/fullscreen-aliasing-investigation.md`,
+`docs/volume-slider.md`, `docs/playback-speed-pause-audit.md` — read those before reopening
+any of the three.
+
+- **THE FULLSCREEN ALIASING REPORT IS CONFIRMED AS PHASE 15's NEAREST MAGNIFICATION REACHING
+  THE FULLSCREEN FIT — a signed-off decision meeting a case it was not chosen for, NOT a
+  defect, and NOTHING WAS CHANGED.** Both backends gate the point sampler on
+  `reducing || magnifyLinear`, and the fit is "not reducing" whenever the source is smaller
+  than the screen: 720p fullscreen reads `display 1912x1076 NEAREST` on d3d11 AND cpu,
+  `filtered x1` under `TRACE_MAG_FILTER=linear`, and the shipping-config nearest-vs-linear
+  diff on 1080p fullscreen is ~8% of sampled pixels at max channel delta 61/62, the same
+  class on both backends. **Why the owner cannot reproduce it**: his 5120x1440 panel REDUCES
+  4K material in fullscreen, and even 1080p fullscreen with the dev HUD up fits at 1912x1076
+  — fractionally UNDER 1:1, so `filtered` — the HUD's own height is what kept the
+  magnification from engaging; only the shipping HUD-hidden fullscreen magnifies (1080p →
+  1.333x, the fractional worst case; testers' 1080p-on-UHD is 2.0x). The options (keep
+  nearest / filter the FIT while deliberate zoom keeps nearest / a setting) are in the doc
+  with costs; **do not change the filter without the owner's call.**
+- **THE VOLUME SLIDER IS BUILT (owner decision on tester feedback, REVERSING roadmap step
+  5's decision 2; designer option 1b, package untouched at `3d96c61`, feature `af4e427`).**
+  Hover/click the speaker slides a 74px slider out between Mute and Loop, 1.5s idle
+  collapse on its own timer, wheel-over-speaker adjusts 5%/notch; the package's three glyphs
+  supersede the step 5 volume pair in place and `volume-open` is new (derived asset set
+  33 → 35 with no script edit). **`TRACE_VOLUME_SLIDER=0` restores the mute-only strip
+  exactly** — layout, hit regions, glyphs, proxy count, wheel and the HUD line. The shape:
+  volume is a **sink gain** (`AudioOutput::setVolume`, perceptual via
+  `QtAudio::convertVolume`) and never the clock; the slider has its **own press routing**
+  (`draggingVolume_`, `setVolumeFraction`/`setVolumeDragging` hooks) and can never issue a
+  seek; expanding **re-lays the strip** and bumps `layoutRevision_`, so the ninth proxy
+  (Slider role, empty rect while collapsed — measured following the expansion at 85x56 with
+  Loop +76px) comes for free; the wheel is new plumbing on both backends —
+  `WM_MOUSEWHEEL` on the d3d11 surface (whose lParam is **SCREEN** coordinates, unlike
+  every other mouse message) and `wheelEvent` on cpu — and only volume consumes it. **Three
+  recorded DEFAULTS pending owner answers**: a drag to zero restores the PRE-DRAG level on
+  the next speaker click (the drag edges exist because the ramp's own values — 60, 40, 20,
+  5 — must not be what "restore" means; wheel-to-zero restores the last wheel-set value);
+  volume is session-only (mute is not persisted, Loop's persistence was owner-reversed);
+  the expand is instant, not animated. Measured (`scripts/measure/volumeslider.ps1`, both
+  backends): hover 18→325 slider px (cpu 14→325 — the same expanded count), wheel to
+  `vol 75%` on the HUD's audio line, drag-to-zero flips the glyph (167/186 of 625 px,
+  hovered-vs-hovered), the click restores 75%; `-Mode off` reads 18/18, byte-stable. **Two
+  harness traps it re-hit**: with `TRACE_HUD=1` the strip is NOT at the client bottom (the
+  HUD widget sits below the viewer), so geometry-derived aims land on HUD text — the
+  interaction legs run HUD-hidden and press `H` at the end for the vol readout; and
+  hovering Mute now EXPANDS the slider, shifting Loop ~76px right — `overlay.ps1`'s loop
+  leg parks on Play for 2.2s so the idle collapse restores the collapsed offsets first.
+- **THE SPEED-THROUGH-PAUSE ITEM DISSOLVED INTO A ONE-LINE SYNC BUG PLUS AN OWNER QUESTION,
+  AND THE ITEM'S PREMISE WAS BACKWARDS.** "The menu is a setting, and the code comment says
+  so" is contradicted by every comment and by the spec ("the checked item must reflect the
+  effective playback rate") — the menu is a command mirror by design and pause zeroing the
+  rate is that design working. **The real defect: `syncPlaybackSpeedActions()` was never
+  called on the Space/K pause path or on a shuttle press**, so pausing a 0.5x run left 0.5x
+  ticked over a paused file and the next Play ran 1x with the menu still claiming 0.5x.
+  Fixed (`f8dbbd6`) with ONE call in `refreshHud()`, beside the `playbackAtEnd_` clearing
+  and for its reason (runs after every transport action; above the showHud early return so
+  the shipping config is covered; setChecked no-ops unchanged). Verified on screen: 0.5x
+  ticked running, NOTHING ticked paused, Normal ticked after Play. **Pause clearing the
+  rate and Play returning 1x are UNCHANGED in both cases** — the shuttle's by spec
+  ("Pressing Play returns to normal +1x playback. Pressing Pause stops and clears the
+  active shuttle rate.") and the menu's by phase 14 part 1's acceptance. Making either
+  sticky is an owner call; the audit doc frames it, including that a persistent off-speed
+  rate is persistently SILENT (audio drives at exactly 1x), which users will report as
+  broken sound.
+- **Regression at HEAD, flat** (physical panel 5120x1440 @ 239.999Hz): `scrubbar.ps1`
+  full-pool **PASS — 22 files, 88 legs, `delta 0` throughout** · 4K H.264 cadence x2
+  **99.2/99.1%** (`drop 0`, `rephase 0`, `0 of 120`, buckets `~1x 118 / 1.5-2.5x 1`) ·
+  4444 x2 **99.8/99.8%** (`0 of 260`) · 4444 `-SnapRelease` **`target 261 shown 261
+  delta 0`** full-res planar, `release 25.3ms`, `hitch 0`, `land 0` · **25 of 25
+  transitions** · lifecycle **84.1% moving / 0% control** · `overlay.ps1` all legs PASS on
+  both backends (loop accent 0/68/0 d3d11 — the recorded figure) · `uiatree.ps1` **nine**
+  named controls + MenuBar/5 items · renderer selftest `d3d11 fellback=0 planar=1` ·
+  `verify_trace_assets --strict` green. Two small fixes in passing: the Loop proxy stopped
+  announcing the persistence owner item 6 removed (`fde2ea0`), and a harness lesson —
+  **leaving Qt's menu mode can leave the menu bar focused, where Space is silently
+  swallowed**; click the picture (item 13's click-activate) before sending keys after any
+  menu interaction, and read the HUD's `speed` field before believing a pause happened.
+
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
@@ -4034,6 +4113,10 @@ stride when demand exceeds supply, with the decoder delivering the keyframe its 
 on, floored at the pointer. Deliberately separate from `TRACE_SCRUB_SAMPLE`, which governs
 the validated intra path and must stay revertable independently. The HUD's `kf-land` count
 is the engagement check — 0 on intra media and unflagged gestures by construction),
+**`TRACE_VOLUME_SLIDER=0`** (2026-08-20: no inline volume slider — the step 5 mute-only
+button exactly, in layout, hit regions, glyphs, proxy count, wheel behaviour and the HUD
+line. The owner-required rollback for the volume slider; default on. Record in
+`docs/volume-slider.md`),
 **`TRACE_SCRUB_PAINT_GATE=0`** (2026-08-19: back to one synchronous paint per delivered
 drag frame — the pre-fix behaviour every recorded scrub figure was taken under, and the
 rollback for the scrub paint gate. Default is the gate: at most one paint per
