@@ -1,5 +1,15 @@
 # Fullscreen aliasing — investigation record (2026-08-20)
 
+**DECIDED AND BUILT (owner, 2026-08-21): option 2, narrowed to fullscreen.** The fullscreen
+fit filters its magnification (linear); deliberate zoom — Actual Size, Zoom In, fullscreen or
+not — keeps phase 15's nearest. `49ed100`; `TRACE_FS_MAG_FILTER=0` is the rollback. Measured:
+720p fullscreen reads `filtered x1` on both backends where it read `NEAREST`, the knob
+restores `NEAREST`, and fullscreen + Zoom In reads `NEAREST zoom 2.00:1` — the deliberate-zoom
+half intact. Read at its stated width: the WINDOWED fit still takes nearest when it magnifies
+(a source smaller than a hand-enlarged window), which for ordinary media requires deliberately
+growing the window past the source's size — recorded as the decision's edge, not an oversight.
+The rest of this document is the investigation as it stood before the decision.
+
 Tester report: the picture looks aliased / over-sharpened in fullscreen. Owner has not
 reproduced it. **Investigation only — nothing was built, per instruction.** The answer is a
 product decision for the owner, with options at the bottom.

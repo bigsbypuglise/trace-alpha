@@ -39,7 +39,9 @@ step 5 mute-only button exactly — the same in-binary-revert pattern as
 - HUD: the audio line carries `vol N%` while the feature is on (gated on the same knob, so
   the rollback restores the old line byte for byte).
 
-## The semantics, and which are RECORDED DEFAULTS pending the owner
+## The semantics, and which were RECORDED DEFAULTS pending the owner
+**(ANSWERED 2026-08-21 — see "The owner's answers" at the bottom; the "session-only" bullet
+below is superseded there: volume persists now.)**
 
 - **Dragging to zero reads as muted** (owner item wording): glyph flips to `volume-muted`,
   audio silent at gain 0, mute flag untouched.
@@ -81,8 +83,18 @@ expanded slider shifts Loop right by ~76px, and the collapsed-layout `$loopX` wo
 the slider (the owner-item-15 stale-offset class). `uiatree.ps1`'s reading-order note is
 nine controls now, with the collapsed Volume rect documented as expectedly empty.
 
-## Open with the owner
+## The owner's answers (2026-08-21) — nothing here is a default any more
 
-1. What unmute restores after a drag to zero (default above: the pre-drag level).
-2. Whether volume persists across sessions (default above: no).
-3. Whether the expand/collapse should animate (default above: instant).
+1. **Unmute after a drag to zero restores the previous volume** — the shipped pre-drag-level
+   behaviour, confirmed.
+2. **Volume PERSISTS between sessions** — built at `b3a7d41`: `audio/volume` in the one
+   settings home, seeded at startup, written at settled values only (wheel steps, drag ends),
+   both gated on `TRACE_VOLUME_SLIDER` so the rollback keeps mute-only behaviour exactly. The
+   fraction is quantised to 0.1% steps in its one writer (the wheel's 0.05 subtractions
+   accumulate binary crumbs; 0.7499999999999998 reached the settings file before this).
+   `volumeslider.ps1` runs on a scratch `TRACE_SETTINGS_FILE` now — a persisted volume is an
+   input to a measurement — and its `-Mode persist` is the check (INI holds 0.75, the
+   relaunch HUD reads `vol 75%`).
+3. **Expansion stays instant** — the owner will test the feel at the machine and report on
+   hover timing, collapse timing and whether instant expansion reads right. That feel test is
+   the one open item on this feature.

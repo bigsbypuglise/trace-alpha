@@ -1,5 +1,10 @@
 # Playback speed through pause/play — the audit (2026-08-20)
 
+**RULED (owner, 2026-08-21): the current behaviour stands.** Pause clears the active
+off-speed rate and Play returns to 1×, for the menu and the shuttle alike. The `f8dbbd6`
+checkmark-sync fix ships; the stickiness question at the bottom is CLOSED as declined — do
+not re-propose it without a new owner request.
+
 Tester-driven item: playback speed does not survive pause/play. The instruction was to audit
 WHICH case this is before changing anything — the Playback Speed menu, or the shuttle ladder —
 and to get the owner's call before touching the shuttle. Both cases are audited here; one

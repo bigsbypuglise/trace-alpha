@@ -210,9 +210,15 @@ any of the three.
   4K material in fullscreen, and even 1080p fullscreen with the dev HUD up fits at 1912x1076
   — fractionally UNDER 1:1, so `filtered` — the HUD's own height is what kept the
   magnification from engaging; only the shipping HUD-hidden fullscreen magnifies (1080p →
-  1.333x, the fractional worst case; testers' 1080p-on-UHD is 2.0x). The options (keep
-  nearest / filter the FIT while deliberate zoom keeps nearest / a setting) are in the doc
-  with costs; **do not change the filter without the owner's call.**
+  1.333x, the fractional worst case; testers' 1080p-on-UHD is 2.0x). **DECIDED AND BUILT
+  (owner, 2026-08-21, `49ed100`): the fullscreen FIT filters its magnification; deliberate
+  zoom keeps nearest, fullscreen or not.** One new fact crosses the renderer boundary --
+  `VideoRenderer::setHostFullscreen`, pushed per paint by ViewerWidget -- combined with each
+  backend's own `viewScale_.fitToWindow`; `TRACE_FS_MAG_FILTER=0` is the rollback. Measured:
+  720p fullscreen `filtered x1` on both backends (was NEAREST), the knob restores NEAREST,
+  fullscreen + Zoom In reads `NEAREST zoom 2.00:1`, cadence flat (99.1/99.1%, identical
+  buckets). The WINDOWED fit still takes nearest when it magnifies -- the decision's stated
+  width, recorded in the doc, not an oversight.
 - **THE VOLUME SLIDER IS BUILT (owner decision on tester feedback, REVERSING roadmap step
   5's decision 2; designer option 1b, package untouched at `3d96c61`, feature `af4e427`).**
   Hover/click the speaker slides a 74px slider out between Mute and Loop, 1.5s idle
@@ -254,10 +260,9 @@ any of the three.
   ticked running, NOTHING ticked paused, Normal ticked after Play. **Pause clearing the
   rate and Play returning 1x are UNCHANGED in both cases** — the shuttle's by spec
   ("Pressing Play returns to normal +1x playback. Pressing Pause stops and clears the
-  active shuttle rate.") and the menu's by phase 14 part 1's acceptance. Making either
-  sticky is an owner call; the audit doc frames it, including that a persistent off-speed
-  rate is persistently SILENT (audio drives at exactly 1x), which users will report as
-  broken sound.
+  active shuttle rate.") and the menu's by phase 14 part 1's acceptance. **RULED (owner,
+  2026-08-21): the current behaviour STANDS** -- Pause clears the rate, Play returns 1x, menu
+  and shuttle alike; the stickiness question is closed as declined, do not re-propose it.
 - **Regression at HEAD, flat** (physical panel 5120x1440 @ 239.999Hz): `scrubbar.ps1`
   full-pool **PASS — 22 files, 88 legs, `delta 0` throughout** · 4K H.264 cadence x2
   **99.2/99.1%** (`drop 0`, `rephase 0`, `0 of 120`, buckets `~1x 118 / 1.5-2.5x 1`) ·
