@@ -30,14 +30,30 @@ env:
   # every promotion; a name that never has to change cannot fall out of step.
   DIST_NAME: trace-windows-x64
 
-  # Bump this string to force a rebuild of the cached FFmpeg/vcpkg tree.
-  # v2 (Aug 2026): the v1 cache still held FFmpeg 7.x (avcodec-61) while local
-  # dev builds resolve to 8.x, so perf numbers measured locally could not be
-  # compared against the shipping build. Bumping forces a rebuild onto the
-  # current vcpkg ffmpeg port. Note this pins the *cache*, not the version:
-  # vcpkg is cloned unpinned below, so a future cache miss can still drift.
-  # Pin a vcpkg baseline commit if exact reproducibility becomes necessary.
-  VCPKG_CACHE_VERSION: v2
+  # The vcpkg tree is PINNED to a commit, and the pin is the cache key.
+  #
+  # It was cloned unpinned behind a cache that expires after 7 days idle, which
+  # made every CI result a function of the day it happened to run: a green run
+  # and a red run could differ only by whether the cache had aged out. That is
+  # not theoretical -- it already happened once, and the v2 bump this replaces
+  # is the scar. Bumping the cache string treated the symptom; the unpinned
+  # clone that caused it was left in place.
+  #
+  # This SHA is what the development box runs (vcpkg ffmpeg port 8.1.2#3 ->
+  # avcodec-62 / avformat-62 / avutil-60 / swscale-9 / swresample-6), so CI and
+  # dev resolve the same tree rather than agreeing by luck. Note the shipped
+  # artifact does NOT take its FFmpeg from here -- TRACE_FFMPEG_ROOT points the
+  # build at the minimal MinGW tree and wins with NO_DEFAULT_PATH -- so this pin
+  # buys reproducibility of the toolchain and of the documented revert path,
+  # not of the DLLs in the ZIP.
+  #
+  # THE CACHE KEY CARRIES THE PIN, which is what makes the pin binding rather
+  # than decorative: a cache entry built from a different vcpkg can no longer be
+  # served to a build that asks for this one. Same property the ffmin cache gets
+  # from hashing its build script -- editing the identity invalidates the cache
+  # by construction, and nobody has to remember to bump a string.
+  VCPKG_PIN: 17f35ad2418007a895ced8a4cece4ab34068a58d
+  VCPKG_CACHE_VERSION: v3
 
 jobs:
   build-windows:
@@ -111,7 +127,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}\vcpkg
-          key: vcpkg-${{ env.VCPKG_CACHE_VERSION }}-windows-2022-ffmpeg-x64
+          key: vcpkg-${{ env.VCPKG_CACHE_VERSION }}-windows-2022-ffmpeg-x64-${{ env.VCPKG_PIN }}
 
       - name: Install vcpkg + FFmpeg (only on cache miss)
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
@@ -120,7 +136,27 @@ jobs:
           $ErrorActionPreference = 'Stop'
           if ($PSVersionTable.PSVersion.Major -ge 7) { $PSNativeCommandUseErrorActionPreference = $true }
 
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          # Fetch the PINNED commit rather than whatever master is today.
+          # `git clone --depth 1 <sha>` is not a thing, so this is init plus a
+          # fetch of the single revision, which stays exactly as shallow as the
+          # clone it replaces. GitHub serves arbitrary reachable SHAs to fetch.
+          $vcpkgDir = "$env:RUNNER_TEMP\vcpkg"
+          git init -q $vcpkgDir
+          if ($LASTEXITCODE -ne 0) { throw "git init vcpkg failed ($LASTEXITCODE)" }
+          git -C $vcpkgDir remote add origin https://github.com/microsoft/vcpkg.git
+          if ($LASTEXITCODE -ne 0) { throw "git remote add failed ($LASTEXITCODE)" }
+          git -C $vcpkgDir fetch --depth 1 origin $env:VCPKG_PIN
+          if ($LASTEXITCODE -ne 0) { throw "git fetch of pinned vcpkg $env:VCPKG_PIN failed ($LASTEXITCODE)" }
+          git -C $vcpkgDir checkout -q --detach FETCH_HEAD
+          if ($LASTEXITCODE -ne 0) { throw "git checkout of pinned vcpkg failed ($LASTEXITCODE)" }
+
+          # Assert rather than trust. A fetch that silently landed somewhere
+          # else would reintroduce the drift this pin removes, and would do it
+          # quietly -- which is the failure mode that cost a release once.
+          $head = (git -C $vcpkgDir rev-parse HEAD).Trim()
+          if ($head -ne $env:VCPKG_PIN) { throw "vcpkg HEAD is $head, expected $env:VCPKG_PIN" }
+          Write-Host "vcpkg pinned at $head"
+
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
 
