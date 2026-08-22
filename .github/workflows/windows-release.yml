@@ -227,8 +227,8 @@ jobs:
           # DLLs, MSVC import libraries and headers must all be present: a build
           # that produced .dll.a but no .lib links fine with mingw and not at all
           # with link.exe, and that failure would surface much later.
-          foreach ($f in @('bin\avcodec-62.dll','bin\avformat-62.dll','bin\avutil-60.dll',
-                           'bin\swresample-6.dll','bin\swscale-9.dll',
+          foreach ($f in @('bin\avcodec-63.dll','bin\avformat-63.dll','bin\avutil-61.dll',
+                           'bin\swresample-7.dll','bin\swscale-10.dll',
                            'lib\avcodec.lib','lib\avformat.lib','lib\avutil.lib',
                            'lib\swresample.lib','lib\swscale.lib',
                            'include\libavformat\avformat.h')) {
@@ -359,8 +359,9 @@ jobs:
             if (-not (Test-Path (Join-Path $dist $item))) { $missing += $item }
           }
 
-          # FFmpeg DLL names carry version suffixes (avcodec-62.dll on 8.x),
-          # so match by prefix rather than pinning a soname here.
+          # FFmpeg DLL names carry version suffixes (avcodec-63.dll on 9.0.x),
+          # so match by prefix rather than pinning a soname here. The exact sonames
+          # ARE asserted, once, where the minimal build is verified above.
           foreach ($lib in @("avcodec", "avformat", "avutil", "swscale", "swresample")) {
             if (-not (Get-ChildItem $dist -Filter "$lib*.dll" -ErrorAction SilentlyContinue)) {
               $missing += "$lib*.dll"

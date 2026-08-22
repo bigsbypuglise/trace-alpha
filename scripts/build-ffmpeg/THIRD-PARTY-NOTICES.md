@@ -7,13 +7,13 @@ Nothing here is statically linked into Trace, and Trace contains no FFmpeg sourc
 
 | DLL | Library |
 |---|---|
-| `avcodec-62.dll` | libavcodec |
-| `avformat-62.dll` | libavformat |
-| `avutil-60.dll` | libavutil |
-| `swresample-6.dll` | libswresample |
-| `swscale-9.dll` | libswscale |
+| `avcodec-63.dll` | libavcodec |
+| `avformat-63.dll` | libavformat |
+| `avutil-61.dll` | libavutil |
+| `swresample-7.dll` | libswresample |
+| `swscale-10.dll` | libswscale |
 
-Built from **FFmpeg n8.1.2** by `scripts/build-ffmpeg/build-minimal-ffmpeg.ps1`,
+Built from **FFmpeg n9.0.1** by `scripts/build-ffmpeg/build-minimal-ffmpeg.ps1`,
 which pins the source archive, the compiler and the assembler by URL and SHA256.
 
 ## Licence
@@ -44,7 +44,7 @@ disabled. The replacement does not widen the licensing surface.
    their own build of the same soname. This is what satisfies the relinking
    requirement without shipping Trace's object files.
 2. **Written offer / source availability.** The exact source is the pinned
-   archive named in `build-minimal-ffmpeg.ps1` (FFmpeg `n8.1.2`, SHA256 recorded
+   archive named in `build-minimal-ffmpeg.ps1` (FFmpeg `n9.0.1`, SHA256 recorded
    there), unmodified. Ship a copy of `COPYING.LGPLv2.1` and `LICENSE.md` from
    that archive alongside the release, and state the version and the configure
    line.

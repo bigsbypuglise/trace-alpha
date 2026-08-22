@@ -42,9 +42,9 @@ $PIN = @{
     GccSha    = "C1F52294597C0B73786B2A78EB5D176D"   # first 32 hex of SHA256
     NasmUrl   = "https://www.nasm.us/pub/nasm/releasebuilds/2.16.03/win64/nasm-2.16.03-win64.zip"
     NasmSha   = "3EE4782247BCB874378D02F7EAB4E294"
-    FFmpegUrl = "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n8.1.2.zip"
-    FFmpegSha = "C6660EEE2507EF9644C7DFF3B91DF97C"
-    FFmpegDir = "FFmpeg-n8.1.2"
+    FFmpegUrl = "https://github.com/FFmpeg/FFmpeg/archive/refs/tags/n9.0.1.zip"
+    FFmpegSha = "D16837DDBB0963753AA2739971A09B07"
+    FFmpegDir = "FFmpeg-n9.0.1"
     # MSYS2 IS REQUIRED AND IS NOT INTERCHANGEABLE WITH GIT FOR WINDOWS' BASH.
     # FFmpeg's `makedef` receives every object file of a library as a single argv,
     # and libavcodec's list overflows Git bash's command-line limit: the build
@@ -59,10 +59,25 @@ $PIN = @{
     Msys2Sha  = "C105946E64E08F099AC0E4647461CE76"
 }
 
-# n8.1.x is chosen so the sonames match what vcpkg produces -- avcodec-62,
-# avformat-62, avutil-60, swresample-6, swscale-9. That makes the replacement a
-# DLL swap rather than a Trace rebuild, which is what lets it be A/B'd against the
-# current dependency without changing anything else at the same time.
+# n9.0.1 produces avcodec-63, avformat-63, avutil-61, swresample-7, swscale-10.
+# Read out of the source tree (libav*/version*.h) rather than taken from a
+# release note, and asserted by the workflow after the build.
+#
+# THIS DELIBERATELY BREAKS A PROPERTY THE 8.1.x PIN HAD, and the next session
+# should know it is gone rather than rediscover it. n8.1.x was chosen so the
+# sonames MATCHED vcpkg's, which made swapping this build in a DLL swap rather
+# than a Trace rebuild -- and that is what let it be A/B'd against the vcpkg
+# dependency without changing anything else at the same time. With vcpkg pinned
+# at ffmpeg 8.1.2 and this at 9.0.1 the two no longer share sonames or headers,
+# so that A/B now needs a reconfigure. The revert path is unaffected -- dropping
+# -DTRACE_FFMPEG_ROOT still returns the build to vcpkg -- it is only the
+# drop-in-DLL comparison that is gone.
+#
+# Nothing in Trace's call surface changed. All 147 FFmpeg identifiers referenced
+# under src/ resolve against the 9.0.1 headers; the one removal that could have
+# bitten -- av_stream_get_side_data -- is already behind
+# LIBAVCODEC_VERSION_MAJOR >= 61 in VideoDecoderFFmpeg.cpp and takes the modern
+# av_packet_side_data_get branch at 63.
 
 if (-not $OutDir) { $OutDir = Join-Path $Root "out" }
 $dl = Join-Path $Root "dl"
@@ -339,7 +354,7 @@ if (-not $defs) { $defs = Get-ChildItem $libOut -Filter *.def -ErrorAction Silen
 if (-not $defs) { throw "no .def files produced; cannot build MSVC import libraries" }
 
 foreach ($d in $defs) {
-    # avcodec-62.def -> avcodec.lib, which is the name CMake's find_library wants.
+    # avcodec-63.def -> avcodec.lib, which is the name CMake's find_library wants.
     $stem = ($d.BaseName -replace '-\d+$', '')
     $out  = Join-Path $libOut "$stem.lib"
     $cmd  = '"' + $vcvars + '" >nul && lib /nologo /def:"' + $d.FullName + '" /machine:x64 /out:"' + $out + '"'
