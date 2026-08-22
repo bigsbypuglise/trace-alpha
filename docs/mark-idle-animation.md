@@ -1,6 +1,18 @@
-# The empty mark's idle animation — prototype (2026-08-21)
+# The empty mark's idle animation — SHIPPED (2026-08-21)
 
-`TRACE_MARK_ANIM=1`, **default off**, built for the owner to judge by eye.
+**Owner decision, 2026-08-21, taken with it on screen: the animation ships.**
+It is on by default; `TRACE_MARK_ANIM=0` is the rollback and no longer means
+"draw the bitmap" — the PNG renditions and the `paintIcon` route for the mark
+left in the same commit, per "artwork follows behaviour", so `0` means **no
+animation**: the same procedural mark held at phase 0, which is the delivered
+still. `TRACE_MARK_ANIM_PHASE` stays, and staying is load-bearing — it is what
+keeps the empty state a deterministic raster and therefore keeps the one
+byte-identical cross-backend surface usable as an instrument.
+
+What follows below the next paragraph is the record of the prototype as built
+and measured; it is retained because the mechanism is unchanged.
+
+_Originally written as:_ `TRACE_MARK_ANIM=1`, **default off**, built for the owner to judge by eye.
 The design package's 18s loop for the empty-state prism mark — a spatial
 gradient rotation on the inner edge plus a glow hue cycle — re-authored as
 QPainter paths and gradients from `assets/interface/branding/empty-mark.svg`
@@ -89,3 +101,50 @@ re-authoring, not a byte-identical re-rasterisation — resvg and QPainter are
 different rasterisers, so at the same phase the two sources are visually
 matched rather than pixel-equal. The comparison that must hold (and does) is
 cross-backend identity of whichever source is drawing.
+
+## Shipping it (2026-08-21)
+
+Owner decision after judging the prototype on screen. Three changes and one
+deletion, in one commit, because they are one decision:
+
+- `markAnimEnabled()` reads `!= "0"` instead of `== "1"`.
+- `rebuildEmpty()` has **one source for the mark**. The `paintIcon` branch and
+  its `{104, 208}` candidate sizes are gone; the ink-centring scan, the
+  centring and the hint layout are untouched and never knew which source fed
+  them. The phase term is now always part of the cache key: with the animation
+  off or pinned it is constant, so the key behaves exactly as it did before the
+  animation existed.
+- `empty-mark-104.png` and `empty-mark-208.png` left `app/resources.qrc`, the
+  working copy and the tree. **`empty-mark.svg` stays** — it is the
+  specification the QPainter paths were authored from, and the SVG-master rule
+  covers it the same way it covers a control glyph.
+- `TRACE_MARK_ANIM=0` is the rollback and means **no animation**, not "the
+  bitmap": there is no bitmap any more. Measured below.
+
+**`verify_trace_assets.py` followed the derived set DOWN with no edit to
+itself** — 35 → 33 embedded files, `--strict --no-pillow` green. That is the
+same property the removal direction that motivated deriving the set in the
+first place, confirmed for the first time by a deletion rather than an
+addition. The `.qrc` comment that replaced the two entries hit the recorded XML
+trap on the way (a double hyphen inside a comment is not well-formed, and the
+verifier says so rather than the build).
+
+**Verified against the built binary, not the tree**: a UTF-16BE search of
+`Trace.exe` finds neither `empty-mark-104.png` nor `empty-mark-208.png`, while
+`play-48.png` and `loop-48.png` are still there — so the aliases really left
+the embed rather than merely leaving the disk.
+
+### Measured on the shipping build
+
+- **The animation runs, and only the mark moves.** Two captures of the empty
+  window 4s apart differ on **2301 px, max channel delta 40, bounding box
+  (619,376)-(678,444)** — 59×68, which is the mark's own ink box to the pixel.
+- **The rollback is still.** The same pair under `TRACE_MARK_ANIM=0` differs on
+  **0 px, max channel delta 0** — no timer, no rebuild.
+- **The instrument survives.** `TRACE_MARK_ANIM_PHASE=0.25`, empty window,
+  d3d11 against cpu: **0 of 1,035,504 px differ, max channel delta 0.** The one
+  byte-identical cross-backend surface is intact at the shipping default.
+- **The geometry did not move.** `emptystate.ps1 -Mode launch` reads mark
+  **59×68**, ink offset **+0.5**, hint **169×14**, gap **44** — the recorded
+  figures, from a procedural mark at an arbitrary running phase rather than
+  from a bitmap. All four modes PASS on **both** backends.

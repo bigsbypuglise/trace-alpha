@@ -237,7 +237,7 @@ void paintIcon(QPainter& p, const QRectF& r, const QString& baseName,
 // backends. The scratch image is per-cell and rebuildAtlas() is rare.
 // (Definition follows the animated-mark block below.)
 
-// ---- the animated empty mark (prototype, TRACE_MARK_ANIM=1) -----------------
+// ---- the animated empty mark (ships on; TRACE_MARK_ANIM=0 holds phase 0) ----
 //
 // assets/interface/branding/empty-mark.svg re-authored as QPainter paths and
 // gradients, geometry and stops copied value for value -- NOT
@@ -452,10 +452,15 @@ bool OverlayModel::volumeSliderEnabled() {
     return on;
 }
 
-// Default OFF: the shipped mark stays the committed PNG renditions, and the
-// re-authoring only exists at all while this reads 1. See the header block.
+// DEFAULT ON as of 2026-08-21 (owner decision, after judging it on screen).
+// The PNG renditions and the paintIcon route for the mark left with that
+// decision -- artwork follows behaviour -- so `0` can no longer mean "draw the
+// bitmap". It means NO ANIMATION: the mark is still drawn procedurally, held at
+// phase 0, which is the delivered still (measured against the package's own
+// mockup at mean absolute channel delta 0.67). That is the honest rollback for
+// a build with one source for the mark.
 bool OverlayModel::markAnimEnabled() {
-    static const bool on = qgetenv("TRACE_MARK_ANIM") == QByteArray("1");
+    static const bool on = qgetenv("TRACE_MARK_ANIM") != QByteArray("0");
     return on;
 }
 
@@ -1245,21 +1250,22 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
         ? QString()
         : fm.elidedText(emptyHintText(), Qt::ElideRight, maxTextW);
 
-    // The animated mark's phase joins the cache key while the prototype knob
-    // is on: a pinned phase is one deterministic raster (the instrument case),
-    // an advancing one rebuilds per animation tick and never otherwise. With
-    // the knob off the term is constant and the key is exactly what it was.
-    const bool animMark = markAnimEnabled();
-    const double markPhase =
-        animMark ? (markAnimPinnedPhase() >= 0.0 ? markAnimPinnedPhase() : markAnimPhase_)
-                 : 0.0;
+    // The mark's phase is part of the cache key. A pinned phase, and the
+    // TRACE_MARK_ANIM=0 rollback, are one deterministic raster and the term is
+    // constant -- so the key behaves exactly as it did before the animation
+    // existed. An advancing phase rebuilds per animation tick and never
+    // otherwise.
+    const double pinnedPhase = markAnimPinnedPhase();
+    const bool animating = markAnimEnabled() && pinnedPhase < 0.0;
+    const double markPhase = pinnedPhase >= 0.0 ? pinnedPhase
+                           : (animating ? markAnimPhase_ : 0.0);
 
     if (!empty_.isNull() && std::abs(markPx - emptyMarkPx_) < 0.5 && shown == emptyTextCached_
-        && (!animMark || std::abs(markPhase - emptyPhaseCached_) < 1e-9))
+        && std::abs(markPhase - emptyPhaseCached_) < 1e-9)
         return;
 
     QElapsedTimer rebuildClock;
-    if (animMark) rebuildClock.start();
+    if (animating) rebuildClock.start();
 
     const double gap = snap(kEmptyGapLogical * s);
     const double lineH = fm.height();
@@ -1299,16 +1305,11 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
         mark.fill(Qt::transparent);
         QPainter mp(&mark);
         mp.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        // The prototype knob decides the SOURCE of the mark and nothing else:
-        // the ink scan below, the centring and the hint layout all run the
-        // same on either. Off (the default) is the shipped PNG rendition,
-        // byte for byte.
-        if (animMark) {
-            paintAnimatedEmptyMark(mp, markPx, markPhase);
-        } else {
-            paintIcon(mp, QRectF(0.0, 0.0, markPx, markPx), QStringLiteral("empty-mark"),
-                      {104, 208});
-        }
+        // ONE SOURCE FOR THE MARK as of 2026-08-21. The PNG renditions and the
+        // paintIcon branch that read them left with the owner's decision to
+        // ship the animation; the ink scan below, the centring and the hint
+        // layout are unchanged and never knew which source they were fed.
+        paintAnimatedEmptyMark(mp, markPx, markPhase);
         mp.end();
         // Ink = alpha above a modest floor, so the faint glow does not drag
         // the box; 40 of 255 keeps the measured 59x68 ink and drops the halo.
@@ -1341,7 +1342,7 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
     emptyTextCached_ = shown;
     emptyPhaseCached_ = markPhase;
     ++emptyRevision_;
-    if (animMark && rebuildClock.isValid()) {
+    if (animating && rebuildClock.isValid()) {
         const double ms = static_cast<double>(rebuildClock.nsecsElapsed()) / 1'000'000.0;
         ++markRebuilds_;
         markRebuildMsSum_ += ms;

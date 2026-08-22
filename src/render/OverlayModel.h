@@ -223,16 +223,19 @@ public:
     // locate none of them.
     long long layoutRevision() const { return layoutRevision_; }
 
-    // ---- the empty mark's idle animation (prototype, TRACE_MARK_ANIM=1) -----
+    // ---- the empty mark's idle animation (SHIPS ON, TRACE_MARK_ANIM=0 off) --
     //
     // The design package's 18s loop -- a spatial gradient rotation on the inner
     // edge plus a glow hue cycle -- re-authored as QPainter paths and gradients
     // from assets/interface/branding/empty-mark.svg, because neither animated
-    // property is reachable from the committed PNG renditions. DEFAULT OFF: the
-    // PNG path ships unchanged, both routes coexist behind the knob, and
-    // whether the animation (and therefore the re-authoring) ships is an owner
-    // decision. If it ever ships, the PNGs leave with that decision -- artwork
-    // follows behaviour -- not before it.
+    // property is reachable from a committed PNG rendition.
+    //
+    // SHIPPED ON by owner decision, 2026-08-21, after judging it on screen. The
+    // renditions empty-mark-104.png / -208.png and the paintIcon branch that
+    // read them left in the same commit -- artwork follows behaviour, and a
+    // mark with two sources of truth is what that rule exists to prevent. So
+    // TRACE_MARK_ANIM=0 no longer means "draw the bitmap"; it means NO
+    // ANIMATION, the same procedural mark held at phase 0.
     //
     // TRACE_MARK_ANIM_PHASE=<0..1> pins the phase (the TRACE_TOPCHROME_ALPHA
     // idea): the mark renders procedurally at that phase with NO timer, which

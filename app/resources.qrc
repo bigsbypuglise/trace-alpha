@@ -132,15 +132,15 @@
     <file alias="copy-lucidlink-24.png">../assets/interface/common/copy-lucidlink-24.png</file>
     <file alias="copy-lucidlink-48.png">../assets/interface/common/copy-lucidlink-48.png</file>
 
-    <!-- The empty state, UI redesign roadmap step 3. NOT on the 24/48 ladder:
-         the design package draws this mark at 104 logical px, so it ships 104
-         and 208, which is the same @1x/@2x pair every control has at its own
-         drawn size. It is in branding/ rather than transport/ or common/
-         because it is the product's mark rather than a control glyph, and the
-         master beside it is the delivered empty-state art, which is a
-         different asset from the app icon's play mark. -->
-    <file alias="empty-mark-104.png">../assets/interface/branding/empty-mark-104.png</file>
-    <file alias="empty-mark-208.png">../assets/interface/branding/empty-mark-208.png</file>
+    <!-- The empty state's mark, roadmap step 3, LEFT on 2026-08-21 with the
+         owner's decision to ship its idle animation. Neither animated property
+         (the edge gradient's rotation, the glow's hue cycle) is reachable from
+         a bitmap, so the mark is drawn procedurally in OverlayModel from
+         assets/interface/branding/empty-mark.svg, and renditions beside it
+         would be embedded-and-unused. Artwork follows behaviour: the PNGs went
+         out with the code that read them, in the same commit, and the SVG
+         master stays because it is the specification the paths were authored
+         from. -->
 
     <!-- The top chrome's brand mark (a 15/30 pair of trace-play-mark.svg)
          LEFT with the strip's mark and wordmark: owner item 1's approved
