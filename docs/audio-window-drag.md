@@ -484,3 +484,53 @@ not the compositor path, not the animation timer.
 **What costs the ~550ms is still unattributed.** What is now bounded is the
 surface: one caption press, both Qt versions, both renderers, ~550ms, once per
 press, and nothing else in the application reproduces it.
+
+## IT IS NOT AN AUDIO BUG: the caption press stalls the WHOLE PROCESS for ~half a second
+
+**The owner confirmed by ear that the silence is ~half a second and then returns
+while the title bar is still held** — which matches the instrument exactly and
+closes the "something below `QAudioSink`" question: there is no second
+mechanism, the counters account for the whole of what is heard.
+
+Run on a video-with-audio file so the scheduler and cadence lines are readable
+beside the audio ones. Same clip, same binary, same 5s, `hold` against `idle`:
+
+| | **caption hold** | **idle (control)** |
+|---|---|---|
+| tick jitter max | **463.51ms** | **2.37ms** |
+| present-late max | **464.59ms** | **1.82ms** |
+| cadence gap max | **506.3ms** | — |
+| **audio `pull max`** | **521.7ms** | ~52ms |
+| `drop` | **405 (media 267.5%)** | 2 (media 100.0%) |
+| presented | 94.4% | 99.1% |
+
+**The video tick, the presentation and the audio pull all stall by the same
+~460–520ms, at the same instant.** This is a whole-process stall on the caption
+press. Audio is not the fault — audio is where the fault is *audible*: half a
+second of dropped picture while you are grabbing a window is invisible, and half
+a second of silence is not.
+
+**And that is why Qt 6.10's MMCSS audio thread stalls too.** It was the one
+result that made no sense while this was read as an audio bug — a dedicated,
+priority-boosted audio thread should be immune to a blocked UI thread. It is not
+immune to whatever stops the whole process.
+
+This also finally attributes, at least in family, the asymmetry the 2026-08-21
+pass recorded and left open: *"a move loop costs the picture a ~110ms hiccup and
+a resize loop costs neither... that asymmetry is unattributed."* It is the same
+event, measured on the picture side and with the pointer moving, which is the
+milder case.
+
+**What has been excluded**: the Qt version (6.7.2 and 6.10.2 identical), the
+renderer (`d3d11` and `cpu` identical), the mark animation, the ring feed
+(`under 0`, `silence 0 B` throughout — the ring always had data whenever it was
+asked), modal loops in general (a motionless resize-corner hold is at the idle
+floor), and the whole "blocked UI thread starves the sink" family.
+
+**What is left, and it is one question**: what stalls the Trace process for ~500ms
+when a press lands on its caption, and does it stall other applications the same
+way. Note the owner's control — Windows Media Player on the same endpoint does
+not do it — so whatever it is, it is something about this process rather than
+about pressing a caption in general. **Not guessed at here.** The next session
+starts with a reproducible one-gesture fault, an instrument that reads it, and
+this list of exclusions.
