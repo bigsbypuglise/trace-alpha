@@ -235,6 +235,163 @@ void paintIcon(QPainter& p, const QRectF& r, const QString& baseName,
 // alpha would leave brighten pushing RGB past alpha, which is not a
 // representable premultiplied colour and clamps differently on the two
 // backends. The scratch image is per-cell and rebuildAtlas() is rare.
+// (Definition follows the animated-mark block below.)
+
+// ---- the animated empty mark (prototype, TRACE_MARK_ANIM=1) -----------------
+//
+// assets/interface/branding/empty-mark.svg re-authored as QPainter paths and
+// gradients, geometry and stops copied value for value -- NOT
+// trace-play-mark.svg, whose five near-identical values make the wrong choice
+// look almost right. The SVG's own SMIL block is the specification followed
+// here: the emEdge gradientTransform rotates from 150 to 510 degrees about
+// (520,512) over 18s, and the two animated emGlow stops cycle through the
+// five-colour ladder over the same 18s. Phase 0 is therefore the delivered
+// still, byte-for-byte in intent if not in rasteriser.
+//
+// objectBoundingBox gradients are reproduced exactly by defining the gradient
+// in the unit square and giving the BRUSH the bbox transform -- mapping the
+// endpoints alone is not the same thing for a diagonal vector under
+// non-uniform scale, and emBody's is diagonal.
+
+// The five-colour ladder the SVG's two animated stops cycle through.
+const QColor kMarkEdgeLadder[5] = {
+    QColor(0x5A, 0xC8, 0xE8), QColor(0x5B, 0x8D, 0xEF), QColor(0x8B, 0x6F, 0xE8),
+    QColor(0xD4, 0x6F, 0xB8), QColor(0x5A, 0xC8, 0xE8)};
+const QColor kMarkGlowMidLadder[5] = {
+    QColor(0x4F, 0xBE, 0xE8), QColor(0x6F, 0x8F, 0xE0), QColor(0x9F, 0x7F, 0xD8),
+    QColor(0xD4, 0x8F, 0xC0), QColor(0x4F, 0xBE, 0xE8)};
+
+QColor lerpColor(const QColor& a, const QColor& b, double t) {
+    return QColor(static_cast<int>(std::lround(a.red() + (b.red() - a.red()) * t)),
+                  static_cast<int>(std::lround(a.green() + (b.green() - a.green()) * t)),
+                  static_cast<int>(std::lround(a.blue() + (b.blue() - a.blue()) * t)));
+}
+
+// Piecewise-linear through the ladder, exactly what SMIL does with five values
+// over one duration: four equal segments, the last returning to the first.
+QColor ladderColorAt(const QColor* ladder, double phase) {
+    const double s = std::clamp(phase, 0.0, 1.0) * 4.0;
+    const int i = std::min(3, static_cast<int>(std::floor(s)));
+    return lerpColor(ladder[i], ladder[i + 1], s - i);
+}
+
+QColor withAlphaF(QColor c, double a) {
+    c.setAlphaF(a);
+    return c;
+}
+
+// The mark at `phase` (0..1 of the 18s loop) into a markPx-square target.
+// Drawn in the SVG's own 1024 canvas units under a painter scale, so every
+// number below is the master's own.
+void paintAnimatedEmptyMark(QPainter& p, double markPx, double phase) {
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    const double s = markPx / 1024.0;
+    p.scale(s, s);
+    // The group transform: translate(520 512) scale(1.7) translate(-520 -512).
+    p.translate(520.0, 512.0);
+    p.scale(1.7, 1.7);
+    p.translate(-520.0, -512.0);
+
+    QPainterPath tri;
+    tri.moveTo(420, 336);
+    tri.lineTo(720, 512);
+    tri.lineTo(420, 688);
+    tri.closeSubpath();
+    QPainterPath inner;
+    inner.moveTo(452, 388);
+    inner.lineTo(672, 512);
+    inner.lineTo(452, 636);
+    inner.closeSubpath();
+
+    // The outer triangle's fill bbox, which is what objectBoundingBox means.
+    const QTransform triBox(300.0, 0.0, 0.0, 352.0, 420.0, 336.0);
+
+    // emBody: fill and stroke, (0.1,0) -> (0.8,1) in bbox units.
+    QLinearGradient bodyG(QPointF(0.1, 0.0), QPointF(0.8, 1.0));
+    bodyG.setColorAt(0.0, QColor(0x2E, 0x4E, 0x58));
+    bodyG.setColorAt(0.5, QColor(0x2A, 0x3A, 0x50));
+    bodyG.setColorAt(1.0, QColor(0x3A, 0x2E, 0x48));
+    QBrush bodyBrush(bodyG);
+    bodyBrush.setTransform(triBox);
+    QPen bodyPen(bodyBrush, 40.0);
+    bodyPen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(bodyPen);
+    p.setBrush(bodyBrush);
+    p.drawPath(tri);
+
+    // emRim: stroke only, vertical white falloff in bbox units.
+    QLinearGradient rimG(QPointF(0.0, 0.0), QPointF(0.0, 1.0));
+    rimG.setColorAt(0.0, withAlphaF(Qt::white, 0.18));
+    rimG.setColorAt(0.4, withAlphaF(Qt::white, 0.03));
+    rimG.setColorAt(1.0, withAlphaF(Qt::white, 0.0));
+    QBrush rimBrush(rimG);
+    rimBrush.setTransform(triBox);
+    QPen rimPen(rimBrush, 40.0);
+    rimPen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(rimPen);
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(tri);
+
+    // emGlow: the ANIMATED radial, user-space centre (520,560) r 300, its two
+    // coloured stops cycling the ladder. Opacity 0.9, mix-blend-mode screen.
+    QRadialGradient glowG(QPointF(520.0, 560.0), 300.0);
+    glowG.setColorAt(0.0, withAlphaF(ladderColorAt(kMarkEdgeLadder, phase), 0.42));
+    glowG.setColorAt(0.6, withAlphaF(ladderColorAt(kMarkGlowMidLadder, phase), 0.16));
+    glowG.setColorAt(1.0, withAlphaF(QColor(0x6F, 0xA8, 0xD8), 0.0));
+    p.setCompositionMode(QPainter::CompositionMode_Screen);
+    p.setOpacity(0.9);
+    QPen glowPen(QBrush(glowG), 40.0);
+    glowPen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(glowPen);
+    p.setBrush(QBrush(glowG));
+    p.drawPath(tri);
+
+    // emEdge: the ANIMATED prism stroke on the inner triangle. Five fixed
+    // stops on a user-space vector (300,300)->(740,740); what animates is the
+    // gradient's own rotation about (520,512), 150 + 360*phase degrees.
+    QLinearGradient edgeG(QPointF(300.0, 300.0), QPointF(740.0, 740.0));
+    edgeG.setColorAt(0.00, kMarkEdgeLadder[0]);
+    edgeG.setColorAt(0.25, kMarkEdgeLadder[1]);
+    edgeG.setColorAt(0.50, kMarkEdgeLadder[2]);
+    edgeG.setColorAt(0.75, kMarkEdgeLadder[3]);
+    edgeG.setColorAt(1.00, kMarkEdgeLadder[4]);
+    QBrush edgeBrush(edgeG);
+    QTransform rot;
+    rot.translate(520.0, 512.0);
+    rot.rotate(150.0 + 360.0 * phase);
+    rot.translate(-520.0, -512.0);
+    edgeBrush.setTransform(rot);
+    QPen edgePen(edgeBrush, 11.0);
+    edgePen.setJoinStyle(Qt::RoundJoin);
+    p.setPen(edgePen);
+    p.setBrush(Qt::NoBrush);
+    p.drawPath(inner);
+
+    // emSpec: the specular streak, back to normal compositing, opacity 0.6.
+    p.setCompositionMode(QPainter::CompositionMode_SourceOver);
+    p.setOpacity(0.6);
+    QLinearGradient specG(QPointF(0.0, 0.0), QPointF(1.0, 0.0));
+    specG.setColorAt(0.0, withAlphaF(Qt::white, 0.0));
+    specG.setColorAt(0.3, withAlphaF(Qt::white, 0.85));
+    specG.setColorAt(0.7, withAlphaF(Qt::white, 0.85));
+    specG.setColorAt(1.0, withAlphaF(Qt::white, 0.0));
+    QBrush specBrush(specG);
+    // The line's own bbox: (430,352) to (604,454).
+    specBrush.setTransform(QTransform(174.0, 0.0, 0.0, 102.0, 430.0, 352.0));
+    QPen specPen(specBrush, 9.0);
+    specPen.setCapStyle(Qt::RoundCap);
+    p.setPen(specPen);
+    p.drawLine(QPointF(430.0, 352.0), QPointF(604.0, 454.0));
+
+    p.restore();
+}
+
+bool markAnimLogEnabled() {
+    static const bool on = qgetenv("TRACE_MARK_ANIM_LOG") == "1";
+    return on;
+}
+
 void paintIconTinted(QPainter& p, const QRectF& r, const QString& baseName,
                      std::initializer_list<int> sizes, const QColor& ink) {
     const int w = std::max(1, static_cast<int>(std::lround(r.width())));
@@ -293,6 +450,29 @@ bool OverlayModel::enabledByEnvironment() {
 bool OverlayModel::volumeSliderEnabled() {
     static const bool on = qgetenv("TRACE_VOLUME_SLIDER") != QByteArray("0");
     return on;
+}
+
+// Default OFF: the shipped mark stays the committed PNG renditions, and the
+// re-authoring only exists at all while this reads 1. See the header block.
+bool OverlayModel::markAnimEnabled() {
+    static const bool on = qgetenv("TRACE_MARK_ANIM") == QByteArray("1");
+    return on;
+}
+
+// -1 when unset; a set value is wrapped into [0,1) rather than clamped, so
+// pinning 1.25 means the same frame as 0.25 -- a phase is an angle.
+double OverlayModel::markAnimPinnedPhase() {
+    static const double pinned = [] {
+        const QByteArray raw = qgetenv("TRACE_MARK_ANIM_PHASE");
+        if (raw.isEmpty()) return -1.0;
+        bool ok = false;
+        double v = raw.toDouble(&ok);
+        if (!ok) return -1.0;
+        v = std::fmod(v, 1.0);
+        if (v < 0.0) v += 1.0;
+        return v;
+    }();
+    return pinned;
 }
 
 OverlayModel::OverlayModel() {
@@ -354,9 +534,70 @@ OverlayModel::OverlayModel() {
         collapseVolume();
     });
 
+    // The mark's idle animation (prototype). 33ms is ~30 ticks a second, ample
+    // for an 18s loop; the phase is advanced from measured elapsed time rather
+    // than by a fixed step, so a late tick does not slow the loop. The timer
+    // only ever runs while the whole gate holds -- see syncMarkAnimation().
+    if (markAnimEnabled() && markAnimPinnedPhase() < 0.0) {
+        markAnimTimer_.setInterval(33);
+        markAnimTimer_.setSingleShot(false);
+        QObject::connect(&markAnimTimer_, &QTimer::timeout, [this]() {
+            // Belt on the gate: the visible/active edge arrives through host
+            // events, and a missed edge must cost one tick, not a spin.
+            if (mediaPresent_ || !hostVisibleActive_) {
+                syncMarkAnimation();
+                return;
+            }
+            const double elapsedMs = static_cast<double>(markAnimClock_.restart());
+            markAnimPhase_ = std::fmod(markAnimPhase_ + elapsedMs / 18000.0, 1.0);
+            ++markAnimTicks_;
+            if (markAnimLogEnabled()) {
+                if (!markAnimLogClock_.isValid()) markAnimLogClock_.start();
+                if (markAnimLogClock_.elapsed() >= 5000) {
+                    const double secs = markAnimLogClock_.restart() / 1000.0;
+                    fprintf(stderr,
+                            "[mark-anim] %.1f ticks/s | rebuild avg %.3fms max %.3fms (%lld) | phase %.3f\n",
+                            markAnimTicks_ / secs,
+                            markRebuilds_ > 0 ? markRebuildMsSum_ / markRebuilds_ : 0.0,
+                            markRebuildMsMax_, markRebuilds_, markAnimPhase_);
+                    fflush(stderr);
+                    markAnimTicks_ = 0;
+                    markRebuilds_ = 0;
+                    markRebuildMsSum_ = markRebuildMsMax_ = 0.0;
+                }
+            }
+            if (hooks_.requestRepaint) hooks_.requestRepaint();
+        });
+    }
+
     // Reserve once. The draw path must not allocate, and the quad count is
     // fixed by the design rather than by the media.
     quads_.reserve(24);
+
+    // The construction-time state (no picture, host presumed visible) is a
+    // valid run state, and nothing else fires until an EDGE arrives.
+    syncMarkAnimation();
+}
+
+// The whole run gate in one place: knob on, phase not pinned, no picture on
+// screen, host visible and active. Freezing keeps the phase where it was;
+// resuming restarts the delta clock so a pause cannot bank a jump.
+void OverlayModel::syncMarkAnimation() {
+    const bool run = markAnimEnabled() && markAnimPinnedPhase() < 0.0
+                  && !mediaPresent_ && hostVisibleActive_;
+    if (run == markAnimTimer_.isActive()) return;
+    if (run) {
+        markAnimClock_.restart();
+        markAnimTimer_.start();
+    } else {
+        markAnimTimer_.stop();
+    }
+}
+
+void OverlayModel::setHostVisibleActive(bool visibleActive) {
+    if (visibleActive == hostVisibleActive_) return;
+    hostVisibleActive_ = visibleActive;
+    syncMarkAnimation();
 }
 
 OverlayModel::~OverlayModel() = default;
@@ -966,6 +1207,11 @@ void OverlayModel::rebuildMessage(QSize surfacePixels) {
 // neither and costs nothing; only a DPI change, or a window narrow enough to
 // re-elide the hint, rasterises again.
 void OverlayModel::rebuildEmpty(QSize surfacePixels) {
+    // The mark animation's picture edge: this runs on every paint of either
+    // backend, so a frame arriving stops the loop (the timer's own belt check
+    // covers the paint-free case) and Close Media restarts it on the first
+    // empty-state paint. Two compares when nothing changed.
+    syncMarkAnimation();
     if (mediaPresent_) {
         // Dropped rather than kept hidden, so the backends release the texture
         // and a revision bump tells them to. There is no reason to hold a
@@ -999,8 +1245,21 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
         ? QString()
         : fm.elidedText(emptyHintText(), Qt::ElideRight, maxTextW);
 
-    if (!empty_.isNull() && std::abs(markPx - emptyMarkPx_) < 0.5 && shown == emptyTextCached_)
+    // The animated mark's phase joins the cache key while the prototype knob
+    // is on: a pinned phase is one deterministic raster (the instrument case),
+    // an advancing one rebuilds per animation tick and never otherwise. With
+    // the knob off the term is constant and the key is exactly what it was.
+    const bool animMark = markAnimEnabled();
+    const double markPhase =
+        animMark ? (markAnimPinnedPhase() >= 0.0 ? markAnimPinnedPhase() : markAnimPhase_)
+                 : 0.0;
+
+    if (!empty_.isNull() && std::abs(markPx - emptyMarkPx_) < 0.5 && shown == emptyTextCached_
+        && (!animMark || std::abs(markPhase - emptyPhaseCached_) < 1e-9))
         return;
+
+    QElapsedTimer rebuildClock;
+    if (animMark) rebuildClock.start();
 
     const double gap = snap(kEmptyGapLogical * s);
     const double lineH = fm.height();
@@ -1040,8 +1299,16 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
         mark.fill(Qt::transparent);
         QPainter mp(&mark);
         mp.setRenderHint(QPainter::SmoothPixmapTransform, true);
-        paintIcon(mp, QRectF(0.0, 0.0, markPx, markPx), QStringLiteral("empty-mark"),
-                  {104, 208});
+        // The prototype knob decides the SOURCE of the mark and nothing else:
+        // the ink scan below, the centring and the hint layout all run the
+        // same on either. Off (the default) is the shipped PNG rendition,
+        // byte for byte.
+        if (animMark) {
+            paintAnimatedEmptyMark(mp, markPx, markPhase);
+        } else {
+            paintIcon(mp, QRectF(0.0, 0.0, markPx, markPx), QStringLiteral("empty-mark"),
+                      {104, 208});
+        }
         mp.end();
         // Ink = alpha above a modest floor, so the faint glow does not drag
         // the box; 40 of 255 keeps the measured 59x68 ink and drops the halo.
@@ -1072,7 +1339,14 @@ void OverlayModel::rebuildEmpty(QSize surfacePixels) {
     empty_ = image;
     emptyMarkPx_ = markPx;
     emptyTextCached_ = shown;
+    emptyPhaseCached_ = markPhase;
     ++emptyRevision_;
+    if (animMark && rebuildClock.isValid()) {
+        const double ms = static_cast<double>(rebuildClock.nsecsElapsed()) / 1'000'000.0;
+        ++markRebuilds_;
+        markRebuildMsSum_ += ms;
+        markRebuildMsMax_ = std::max(markRebuildMsMax_, ms);
+    }
 }
 
 // THE TWO TIME READOUTS, RASTERISED TOGETHER (UI redesign roadmap step 5).

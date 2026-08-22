@@ -172,6 +172,12 @@ protected:
     void paintEvent(QPaintEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     QPaintEngine* paintEngine() const override;
+    // The mark-animation host gate (TRACE_MARK_ANIM prototype): visibility and
+    // window-activation edges pushed into the model, so the idle loop stops
+    // when nobody is looking. An event() override rather than four separate
+    // handlers because Show/Hide/WindowActivate/WindowDeactivate share one
+    // consumer and everything else falls straight through to QWidget.
+    bool event(QEvent* event) override;
     // The CPU backend's input path. Under the D3D11 backend these never fire:
     // the surface is a child HWND above this widget and takes the hit-test
     // itself, which is the same fact that closed the Qt-widget overlay route.

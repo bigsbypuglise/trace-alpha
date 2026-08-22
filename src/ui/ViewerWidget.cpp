@@ -398,6 +398,24 @@ void ViewerWidget::setCursorHidden(bool hidden) {
     if (renderer_) renderer_->setCursorHidden(hidden);
 }
 
+// Show/Hide arrive on this widget; WindowActivate/WindowDeactivate are
+// delivered to every widget of the window, this one included. Everything else
+// falls through untouched, so this cannot perturb the input paths below.
+bool ViewerWidget::event(QEvent* event) {
+    switch (event->type()) {
+        case QEvent::Show:
+        case QEvent::Hide:
+        case QEvent::WindowActivate:
+        case QEvent::WindowDeactivate:
+            overlayModel_.setHostVisibleActive(
+                isVisible() && window() && window()->isActiveWindow());
+            break;
+        default:
+            break;
+    }
+    return QWidget::event(event);
+}
+
 void ViewerWidget::setOverlayHooks(const trace::render::OverlayHooks& hooks) {
     // The hooks belong to the model, not to a backend. That is the whole point
     // of the split: the commands are the application's, the geometry is the

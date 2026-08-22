@@ -223,6 +223,36 @@ public:
     // locate none of them.
     long long layoutRevision() const { return layoutRevision_; }
 
+    // ---- the empty mark's idle animation (prototype, TRACE_MARK_ANIM=1) -----
+    //
+    // The design package's 18s loop -- a spatial gradient rotation on the inner
+    // edge plus a glow hue cycle -- re-authored as QPainter paths and gradients
+    // from assets/interface/branding/empty-mark.svg, because neither animated
+    // property is reachable from the committed PNG renditions. DEFAULT OFF: the
+    // PNG path ships unchanged, both routes coexist behind the knob, and
+    // whether the animation (and therefore the re-authoring) ships is an owner
+    // decision. If it ever ships, the PNGs leave with that decision -- artwork
+    // follows behaviour -- not before it.
+    //
+    // TRACE_MARK_ANIM_PHASE=<0..1> pins the phase (the TRACE_TOPCHROME_ALPHA
+    // idea): the mark renders procedurally at that phase with NO timer, which
+    // is what keeps the empty state a deterministic raster -- and therefore
+    // keeps the one surface that is byte-identical across both renderers usable
+    // as an instrument while the knob is on. Phase 0 is the delivered still
+    // (the SVG's own t=0: rotation 150 degrees, ladder colours at their first
+    // stop).
+    //
+    // The picture edge needs no setter of its own: the timer tick and
+    // rebuildEmpty() both re-ask the whole gate, so a frame arriving stops the
+    // loop within one tick and Close Media restarts it on its first paint.
+    static bool markAnimEnabled();
+    static double markAnimPinnedPhase();  // -1 when unset
+    // The host's half of the run gate: the window is visible and active. An
+    // idle repaint loop in a background window is the opposite of priority #1,
+    // so the animation freezes (phase held, timer stopped) whenever this is
+    // false and resumes from the same phase when it returns.
+    void setHostVisibleActive(bool visibleActive);
+
     // --- input, in surface device pixels -------------------------------------
     // Return true when the overlay consumed the event, so the caller knows
     // whether to fall through to its default handling.
@@ -451,6 +481,24 @@ private:
     QElapsedTimer fadeClock_;
     QTimer animTimer_;
     QTimer autoHideTimer_;
+
+    // ---- mark idle animation state (see the public block above) -------------
+    // Starts or stops markAnimTimer_ from the whole gate: knob on, phase not
+    // pinned, no picture (mediaPresent_), host visible and active. Freezing
+    // keeps the phase; resuming restarts the delta clock so a pause does not
+    // bank a jump.
+    void syncMarkAnimation();
+    QTimer markAnimTimer_;
+    QElapsedTimer markAnimClock_;     // per-tick delta source
+    double markAnimPhase_ = 0.0;      // 0..1 over the 18s loop
+    double emptyPhaseCached_ = -1.0;  // the phase empty_ was rasterised at
+    bool hostVisibleActive_ = true;
+    // TRACE_MARK_ANIM_LOG=1 instrumentation: repaint rate and rebuild cost.
+    QElapsedTimer markAnimLogClock_;
+    long long markAnimTicks_ = 0;
+    long long markRebuilds_ = 0;
+    double markRebuildMsSum_ = 0.0;
+    double markRebuildMsMax_ = 0.0;
 
     // Rebuilt in place each frame rather than reallocated: the draw path
     // allocating once per present is exactly the per-frame cost this design
