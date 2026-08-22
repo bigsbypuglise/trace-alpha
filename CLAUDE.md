@@ -450,6 +450,30 @@ AND the reverted tree builds, checked one at a time.**
   0/51/0 cpu) · `menushot.ps1` all five Alt mnemonics ok · renderer selftest
   `d3d11 fellback=0 planar=1` · shape selftest 44 rows OK ·
   `verify_trace_assets --strict` green.
+- **SHIPPED AS `v0.3.0-beta.6` (2026-08-22, tag at `c519ce3`, run `32558035434` green,
+  asset `trace-windows-x64.zip` 40.9 MB, prerelease at
+  https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.3.0-beta.6).** Nineteen
+  commits past `v0.3.0-beta.5`, and the first release since beta.1 with real user-facing
+  surface rather than one engine change. Version `0.3.0` and **all three stage literals
+  verified inside the built `Trace.exe`** before tagging — `(beta)` , `Beta.` with a
+  capital, and the mail subject — with `0.2.0` absent. **Every verification step read
+  individually rather than trusted from its tick**: asset contract `derived: 33 embedded
+  files` (the item-3 deletion, enforced in CI) · `dependency check: all DLLs import only
+  Windows system libraries` · `FFmpeg detected` + `Audio dependencies detected` ·
+  `6 required files present, 95.4 MB total` · **`renderer=d3d11 fellback=0 planar=1`** (the
+  HARDWARE path — the check accepts `d3d11 (warp)` by prefix, so a WARP pass looks identical
+  in the step status and different in that line) · `OK - 11 shapes x 4 scale factors` ·
+  `release ZIP … (40.9 MB)`. The stale `docs/release-body-draft.md`, which still read
+  "DRAFT, NOT CUT" for beta.1, is banner-marked as history in the same commit.
+  **The tester-facing rollbacks named in the notes are `TRACE_VOLUME_SLIDER=0`,
+  `TRACE_FS_MAG_FILTER=0`, `TRACE_MARK_ANIM=0`, `TRACE_SCRUB_PAINT_GATE=0` and
+  `TRACE_RENDERER=cpu`.**
+  **THE AUDIO-DROPOUT ITEM SHIPS UNRESOLVED, DELIBERATELY, AND THE RELEASE DOES NOT CLAIM
+  OTHERWISE.** If it recurs, the first thing to establish is which Qt the failing build
+  links: **this diagnosis ran on the local Qt 6.10.2 and CI pins Qt 6.7.2**, whose Windows
+  audio backend predates `QWASAPIAudioSinkStream` and its MMCSS thread — so a downloaded
+  ZIP is not the same experiment as a local build, and `audiodrag.ps1 -Exe <the ZIP's
+  Trace.exe>` is the run that would tell them apart.
 
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
