@@ -119,6 +119,24 @@ step 5 applies as-is.
 - Loop on: the run wraps at the end and keeps playing lap after lap.
 - Movie Inspector shows the audio snapshot with honest origin tags.
 
+## Regression (2026-08-21, physical panel, both items at HEAD)
+
+- `scrubbar.ps1` full pool: **PASS — 22 files, 88 legs, `delta 0` throughout.**
+- 4K H.264 cadence ×2: **99.2/99.1%**, `drop 0`, `rephase 0`,
+  `handler>budget 0 of 120`, buckets `~1x 118 / 1.5-2.5x 1` — the recorded
+  class. (First rep of each run was voided by a foreground denial to the
+  harness and re-taken; the valid samples are quoted.)
+- 4444 cadence ×2: **99.8/99.8%**, 261 frames, `drop 0`, `0 of 260`.
+- 4444 `scrub -SnapRelease`: **`target 261 shown 261 delta 0`** full-res
+  planar, `release 21.3ms`, `hitch 0`, `land 0`.
+- `transitions.ps1 -All`: **25 of 25 PASS.**
+- `lifecycle.ps1`: **93.9% moving / 0% control.**
+- `emptystate.ps1`: all four modes PASS on both backends, plus `-Bar` — after
+  the harness's own close-mode focus fix (`Focus-Window`; a silent
+  `SetForegroundWindow` denial had accused a correct build).
+- `uiatree.ps1`: nine named transport controls + MenuBar + five MenuItems, on
+  **identical rects to the pixel** across both backends.
+
 ## Knobs and notes
 
 - `TRACE_NO_AUDIO=1` makes an audio file **fail to open** (AudioOutput

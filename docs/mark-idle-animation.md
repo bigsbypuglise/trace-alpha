@@ -60,6 +60,17 @@ committed PNG rendition, byte for byte, and every figure below says so.
   is showing"); **opening a video stops it** and it stays stopped (line
   count flat across 14s of an open 1080p file).
 
+## Regression (2026-08-21, default-off configuration)
+
+The standing regression ran at HEAD with both this and the audio commit in:
+`scrubbar.ps1` full pool **PASS (22 files, 88 legs, `delta 0` throughout)** ·
+4K H.264 cadence ×2 **99.2/99.1%** identical buckets · 4444 ×2 **99.8/99.8%**
+· 4444 `-SnapRelease` **`delta 0`**, `hitch 0`, `land 0` · **25 of 25
+transitions** · lifecycle **93.9%/0%** · `emptystate.ps1` all modes both
+backends + `-Bar` · `uiatree.ps1` identical rects across backends. With the
+knob unset the animated path never executes (one static `markAnimEnabled()`
+read per rebuild), which is what those figures measure.
+
 ## What this is not, and the decision it tees up
 
 The mark ships as committed PNGs and neither animated property is reachable

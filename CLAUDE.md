@@ -277,6 +277,66 @@ any of the three.
   swallowed**; click the picture (item 13's click-activate) before sending keys after any
   menu interaction, and read the HUD's `speed` field before believing a pause happened.
 
+**AUDIO-ONLY PLAYBACK IS BUILT AND THE MARK'S IDLE ANIMATION IS PROTOTYPED (2026-08-21,
+`f7e4e00` audio · `5863f08` animation · `bd65ad7` harness; records `docs/audio-playback.md`
+and `docs/mark-idle-animation.md` — read them before touching either.)** Two separately
+revertable commits, proven so by reverting each against the other before push.
+
+- **AUDIO FILES OPEN AND THE TRANSPORT DRIVES THEM** (wav mp3 m4a aac flac ogg opus).
+  `MediaKind::AudioFile` is a fourth `openPath` branch; AudioOutput already owned its own
+  demuxer, decode thread, seek and master clock, so opening it IS the open. **`frameSource_`
+  stays null by design** — the full frames-available guard audit is in the doc: most
+  consumers already refuse through existing guards (scrub worker, shuttle engine, prefetch,
+  §4 shaping via `currentDisplayAspect()` reading 0), the rest gained an audio branch
+  (tick → `runAudioOnlyTick()`, stepping, Go To, slider handlers, `loopWrap`) or are
+  disabled through `syncMediaDependentActions` (copy frame, view transforms, zoom/pan,
+  speed rungs, shuttle buttons). The transport runs on a **synthetic frame index, duration
+  × 24.0 (`kAudioNominalFps` — 24 because it is the fallback `readoutTextAt` already used
+  for a null source, so the two cannot disagree)**; the readout defaults to **Elapsed,
+  never Frame Count**, and the HUD (`@ 24fps nominal`) and inspector (`playback` origin,
+  "synthesised by Trace") label the index as Trace's own. Dragging is silent; the release
+  seeks and resumes through `AudioOutput::start(offset)`; **scrub audio is explicitly out
+  of scope**. The empty-state mark stays on screen for free (the renderers' own no-picture
+  answer) with the drop-media hint suppressed while a file is open
+  (`OverlayModel::setPicturelessMediaOpen`). Two latent faults closed in passing: **Go to
+  End computed its target from `frameSource_` and silently did nothing without one**, and
+  **`releaseCurrentMedia` never cleared `currentImage_`**, so an audio open after a still
+  would have inherited the previous picture's size into the §4 shaping pass.
+  `TRACE_NO_AUDIO=1` makes an audio file fail to open, stated in its message — the honest
+  reading of the control knob.
+- **THE MARK ANIMATION IS A PROTOTYPE BEHIND `TRACE_MARK_ANIM=1`, DEFAULT OFF, FOR THE
+  OWNER TO JUDGE — and the PNG renditions ship unchanged until that decision.** The 18s
+  loop re-authored as QPainter paths and gradients from `empty-mark.svg`, whose own SMIL
+  block is the spec (edge gradient rotating 150→510° about (520,512); glow stops cycling
+  the five-colour ladder); objectBoundingBox gradients are reproduced by giving the BRUSH
+  the bbox transform, not by mapping endpoints. **`TRACE_MARK_ANIM_PHASE=<0..1>` pins the
+  phase with no timer — measured d3d11 vs cpu at a pinned 0.25: 0 of 983,664 px differ,
+  max channel delta 0**, so the one byte-identical cross-backend surface stays a working
+  instrument. The run gate is one place (`syncMarkAnimation`): knob on, phase unpinned,
+  **no picture on screen** (so video decoding stops it by construction while audio-only
+  playback keeps the mark animating — verified both ways), host visible and active
+  (ViewerWidget pushes the edges; deactivation freezes the phase, refocus resumes it).
+  Cost: ~20–21 ticks/s (coarse timer; the phase is elapsed-based so the 18s period is
+  exact), rebuild ~0.5ms, **2.97% of one core animating against 0.0% off**.
+  `TRACE_MARK_ANIM_LOG=1` prints ticks/s, rebuild cost and phase every 5s. **If the owner
+  ships it, the PNGs and the `paintIcon` route leave in the same decision (artwork follows
+  behaviour); if declined, the procedural path is one self-contained revert.**
+- **Regression at HEAD, flat** (physical panel): `scrubbar.ps1` full-pool **PASS — 22
+  files, 88 legs, `delta 0` throughout** · 4K H.264 cadence ×2 **99.2/99.1%** (`drop 0`,
+  `rephase 0`, `0 of 120`, buckets `~1x 118 / 1.5-2.5x 1`) · 4444 ×2 **99.8/99.8%**
+  (`0 of 260`) · 4444 `-SnapRelease` **`target 261 shown 261 delta 0`** full-res planar,
+  `release 21.3ms`, `hitch 0`, `land 0` · **25 of 25 transitions** · lifecycle **93.9%
+  moving / 0% control** · `emptystate.ps1` all four modes both backends + `-Bar` ·
+  `uiatree.ps1` nine named controls + MenuBar/5 items on identical rects across backends.
+- **`emptystate.ps1` GAINED `Focus-Window` IN EVERY KEY-SENDING MODE** (`bd65ad7`): the
+  close leg pressed Ctrl+W after a bare `SetForegroundWindow`, Windows denied it silently
+  — the trap the script itself recorded and guarded in swap mode alone — and a correct
+  build read as "the empty state did not come back", twice, on d3d11. The guard verifies
+  with `GetForegroundWindow` and carries the synthetic Alt-tap unlock; a denial now fails
+  as the harness. Same-session corollary: **Ctrl+W from SendKeys needs the picture
+  click-activated or a verified foreground first** — the recorded menu-mode lesson's
+  sibling.
+
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
@@ -4118,6 +4178,12 @@ stride when demand exceeds supply, with the decoder delivering the keyframe its 
 on, floored at the pointer. Deliberately separate from `TRACE_SCRUB_SAMPLE`, which governs
 the validated intra path and must stay revertable independently. The HUD's `kf-land` count
 is the engagement check — 0 on intra media and unflagged gestures by construction),
+**`TRACE_MARK_ANIM=1`** (2026-08-21: the empty mark's 18s idle animation, a QPainter
+re-authoring prototype for the owner to judge — DEFAULT OFF, the committed PNG renditions
+ship unchanged. `TRACE_MARK_ANIM_PHASE=<0..1>` pins the phase with no timer, which is what
+keeps the empty state byte-identical across backends while the knob is on;
+`TRACE_MARK_ANIM_LOG=1` prints ticks/s, rebuild cost and phase every 5s. Record in
+`docs/mark-idle-animation.md`),
 **`TRACE_VOLUME_SLIDER=0`** (2026-08-20: no inline volume slider — the step 5 mute-only
 button exactly, in layout, hit regions, glyphs, proxy count, wheel behaviour and the HUD
 line. The owner-required rollback for the volume slider; default on. Record in
