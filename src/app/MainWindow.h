@@ -135,7 +135,13 @@ private:
     // claim the same Alt mnemonic -- which makes the key cycle the highlight
     // rather than activate either. Phase 14 introduced two of them in one menu;
     // see the definition.
+    // Also warns when a menu mnemonic is a bare-key command (2026-08-21), so it
+    // needs shortcuts_ populated and therefore runs from the constructor rather
+    // than from setupMenus().
     void warnOnDuplicateMnemonics() const;
+    // Runs the shortcut table for one key event and reveals the transport if it
+    // did. Shared by keyPressEvent and the menu bar's event filter.
+    bool dispatchShortcutKey(QKeyEvent* event);
     void setupTransportControls();
     // Fills shortcuts_. Runs LAST, after every action it lists exists.
     void setupShortcuts();

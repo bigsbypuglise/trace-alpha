@@ -480,6 +480,12 @@ MainWindow::MainWindow() {
     // Last: every action it lists has to exist before it can point at one.
     setupShortcuts();
 
+    // After BOTH menus and shortcuts, because it now checks two things: two
+    // items in one menu sharing a mnemonic, and a menu mnemonic that is also a
+    // bare-key command. The second comparison needs the shortcut table, which
+    // is why this moved out of the tail of setupMenus().
+    warnOnDuplicateMnemonics();
+
     // Open Recent (spec phase 11). Reads stored strings and builds the submenu
     // from them; NOTHING here touches the filesystem, so a list full of
     // disconnected LucidLink or UNC paths costs a launch exactly nothing. That
@@ -4103,7 +4109,44 @@ void MainWindow::setupMenus() {
 
     syncPlaybackSpeedActions();
     syncMediaDependentActions();
-    warnOnDuplicateMnemonics();
+
+    // THE MENU BAR MUST NOT ANSWER A BARE LETTER THAT IS ONE OF TRACE'S OWN
+    // COMMANDS (owner ruling, 2026-08-21). Two halves, and both are needed --
+    // the filter alone was built first and measured no change.
+    //
+    // (1) THE MENU BAR MUST NOT KEEP KEYBOARD FOCUS ONCE NO MENU IS OPEN.
+    // Closing a popup with Escape leaves QMenuBar in keyboard mode with its
+    // title still the active action, and Trace has nothing to hand focus back
+    // to (viewer, transport and the phase 14 proxies are all Qt::NoFocus), so
+    // it stays there invisibly -- the strip fades out two seconds later and the
+    // menu bar is still holding the keyboard. clearFocus() sends QMenuBar a
+    // focus-out, which is what makes it leave keyboard mode.
+    //
+    // DEFERRED, AND ONLY WHEN NO POPUP IS LEFT. aboutToHide fires before the
+    // menu is actually hidden, and it also fires for the OUTGOING menu when
+    // Left/Right walks from File to Edit -- clearing focus there would break
+    // arrow navigation between menus. By the time the queued call runs, the
+    // incoming popup exists and the test declines.
+    for (const QAction* top : appMenuBar_->actions()) {
+        QMenu* menu = top->menu();
+        if (!menu) continue;
+        connect(menu, &QMenu::aboutToHide, this, [this]() {
+            QTimer::singleShot(0, this, [this]() {
+                if (!appMenuBar_) return;
+                if (QApplication::activePopupWidget() != nullptr) return;
+                appMenuBar_->clearFocus();
+            });
+        });
+    }
+
+    // (2) And if the menu bar holds focus by any other route, the table still
+    // wins the key. See eventFilter().
+    appMenuBar_->installEventFilter(this);
+
+    // warnOnDuplicateMnemonics() is NOT called here any more: it now also
+    // compares the menu bar's mnemonics against the bare keys ShortcutTable
+    // dispatches, and setupShortcuts() runs after this function. The
+    // constructor calls it once both halves exist.
 }
 
 // TWO ITEMS IN ONE MENU SHARING A MNEMONIC MAKES THE KEY CYCLE THE HIGHLIGHT
@@ -4153,6 +4196,50 @@ void MainWindow::warnOnDuplicateMnemonics() const {
     };
 
     if (!appMenuBar_) return;
+
+    // A MENU MNEMONIC THAT IS ALSO A BARE-KEY COMMAND IS THE SECOND CLASS THIS
+    // CHECK CATCHES (owner instruction, 2026-08-21), and it is a different
+    // failure from two items sharing a mnemonic: the letter does not cycle a
+    // highlight, it does one thing with the picture focused and a different
+    // thing with the menu bar focused. F/File and E/Edit were both live when
+    // this was added, H/Help is live and hidden (Qt runs an action's shortcut
+    // before the menu bar sees the key, so H reaches the HUD either way), and
+    // V/View and W/Window are one binding away. eventFilter() decides the
+    // collision in Trace's favour; this says out loud that there is one, so the
+    // next single-key shortcut cannot reintroduce it silently.
+    {
+        QHash<QChar, QString> bareKeys;
+        const auto noteBare = [&bareKeys](const QKeySequence& seq, const QString& label) {
+            if (seq.count() != 1) return;
+            const QKeyCombination combo = seq[0];
+            if (combo.keyboardModifiers() != Qt::NoModifier) return;
+            const int k = combo.key();
+            if (k < Qt::Key_A || k > Qt::Key_Z) return;
+            bareKeys.insert(QChar(QLatin1Char('a' + (k - Qt::Key_A))), label);
+        };
+        for (const auto& row : shortcuts_.rows()) {
+            QString label = row.label();
+            label.remove(QLatin1Char('&'));
+            for (const QKeySequence& seq : row.keys()) noteBare(seq, label);
+        }
+        for (const QAction* top : appMenuBar_->actions()) {
+            const QString text = top->text();
+            const int amp = text.indexOf(QLatin1Char('&'));
+            if (amp < 0 || amp + 1 >= text.size()) continue;
+            const QChar key = text.at(amp + 1).toLower();
+            const auto it = bareKeys.constFind(key);
+            if (it == bareKeys.constEnd()) continue;
+            QString menuName = text;
+            menuName.remove(QLatin1Char('&'));
+            fprintf(stderr,
+                    "trace-menu: MNEMONIC '&%s' on the %s menu is also the bare "
+                    "key for \"%s\". Trace's command wins (MainWindow::"
+                    "eventFilter); Alt+%s still opens the menu.\n",
+                    qPrintable(QString(key)), qPrintable(menuName),
+                    qPrintable(it.value()), qPrintable(QString(key.toUpper())));
+        }
+    }
+
     // The menu bar's own titles, then each menu's items and each submenu's.
     scan(appMenuBar_->actions(), QStringLiteral("menu bar"));
     for (const QAction* top : appMenuBar_->actions()) {
@@ -4524,6 +4611,44 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
         if (key->key() == Qt::Key_Alt || (key->modifiers() & Qt::AltModifier)) {
             if (viewer_) viewer_->revealOverlay("alt-mnemonic");
         }
+    }
+
+    // A BARE LETTER BELONGS TO TRACE, NOT TO THE MENU BAR (owner ruling,
+    // 2026-08-21). F changes the time display; E changes the time display;
+    // Alt+F and Alt+E still open their menus.
+    //
+    // The fault this fixes: QMenuBar::keyPressEvent matches a bare letter
+    // against its menus' mnemonics whenever the menu bar has keyboard focus --
+    // Qt's own test is (no modifiers || Alt || Meta), so no Alt is required.
+    // And the menu bar KEEPS that focus after Qt's menu mode is left, because
+    // QMenuBarPrivate restores focus to whatever held it before, and in Trace
+    // nothing does: the viewer, the transport widgets and the phase 14
+    // accessibility proxies are all Qt::NoFocus by design. Measured on the
+    // shipping build: after Alt+F then Escape, a bare `f` opened File and left
+    // the readout alone, while `s` -- which matches no menu title -- fell
+    // through to the window and worked. That asymmetry is the whole bug, and
+    // it is the same state CLAUDE.md already records from the other side
+    // ("leaving Qt's menu mode can leave the menu bar focused, where Space is
+    // silently swallowed") -- which this fixes too, Space being a table row.
+    //
+    // ON THE MENU BAR, and consuming, because by the time the key reached
+    // MainWindow::keyPressEvent the menu bar would already have eaten it. The
+    // table is asked first and the event is only taken if the table owns the
+    // key, so every key the menu bar legitimately handles still reaches it.
+    //
+    // NOT WHILE THE MENU BAR IS ACTUALLY BEING NAVIGATED. activeAction() is
+    // non-null exactly while a menu title is highlighted, which is Qt's
+    // keyboard mode -- there the user is IN the menus and Windows' convention
+    // is that letters are mnemonics. Arrow navigation between menus therefore
+    // survives untouched, which matters because Left and Right are table rows.
+    // A popup being open is checked as well: with one up the key would go to
+    // the QMenu rather than here, but the test costs nothing and states the
+    // intent.
+    if (watched == appMenuBar_ && event->type() == QEvent::KeyPress
+        && appMenuBar_->activeAction() == nullptr
+        && QApplication::activePopupWidget() == nullptr) {
+        auto* key = static_cast<QKeyEvent*>(event);
+        if (dispatchShortcutKey(key)) return true;
     }
     return QMainWindow::eventFilter(watched, event);
 }
@@ -9332,16 +9457,23 @@ void MainWindow::refreshHud(const QString& action) {
 // The rows carrying a QAction never reach here at all -- Qt runs an action's
 // shortcut before the key event is delivered to the window -- so they are in the
 // table as documentation for spec phase 13 and are skipped by the dispatcher.
+// Extracted so the menu bar's event filter can run the SAME dispatch rather
+// than a second copy of it (see eventFilter). Returns whether the table owned
+// the key, which is what lets the filter decide between consuming the event and
+// letting the menu bar have it.
+bool MainWindow::dispatchShortcutKey(QKeyEvent* event) {
+    if (!shortcuts_.dispatch(event)) return false;
+    // "Relevant keyboard input reveals it" (spec phase 6). The table IS the
+    // definition of relevant: every key in it is a transport, stepping,
+    // shuttle or readout command, and a key it does not own is by
+    // construction not one. Revealing after the handler, so a shuttle press
+    // brings the panel back already showing its new rate.
+    if (viewer_) viewer_->revealOverlay("keypress");
+    return true;
+}
+
 void MainWindow::keyPressEvent(QKeyEvent* event) {
-    if (shortcuts_.dispatch(event)) {
-        // "Relevant keyboard input reveals it" (spec phase 6). The table IS the
-        // definition of relevant: every key in it is a transport, stepping,
-        // shuttle or readout command, and a key it does not own is by
-        // construction not one. Revealing after the handler, so a shuttle press
-        // brings the panel back already showing its new rate.
-        if (viewer_) viewer_->revealOverlay("keypress");
-        return;
-    }
+    if (dispatchShortcutKey(event)) return;
     QMainWindow::keyPressEvent(event);
 }
 
