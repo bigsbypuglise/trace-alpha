@@ -9403,7 +9403,18 @@ void MainWindow::refreshHud(const QString& action) {
             // rate beside it, because the index is synthetic and the HUD must
             // not present it as a property of the file.
             const auto as = audio_.stats();
-            line = QString("Audio | %1 | %2 %3Hz ch:%4 | dur %5s | F:%6/%7 @ %8fps nominal | Seconds: %9 | clk %10s %11%12")
+            // `under` and `silence` ride this line as well as the video one
+            // (2026-08-21). They were video-only, so the ONE media class with
+            // nothing but sound in it was the class whose HUD said least about
+            // the sound -- which is exactly what the window-drag dropout report
+            // had to be diagnosed around, by timing `clk` against wall time
+            // instead. Read them together: `under` counts pulls the ring could
+            // not answer in full and `silence` the padding bytes handed to the
+            // device, so `silence` is the audible gap measured in bytes. NOTE
+            // both count the RING side -- a device that stops being pulled at
+            // all leaves both at 0 -- so `clk` against wall time is still the
+            // check for "did the sound keep coming".
+            line = QString("Audio | %1 | %2 %3Hz ch:%4 | dur %5s | F:%6/%7 @ %8fps nominal | Seconds: %9 | clk %10s %11%12 | under %13 | silence %14 B")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
                 .arg(as.codecName)
                 .arg(audio_.sourceSampleRate())
@@ -9415,7 +9426,9 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
                 .arg(QString::number(as.clockSeconds, 'f', 3))
                 .arg(as.playing ? QStringLiteral("PLAYING") : QStringLiteral("idle"))
-                .arg(as.muted ? QStringLiteral(" muted") : QString());
+                .arg(as.muted ? QStringLiteral(" muted") : QString())
+                .arg(as.underruns)
+                .arg(as.silenceBytes);
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             // ZERO-BASED, and against the last valid INDEX rather than the
