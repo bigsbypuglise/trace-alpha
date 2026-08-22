@@ -9091,7 +9091,7 @@ void MainWindow::refreshHud(const QString& action) {
             // stepping the control loop and the HUD is changing playback.
             const QString l10 = !audioStats.available
                 ? QString()
-                : QString("audiobuf req %1 KB / got %2 KB (%3ms) | ring %4 KB (%5ms, %6x) | fill %7ms | silence %8 B | lat %9ms | snap %10ms x%11 | clk-upd %12/%13")
+                : QString("audiobuf req %1 KB / got %2 KB (%3ms) | ring %4 KB (%5ms, %6x) | fill %7ms | silence %8 B | lat %9ms | snap %10ms x%11 | clk-upd %12/%13 | pull max %14ms over50 %15 dry %16")
                     .arg(audioStats.sinkBufferRequestedBytes / 1024)
                     .arg(audioStats.sinkBufferBytes / 1024)
                     .arg(QString::number(audioStats.deviceBufferMs, 'f', 0))
@@ -9108,7 +9108,10 @@ void MainWindow::refreshHud(const QString& action) {
                     .arg(QString::number(audioStats.snapThresholdMs, 'f', 0))
                     .arg(audioStats.clockSnaps)
                     .arg(lastClockUpdatesPerTick_)
-                    .arg(maxClockUpdatesPerTick_);
+                    .arg(maxClockUpdatesPerTick_)
+                    .arg(QString::number(audioStats.pullGapMaxUs / 1000.0, 'f', 1))
+                    .arg(audioStats.pullGapsOver50)
+                    .arg(audioStats.pullGapsDry);
 
             // Capacity is the count that fits at the size currently stored, so
             // it rises as a 4K drag fills the cache with half-res previews.
@@ -9412,9 +9415,19 @@ void MainWindow::refreshHud(const QString& action) {
             // not answer in full and `silence` the padding bytes handed to the
             // device, so `silence` is the audible gap measured in bytes. NOTE
             // both count the RING side -- a device that stops being pulled at
-            // all leaves both at 0 -- so `clk` against wall time is still the
-            // check for "did the sound keep coming".
-            line = QString("Audio | %1 | %2 %3Hz ch:%4 | dur %5s | F:%6/%7 @ %8fps nominal | Seconds: %9 | clk %10s %11%12 | under %13 | silence %14 B")
+            // all leaves both at 0.
+            //
+            // `clk` is NOT the check for "did the sound keep coming", and
+            // reading it as one cost the 2026-08-22 session a wrong conclusion:
+            // advanceClock() is a WALL-CLOCK projection slewed 5% per update
+            // toward the raw audio position and then monotonically clamped, so
+            // it advances at real time whether or not the device is being fed.
+            // `proc` is the raw sink counter and `snap` counts the divergences
+            // the slew could not absorb; `pull max` is the only figure that
+            // sees a starved pull directly. All four are on this line now,
+            // because audio-only is the one media class that is nothing but
+            // sound and it was the class whose HUD said least about it.
+            line = QString("Audio | %1 | %2 %3Hz ch:%4 | dur %5s | F:%6/%7 @ %8fps nominal | Seconds: %9 | clk %10s %11%12 | under %13 | silence %14 B | proc %15ms | snap %16ms x%17 | pull max %18ms over50 %19 dry %20 | state %21")
                 .arg(QFileInfo(QString::fromStdString(currentMedia_->path)).fileName())
                 .arg(as.codecName)
                 .arg(audio_.sourceSampleRate())
@@ -9428,7 +9441,14 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(as.playing ? QStringLiteral("PLAYING") : QStringLiteral("idle"))
                 .arg(as.muted ? QStringLiteral(" muted") : QString())
                 .arg(as.underruns)
-                .arg(as.silenceBytes);
+                .arg(as.silenceBytes)
+                .arg(as.processedUSecs / 1000)
+                .arg(QString::number(as.snapThresholdMs, 'f', 0))
+                .arg(as.clockSnaps)
+                .arg(QString::number(as.pullGapMaxUs / 1000.0, 'f', 1))
+                .arg(as.pullGapsOver50)
+                .arg(as.pullGapsDry)
+                .arg(as.sinkState);
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
             // ZERO-BASED, and against the last valid INDEX rather than the

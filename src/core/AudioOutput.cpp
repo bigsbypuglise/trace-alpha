@@ -211,8 +211,13 @@ class AudioFeed final : public QIODevice {
 public:
     AudioFeed(AudioRing& ring,
               std::atomic<long long>& underruns,
-              std::atomic<long long>& silenceBytes)
-        : ring_(ring), underruns_(underruns), silenceBytes_(silenceBytes) {}
+              std::atomic<long long>& silenceBytes,
+              std::atomic<long long>& pullGapMaxUs,
+              std::atomic<long long>& pullGapsOver,
+              std::atomic<long long>& pullGapsDry)
+        : ring_(ring), underruns_(underruns), silenceBytes_(silenceBytes),
+          pullGapMaxUs_(pullGapMaxUs), pullGapsOver_(pullGapsOver),
+          pullGapsDry_(pullGapsDry) {}
 
     bool isSequential() const override { return true; }
 
@@ -233,6 +238,38 @@ public:
 protected:
     qint64 readData(char* data, qint64 maxSize) override {
         if (maxSize <= 0) return 0;
+
+        // How long the device went UNPULLED, which is the one thing neither
+        // `under`/`silence` nor `proc` can report. Both counters above increment
+        // inside this function, so a device that is not pulled at all leaves
+        // them at 0 while going silent -- the 2026-08-21 record says exactly
+        // this and then had no instrument for it. And a before/after `proc`
+        // delta averages a few hundred ms of gap away over a multi-second
+        // gesture: a 400ms stall is plainly audible and moves a 5.3s total by
+        // under 1%, which is inside the measurement's own noise. This is the
+        // figure that sees a pull the event loop failed to service.
+        if (!pullTimer_.isValid()) {
+            pullTimer_.start();
+        } else {
+            const long long gapUs = pullTimer_.nsecsElapsed() / 1000;
+            pullTimer_.restart();
+            long long prev = pullGapMaxUs_.load(std::memory_order_relaxed);
+            while (gapUs > prev &&
+                   !pullGapMaxUs_.compare_exchange_weak(
+                       prev, gapUs, std::memory_order_relaxed)) {}
+            // Two thresholds, because one of them is the noise floor and the
+            // other is the fault. The sink pulls about every 50ms -- half the
+            // 100ms device buffer -- so `over50` counts ORDINARY pulls and
+            // reads ~50 across a 10s run whatever is happening; it is context,
+            // not a signal. `over100` is the one that matters: a gap wider than
+            // the whole device buffer means the buffer emptied and the endpoint
+            // had nothing to play. That is inaudible to every other counter
+            // Trace has, because the ring still had data whenever it was
+            // finally asked.
+            if (gapUs > 50'000) ++pullGapsOver_;
+            if (gapUs > 100'000) ++pullGapsDry_;
+        }
+
         const int got = ring_.read(reinterpret_cast<uint8_t*>(data),
                                    static_cast<int>(maxSize));
         if (got < maxSize) {
@@ -259,6 +296,10 @@ private:
     AudioRing& ring_;
     std::atomic<long long>& underruns_;
     std::atomic<long long>& silenceBytes_;
+    std::atomic<long long>& pullGapMaxUs_;
+    std::atomic<long long>& pullGapsOver_;
+    std::atomic<long long>& pullGapsDry_;
+    QElapsedTimer pullTimer_;
 };
 
 } // namespace
@@ -295,6 +336,9 @@ struct AudioOutput::Impl {
     std::atomic<bool> decodeEnded{false};
     std::atomic<long long> underruns{0};
     std::atomic<long long> silenceBytes{0};
+    std::atomic<long long> pullGapMaxUs{0};
+    std::atomic<long long> pullGapsOver{0};
+    std::atomic<long long> pullGapsDry{0};
 
     double startSeconds = 0.0;
     bool playing = false;
@@ -543,7 +587,10 @@ bool AudioOutput::open(const QString& path, QString& error) {
 
     impl_->sink = std::make_unique<QAudioSink>(device, impl_->deviceFormat);
     impl_->feed = std::make_unique<AudioFeed>(impl_->ring, impl_->underruns,
-                                              impl_->silenceBytes);
+                                              impl_->silenceBytes,
+                                              impl_->pullGapMaxUs,
+                                              impl_->pullGapsOver,
+                                              impl_->pullGapsDry);
     return true;
 }
 
@@ -556,6 +603,9 @@ void AudioOutput::close() {
     impl_->codecName.clear();
     impl_->underruns = 0;
     impl_->silenceBytes = 0;
+    impl_->pullGapMaxUs = 0;
+    impl_->pullGapsOver = 0;
+    impl_->pullGapsDry = 0;
     impl_->disabledByEnv = false;
 }
 
@@ -603,6 +653,9 @@ void AudioOutput::start(double startSeconds) {
     impl_->clockBase = startSeconds;
     impl_->underruns = 0;
     impl_->silenceBytes = 0;
+    impl_->pullGapMaxUs = 0;
+    impl_->pullGapsOver = 0;
+    impl_->pullGapsDry = 0;
     impl_->clockUpdates = 0;
     impl_->clockSnaps = 0;
 
@@ -811,6 +864,9 @@ AudioPerfStats AudioOutput::stats() const {
     s.clockSeconds = peekClock();
     s.bufferedMs = impl_->bytesToSeconds(impl_->ring.used()) * 1000.0;
     s.underruns = impl_->underruns;
+    s.pullGapMaxUs = impl_->pullGapMaxUs;
+    s.pullGapsOver50 = impl_->pullGapsOver;
+    s.pullGapsDry = impl_->pullGapsDry;
     s.ended = ended();
     s.disabledByEnv = impl_->disabledByEnv;
     s.sinkBufferRequestedBytes = impl_->requestedBufferBytes;

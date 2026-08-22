@@ -19,6 +19,14 @@ struct AudioPerfStats {
     double clockSeconds = 0.0;   // media time currently hitting the speakers
     double bufferedMs = 0.0;     // decoded audio waiting to be handed to the device
     long long underruns = 0;     // times the device asked for data we did not have
+
+    // Gap between consecutive device pulls. `underruns`/`silenceBytes` count the
+    // RING side and cannot see a device that stopped being pulled at all; a
+    // before/after `processedUSecs` delta averages a sub-second gap away. This
+    // pair is the only instrument that reports a starved pull directly.
+    long long pullGapMaxUs = 0;
+    long long pullGapsOver50 = 0;  // ~the normal pull cadence: context, not signal
+    long long pullGapsDry = 0;     // gap > the whole device buffer: it ran dry
     bool ended = false;          // audio stream ran out before video did
 
     // Raw sink numbers behind the clock. Present because the clock pinning at
