@@ -7,6 +7,13 @@ Trace faster, clearer, or simpler? If not, do not add it.*
 
 Design package: `assets/source/260817-trace-ui-v2/` — see "The delivery" at the end.
 
+**THE ROADMAP IS COMPLETE as of 2026-08-21.** Steps 1–11 are built and measured; step 12,
+the frameless window, is **closed as declined** by owner decision — the native Windows title
+bar stays, for Snap, Aero Shake, Win+arrow, multi-monitor and accessibility. Drag-anywhere-in-
+the-picture to move the window was declined in the same decision. See step 12 below for both,
+and for the two interim decisions that closing it settles. There is no open step and no open
+owner question on this roadmap.
+
 ---
 
 ## FIRST, THE THING THAT CUTS ACROSS SEVERAL STEPS
@@ -711,13 +718,40 @@ fractional offset, until the layout was pixel-snapped. `overlay.ps1` and `banddi
 this; take backend diffs in **bar mode** or over the empty state, because the floating overlay's
 fade state otherwise lands inside the band and read 9.1% on the first attempt.
 
-### 12. Frameless window — later
+### 12. Frameless window — CLOSED AS DECLINED (owner, 2026-08-21)
 
-**Correctly deferred, and it is the highest-risk item on the list.** Flagging why, so the
-deferral is made on the real reason: Trace already handles `WM_SIZING` (the aspect lock, which
-constrains the drag rect rather than correcting afterwards) and `WM_DPICHANGED` (the reshape
-that fixed the pillarboxing bug). A frameless window adds `WM_NCHITTEST` and `WM_NCCALCSIZE` to
-the same `nativeEvent` path and can break both — and both are signed-off geometry.
+**The native Windows title bar stays.** Owner decision, taken on its merits rather than
+deferred again: the native frame is what gives Trace Snap, Aero Shake, Win+arrow, correct
+multi-monitor behaviour and the accessibility a real caption carries. A frameless window would
+have to reimplement all of that, and reimplementations of window management are where this class
+of app goes wrong. **Do not re-propose it.**
+
+The risk flag it was deferred on still reads true and is retained as the record of why the
+decision was easy: Trace already handles `WM_SIZING` (the aspect lock, which constrains the drag
+rect rather than correcting afterwards) and `WM_DPICHANGED` (the reshape that fixed the
+pillarboxing bug). A frameless window adds `WM_NCHITTEST` and `WM_NCCALCSIZE` to the same
+`nativeEvent` path and can break both — and both are signed-off geometry.
+
+**Two things that were conditional on step 12 are now settled by its closing.** The top strip's
+brand mark and wordmark, removed at owner item 1 (2026-08-18) as an "approved interim" on the
+stated grounds that they return "with roadmap step 12, when the strip becomes the only header",
+**do not return** — the strip is never the only header. The `brand-mark-*` renditions stay out
+of the `.qrc` and the working copies. And the design package's screen-2 fullscreen strip, already
+declined at steps 6/8/9 in favour of one strip windowed and fullscreen, keeps that ruling with no
+remaining route back to it.
+
+### 12b. Drag anywhere in the picture to move the window — DECLINED (owner, 2026-08-21)
+
+Raised and declined in the same decision. **The picture's press gesture is already spoken for**:
+it is the phase 15 pan when the picture is zoomed, and it is feedback item 13's click-activate
+otherwise. A third meaning for the same press would have to be arbitrated by zoom state, which
+makes the same gesture do different things depending on something the user is not looking at.
+
+Beyond that, **Windows applications move by their chrome**, and Trace now keeps a native caption
+to move by (step 12, above). And it would multiply the one measured cost of a window drag: the
+modal move loop already costs the picture a ~110ms hiccup and a run of single-frame real-time
+drops (`docs/audio-window-drag.md`), and putting that gesture under the pointer everywhere would
+put it in the middle of scrubbing and panning. **Do not re-propose it.**
 
 ---
 
