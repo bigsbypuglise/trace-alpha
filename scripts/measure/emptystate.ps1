@@ -67,8 +67,27 @@ public class ES {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, IntPtr pid);
   [DllImport("user32.dll")] public static extern bool AttachThreadInput(uint a,uint b,bool f);
   [DllImport("kernel32.dll")] public static extern uint GetCurrentThreadId();
+  [DllImport("user32.dll")] public static extern void keybd_event(byte k, byte s, uint f, UIntPtr e);
 }
 "@
+
+# SetForegroundWindow fails SILENTLY when Windows has foreground-locked this
+# (freshly spawned, background) process -- the recorded trap, previously
+# guarded only in swap mode, which made a denial in close mode read as "the
+# empty state did not come back" against a correct build. The synthetic Alt
+# tap is the documented unlock: it makes this thread the last input owner, so
+# the request is granted. Verified rather than assumed, and a denial is the
+# harness's own failure, never the build's.
+function Focus-Window([IntPtr]$h) {
+    [ES]::SetForegroundWindow($h) | Out-Null
+    Start-Sleep -Milliseconds 250
+    if ([ES]::GetForegroundWindow() -eq $h) { return $true }
+    [ES]::keybd_event(0xA4, 0, 0, [UIntPtr]::Zero)   # VK_LMENU down
+    [ES]::keybd_event(0xA4, 0, 2, [UIntPtr]::Zero)   # up
+    [ES]::SetForegroundWindow($h) | Out-Null
+    Start-Sleep -Milliseconds 250
+    return [ES]::GetForegroundWindow() -eq $h
+}
 
 if (-not $Exe) {
     $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
@@ -333,7 +352,7 @@ switch ($Mode) {
     $p = Start-Trace $null
     $h = $p.MainWindowHandle
     $box = Get-ClientBox $h
-    [ES]::SetForegroundWindow($h) | Out-Null
+    Focus-Window $h | Out-Null
     Start-Sleep -Seconds 3
     $hidden = Grab $box (Join-Path $OutDir "transport-hidden-$Renderer.png")
     # TWO moves, not one. A single SetCursorPos to a fixed target reveals
@@ -394,7 +413,11 @@ switch ($Mode) {
     $p = Start-Trace $Clip
     $h = $p.MainWindowHandle
     $box = Get-ClientBox $h
-    [ES]::SetForegroundWindow($h) | Out-Null
+    # This leg sends Ctrl+W, so a silent foreground denial makes a correct
+    # build read as "the empty state did not come back". Fail as ourselves.
+    if (-not (Focus-Window $h)) {
+        Write-Output "FAIL: could not focus Trace, so no key reached it"; exit 1
+    }
     Start-Sleep -Seconds 3
     $b1 = Grab $box (Join-Path $OutDir "close-01-media.png")
     $stage1 = Find-Stage $b1
@@ -434,12 +457,10 @@ switch ($Mode) {
     $p = Start-Trace $Clip
     $h = $p.MainWindowHandle
     $box = Get-ClientBox $h
-    [ES]::SetForegroundWindow($h) | Out-Null
-    Start-Sleep -Milliseconds 600
-    if ([ES]::GetForegroundWindow() -ne $h) {
-        # SetForegroundWindow fails SILENTLY from a background process, and a
-        # run where every keystroke went to the console reports the feature
-        # missing rather than reporting itself broken.
+    # Focus-Window carries this mode's own recorded lesson (a silent
+    # SetForegroundWindow denial) plus the Alt-tap unlock for the desktop
+    # states where the plain call is refused outright.
+    if (-not (Focus-Window $h)) {
         Write-Output "FAIL: could not focus Trace, so no key reached it"; exit 1
     }
 
