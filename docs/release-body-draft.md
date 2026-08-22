@@ -1,3 +1,8 @@
+> **SUPERSEDED AND SHIPPED. This file is history, not a pending release.**
+> `v0.3.0-beta.1` was cut from it on 2026-08-19 and five betas have shipped since.
+> The live notes are `docs/release-body.md`, which currently describes
+> `v0.3.0-beta.6`. Do not read the "NOT CUT" banner below as a live state.
+
 ## Trace v0.3.0-beta.1 — DRAFT, NOT CUT (version agreed 2026-08-18; notes re-drafted 2026-08-19 at `86f1186`)
 
 > **This is a proposal, not a release.** Nothing is tagged. Whether to cut is the owner's call.

@@ -1,64 +1,94 @@
-## Trace v0.3.0-beta.4
+## Trace v0.3.0-beta.6
 
-**The long-GOP scrub fix.** The application is `v0.3.0-beta.3` plus one engine change: on
-long-GOP H.264 files, a fast backward drag now samples keyframes instead of falling seconds
-behind the hand. No interface changes.
+**Sound, and the small things you asked about.** Trace now opens audio files, has a
+volume slider, filters the fullscreen picture when it enlarges it, animates the empty-state
+mark, and no longer lets a bare `F` open the File menu. Nineteen commits past
+`v0.3.0-beta.5`; the playback and scrub engines are unchanged and measure flat.
 
 Windows, portable ZIP, x64. Unzip anywhere and run `Trace.exe`. There is no installer by design.
 
-### What was wrong
+### Audio files open and the transport drives them
 
-A full sweep of the test pool — every H.264 MP4 and every ProRes, three display passes, 264
-scripted drag legs — isolated the last reported scrub fault to one class: **long-GOP H.264
-under a drag whose speed exceeds what the decoder can supply.** Trace never skips a frame
-during a drag, so on those files the picture walked every intermediate frame and fell behind
-by the whole deficit — the worst file in the pool ended a hard reversal drag 216 frames
-(1.7 seconds) behind the pointer, on every display, while every other subsystem measured
-healthy. ProRes never showed it because ProRes drags already sample adaptively when the hand
-outruns the decoder; long-GOP H.264 was the one place that mechanism was gated off, because
-naively skipping frames on long-GOP had been measured to make things far worse.
+`wav` `mp3` `m4a` `aac` `flac` `ogg` `opus`. Play, pause, scrub, Go To, Home/End and Loop all
+work; the window keeps the prism mark on screen because there is no picture to show. The
+readout defaults to **Elapsed**, never Frame Count — an audio file has no frames, so the frame
+index you can still see is Trace's own synthetic one at a nominal 24fps, and the HUD and the
+Movie Inspector both say so rather than presenting it as a property of your file.
 
-### The fix
+Dragging is silent by design; the release seeks and resumes. That follows the existing rule
+that sound is 1× forward playback only.
 
-During a fast **backward** drag on long-GOP H.264, when the hand is outrunning the decoder,
-the preview now hops between keyframes instead of walking every frame — that is what makes the
-hops cheap, since a seek lands on a keyframe for free where a mid-GOP frame costs a decode
-walk. The hops shrink as the hand slows, converging back onto exact consecutive frames.
+### A volume slider
 
-This is a visible feel change, and it is honest to describe it as a trade: during the fastest
-part of a backward drag on a heavy long-GOP file you now see GOP-spaced frames tracking your
-hand, where before you saw every frame arriving seconds late. The moment the hand slows, and
-always at release, you are back on exact frames — **the frame you release on is still landed
-exactly, at full resolution: `delta 0` on all 264 legs of the sweep**, before and after the
-change. Forward drags, stepping, playback and ProRes behaviour are unchanged.
+Hover or click the speaker and a slider slides out between Mute and Loop; it collapses on its
+own after a moment. The scroll wheel over the speaker adjusts in 5% steps. **Your level now
+persists between sessions** (written only at settled values — the end of a drag, a wheel step
+— never continuously while you drag).
 
-Measured on the three affected files (hard reversal drag, release-to-exact-picture): the worst
-went from ending 216 frames behind to ending at the pointer, 1668ms → 85ms; the reported file
-241ms → 57ms; the mildest 210ms → 152ms. The other nineteen files in the pool are flat, and
-the full regression (cadence, exact release, lifecycle, all 25 transport transitions) is flat.
+Volume is a gain on the audio device and never touches the playback clock, so it cannot affect
+timing. `TRACE_VOLUME_SLIDER=0` restores the previous mute-only button exactly, including not
+leaving a stored level silently in force with no control to show it.
 
-### The side-by-side, and the rollback
+### Fullscreen no longer aliases
 
-If you want to feel the difference — or if anything about backward scrubbing reads *worse* —
-this restores the previous walk-every-frame behaviour:
+Reported by a tester and confirmed: pressing F11 on material **smaller than your screen** made
+Trace enlarge it with a point sampler, which shows as hard, stair-stepped edges. That sampler
+is deliberate for deliberate zoom — someone at 4:1 is inspecting samples — but a fullscreen fit
+is not that, and it is why the report was hard to reproduce on an ultrawide, where 4K material
+is being *reduced* in fullscreen and never hits the case.
 
-```
-set TRACE_SCRUB_GOP_SAMPLE=0
-Trace.exe
-```
+**The fullscreen fit now filters when it magnifies. Actual Size and Zoom In keep the sharp
+sampler, fullscreen or not.** The windowed fit still takes the point sampler when it magnifies;
+that is the decision's stated width, not an oversight. `TRACE_FS_MAG_FILTER=0` is the rollback.
 
-Good files to judge it on: a long clip with short GOPs (the WeLo 1x1 social cut) and a tall
-9:16 online (the Universe file) — fast backward sweeps and quick back-and-forth.
+### The empty-state mark animates
 
-### Also in this build
+With nothing open, the prism mark's edge gradient rotates and its glow cycles through its
+colour ladder over an 18-second loop — the design package's own animation, which no still image
+could carry. It runs only when there is no picture on screen and the window is in front, so
+opening a video stops it by construction and a background window costs nothing.
+`TRACE_MARK_ANIM=0` holds it still.
 
-The sweep that found the class is now a standing regression with a per-file pass bar
-(`scripts/measure/scrubbar.ps1`), so "MP4s scrub well" is a checkable verdict rather than a
-feeling. Dev-side only; nothing in the application changed for it.
+### A bare letter belongs to Trace again
 
-### Everything else
+If you had used the menus at all, `F` would open the File menu instead of changing the time
+readout, and `E` would open Edit. The menu bar was keeping keyboard focus after you left a menu
+— invisibly, because the top strip fades away — and in that state Windows treats a bare letter
+as a menu shortcut.
 
-Unchanged from `v0.3.0-beta.3`. Known gaps are the same: 8K ProRes 4444 XQ does not reach real
-time and is understood rather than solved; EXR does not open; HDR / BT.2020 has no tonemap;
-there is no 10-bit output path; mixed-monitor DPI is validated at 100% and 150% only. If
-anything about the picture looks wrong, `TRACE_RENDERER=cpu` is the escape hatch.
+**`F`, `S`, `E` and `T` now always change the time display, and `H` always toggles the
+diagnostics HUD.** `Alt`+`F`, `Alt`+`E` and the rest still open their menus, including when the
+strip is hidden, and arrow-key navigation between open menus is unchanged. **`Space` also
+toggles playback again after you have used a menu**, which was the same fault seen from the
+other side.
+
+### Also
+
+- The Playback Speed menu follows the engine through pause and play, instead of leaving `0.5×`
+  ticked over a paused file that will next play at `1×`.
+- The Loop button no longer announces a persistence that was removed — Loop still starts off
+  each session and survives a file change within one.
+
+### Rollback knobs for this release
+
+| knob | effect |
+|---|---|
+| `TRACE_VOLUME_SLIDER=0` | mute-only button, no slider, no stored level |
+| `TRACE_FS_MAG_FILTER=0` | fullscreen magnification back to the sharp sampler |
+| `TRACE_MARK_ANIM=0` | empty-state mark held still |
+| `TRACE_SCRUB_PAINT_GATE=0` | the beta.3 scrub paint gate off |
+| `TRACE_RENDERER=cpu` | the software renderer — first thing to try if the picture looks wrong |
+
+### Known and unchanged
+
+- 8K ProRes 4444 XQ does not reach real time on this decoder and is a closed investigation, not
+  a regression.
+- EXR does not open: OpenImageIO is not in this build.
+- HDR/PQ material gets the right matrix but no tonemap.
+- Audio during scrubbing, reverse and off-speed playback is deliberately silent.
+
+### If something is wrong
+
+Help ▸ Report an Issue opens a pre-filled mail with the build identity in it. Press `H` to show
+the diagnostics HUD and include a screenshot of it — nearly every question about playback,
+scrubbing or audio is answered by that one line of text.
