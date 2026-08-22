@@ -335,3 +335,37 @@ length, fork (a) is the answer and this is why.
 
 **Do not bump the Qt pin before that measurement exists.** The one-blip
 transition cost is present on 6.10 and would survive the bump.
+
+### The move loop is the only gesture that starves the device
+
+Same build, same clip, same 10s hold, one leg per modal gesture:
+
+| gesture | `pull max` | **`dry`** |
+|---|---|---|
+| **idle (control)** | 50.8ms | **0** |
+| **move drag** | **131.3 – 153.4ms** | **1** |
+| resize drag | 79.7ms | **0** |
+| File menu held open | 51.2ms | **0** |
+| Go to Frame modal held open | 50.6ms | **0** |
+
+**Only the move drag runs the device dry.** The resize drag is the same class of
+Win32 modal size/move loop and does *far* more UI-thread work inside it — ~127
+`WM_SIZING`, the §4 aspect lock on every one, a scrub-preview resync, ~181
+discarded cache entries — and it never exceeds 79.7ms. The two Qt nested event
+loops sit on the idle floor.
+
+**So "the modal loop blocks the thread" is not the mechanism**: the gesture that
+blocks it hardest is clean. This is the *same asymmetry the 2026-08-21 pass
+measured on the picture side* and left unattributed — a move drag costs
+`drop 66` and 107ms of jitter where a resize drag costs neither. One cause is
+now known to hit both sound and picture, which is more than was known before.
+
+**The gap is at the START of the drag and never recurs.** The mid-drag capture of
+the 30s leg, taken at 15s with the button still down, already reads
+`pull max 144.3ms` and `dry 1` — the final values. A 10s drag and a 30s drag both
+end at `dry 1`. On Qt 6.10 this is a one-off cost of *entering* the move loop,
+not a starvation sustained through it.
+
+**Pushed as `diag/audio-pull-gap-instrument` (`6f4bed3`) so CI builds it against
+the Qt 6.7.2 it pins.** That artifact is both the 6.7 measurement and the owner's
+hand test, on the exact version that ships and that the report is against.
