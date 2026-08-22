@@ -304,8 +304,10 @@ revertable commits, proven so by reverting each against the other before push.
   would have inherited the previous picture's size into the §4 shaping pass.
   `TRACE_NO_AUDIO=1` makes an audio file fail to open, stated in its message — the honest
   reading of the control knob.
-- **THE MARK ANIMATION IS A PROTOTYPE BEHIND `TRACE_MARK_ANIM=1`, DEFAULT OFF, FOR THE
-  OWNER TO JUDGE — and the PNG renditions ship unchanged until that decision.** The 18s
+- **THE MARK ANIMATION WAS A PROTOTYPE BEHIND `TRACE_MARK_ANIM=1`, DEFAULT OFF, FOR THE
+  OWNER TO JUDGE — SUPERSEDED 2026-08-21: the owner judged it and it SHIPS ON, taking the
+  PNG renditions and the `paintIcon` route with it. Read the 2026-08-21 hand-test entry
+  below for what is in force; this paragraph is the record of the prototype.** The 18s
   loop re-authored as QPainter paths and gradients from `empty-mark.svg`, whose own SMIL
   block is the spec (edge gradient rotating 150→510° about (520,512); glow stops cycling
   the five-colour ladder); objectBoundingBox gradients are reproduced by giving the BRUSH
@@ -318,9 +320,9 @@ revertable commits, proven so by reverting each against the other before push.
   (ViewerWidget pushes the edges; deactivation freezes the phase, refocus resumes it).
   Cost: ~20–21 ticks/s (coarse timer; the phase is elapsed-based so the 18s period is
   exact), rebuild ~0.5ms, **2.97% of one core animating against 0.0% off**.
-  `TRACE_MARK_ANIM_LOG=1` prints ticks/s, rebuild cost and phase every 5s. **If the owner
-  ships it, the PNGs and the `paintIcon` route leave in the same decision (artwork follows
-  behaviour); if declined, the procedural path is one self-contained revert.**
+  `TRACE_MARK_ANIM_LOG=1` prints ticks/s, rebuild cost and phase every 5s. **The owner
+  shipped it on 2026-08-21, and the PNGs and the `paintIcon` route left in the same
+  decision, exactly as this sentence said they would.**
 - **Regression at HEAD, flat** (physical panel): `scrubbar.ps1` full-pool **PASS — 22
   files, 88 legs, `delta 0` throughout** · 4K H.264 cadence ×2 **99.2/99.1%** (`drop 0`,
   `rephase 0`, `0 of 120`, buckets `~1x 118 / 1.5-2.5x 1`) · 4444 ×2 **99.8/99.8%**
@@ -336,6 +338,118 @@ revertable commits, proven so by reverting each against the other before push.
   as the harness. Same-session corollary: **Ctrl+W from SendKeys needs the picture
   click-activated or a verified foreground first** — the recorded menu-mode lesson's
   sibling.
+
+**THE 2026-08-21 OWNER HAND TEST: THREE ITEMS, TWO FIXES AND ONE REFUTATION
+(`7c5ff2e` bare keys · `8b6d331` the mark ships · `0e059f3` the audio diagnosis ·
+`17cbda5` two owner decisions). Separately revertable, proven so — each reverts cleanly
+AND the reverted tree builds, checked one at a time.**
+
+- **A BARE LETTER BELONGS TO TRACE, NOT TO THE MENU BAR (owner ruling).** Plain F changed
+  the readout AND opened File; plain E did the same for Edit. **The mechanism was
+  reproduced and characterised before anything was built** (new
+  `scripts/measure/barekeys.ps1`: two focus states × seven keys, popup windows counted by
+  CLASS rather than judged from a screenshot). With the PICTURE focused all seven keys are
+  clean; with the MENU BAR focused — reached the way a user reaches it, Alt+F then Escape
+  — **f, e, v and w each open a menu while s and t fall through and work.**
+  `QMenuBar::keyPressEvent` matches a bare letter against its mnemonics whenever the menu
+  bar has focus (Qt's own test is *no modifiers || Alt || Meta*), and **the menu bar keeps
+  that focus because Trace has nothing to hand it back to** — viewer, transport and the
+  phase 14 proxies are all `Qt::NoFocus` by design, so `QMenuBarPrivate`'s restore finds
+  nobody and the strip then fades out with the menu bar still holding the keyboard. Same
+  state CLAUDE.md already recorded from the other side ("Space is silently swallowed"),
+  **which this fixes in passing — measured, Space toggles playback after a menu
+  interaction now.**
+  **H was NOT reproducible and that is a result**: it is a `QAction` shortcut, so Qt's
+  shortcut map runs it before the menu bar sees the key, while F/S/E/T are `ShortcutTable`
+  rows the menu bar reaches first. **That difference is why two of the three were noticed
+  and one was not**, and it is why the fix was verified on both families.
+  **TWO HALVES, AND THE FILTER ALONE MEASURED NO CHANGE** — built first, and after Escape
+  the menu bar is still in keyboard mode with its title active, so an `activeAction()`
+  guard skipped the whole case. What works is (a) closing a top-level menu clears the menu
+  bar's focus, which is what makes `QMenuBar` leave keyboard mode — **deferred to the event
+  loop and declined while any popup is still up, so walking File→Edit with the arrows is
+  untouched** (verified: Alt+F, Right, Right walks File→Edit→View) — plus (b) the menu
+  bar's event filter running the shortcut table first and consuming only what the table
+  owns.
+  **`warnOnDuplicateMnemonics()` now also compares menu mnemonics against the table's bare
+  keys** and moved out of `setupMenus()` to the constructor (it needs `shortcuts_`). On its
+  first run it printed exactly three lines — File/f, Edit/e and the **unreported** Help/h
+  — the second time this check has earned itself immediately.
+- **THE MARK'S IDLE ANIMATION SHIPS (owner decision, judged on screen) AND ITS PNGs LEFT
+  WITH IT.** On by default; `empty-mark-104.png`/`-208.png` and the `paintIcon` branch that
+  read them are gone from the `.qrc`, the working copy and the tree. **`TRACE_MARK_ANIM=0`
+  can no longer mean "draw the bitmap" — there is none. It means NO ANIMATION**: the same
+  procedural mark held at phase 0, which is the delivered still.
+  `TRACE_MARK_ANIM_PHASE` stays and **staying is load-bearing**: pinning is what keeps the
+  empty state a deterministic raster, and that is the one surface this project compares
+  byte for byte across renderers. **`verify_trace_assets.py` followed the derived set DOWN
+  with no edit to itself, 35 → 33** — the property it was built for, confirmed for the
+  first time by a DELETION rather than an addition. The replacement `.qrc` comment hit the
+  recorded XML trap on the way (a double hyphen inside a comment), and the verifier caught
+  it rather than the build. **Verified against the BUILT BINARY**: a UTF-16BE search of
+  `Trace.exe` finds neither mark PNG while `play-48.png` and `loop-48.png` are still there.
+  Measured: the empty window 4s apart differs on **2301 px, max delta 40, bbox
+  (619,376)-(678,444)** — the mark's own 59x68 ink box, so only the mark moves; under
+  `TRACE_MARK_ANIM=0` the same pair differs on **0 px**; at `TRACE_MARK_ANIM_PHASE=0.25`
+  d3d11 vs cpu reads **0 of 1,035,504 px, max channel delta 0**; and `emptystate launch`
+  still reads mark **59x68**, offset **+0.5**, hint **169x14**, gap **44**.
+- **THE WINDOW-DRAG AUDIO DROPOUT DOES NOT REPRODUCE AND THE NAMED MECHANISM IS REFUTED
+  — nothing was built** (record `docs/audio-window-drag.md`, harness
+  `scripts/measure/audiodrag.ps1`). **Qt's event loop DOES run inside the modal move
+  loop**: a capture taken MID-DRAG with the button still down reads `wm 0/1/0` (enter
+  fired, exit had not) with the picture presenting at **23.28 of 24 fps**. And **the sink
+  is not on the UI thread anyway** — Qt 6.10's Windows backend is
+  `QWASAPIAudioSinkStream` and `Qt6Multimedia.dll` carries
+  `AvSetMmThreadCharacteristics` + `"Pro Audio"`, i.e. MMCSS, i.e. a dedicated audio
+  thread. **Eleven configurations, all `under 0` / `silence 0 B`**: move drags of 4/6/8/10s,
+  8670 pointer moves/s, the window flown across the whole 5120px desktop,
+  `TRACE_RENDERER=cpu`, audio-only, audio-only under the owner's own `TRACE_MARK_ANIM=1`
+  launcher, a resize drag (`wm 125/1/1`, 127 `WM_SIZING`, 181 cache entries dropped), a
+  File menu held open, a modal Go to Frame held open, and the idle control.
+  **`under`/`silence` COUNT THE RING SIDE, so a device that stops being pulled at all
+  leaves both at 0 while going silent** — the corroborating instrument is
+  `processedUSecs` against wall time (`proc 3546 → 8846ms` across a 4s drag plus settle)
+  and `clk` on audio files (`3.4 → 7.467 → 12.757s` across an 8s drag). **The one figure
+  that DID climb was the clip ending**: `silence 46872 B` on the 6s leg is end-of-stream
+  padding on a 10.05s file, and the same drag inside the clip's length reads 0 — *a
+  counter that climbs is not a confirmation until the run is inside the material.*
+  **What the move loop really costs is PICTURE**: `drop 66 (ticks 64, media 129.2%)`,
+  jitter max **107ms**, presented 98.1%, against `drop 0` / 2.2ms / 99.5% at idle — and
+  `drop 0` / 13.9ms / 99.5% on a RESIZE drag, which does far more UI-thread work. Same
+  shape on `cpu`, so not the swapchain; left unattributed. **The proposed fix was declined
+  on the evidence**: moving `QAudioSink` to its own `QThread` does not move where WASAPI
+  pulls from, and would put `advanceClock()`'s per-tick `processedUSecs`/`bytesFree` reads
+  across a thread boundary — the master clock, for a mechanism that does not exist. The
+  100ms device buffer was not touched.
+  **One instrument gap was closed: `under` and `silence` now ride the AUDIO-ONLY HUD line
+  too.** The one media class that is nothing but sound was the class whose HUD said least
+  about it, which is why those legs had to be judged by timing `clk` against wall time.
+- **TWO OWNER DECISIONS, RECORDED IN `docs/ui-redesign-roadmap.md` RATHER THAN ONLY HERE.**
+  **Roadmap step 12, the frameless window, is CLOSED AS DECLINED** — the native Windows
+  title bar stays, for Snap, Aero Shake, Win+arrow, multi-monitor and accessibility — **so
+  the UI roadmap has no open step and no open owner question.** Closing it settles two
+  conditionals: the strip's brand mark and wordmark, removed at owner item 1 as an interim
+  "until the strip becomes the only header", **do not return**, and the design's screen-2
+  fullscreen strip keeps its decline. **Drag-anywhere-in-the-picture to move the window is
+  DECLINED** in the same decision: the picture's press already means the phase 15 pan when
+  zoomed and click-activate otherwise, a third meaning would be arbitrated by zoom state,
+  Windows apps move by their chrome, and it would put the move loop's measured ~110ms
+  picture hiccup under the pointer everywhere including mid-scrub. **Do not re-propose
+  either.**
+- **Regression at HEAD, flat** (physical panel 5120x1440 @ 239.999Hz): `scrubbar.ps1`
+  full-pool **PASS — 22 files, 88 legs, `delta 0` throughout** · 4K H.264 cadence x2
+  **100.0/100.0%** (`drop 0`, `rephase 0`, `0 of 119`, all 119 gaps `~1x`) · 4444 x2
+  **99.8/99.8%** (`0 of 260`) · **audio-mastered cadence x2 99.6/99.6%** on the 1080p clip
+  (`drop 0`, `rephase 0`, `0 of 240`) — item 1's own requirement, the clock is unchanged ·
+  4444 `-SnapRelease` **`target 261 shown 261 delta 0`** full-res planar, `release 24.2ms`,
+  `hitch 0`, `land 0`, `ui over-16ms 0 of 572` · **25 of 25 transitions** (one
+  `N -> rewBtn` "no window after restart", the recorded harness flake, PASS on re-run) ·
+  lifecycle **87.5% moving / 0% control** · `emptystate.ps1` all four modes on both
+  backends · `uiatree.ps1` **MenuBar + five MenuItems on their rects with nine named
+  controls** · `overlay.ps1` all legs PASS on both backends (loop accent 0/65/0 d3d11,
+  0/51/0 cpu) · `menushot.ps1` all five Alt mnemonics ok · renderer selftest
+  `d3d11 fellback=0 planar=1` · shape selftest 44 rows OK ·
+  `verify_trace_assets --strict` green.
 
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
@@ -4178,10 +4292,14 @@ stride when demand exceeds supply, with the decoder delivering the keyframe its 
 on, floored at the pointer. Deliberately separate from `TRACE_SCRUB_SAMPLE`, which governs
 the validated intra path and must stay revertable independently. The HUD's `kf-land` count
 is the engagement check — 0 on intra media and unflagged gestures by construction),
-**`TRACE_MARK_ANIM=1`** (2026-08-21: the empty mark's 18s idle animation, a QPainter
-re-authoring prototype for the owner to judge — DEFAULT OFF, the committed PNG renditions
-ship unchanged. `TRACE_MARK_ANIM_PHASE=<0..1>` pins the phase with no timer, which is what
-keeps the empty state byte-identical across backends while the knob is on;
+**`TRACE_MARK_ANIM=0`** (2026-08-21: **the empty mark's 18s idle animation SHIPS ON** by
+owner decision, and the PNG renditions plus the `paintIcon` route for the mark left in the
+same commit — so `0` cannot mean "draw the bitmap" and does not. It means **no animation**:
+the same procedural mark held at phase 0, which is the delivered still. There is one source
+for the mark now. `TRACE_MARK_ANIM_PHASE=<0..1>` pins the phase with no timer and is
+LOAD-BEARING rather than a convenience — it is what keeps the empty state a deterministic
+raster and therefore keeps the one byte-identical cross-backend surface usable as an
+instrument (measured at 0.25: 0 of 1,035,504 px differ, max channel delta 0);
 `TRACE_MARK_ANIM_LOG=1` prints ticks/s, rebuild cost and phase every 5s. Record in
 `docs/mark-idle-animation.md`),
 **`TRACE_VOLUME_SLIDER=0`** (2026-08-20: no inline volume slider — the step 5 mute-only
