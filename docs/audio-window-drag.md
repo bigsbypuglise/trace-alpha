@@ -369,3 +369,68 @@ not a starvation sustained through it.
 **Pushed as `diag/audio-pull-gap-instrument` (`6f4bed3`) so CI builds it against
 the Qt 6.7.2 it pins.** That artifact is both the 6.7 measurement and the owner's
 hand test, on the exact version that ships and that the report is against.
+
+## THE 6.7.2 ANSWER: the Qt version is NOT the variable, and BOTH forks are dead
+
+CI run **32599463708** built `b15aeeb` against the Qt it pins. Verified in the
+artifact before measuring anything: `Qt6Core`/`Qt6Multimedia` **6.7.2.0**,
+`AvSetMmThreadCharacteristics` **0**, `QWASAPIAudioSinkStream` **0**,
+`QWindowsAudioSink` 3 — the shipped backend, no MMCSS thread — and the
+instrument present (`pull max` ×2, ASCII; a UTF-16 search finds nothing, these
+are plain `QString` literals in `.rdata`).
+
+Same clip, same panel, same harness, one leg per row:
+
+| leg | **Qt 6.7.2 (ships)** | **Qt 6.10.2 (local)** |
+|---|---|---|
+| idle 10s (control) | 52.2ms · **dry 0** | 50.8ms · **dry 0** |
+| **move drag 10s** | 142.5ms · **dry 1** | 153.4ms · **dry 1** |
+| **move drag 30s** | 155.4ms · **dry 1** | 144.3ms · **dry 1** |
+| resize drag 10s | 75.6ms · **dry 0** | 79.7ms · **dry 0** |
+| menu held 10s | — | 51.2ms · **dry 0** |
+| modal held 10s | — | 50.6ms · **dry 0** |
+| move drag, `TRACE_RENDERER=cpu` | 150.2ms · **dry 1** | — |
+| move drag, `TRACE_MARK_ANIM=0` | 169.6ms · **dry 1** | — |
+
+**6.7.2 reads `dry 1` at 10s and `dry 1` at 30s — identical to 6.10.2. It does
+not stall for the length of the drag.** Both Qt versions cost exactly one
+~150ms pull gap on entering the move loop and then recover for as long as the
+drag lasts.
+
+**Fork (a), bumping the Qt pin, is refuted.** The version is not the variable and
+the bump would carry the fault across unchanged, while reopening window shaping,
+DPI and imageformats for nothing.
+
+**Fork (b), driving the sink from its own thread, is refuted by the same table
+and this is the stronger result.** Qt **6.10 already does exactly that** — a
+dedicated MMCSS audio thread, confirmed in the DLL — **and gaps identically.**
+So the UI thread being blocked is not the mechanism, and moving the sink off it
+buys a thread boundary on the master clock in exchange for a fault that survives
+having one.
+
+**Neither fix is funded. The Qt pin and the 100ms device buffer stay as they are.**
+
+### What the fault actually is, and what is still unattributed
+
+One ~150ms gap in the device pull, at the moment the modal **move** loop is
+entered; never repeated however long the drag runs; `under 0`, `silence 0 B`,
+`snap x0` throughout, so every pre-existing counter reads clean. Present on both
+Qt versions, on **both renderers**, and with the mark animation **off** — so it
+is not the flip-model swapchain, not the compositor path and not the animation
+timer. Absent from the resize loop, which is the same class of Win32 modal
+size/move loop doing far more UI-thread work inside it, and absent from both Qt
+nested event loops.
+
+**What costs the 150ms is not yet attributed, and is deliberately left that way**
+rather than guessed at. The one thing now excluded that was not before is the
+whole "blocked UI thread" family, on the 6.10 MMCSS evidence.
+
+### The gap between this and the report
+
+One dry event is **one blip**, not "silent for the length of the drag". It
+matches the owner's later "blip/cut" and not the original wording. **Whether a
+real hand drag produces more than the synthetic one does is still open, and is
+now readable rather than a judgement call**: the CI artifact prints `pull max`
+and `dry` on the HUD for video and audio-only alike, so a hand drag on the work
+machine answers it directly. `dry` climbing past 1 during a hand drag would mean
+the synthetic gesture is milder than the real one and this table needs re-taking.
