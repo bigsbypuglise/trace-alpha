@@ -15,7 +15,12 @@
 #
 # Four legs, because "is this a window-drag bug or a class of bug" changes the
 # fix:
-#   -Mode drag    the reported gesture: hold the title bar and move
+#   -Mode drag    hold the title bar and MOVE continuously
+#   -Mode hold    press the title bar and DO NOT MOVE -- the owner's own
+#                 reproduction (2026-08-22), and a different case entirely: the
+#                 modal move loop is entered and the input queue then goes
+#                 EMPTY. Every other leg here generates input for the whole
+#                 gesture, which is why none of them found this.
 #   -Mode menu    a Qt popup menu held open (nested QT event loop)
 #   -Mode dialog  a modal QInputDialog held open (nested Qt event loop)
 #   -Mode idle    the control: play for the same wall time, touch nothing
@@ -25,7 +30,7 @@
 # file as well as a video-with-audio file.
 
 param(
-    [ValidateSet('drag','resize','menu','dialog','idle')][string]$Mode = 'drag',
+    [ValidateSet('drag','hold','holdresize','resize','menu','dialog','idle')][string]$Mode = 'drag',
     [Parameter(Mandatory = $true)][string]$Clip,
     [string]$Renderer = 'd3d11',
     [int]$HoldSeconds = 6,
@@ -39,6 +44,9 @@ param(
     # hand drag crosses most of the panel; a 40px jiggle repaints a fraction of
     # what a 1600px sweep of a 1269-wide window over a 5120-wide desktop does.
     [int]$Amplitude = 40,
+    # hold mode: how many separate press/release cycles inside the hold window.
+    # "one stall per press" and "one stall per process" are different bugs.
+    [int]$Presses = 1,
     [string]$Exe,
     [string[]]$Env = @(),
     [string]$OutDir = "$env:TEMP\trace-audiodrag"
@@ -192,6 +200,62 @@ switch ($Mode) {
         Start-Sleep -Milliseconds 60
         [AD]::mouse_event($LUP, 0, 0, 0, [UIntPtr]::Zero)
         Write-Output ("window while held: " + ($samples -join " | "))
+    }
+    'holdresize' {
+        # The control the `hold` result demanded: press the RESIZE CORNER and do
+        # not move. `resize` moves the pointer throughout and reads clean, so
+        # "only the move loop starves the device" was measured with movement in
+        # one arm and is not a fair comparison against a motionless hold. This
+        # leg separates "the move loop" from "a modal loop with an empty input
+        # queue", which are different mechanisms and different fixes.
+        $rx = $r.R - 6
+        $ry = $r.B - 6
+        [AD]::SetCursorPos($rx, $ry) | Out-Null
+        Start-Sleep -Milliseconds 150
+        [AD]::mouse_event($LDOWN, 0, 0, 0, [UIntPtr]::Zero)
+        while ($sw.Elapsed.TotalSeconds -lt $HoldSeconds) { Start-Sleep -Milliseconds 50 }
+        [AD]::mouse_event($LUP, 0, 0, 0, [UIntPtr]::Zero)
+        $wr = New-Object AD+RECT
+        [AD]::GetWindowRect($h, [ref]$wr) | Out-Null
+        Write-Output ("held corner still; window {0}x{1} (must NOT have resized)" -f `
+            ($wr.R - $wr.L), ($wr.B - $wr.T))
+    }
+    'hold' {
+        # Press and hold, NO pointer movement. The owner reproduces the dropout
+        # this way every time, and it is the one gesture no leg here had: `drag`
+        # moves the pointer continuously, so the modal loop always has input to
+        # dispatch. Here it has none.
+        [AD]::SetCursorPos($capX, $capY) | Out-Null
+        Start-Sleep -Milliseconds 150
+        $per = $HoldSeconds / [double]$Presses
+        for ($k = 1; $k -lt $Presses; $k++) {
+            [AD]::mouse_event($LDOWN, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds ([int]($per * 1000 * 0.7))
+            [AD]::mouse_event($LUP, 0, 0, 0, [UIntPtr]::Zero)
+            Start-Sleep -Milliseconds ([int]($per * 1000 * 0.3))
+        }
+        [AD]::mouse_event($LDOWN, 0, 0, 0, [UIntPtr]::Zero)
+        $mid = $false
+        while ($sw.Elapsed.TotalSeconds -lt $HoldSeconds) {
+            Start-Sleep -Milliseconds 50
+            if (-not $mid -and $sw.Elapsed.TotalSeconds -ge $HoldSeconds / 2.0) {
+                $mid = $true
+                $mr = New-Object AD+RECT
+                [AD]::GetWindowRect($h, [ref]$mr) | Out-Null
+                $mw = $mr.R - $mr.L; $mh = $mr.B - $mr.T
+                $off = [int]($mh * 0.56)
+                $bmp = New-Object System.Drawing.Bitmap $mw, ($mh - $off)
+                $g = [System.Drawing.Graphics]::FromImage($bmp)
+                $g.CopyFromScreen($mr.L, $mr.T + $off, 0, 0, $bmp.Size)
+                $bmp.Save((Join-Path $OutDir "01b-mid.png"),
+                          [System.Drawing.Imaging.ImageFormat]::Png)
+                $g.Dispose(); $bmp.Dispose()
+            }
+        }
+        [AD]::mouse_event($LUP, 0, 0, 0, [UIntPtr]::Zero)
+        $wr = New-Object AD+RECT
+        [AD]::GetWindowRect($h, [ref]$wr) | Out-Null
+        Write-Output ("held still at {0},{1} (window must NOT have moved)" -f $wr.L, $wr.T)
     }
     'resize' {
         # The other modal size/move gesture, and the one with real UI-thread

@@ -434,3 +434,53 @@ now readable rather than a judgement call**: the CI artifact prints `pull max`
 and `dry` on the HUD for video and audio-only alike, so a hand drag on the work
 machine answers it directly. `dry` climbing past 1 during a hand drag would mean
 the synthetic gesture is milder than the real one and this table needs re-taking.
+
+## THE REPRODUCTION (owner, 2026-08-22): PRESS AND HOLD THE CAPTION, DO NOT MOVE
+
+The owner found the gesture: **click the title bar and hold. It reproduces the
+pause every time.** Every leg in this document until now MOVED the pointer for
+the whole gesture, which is why none of them found it — a motionless press was
+the one case the harness had no mode for. `audiodrag.ps1` gained
+**`-Mode hold`** (press, no movement, `-Presses N` for repeated cycles) and
+**`-Mode holdresize`** (the same on the resize corner).
+
+`tone_440_click_90s.wav`, physical panel, one leg per row:
+
+| gesture (10s unless noted) | `pull max` | `snap` | `dry` |
+|---|---|---|---|
+| idle (control) | 52.2ms | x0 | **0** |
+| **hold caption, still** | **555.6ms** | **x1** | **1** |
+| **hold caption, still, 30s** | **547.7ms** | **x1** | **1** |
+| hold **resize corner**, still | **51.6ms** | **x0** | **0** |
+| move drag (caption, moving) | 142.5ms | x0 | 1 |
+| resize drag (moving) | 75.6ms | x0 | 0 |
+| **5 separate caption presses, 20s** | **561.5ms** | **x5** | **5** |
+
+**A press on the caption costs ~550ms of unpulled device — roughly 450ms of
+actual silence against a 100ms buffer — and it costs one per press.** Five
+presses give `dry 5` and `snap x5`, which is the owner's "every time" measured.
+`snap` had read **x0** in every previous leg in this document: the audio clock's
+own 250ms divergence detector fires here and did not fire for any drag.
+
+**Holding still is 3.7x worse than dragging** (555ms against 150ms). Movement
+generates input, the modal loop keeps pumping, and the pull recovers sooner —
+so the harder-looking gesture was the milder one, which is why nine months of
+"drag the window fast" legs measured a fifth of the real fault.
+
+**It is the CAPTION, not modal loops in general.** Pressing and holding the
+resize corner — also a `DefWindowProc` modal size/move loop, also an idle input
+queue, motionless for the same 10s — reads **51.6ms, `snap x0`, `dry 0`**, at the
+idle floor. This also corrects the earlier "only the move loop starves the
+device" row above: that comparison had movement in one arm and none in the
+other, and the motionless control is what separates the two claims.
+
+**Qt is still not the variable.** Qt 6.10.2 on the identical gesture reads
+**527.9ms / 530.9ms, `snap x1`, `dry 1`** at 10s and 30s — the same fault, so the
+6.7-vs-6.10 question stays closed and the pin stays where it is.
+
+Also unchanged by: `TRACE_RENDERER=cpu`, `TRACE_MARK_ANIM=0`. Not the swapchain,
+not the compositor path, not the animation timer.
+
+**What costs the ~550ms is still unattributed.** What is now bounded is the
+surface: one caption press, both Qt versions, both renderers, ~550ms, once per
+press, and nothing else in the application reproduces it.
