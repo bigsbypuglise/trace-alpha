@@ -123,3 +123,54 @@ exactly one handler for it, so this is the one named 6.11 change that is in
 Trace's path and **unverified**. `scripts/measure/dpimove.ps1` is ready for it if
 the hardware ever returns; it sets `PER_MONITOR_AWARE_V2` and refuses to measure
 without it.
+
+## Accepted on CI, run 32610488045 (`25a7fd4`) — green
+
+**The aqtinstall pin worked on a clean runner**, which is the step that could not
+be tested any other way:
+
+```
+python.exe -m pip install git+https://github.com/miurahr/aqtinstall.git@16db45a70b5905ad596941b223469bc86a56901e
+python.exe -m aqt install-qt windows desktop 6.11.2 win64_msvc2022_64 --autodesktop --modules qtimageformats qtmultimedia
+INFO : Patching D:\a\trace-alpha\Qt\6.11.2\msvc2022_64\bin\qmake.exe
+```
+
+Qt 6.11.2 was fetched and used — read from the install path in the log, not from
+the version field that requested it.
+
+**Both FFmpeg cache steps report `skipped`**, i.e. cache HIT, which is the
+confirmation that the vcpkg pin and the ffmin script hash produce stable keys
+across runs. The previous run built both from scratch; this one reused them.
+
+```
+minimal FFmpeg DLLs: 20.9 MB
+dependency check: all DLLs import only Windows system libraries
+FFmpeg detected by CMake.
+Audio dependencies detected by CMake.
+Package verified: 6 required files present, 102.5 MB total.
+trace-selftest: renderer=d3d11 fellback=0 planar=1
+trace-shape: OK - 11 shapes x 4 scale factors
+```
+
+Package 95.6 → **102.5 MB** and artifact 40.7 → **42.8 MB**, entirely Qt 6.11
+being larger than 6.7.2. `fellback=0` is the hardware D3D11 path.
+
+## Revertability
+
+Both dependency commits were checked rather than assumed, per this project's own
+rule that separately revertable commits must be proven so.
+
+- **Reverting Qt alone is clean** — workflow and both docs, no conflict.
+- **Reverting FFmpeg alone is clean in every file that matters** — the workflow,
+  `THIRD-PARTY-NOTICES.md` and `build-minimal-ffmpeg.ps1` all revert without
+  conflict — **and the resulting combination builds**: Qt 6.11.2 against FFmpeg
+  8.1.2 configures and compiles to `Trace.exe`, exit 0.
+- **One trivial conflict, and it is documentation only.** Each upgrade's record
+  doc was created by its own commit and appended to by a later one, so reverting
+  the upgrade leaves the doc `UD` (deleted by us, modified by them). **Resolve
+  with `git rm docs/ffmpeg-9-upgrade.md`** (or `docs/qt-6.11-upgrade.md`) — the
+  record goes away with the change it records. No code path is involved.
+- Reverting the Qt commit restores CI to 6.7.2 with FFmpeg 9.0.1. That
+  combination is **not built anywhere** — 6.7.2 is not installed on the dev box —
+  and is reasoned rather than measured: the two changes touch disjoint code, and
+  FFmpeg 9.0.1 needed no source change at all.
