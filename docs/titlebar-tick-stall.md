@@ -430,3 +430,71 @@ permanently behind the sound. If audio stalls too, the clock can be re-anchored
 cleanly. The owner reports picture and sound freezing together, and
 `AudioOutput` owns its own decode thread while `advanceClock()` runs on the
 frozen UI thread, so the two halves may well disagree. Measure before building.
+
+---
+
+# MEASURED: audio stalls too, and the resume jump is 2-3 frames, not 12 (2026-08-23)
+
+Owner run, four motionless caption holds, physical panel, sound audible,
+`TRACE_TICK_LOG=1`:
+
+    period=520.87ms handler=0.87ms sizemove=1 audio proc=110.00ms clk=0.042s ring=433.2ms under=0 silence=0B
+    period=511.39ms handler=0.81ms sizemove=1 audio proc=110.00ms clk=0.042s ring=424.0ms under=0 silence=0B
+    period=512.10ms handler=0.54ms sizemove=1 audio proc=110.00ms clk=0.042s ring=443.9ms under=0 silence=0B
+    period=503.99ms handler=0.54ms sizemove=1 audio proc=100.00ms clk=0.041s ring=428.5ms under=0 silence=0B
+
+**Across a ~515ms blackout the sound card was handed 110ms of audio and then
+nothing.** Four for four, quantised to the 10ms poll: this is one device buffer
+(`TRACE_AUDIO_BUFFER_MS` default 100) draining and not being refilled.
+
+**The decode side never stopped.** The ring still held **424-444ms** of decoded
+audio throughout, and `under 0 / silence 0` across every hold. Nothing starved
+and nothing was dropped — **the device simply stopped being PULLED**, which is
+the one thing those two counters cannot report, exactly as recorded.
+
+So sound plays for about a tenth of a second into the freeze and then goes
+quiet. That is the owner's "picture and sound freeze together", from the inside.
+
+## The answer to the question that was asked
+
+**Audio stalled too — but not to zero, and the difference decides the design.**
+
+Video does not follow wall time while audio is driving. `audioActive` takes the
+target from `audio_.advanceClock()`, i.e. from `processedUSecs`, so the picture
+resumes wherever the SOUND actually got to. Audio got 110ms further into the
+movie; the picture therefore advances **110ms — 2 to 3 frames at 24fps — and not
+the ~515ms of wall time that elapsed.**
+
+**The jump is REQUIRED, and it is already small.** Those 2-3 frames of sound
+genuinely came out of the speakers. Re-anchoring the clock to suppress them
+would leave the picture permanently 110ms behind the audio, which is a real
+sync defect traded for a barely visible one.
+
+**The owner's own recording already contained the corroboration.** Its
+mid-gesture HUD reads `drop 10 (ticks 4 max 3)` — ten dropped frames across
+FOUR stall events, at most three in any one tick. That is 2-3 frames per freeze,
+which is 110ms at 24fps to the frame, arrived at from a completely different
+counter in a different session.
+
+**Nothing is built, and nothing should be.** The fallback option is closed as
+"not applicable": there is no ugly time jump to remove. What the owner is seeing
+is the freeze itself, and the freeze is not removable without reimplementing
+window dragging.
+
+## One thing this opens, deliberately NOT proposed
+
+If the audio pull were serviced off the UI thread, **sound would play straight
+through the blackout** — the ring has 430ms of decoded audio sitting ready and
+the freeze is ~515ms, so it would very nearly cover it. That would turn a
+picture-and-sound freeze into a picture-only stutter, which is a materially
+better artefact.
+
+**It is a different trade, not a free win, and it must not be taken as a
+follow-on.** Video follows the audio clock, so audio playing through means the
+picture must then jump the FULL ~515ms on resume — twelve frames rather than
+two or three. That converts a small correct jump into a large correct one, and
+whether that reads better or worse is a judgement about feel, not a measurement.
+`docs/audio-window-drag.md` already declined moving `QAudioSink` to its own
+thread; that decline was made against a mechanism that did not exist, so the
+reasoning would need re-deriving rather than citing. **Owner decision, on a
+fresh brief, or not at all.**

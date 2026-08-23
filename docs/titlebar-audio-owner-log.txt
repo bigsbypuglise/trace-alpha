@@ -1,0 +1,12 @@
+# TRACE_TICK_LOG -- one line per tick delivered late.
+# period = handler entry to handler entry (DELIVERY).
+# handler = what that tick actually did (WORK).
+# period >> handler means the tick was NOT CALLED.
+# sizemove=1 means Windows' modal move/size loop owned the thread.
+# audio proc = ms of sound HANDED TO THE DEVICE across that gap.
+#   proc ~= period -> audio played through: the jump is REQUIRED for sync.
+#   proc ~= 0      -> audio stalled too: the jump is REMOVABLE.
+t=2.23s period=520.87ms handler=0.87ms budget=41.67ms sizemove=1 audio proc=110.00ms clk=0.042s ring=433.2ms under=0 silence=0B state=0
+t=5.51s period=511.39ms handler=0.81ms budget=41.67ms sizemove=1 audio proc=110.00ms clk=0.042s ring=424.0ms under=0 silence=0B state=0
+t=7.26s period=512.10ms handler=0.54ms budget=41.67ms sizemove=1 audio proc=110.00ms clk=0.042s ring=443.9ms under=0 silence=0B state=0
+t=8.88s period=503.99ms handler=0.54ms budget=41.67ms sizemove=1 audio proc=100.00ms clk=0.041s ring=428.5ms under=0 silence=0B state=0
