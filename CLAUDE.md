@@ -857,6 +857,109 @@ planar=1`, `11 shapes x 4 scale factors`, `--scrub-selftest`) ·
   already records for `overlay.ps1`, not a rendering difference, and §20.3's
   150% case is owner-accepted since GATE B. Not investigated further.
 
+**EXR/COLOUR STAGE 1 IS DONE (2026-08-23): ONE OCIO-BACKED DISPLAY TRANSFORM,
+LUT-FIRST, WITH A REAL `--ocio-selftest` IN CI.** Record
+`docs/exr-stage1-color-transform.md`; assessment `docs/exr-ocio-plan.md`. **NOT
+started, by instruction: multilayer/AOV cycling, Cryptomatte, EXR channel
+regrouping, the `Color Transform...` dialog, the GPU stage. UNMOVED: the vcpkg
+pin, decode and playback scheduling.**
+
+- **THERE IS ONE STAGE AND A LUT IS A CONFIGURATION OF IT, NOT A SECOND
+  PIPELINE.** `src/core/ColorTransform.{h,cpp}` holds `enabled (bypass)` plus a
+  tagged union — `None | Lut | DisplayView` — and compiles it to a single
+  `OCIO::ConstCPUProcessor`. Nothing downstream of `setConfig()` knows which kind
+  it is. `DisplayView` is **compiled and reachable with no UI**, so the ACES
+  dialog is a call site later rather than a redesign. The two terms are
+  INDEPENDENT: the bypass never touches the configuration, which is what makes
+  re-enabling a bool becoming true rather than a reload.
+- **THE STAGE RUNS IN `ViewerWidget::setFrame()`, BETWEEN `frame_` AND THE
+  RENDERER, AND THAT SEAM IS FORCED BY COPY FRAME.** `copyCurrentFrame()` reads
+  `viewer_->frame()`, so applying into that buffer would silently make Copy Frame
+  copy the TRANSFORMED image — the assessment's item 6. Keeping the transformed
+  buffer downstream of `frame_` answers it structurally rather than by
+  remembering. **Copy Frame still copies RAW/SOURCE pixels: verified, not
+  assumed** — with the ARRI LUT active and the vivid Rec.709 picture on screen,
+  Ctrl+C put the flat LogC4 source on the clipboard at the full 4608x3164.
+- **`syncPlanarOutput()` GAINED ONE TERM AND IT IS THE ONLY ENGINE INTERACTION.**
+  The stage works on BGRA8 and GATE C delivers planar YUV, so planar stands down
+  while the stage is ACTIVE — `allowed && !colorTransform_.isActive() &&
+  rendererAcceptsPlanarYuv()`. **Nothing changes while the transform is off**,
+  which is every existing measurement in this repo.
+- **OCIO's `CPUProcessor::apply` IS SINGLE-THREADED AND THAT WAS THE WHOLE
+  DIFFERENCE BETWEEN UNUSABLE AND SHIPPABLE.** 4K H.264 with a LUT: OFF
+  `handoff 0.76ms` / 100.0% · ON single-threaded **77.28ms / 47.9% of real time,
+  `drop 61`** · ON in **parallel row bands 13.27–14.13ms / 99.7% x2, `drop 0`**.
+  Measured **9.3 ns/pixel and linear in pixel count** (the 4608x3164 Alexa clip
+  read 135.7ms at the same rate). A `ConstCPUProcessor` is immutable once built
+  and safe to apply from several threads at once — what OIIO's own colour path
+  does — so bands are ROW RANGES over one shared processor and a per-pixel
+  transform makes seams impossible. **NOT measured on the 8K plate and must not
+  be assumed to hold there.**
+- **`--ocio-selftest` IS FIVE ASSERTIONS, NOT ONE "DID IT THROW", AND IT IS A CI
+  STEP.** 20 not compiled in · 21 no version · 22 config · 23 processor · **24
+  the transform compiled and LEFT THE PIXEL UNCHANGED** · 25 the optional
+  `=<file>`. **(24) is the one an exception check would miss**: a processor that
+  applies an identity is indistinguishable from a working one by every other
+  signal, and identity is exactly what a mis-resolved colour space produces —
+  stage 0's `getColorSpaceFromFilepath("x.exr") = Raw` is that failure in the
+  wild. **The config is OCIO's OWN BUILT-IN ACES config (`ocio://default`), not a
+  file**, because a runner has no colour configs and a selftest needing one could
+  not run there. Reads `version=2.5.2 input=ACEScg ... rgb 0.18->0.34919 moved=1`.
+  **Proven able to fail**: a missing LUT and a garbage `.cube` both exit 25 with
+  OCIO's own parser error.
+- **THE VIEW MENU IS THE SPEC'S FOUR ITEMS.** `Color Transform` (checkable
+  bypass) · `Color Transfor&m...` (present and DISABLED — stage 3; a row that
+  appears later moves every item under it, the same choice the Share menu's
+  LucidLink row makes) · `Load L&UT...` · `&Reset Color Transform`. **Loading a
+  LUT enables the transform in one action. Reset is not "untick"** — it clears
+  the configuration too, or a LUT would sit loaded and invisible. **ON/OFF NEVER
+  REOPENS MEDIA**: `applyColorTransformChange()` re-syncs planar and re-delivers
+  the frame on screen — for video one exact `Step` re-request (the slider-release
+  landing path, frame-exact by construction), for a still or sequence just a
+  re-run of the stage. Measured through the menu: **ON 187.07 -> bypass 109.88 ->
+  ON again 187.07**, bypass equalling the never-loaded value exactly.
+- **THE FIRST DRAFT'S MNEMONICS COLLIDED AND `warnOnDuplicateMnemonics()` IS WHY
+  THAT DID NOT SHIP.** `Color &Transform...` clashes with `Always on &Top` and
+  `&Load LUT...` with `&Lock Window to Media Aspect Ratio`; they are `M` and `U`
+  now, and the check prints only its three recorded pre-existing lines.
+  **NO KEYBOARD SHORTCUT WAS BOUND** — `C` is free and the assessment reserves it,
+  but the brief specified the menu only and a new bare key needs phase 7's
+  text-field guard checked first. Owner call.
+- **THE STAGE IS 8-BIT IN AND OUT, AND THAT IS A STATED LIMIT FOR THE ACEScg
+  WORK.** The frame at this seam is already an 8-bit BGRA display buffer, so a
+  float pipeline here buys nothing the buffer can carry — but a scene-linear EXR
+  carries values above 1.0, and `loadExr` already flattens to 8-bit with a
+  `pow(1/2.2)` long before this stage sees it. Full precision needs a float
+  display buffer end to end, which is the GPU stage's problem. Recorded rather
+  than half-built.
+- **`TRACE_COLOR_LUT=<path>` loads a LUT at startup and enables the stage**,
+  overriding the persisted state and writing nothing back. It exists because the
+  only other way in is a modal file dialog, and it is also the A/B: one binary,
+  the knob set or not. The HUD's **`xform`** field reads `n/a` / `none` /
+  `bypass <lut>` / `ON <lut>` — `off` and `bypass` are different facts and
+  neither is answerable from the picture.
+- **Regression, physical panel 5120x1440 @ 239.999Hz, transform OFF (the shipping
+  default, confirmed by the real settings file carrying no `color/` keys):**
+  `scrubbar.ps1` full pool **PASS — 22 files, 88 legs, `delta 0` throughout** ·
+  4K H.264 cadence x2 **100.0/100.0%** (`0 of 119`, `drop 0`, `rephase 0`,
+  `tick-late 0`) · 4444 x2 **99.8/99.8%** (`0 of 260`) · 4444 `-SnapRelease`
+  **`target 261 shown 261 delta 0`**, `hitch 0`, and **`dst YUV444P12 planar`,
+  i.e. GATE C intact** · all four selftests green · `verify_trace_assets
+  --strict` at **33 embedded files**.
+  **Transform ON**: engages on still, EXR sequence, H.264, ProRes and the Alexa
+  clip; **both renderers agree** (d3d11 delta 77.19, cpu 77.14); fullscreen keeps
+  it (picture-region luma 185.99 vs windowed 187.18) and Escape restores exactly;
+  stepping returns to the same value; **release stays exact** (`delta 0`,
+  `hitch 0`, `dst RGB32/BGRA`, release 39.1ms against 22.4 off); Reset returns the
+  raw picture.
+- **A HARNESS LESSON: a luma detector has to FIND the picture before it samples
+  it.** The first fullscreen check read 57.21 against a windowed 187.18 and looked
+  like the transform being lost; it was a 1.46:1 picture pillarboxed on a 3.56:1
+  panel putting most of a full-width sample band on black bars. Measuring the
+  picture's own column range gives 185.99. Same class as `emptystate.ps1`'s
+  stage-bound trap. Harness: `scripts/measure/colortransform.ps1`
+  (`matrix`/`toggle`/`renderers`).
+
 **THE EXR + COLOUR PHASE HAS STARTED AND STAGE 0 (DEPENDENCIES) IS DONE (2026-08-23).
 EXR OPENS -- AS A STILL AND AS A 217-FRAME SEQUENCE -- WITH NO CODE CHANGE BEYOND THE
 BUILD.** Assessment `docs/exr-ocio-plan.md`; stage-0 record
@@ -4599,8 +4702,10 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    vcpkg tree and linked in dev and CI, so `TRACE_WITH_OIIO` and `TRACE_WITH_OCIO` are
    both defined, and a single EXR opens as a still while the 217-frame folder opens and
    plays as a sequence. **The previous text here -- "EXR does not open today" -- is
-   superseded.** Stages 1-5 (the OCIO-backed Color Transform stage, AOV cycling, the
-   config/display/view dialog, Cryptomatte, the GPU stage) are NOT started.
+   superseded.** **STAGE 1 IS ALSO DONE (2026-08-23)**: one OCIO-backed display
+   transform, LUT-first, with `--ocio-selftest` in CI -- record
+   `docs/exr-stage1-color-transform.md`. **Stages 2-5 (AOV cycling, the
+   config/display/view dialog, Cryptomatte, the GPU stage) are NOT started.**
 
 ## Where scrub stands (2026-08-07, second session)
 
@@ -4967,6 +5072,15 @@ resolved and the `Segoe UI Variable` families **Qt** can see, which are not the 
 It exists because the first build of `src/app/Theme.*` asked for a family Qt does not enumerate,
 `hasFamily()` declined it, and the application ran on Segoe UI looking very nearly right. The
 same value is on the dev HUD as `font`),
+**`TRACE_COLOR_LUT=<path>`** (2026-08-23, stage 1: load a LUT at startup and enable the
+colour transform, OVERRIDING the persisted state and writing nothing back. It exists
+because the only other way into the stage is a modal file dialog, and driving one with
+synthetic input is the class of harness this project has been burned by -- and because
+it is the A/B: one binary, the knob set or not, which is a better control than two
+builds. **Read the HUD's `xform` field rather than the command line**: it prints
+`n/a` / `none` / `bypass <lut>` / `ON <lut>`, and `off` and `bypass` are different
+facts that the picture cannot distinguish. Harness:
+`scripts/measure/colortransform.ps1`),
 **`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second
