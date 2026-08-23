@@ -1,3 +1,80 @@
+# CLOSED, 2026-08-23. The freeze is Windows' and is not removable; nothing is left to fix.
+
+**Read this banner and stop.** Everything below it is the investigation in the
+order it happened, including two hypotheses this banner overturns. It is kept as
+the record of how the answer was reached, not as guidance.
+
+## What it is
+
+Pressing the real Windows title bar blocks Trace's UI thread for the
+**double-click interval** — measured **500.73ms** against a `GetDoubleClickTime()`
+of 500 — before Windows starts the window move. During that block the thread
+retrieves **no message of any kind**. Playback, the HUD and the whole interface
+stop, then resume while the button is still down.
+
+## What is ruled out, all by measurement
+
+| | |
+|---|---|
+| Anything Trace does per tick | `handler 0.54–2.29ms` throughout. Nothing got slower; the tick was not called. |
+| Audio, the Qt audio backend, buffer depth | `TRACE_NO_AUDIO=1` still freezes. Qt 6.7.2 / 6.10.2 / 6.11.2 all identical. |
+| The layered top chrome, the alpha tick storm, the D3D11 swapchain | Each knob turned off, no change. |
+| `WM_TIMER` starvation in a busy queue | The queue is not busy. **Nothing at all** is retrieved for the duration. |
+| The modal move loop | The block is over **before** it starts. Inside it, a 1.9s hold carried **47 ticks with no gap over 20ms**. |
+| `SetTimer` + `WM_TIMER` | Dead by construction: a posted message cannot reach a thread retrieving nothing. Qt already implements `QTimer` with Win32 timers anyway. |
+| Intercepting the caption press (`SC_MOVE` ourselves) | **Built and measured.** The block moved from one `DefWindowProc` path to the other and kept its duration to **0.07ms**. Code removed. |
+
+## Why it is not fixed
+
+The only remaining way to remove the block is to **perform the window move
+ourselves** — capture, hit-testing, `SetWindowPos` — and never call
+`DefWindowProc`. That reimplements Snap, Aero Shake, snap layouts, edge
+magnetism and multi-monitor behaviour by hand, which is exactly the work the
+owner declined when roadmap step 12 was closed and the native title bar kept.
+**Not proposed, and not to be re-proposed without reopening that decision.**
+
+## The resume jump is not a defect and there is nothing to remove
+
+Audio stalls too: across a ~515ms blackout the device is handed **110ms** —
+one buffer — and then nothing, while the ring still holds 430ms decoded and
+`under 0 / silence 0`. The device stops being **pulled**.
+
+Video follows the audio clock, not wall time, so the picture resumes **110ms**
+further on — **2 to 3 frames**, not the twelve that elapsed. Those frames of
+sound really played. Suppressing them would put the picture permanently behind
+the audio: a real sync fault traded for a barely visible one.
+
+**The clock re-anchor fallback is therefore closed as not applicable.**
+
+## What was built, and is worth keeping
+
+The instruments, not a fix. **`stalls` and `hitch` never saw this because both
+are fed only from the scrub-drag path** — during playback they have no samples
+and read `0 of 0`, which was read as a clean result for a dozen harness runs.
+
+- **`smooth/drag`** — the line is labelled as drag-scoped now.
+- **`tick-late` / `tick-stall` / `sizemove`** on the `sched` line — delivery
+  counters for the playback tick, with the size/move subset called out.
+- **`TRACE_TICK_LOG=1`** → `%TEMP%\trace_tickstall.txt`, one line per late tick
+  with the audio deltas across the gap.
+- **`TRACE_MSG_LOG=1`** → `%TEMP%\trace_msglog.txt`, the message-pump timeline,
+  computing its own verdict at the top.
+- **`scripts/measure/tickstall.ps1`** — `-Mode idle` / `-Mode caption`.
+
+## If this is ever reopened
+
+One option is recorded and was deliberately **not** taken: pulling the audio
+device off the UI thread would let sound play through the blackout (430ms
+buffered against a ~515ms freeze), turning a picture-and-sound freeze into a
+picture-only stutter. **It is a trade, not a win** — the picture would then have
+to jump the full ~515ms rather than 110ms. That is a judgement about feel, needs
+a fresh owner brief, and cannot cite `docs/audio-window-drag.md`'s decline, which
+was made against a mechanism that turned out not to exist.
+
+---
+
+# The investigation, in the order it happened
+
 # The title-bar hitch: the tick is not delivered for ~500ms at move-loop entry
 
 Owner reproduction, 2026-08-22, screen recording with the HUD up, physical panel.

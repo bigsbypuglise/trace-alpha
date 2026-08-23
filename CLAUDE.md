@@ -618,6 +618,121 @@ banner, not the body.
   so this is the one named 6.11 change in Trace's path that is **unverified**. Recorded as
   a known, accepted gap. `scripts/measure/dpimove.ps1` is ready if the hardware returns.
 
+**THE TITLE-BAR FREEZE IS CLOSED AS NOT FIXABLE, AND THE SMOOTHNESS COUNTERS
+THAT MISSED IT ARE FIXED (2026-08-23; record `docs/titlebar-tick-stall.md` —
+READ ITS TOP BANNER AND STOP, the body below it is the investigation in order
+and contains two hypotheses the banner overturns).** Owner-run measurements
+throughout; nothing about playback behaviour changed.
+
+- **THE FAULT: pressing the real Windows title bar blocks the UI thread for the
+  DOUBLE-CLICK INTERVAL before Windows starts the move.** Measured **500.73ms**
+  against a `GetDoubleClickTime()` of **500**, and during it the thread
+  retrieves **no message of any kind** — not input, not `WM_TIMER`, not even
+  Qt's own posted-event message, which appears every few ms everywhere else.
+  Playback, the HUD and the whole interface stop, then resume **while the button
+  is still down**, because it is a fixed timeout rather than a condition that
+  lasts the gesture. `handler` reads **0.54–2.29ms** throughout: nothing Trace
+  does got slower, the tick was **not called**.
+- **THE MODAL MOVE LOOP IS INNOCENT AND THE STANDING HYPOTHESIS WAS WRONG TWICE
+  OVER.** The silence runs `WM_NCLBUTTONDOWN` → `WM_ENTERSIZEMOVE`, i.e. it is
+  **over before the loop starts**; inside the loop a 1.9s hold carried **47 frame
+  ticks with no gap over 20ms**. So "`WM_TIMER` is starved because the queue is
+  not empty at loop entry" fails on both halves — the queue is not busy and the
+  fault is not at loop entry. **`sizemove=1` is correct about the TICK and
+  misleading about the STALL** (the tick lands inside the gesture; the stall
+  precedes it). Only a message timeline separates those; no counter can.
+- **EVERY UI-THREAD FIX IS DEAD BY MEASUREMENT.** A posted message cannot reach a
+  thread retrieving nothing, so `SetTimer` + `WM_TIMER` cannot work — and Qt
+  already implements `QTimer` on Windows with real Win32 timers, so it would be
+  the same mechanism twice. **Intercepting the caption press was BUILT and
+  REFUTED**: consuming `WM_NCLBUTTONDOWN` and posting `SC_MOVE` ourselves works
+  perfectly (our `WM_SYSCOMMAND` lands 0.19ms later) and **the block moves from
+  one `DefWindowProc` path to the other keeping its duration to 0.07ms** —
+  214.89 against 214.96ms. `TRACE_CAPTION_FASTMOVE` and its code were **removed
+  by owner decision**; git history has them.
+- **THE ONLY REMAINING FIX IS TO PERFORM THE WINDOW MOVE OURSELVES** — capture,
+  hit-testing, `SetWindowPos`, never calling `DefWindowProc` — which
+  reimplements Snap, Aero Shake, snap layouts, edge magnetism and multi-monitor
+  by hand. **That is the work declined when roadmap step 12 was closed. Not
+  proposed; do not re-propose without reopening that decision.**
+- **THE RESUME JUMP IS NOT A DEFECT AND THERE IS NOTHING TO REMOVE.** Audio
+  stalls too: across a ~515ms blackout the device is handed **110ms** — one
+  buffer — and then nothing, four holds for four, while the ring still holds
+  **424–444ms decoded** with **`under 0` / `silence 0`**. The decode side never
+  stopped; **the device stops being PULLED**, which is exactly what those two
+  ring-side counters cannot report. Video follows the **audio clock**, not wall
+  time, so the picture resumes **110ms** on — **2–3 frames, not the twelve that
+  elapsed** — and those frames of sound really played. Suppressing them would
+  leave the picture permanently behind the audio. **The owner's original
+  recording corroborated this from a different counter in a different session:
+  `drop 10 (ticks 4 max 3)` is 110ms per freeze at 24fps, to the frame.** The
+  clock re-anchor fallback is **closed as not applicable**.
+- **`stalls` AND `hitch` NEVER SAW ANY OF IT, AND THAT WAS A DEFECT IN ITS OWN
+  RIGHT.** Both are fed from exactly two sites, `paintScrubFrameNow()` and the
+  synchronous scrub walk — **both inside the scrub drag path** — so during
+  ordinary playback `scrubPaintGapSamples_` is 0 and the HUD reads **`stalls 0
+  of 0`** on frames carrying `period max 512ms`. That empty measurement was read
+  as a clean one across a dozen harness runs. **The denominator was saying so all
+  along.** The line is **`smooth/drag`** now and says it is drag-scoped.
+- **NEW, PERMANENT, AND THE PLAYBACK-SIDE ANSWER: `tick-late` / `tick-stall` /
+  `sizemove` on the `sched` line**, sampled from `lastPeriodMs_` — handler entry
+  to handler entry, i.e. **DELIVERY rather than WORK**. `tick-late` is
+  `> 1.5 x budget` (relative, the cadence line's own bar); `tick-stall` is
+  `> 100ms` (absolute, comparable across rates like `hitch`); `sizemove` is the
+  subset delivered inside the modal loop **with its own max**, which is the
+  attribution a bare count cannot make. **33.3ms would be the wrong bar: a 33ms
+  paint gap during a drag is a stall, a 33ms tick period at 24fps is EARLY.**
+  Read `period max` against `handler max` — that one comparison is the whole
+  diagnosis.
+- **TWO FILE-BASED DIAGNOSTICS, because the HUD is unreadable for a transient
+  fault — the owner's own report is that the HUD freezes with everything else,
+  so the one moment the number matters is the one moment its display is
+  frozen.** **`TRACE_TICK_LOG=1`** → `%TEMP%\trace_tickstall.txt`, one line per
+  late tick carrying `period`, `handler`, `sizemove` and the **audio deltas
+  across the gap** (`processedUSecs` is the only audio quantity that can see
+  through a frozen UI thread — it counts bytes handed to the DEVICE).
+  **`TRACE_MSG_LOG=1`** → `%TEMP%\trace_msglog.txt`, a `WH_GETMESSAGE`
+  thread-hook timeline that **computes its own verdict at the top** (largest
+  stretches with no message retrieved, filtered to those that interrupted
+  playback — an idle app is silent for seconds and buried the real one in eighth
+  place on the first run). It buffers to a fixed ring and writes **nothing during
+  the gesture**: a file write per message, on the thread whose responsiveness is
+  the subject, is the instrument changing the measurement. Both default off, no
+  hook installed and one static-bool branch when unset. Harness
+  `scripts/measure/tickstall.ps1` (`-Mode idle` is the control and is not
+  optional).
+- **A HUD FIELD CAUGHT A MIS-SET KNOB ON ITS FIRST RUN, AND WITHOUT IT THIS
+  SESSION WOULD HAVE RECORDED A FALSE NEGATIVE.** The first caption-interception
+  measurement looked like a clean refutation; the HUD read **`fastmove off`**
+  throughout. `tickstall.ps1` had been invoked as `-Env "A=1,B=1,C=1"`, which
+  through `powershell -File` arrives as **one string**, so `restart.ps1` split on
+  the first `=` and set the first knob to a nonsense value with **every later one
+  silently absent**. That is the recorded array-flattening trap in a new costume.
+  **The rule generalises: a knob whose state cannot be read back off the running
+  build is a knob you cannot trust a null result from** — the reason `renderer`,
+  `planar`, `font` and `strip` are on that line. `tickstall.ps1` splits on commas
+  now.
+- **SYNTHETIC INPUT DOES REPRODUCE THIS, contrary to the record.**
+  `audiodrag.ps1`'s clean negative across eleven configurations was **not**
+  evidence that it cannot — that harness was reading the audio ring on a fault
+  that is not audio. `tickstall.ps1 -Mode caption` fires it every run. It is
+  still a **lower bound** (215–300ms synthetic on the Parsec-class display
+  against 500–558ms from a real hand on the panel), so it is a smoke test, never
+  a substitute for the owner's hand.
+- **Verification at HEAD** (Parsec-class display 1920x1200 @ 59.999Hz — **this
+  session was remote, so no figure here is a cadence record**; the title-bar
+  fault is the one thing the owner records as reproducing identically over
+  Parsec): 4K H.264 playback **100.0% of real time**, `drop 0`, `rephase 0`,
+  `handler>budget 0 of 119`, all 119 gaps `~1x`, `tick-late 0 of 119`,
+  `tick-stall 0`, `sizemove 0`, `period 41.27/41.67/43.35` against `handler
+  1.90/2.38` · renderer selftest **`d3d11 fellback=0 planar=1`** · shape selftest
+  **11 shapes x 4 scale factors** · `verify_trace_assets --strict` green at
+  **33 embedded files**. **THE FULL SCRUB AND CADENCE REGRESSION AT THE MACHINE
+  IS OUTSTANDING** and was deliberately not run here, because the owner's own
+  rule is that nothing about smoothness or cadence is judgeable over Parsec. The
+  shipping-path cost of everything added is two comparisons and one `std::max`
+  per tick behind a `tickFrameDurationMs_ > 0` guard, plus one HUD field.
+
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
@@ -4441,6 +4556,16 @@ default off, correctness-verified but NOT validated against real remote storage 
 the model that matches what read-ahead is for) are synthetic link simulators for A/B'ing it on
 local media — never a substitute for a real remote measurement. `TRACE_IO_LOG=1` appends
 per-close read/seek stats including `bufferHits`/`raRebases` to `%TEMP%\trace_iolog.txt`.
+
+**Diagnostics for the title-bar freeze (2026-08-23, both DEFAULT OFF, both
+instrument-only):** **`TRACE_TICK_LOG=1`** writes one line per late frame tick to
+`%TEMP%	race_tickstall.txt` -- `period` (handler entry to handler entry, i.e.
+DELIVERY), `handler` (WORK), `sizemove`, and the audio deltas across the gap.
+**`TRACE_MSG_LOG=1`** writes a `WH_GETMESSAGE` message-pump timeline to
+`%TEMP%	race_msglog.txt` with its verdict computed at the top. They exist
+because the HUD is unreadable for a transient fault -- it freezes along with
+everything else -- and because `stalls`/`hitch` are DRAG-scoped and read
+`0 of 0` during playback. Harness `scripts/measure/tickstall.ps1`.
 
 **Tuning knobs**, all defaulting to shipped behaviour: `TRACE_ASYNC_SCRUB=0`
 (back to the synchronous walk), `TRACE_SCRUB_WALK_MS` / `TRACE_SCRUB_REARM_MS`
