@@ -311,6 +311,12 @@ media class, not colour correctness**. Only the Alexa row is a real workflow.
   clears the persisted keys.
 - **Copy Frame with the LUT active** puts the untransformed 4608x3164 LogC4
   source on the clipboard.
+- **A media change keeps the transform.** With the LUT active on the Alexa clip
+  (luma 187.18), opening `Splash_1.mp4` through File > Open in the SAME process
+  gives **253.81** -- the matrix's transformed value for that clip to the digit,
+  against its raw 209.50. The stage is a viewing preference and survives the
+  file change, like Loop; `syncPlanarOutput()` is already called on open, so the
+  new media arrives as BGRA with no extra plumbing.
 
 ### Cost, stated plainly
 
@@ -333,6 +339,27 @@ pillarboxed on a 3.56:1 panel puts most of a full-width sample band on black
 bars. Measuring the picture's own column range gives 185.99. **A luma detector
 has to find the picture before it samples it** -- the same class as
 `emptystate.ps1`'s stage-bound trap, in a new costume.
+
+### CI
+
+Run [32653491585](https://github.com/bigsbypuglise/trace-alpha/actions/runs/32653491585)
+on `ce993993`, **green in 3.7 min** -- the vcpkg cache hit and the install step
+was skipped, so stage 0's `--clean-after-build` decision is still paying.
+
+```
+OpenImageIO + OpenColorIO detected by CMake.
+Package verified: 11 required files present, 118.3 MB total.
+trace-ocio: version=2.5.2 config=ocio://default input=ACEScg
+            display=sRGB - Display view=ACES 2.0 - SDR 100 nits (Rec.709)
+            rgb 0.18->0.34919,0.34919,0.34919 moved=1
+trace-selftest: renderer=d3d11 fellback=0 planar=1
+trace-shape: OK - 11 shapes x 4 scale factors
+```
+
+**`Verify OpenColorIO links and executes` passed on the runner**, which is the
+point of the whole step: `moved=1` there means a real ACES display transform
+compiled and executed inside the SHIPPED binary on a machine that has no colour
+configs and no test assets. Stage 0 could only say the library had been built.
 
 ## Deferred to stage 2, recorded here so they are not re-derived
 
