@@ -48,6 +48,7 @@ foreach ($clip in $Clips) {
         foreach ($pass in @(1, 2)) {
             & "$PSScriptRoot\restart.ps1" -Clip $clip -Env $cfg.Env -SettleSeconds 5 | Out-Null
             & "$PSScriptRoot\play.ps1" -Seconds $PlaySeconds | Out-Null
+            if ($LASTEXITCODE -ne 0) { Write-Warning "gatec_perf: playback did not start; aborting"; exit 1 }
             if ($pass -eq 2) {
                 $png = Join-Path $OutDir ("play_{0}_{1}.png" -f $short, $cfg.Name)
                 & "$PSScriptRoot\capture.ps1" -Out $png | Out-Null

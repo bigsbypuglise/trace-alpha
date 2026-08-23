@@ -73,6 +73,10 @@ for ($r = 1; $r -le $Repeats; $r++) {
     if ($Exe) { $restartArgs.Exe = $Exe }
     & "$PSScriptRoot\restart.ps1" @restartArgs | Out-Null
     & "$PSScriptRoot\play.ps1" -Seconds $Seconds | Out-Null
+    # play.ps1 asserts the picture advanced. A run that never ticked reports
+    # `frames 0 | ticks 0` and stitches into the summary looking like a figure,
+    # so stop here rather than record one.
+    if ($LASTEXITCODE -ne 0) { Write-Warning "cadence: playback did not start; aborting"; exit 1 }
     $png = Join-Path $OutDir ("{0}_r{1}.png" -f ($Label -replace '[^\w\-]', '_'), $r)
     & "$PSScriptRoot\capture.ps1" -Out $png | Out-Null
     $tag = if ($Env.Count) { ($Env -join ' ') } else { "(defaults)" }
