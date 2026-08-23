@@ -473,7 +473,150 @@ AND the reverted tree builds, checked one at a time.**
   links: **this diagnosis ran on the local Qt 6.10.2 and CI pins Qt 6.7.2**, whose Windows
   audio backend predates `QWASAPIAudioSinkStream` and its MMCSS thread — so a downloaded
   ZIP is not the same experiment as a local build, and `audiodrag.ps1 -Exe <the ZIP's
-  Trace.exe>` is the run that would tell them apart.
+  Trace.exe>` is the run that would tell them apart. **SUPERSEDED 2026-08-22: CI and dev
+  now BOTH run Qt 6.11.2, so that experiment no longer needs running — the version was
+  measured across 6.7.2, 6.10.2 and 6.11.2 and is not the variable. See the dependency
+  block below.**
+
+**THE DEPENDENCY MODERNISATION IS DONE (2026-08-22): vcpkg PINNED, FFmpeg 9.0.1, Qt
+6.11.2 on dev AND CI, both green on the runner and each independently revertable.**
+Records: `docs/ffmpeg-9-upgrade.md` and `docs/qt-6.11-upgrade.md`. The assessment that
+started it is `docs/toolchain-upgrade-plan.md`, **kept only as the record of what was
+proposed and carrying a supersession banner listing six disproven claims** — read the
+banner, not the body.
+
+- **VCPKG IS PINNED TO A COMMIT AND THE CACHE KEY CARRIES THE PIN** (`350e294`).
+  `17f35ad2418007a895ced8a4cece4ab34068a58d`, the tree the dev box runs (ffmpeg port
+  8.1.2#3). It was cloned **unpinned** behind a cache that expires after 7 days idle, so
+  every CI result was a function of the day it ran — a green run and a red run could
+  differ only by whether the cache had aged out, and it had already happened once (the
+  `v2` bump was that scar, and it treated the symptom). `git clone --depth 1 <sha>` is
+  not a thing, so it is init + fetch of the single revision, **and HEAD is asserted
+  against the pin afterwards rather than trusted**. Putting the pin IN THE CACHE KEY is
+  what makes it binding rather than decorative — the same property the ffmin cache gets
+  from hashing its build script. **The assessment's urgency was wrong and the fix was
+  still right**: the shipped artifact does not take its FFmpeg from vcpkg at all
+  (`TRACE_FFMPEG_ROOT` wins with `NO_DEFAULT_PATH`, `FFMPEG_BIN` is overwritten before
+  packaging, and the package check already matched by prefix), so a drift would have cost
+  build time, not a failed publication.
+- **THE SHIPPING FFmpeg IS 9.0.1** (`de7bae4`) — the minimal MinGW/GCC LGPL build,
+  n8.1.2 to n9.0.1, sonames **avcodec-63 / avformat-63 / avutil-61 / swresample-7 /
+  swscale-10**, read out of `libav*/version*.h` and asserted by the workflow after the
+  build. **vcpkg stays at 8.1.2 on purpose** — it is the toolchain host and the documented
+  revert path, not the shipping dependency. **NO SOURCE CHANGED, and that was verified
+  rather than assumed**: all 147 FFmpeg identifiers under `src/` were checked against the
+  9.0.1 headers; the one real removal, `av_stream_get_side_data`, is already behind
+  `LIBAVCODEC_VERSION_MAJOR >= 61` and takes the `av_packet_side_data_get` branch at 63,
+  exactly as that guard's own comment predicted.
+- **THE MINIMAL BUILD STILL EARNS ITS COMPLEXITY, AND THE BENCHMARK WAS DECOMPOSED
+  RATHER THAN RUN CONFOUNDED** — vcpkg stays at 8.1.2 while the shipping build moves to
+  9.0.1, so a bare before/after would have mixed toolchain with version. `decbench`,
+  sustained slice t=32, worst pass: **vcpkg 8.1.2 (MSVC) 19.68 / 78.37 fps · ffmin 8.1.2
+  (GCC) 23.48 / 92.45 · ffmin 9.0.1 (GCC) 23.75 / 92.33** on the 8K 4444 XQ plate and 4K
+  4444. **Toolchain with the version held constant: +19.3% / +18.0%** — the recorded ~18%
+  reproduces. **Version with the toolchain held constant: +1.1% / −0.1%, i.e. nothing.**
+  The gain is the toolchain and the bump does not touch it.
+- **DECODE IS BIT-IDENTICAL** across seven files and seven format combinations including
+  12-bit 4:4:4 with alpha, 10-bit 4:2:2 and 10-bit HEVC. Frames hashed straight out of the
+  decoder **at `width x componentsize` per row, never at `linesize`** — stride padding is
+  allocator business and a stride-unaware diff is how a previous session invented 399
+  differing pixels on four unrelated files. **The hash was proven able to fail first**
+  (consecutive frames give distinct values; two files differ).
+- **QT 6.11.2 ON DEV AND CI TOGETHER** (`25a7fd4`), closing a gap that was a correctness
+  problem rather than untidiness: the Windows audio sink was rewritten in **6.9.1**, so
+  `processedUSecs()` and `bytesFree()` — the two terms `AudioOutput::advanceClock()` uses
+  as the master clock — did not mean the same thing in the shipped ZIP as in the build the
+  clock was tuned on. **Every release before this one ran a differently-behaving clock than
+  the one it was measured with.** 6.10.2 was **NOT** taken as an intermediate milestone
+  (owner decision) because the experiment it existed for had already been run and refuted.
+  **Qt 6.10.2 is KEPT INSTALLED at `C:\Qt\6.10.2` as the control.**
+- **CI NEEDS AN `aqtsource` PIN FOR 6.11.x AND IT IS PINNED TO A COMMIT.**
+  `install-qt-action@v4` pins `aqtinstall ==3.3.*` and no released aqtinstall can fetch
+  6.11.x — Qt changed its download-repo folder layout at 6.11. **Verified with a control
+  rather than taken on trust**: aqt 3.3.0 resolves 6.10.2's arch list and fails 6.11.1 and
+  6.11.2 identically on `Updates.xml`, one version apart, same network. Pinned at
+  `16db45a70b5905ad596941b223469bc86a56901e` rather than at master, because floating CI on
+  a branch would reintroduce exactly the drift the vcpkg pin removes; verified to install
+  and reach 6.11.2 from a clean venv first. `arch: win64_msvc2022_64` is also required.
+- **TWO OF THE THREE NAMED 6.11 RISKS DO NOT APPLY, and the assessment was counting GREP
+  HITS rather than code sites.** `WM_DPICHANGED` is **one** handler
+  (`MainWindow.cpp:5134`), not eight. `WS_EX_LAYERED` is **two** calls, and
+  `TopChrome.cpp:227` **already** applies it with `SetWindowLongPtrW` after creation —
+  which is what QTBUG-135333 changed Qt *to* do, so it could never bite. The frameless
+  `showMaximized()`/`showNormal()` rework does not apply at all: **Trace is not frameless**,
+  roadmap step 12 was declined. **The real risk was narrower than described**: the D3D11
+  surface runs its OWN Win32 window proc on its own child HWND and handles eight input
+  messages directly, so the exposure was Qt enabling pointer input process-wide. Measured:
+  it does not — every `overlay.ps1` leg passes on both backends.
+- **FONT DRIFT FROM 6.8's GDI-to-DirectWrite MOVE: NONE.** The empty state's hint line is
+  *text*, so it is the sensitive measurement, and it reads **169x14, gap 44, mark 59x68,
+  offset +0.5** — the recorded figures to the digit, on **both** backends. One benign
+  change worth knowing: **6.11.2 enumerates 13 `Segoe UI Variable` families where 6.10.2
+  enumerated 1** (the optical cuts are now exposed individually). Both resolve to the
+  design's own name and render identically; it would matter only to code doing family
+  matching by enumeration, and nothing in Trace does.
+- **THE CAPTION-PRESS STALL IS UNCHANGED ACROSS THREE QT MAJORS AND QTBUG-132285 IS NOT
+  ITS ATTRIBUTION.** Measured with the diag branch's own instrument built against 6.11.2 in
+  a throwaway worktree, on the 90s tone file so every leg is inside the material (`under 0`,
+  `silence 0 B` throughout — a `silence` figure past the clip's end is end-of-stream
+  padding, not the fault):
+
+  | leg | Qt 6.7.2 | Qt 6.10.2 | **Qt 6.11.2** |
+  |---|---|---|---|
+  | idle 10s (control) | 52.2ms `snap x0 dry 0` | 50.8ms | **50.5ms `snap x0 dry 0`** |
+  | move drag 10s | 142.5ms `snap x0 dry 1` | 153.4ms | **126.3ms `snap x0 dry 1`** |
+  | caption hold 10s | 555.6ms `snap x1 dry 1` | 527.9ms | **507.4ms `snap x1 dry 1`** |
+  | caption hold 30s | 547.7ms `snap x1 dry 1` | 530.9ms | **526.2ms `snap x1 dry 1`** |
+
+  Same fault, same signature, same class. `dry 1` at both 10s and 30s: still **once per
+  press**, not for the length of the hold. **The Qt version is not the variable**, now
+  across three majors rather than two. **Why the hypothesis was always weak, stated so it
+  is not re-proposed**: QTBUG-132285 is repaint-on-**MOVE**, and the worst reproduction is a
+  **MOTIONLESS** caption press — 3.7x worse than dragging. A fix for repainting while moving
+  cannot explain a stall with no movement in it, and the move-drag leg, where it could have
+  helped, lands inside the other versions' spread. **What stalls the process for ~500ms on a
+  caption press is still unattributed. Do not begin that investigation off the back of this
+  block.**
+- **Regression flat, physical panel 5120x1440 @ 239.999Hz**, each leg run beside a
+  same-commit control: `scrubbar.ps1` full pool **PASS — 22 files, 88 legs, `delta 0`
+  throughout** on BOTH the FFmpeg step and the Qt step · 4K H.264 cadence x2
+  **100.0/100.0%** (`drop 0`, `rephase 0`, `0 of 119`, all 119 gaps `~1x`) · 4444 x6 per
+  build **99.8% every rep**, `0 of 260` every rep · **audio-mastered 1080p x2 99.6/99.6%**
+  `0 of 240` identical buckets, which is the swresample-7 path · **25 of 25 transitions** ·
+  `overlay.ps1` all legs PASS both backends, loop accent **0/68/0** d3d11 · `uiatree.ps1`
+  nine named controls + **MenuBar and five MenuItems** · `emptystate.ps1` all four modes
+  plus the `-Bar` control at the recorded **641-row** stage · `topchromefade.ps1 -Mode rest`
+  d3d11 **MAE 0.21** translucent / cpu **MAE 0.1** opaque, both the recorded values ·
+  maximize/restore an **exact round trip**, identical to 6.10.2 · renderer selftest
+  `d3d11 fellback=0 planar=1` · shape selftest 44 rows.
+- **ONE CADENCE READING LOOKED LIKE A REGRESSION AND WAS NOISE, and the control is what
+  said so.** A single 4444 rep on the FFmpeg build smeared its cadence buckets (`<0.9x` 8,
+  `1.1-1.5x` 5) against the control's 1 and 0. Run six times per build, `<0.9x` spans
+  **1-10 on both** — the file's own run-to-run variance. Presented rate, `drop` and
+  `handler>budget` were identical throughout. **Do not chase a 4444 bucket spread on one
+  rep.**
+- **A LOCAL TRAP CLOSED ITSELF IN PASSING, AND IT CAUGHT THIS SESSION'S FIRST CONTROL.**
+  vcpkg's applocal deployment copies DLLs matching the exe's imports out of the vcpkg tree.
+  While the ffmin and vcpkg sonames MATCHED, a local build configured against
+  `TRACE_FFMPEG_ROOT` got **vcpkg's MSVC DLLs copied beside it** and silently ran those
+  rather than the GCC ones it linked — which would have made the toolchain A/B compare
+  vcpkg with vcpkg. CI was never exposed (it copies `FFMPEG_BIN` over the top). **At 9.0.1
+  the sonames no longer collide, so the substitution is impossible.** The cost is that the
+  ffmin-vs-vcpkg comparison is no longer a drop-in DLL swap and needs a reconfigure; the
+  revert path is unaffected.
+- **INDEPENDENTLY REVERTABLE, CHECKED RATHER THAN ASSUMED.** Reverting Qt alone is clean.
+  Reverting FFmpeg alone is clean in the workflow, the notices and the build script, **and
+  the resulting combination builds** — Qt 6.11.2 against FFmpeg 8.1.2 compiles to
+  `Trace.exe`, exit 0. **One trivial conflict, documentation only**: each record doc is
+  created by its own commit and appended by a later one, so a revert leaves it `UD`;
+  resolve with `git rm` on that doc. Reverting Qt restores CI to 6.7.2 with FFmpeg 9.0.1,
+  which is **not built anywhere** and is reasoned rather than measured.
+- **MIXED-MONITOR DPI IS EXPLICITLY DEFERRED (owner, 2026-08-22) AND IS NOT A BLOCKER FOR
+  THIS MILESTONE.** It needs two displays at different scale factors and multi-display work
+  was withdrawn on 2026-08-15. Qt 6.11 moved `WM_DPICHANGED` handling (the suggested rect
+  is now passed into `checkForScreenChanged()`) and Trace has exactly one handler for it,
+  so this is the one named 6.11 change in Trace's path that is **unverified**. Recorded as
+  a known, accepted gap. `scripts/measure/dpimove.ps1` is ready if the hardware returns.
 
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
@@ -3015,18 +3158,18 @@ No test suite yet. **GitHub Actions is the source of truth for release builds**,
 
 ### Local build on the Windows box (Aug 2026 — verified working)
 
-Qt 6.10.2 (msvc2022_64, includes Multimedia), vcpkg FFmpeg 8.x (avcodec-62), and VS2022 Community are all installed. None are on `PATH`, so call them by full path:
+Qt **6.11.2** (msvc2022_64, includes Multimedia) -- 6.10.2 is also installed and KEPT as the upgrade control -- the shipping **minimal MinGW/GCC FFmpeg 9.0.1** at `C:\tw_ff9\out` (built by `scripts/build-ffmpeg/build-minimal-ffmpeg.ps1`), vcpkg FFmpeg 8.1.2 (`avcodec-62`) in the toolchain slot, and VS2022 Community are all installed. None are on `PATH`, so call them by full path:
 
 ```
-& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="C:\Qt\6.10.2\msvc2022_64" -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake"
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' -S . -B build -G "Visual Studio 17 2022" -A x64 -DCMAKE_PREFIX_PATH="C:\Qt\6.11.2\msvc2022_64" -DCMAKE_TOOLCHAIN_FILE="C:/vcpkg/scripts/buildsystems/vcpkg.cmake" -DTRACE_FFMPEG_ROOT="C:/tw_ff9/out"
 & 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe' --build build --config Release --target Trace --parallel
-& 'C:\Qt\6.10.2\msvc2022_64\bin\windeployqt.exe' --release --no-translations 'build\app\Release\Trace.exe'
+& 'C:\Qt\6.11.2\msvc2022_64\bin\windeployqt.exe' --release --no-translations 'build\app\Release\Trace.exe'
 ```
 
-FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt runtime, `platforms\qwindows.dll` and the multimedia plugins. Then run `build\app\Release\Trace.exe`. **Configure prints `Trace: audio output enabled` or `DISABLED` — check that line**, and since GATE B also `Trace: D3D11 renderer enabled` or `DISABLED (needs Windows + MSVC + fxc)`. The D3D11 backend needs `fxc` from the Windows SDK to compile its shaders at build time; if CMake cannot find it the backend is left out and the app builds exactly as before, so a `DISABLED` line is a missing SDK rather than a broken tree. Note local Qt is 6.10.2 while CI pins 6.7.2, so a local green is not proof CI is green; it does catch every compile error.
+FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt runtime, `platforms\qwindows.dll` and the multimedia plugins. Then run `build\app\Release\Trace.exe`. **Configure prints `Trace: audio output enabled` or `DISABLED` — check that line**, and since GATE B also `Trace: D3D11 renderer enabled` or `DISABLED (needs Windows + MSVC + fxc)`. The D3D11 backend needs `fxc` from the Windows SDK to compile its shaders at build time; if CMake cannot find it the backend is left out and the app builds exactly as before, so a `DISABLED` line is a missing SDK rather than a broken tree. **Dev and CI now run the SAME Qt (6.11.2) and the same shipping FFmpeg (9.0.1)** as of 2026-08-22; a local green is still not proof CI is green, but the toolchains no longer differ. **Omitting `-DTRACE_FFMPEG_ROOT` builds against vcpkg's 8.1.2 instead** -- that is the documented revert path, and it is what CI does if the flag is dropped.
 
 - Repo: `https://github.com/bigsbypuglise/trace-alpha` (GitHub account: bigsbypuglise; private)
-- Every push to any branch builds Windows (VS2022, Qt 6.7.2 via install-qt-action, FFmpeg via vcpkg) and uploads artifact `trace-windows-x64` (workflow: `.github/workflows/windows-release.yml`)
+- Every push to any branch builds Windows (VS2022, **Qt 6.11.2** via install-qt-action with a pinned `aqtsource`, **minimal MinGW/GCC FFmpeg 9.0.1** built from pinned source, vcpkg **pinned** at `17f35ad2` for the toolchain) and uploads artifact `trace-windows-x64` (workflow: `.github/workflows/windows-release.yml`)
 - Tags matching `v*` also publish a GitHub prerelease with a `trace-windows-x64.zip` asset
 - **The package name is `DIST_NAME` at the top of the workflow and is spelled ONCE.** It carries no release stage on purpose. Note the **repository** is still `bigsbypuglise/trace-alpha` and that is the remote URL — a search-and-replace over `trace-alpha` breaks the remote, and `docs/release-notes-alpha.md` keeps its filename so links to it do not break.
 - **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
