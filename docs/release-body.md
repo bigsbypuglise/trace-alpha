@@ -1,86 +1,77 @@
-## Trace v0.3.0-beta.6
+## Trace v0.3.0-beta.7
 
-**Sound, and the small things you asked about.** Trace now opens audio files, has a
-volume slider, filters the fullscreen picture when it enlarges it, animates the empty-state
-mark, and no longer lets a bare `F` open the File menu. Nineteen commits past
-`v0.3.0-beta.5`; the playback and scrub engines are unchanged and measure flat.
+**A dependency release. Nothing in the app changed on purpose — that is the point.** Trace now
+builds on the current Qt and the current FFmpeg, and for the first time the build you download
+uses the same toolchain as the build the timing was measured on. No feature was added, no
+behaviour was intentionally altered, and the playback and scrub engines are untouched.
 
 Windows, portable ZIP, x64. Unzip anywhere and run `Trace.exe`. There is no installer by design.
 
-### Audio files open and the transport drives them
+### What actually changed
 
-`wav` `mp3` `m4a` `aac` `flac` `ogg` `opus`. Play, pause, scrub, Go To, Home/End and Loop all
-work; the window keeps the prism mark on screen because there is no picture to show. The
-readout defaults to **Elapsed**, never Frame Count — an audio file has no frames, so the frame
-index you can still see is Trace's own synthetic one at a nominal 24fps, and the HUD and the
-Movie Inspector both say so rather than presenting it as a property of your file.
+| | before | now |
+|---|---|---|
+| Qt (in this ZIP) | 6.7.2 | **6.11.2** |
+| Qt (on the dev box) | 6.10.2 | **6.11.2** |
+| FFmpeg | 8.1.2 | **9.0.1** |
 
-Dragging is silent by design; the release seeks and resumes. That follows the existing rule
-that sound is 1× forward playback only.
+### Why the Qt version mattered more than it sounds
 
-### A volume slider
+Every previous release ran a **different audio clock** than the build its timing was tuned on.
+Qt rewrote its Windows audio sink in 6.9.1, changing what two of the values Trace uses as the
+playback master clock actually mean — and the shipped ZIP was pinned below that line while
+development ran above it. That gap is now closed in the only way that closes it: both are
+6.11.2.
 
-Hover or click the speaker and a slider slides out between Mute and Loop; it collapses on its
-own after a moment. The scroll wheel over the speaker adjusts in 5% steps. **Your level now
-persists between sessions** (written only at settled values — the end of a drag, a wheel step
-— never continuously while you drag).
+If you have ever felt that audio timing behaved differently in a downloaded build than
+described, this is the release where that stops being possible.
 
-Volume is a gain on the audio device and never touches the playback clock, so it cannot affect
-timing. `TRACE_VOLUME_SLIDER=0` restores the previous mute-only button exactly, including not
-leaving a stored level silently in force with no control to show it.
+### The window-drag audio dropout is NOT fixed, and now we know it is not a Qt problem
 
-### Fullscreen no longer aliases
+Holding the title bar still for a moment silences audio for about half a second. **It is
+unchanged in this release and we are not claiming otherwise.**
 
-Reported by a tester and confirmed: pressing F11 on material **smaller than your screen** made
-Trace enlarge it with a point sampler, which shows as hard, stair-stepped edges. That sampler
-is deliberate for deliberate zoom — someone at 4:1 is inspecting samples — but a fullscreen fit
-is not that, and it is why the report was hard to reproduce on an ultrawide, where 4K material
-is being *reduced* in fullscreen and never hits the case.
+What this release does buy is the elimination of a suspect. The fault has now been measured on
+Qt 6.7.2, 6.10.2 and 6.11.2 and it is **the same on all three** — same size, same signature,
+once per press rather than for as long as you hold. It is also not the renderer and not the
+empty-state animation. And it is not really an audio bug: the whole application pauses for that
+half second, audio is just the only part you can hear it in.
 
-**The fullscreen fit now filters when it magnifies. Actual Size and Zoom In keep the sharp
-sampler, fullscreen or not.** The windowed fit still takes the point sampler when it magnifies;
-that is the decision's stated width, not an oversight. `TRACE_FS_MAG_FILTER=0` is the rollback.
+The cause is still unattributed. It is the next thing to look at, and it is deliberately not
+being guessed at.
 
-### The empty-state mark animates
+### What was checked before shipping this
 
-With nothing open, the prism mark's edge gradient rotates and its glow cycles through its
-colour ladder over an 18-second loop — the design package's own animation, which no still image
-could carry. It runs only when there is no picture on screen and the window is in front, so
-opening a video stops it by construction and a background window costs nothing.
-`TRACE_MARK_ANIM=0` holds it still.
+Because a dependency swap can break things quietly, the regression was run against a control
+build of the same code on the old toolchain:
 
-### A bare letter belongs to Trace again
-
-If you had used the menus at all, `F` would open the File menu instead of changing the time
-readout, and `E` would open Edit. The menu bar was keeping keyboard focus after you left a menu
-— invisibly, because the top strip fades away — and in that state Windows treats a bare letter
-as a menu shortcut.
-
-**`F`, `S`, `E` and `T` now always change the time display, and `H` always toggles the
-diagnostics HUD.** `Alt`+`F`, `Alt`+`E` and the rest still open their menus, including when the
-strip is hidden, and arrow-key navigation between open menus is unchanged. **`Space` also
-toggles playback again after you have used a menu**, which was the same fault seen from the
-other side.
-
-### Also
-
-- The Playback Speed menu follows the engine through pause and play, instead of leaving `0.5×`
-  ticked over a paused file that will next play at `1×`.
-- The Loop button no longer announces a persistence that was removed — Loop still starts off
-  each session and survives a file change within one.
+- Decoded pixels are **bit-identical** between FFmpeg 8.1.2 and 9.0.1 across seven files,
+  including 12-bit 4:4:4 with alpha, 10-bit ProRes and 10-bit HEVC.
+- Full-pool scrub: **22 files, 88 gestures, every landing exact.**
+- Playback cadence, including audio-mastered playback, flat.
+- Every transport control, the menus, the accessibility tree, the empty state and the
+  window chrome all retested on the new Qt.
+- Decode throughput on large ProRes is unchanged to within measurement noise.
 
 ### Rollback knobs for this release
 
+Unchanged from beta.6 — the same ones still apply.
+
 | knob | effect |
 |---|---|
+| `TRACE_RENDERER=cpu` | the software renderer — first thing to try if the picture looks wrong |
 | `TRACE_VOLUME_SLIDER=0` | mute-only button, no slider, no stored level |
 | `TRACE_FS_MAG_FILTER=0` | fullscreen magnification back to the sharp sampler |
 | `TRACE_MARK_ANIM=0` | empty-state mark held still |
 | `TRACE_SCRUB_PAINT_GATE=0` | the beta.3 scrub paint gate off |
-| `TRACE_RENDERER=cpu` | the software renderer — first thing to try if the picture looks wrong |
 
 ### Known and unchanged
 
+- **The title-bar audio dropout, above.** Unchanged, understood better, not fixed.
+- Multi-monitor setups with **different display scaling** were not re-tested on this Qt — Qt
+  6.11 changed how that is handled and the test hardware is not currently connected. If you run
+  two monitors at different scaling percentages and the window comes off a move the wrong
+  shape, that is worth reporting.
 - 8K ProRes 4444 XQ does not reach real time on this decoder and is a closed investigation, not
   a regression.
 - EXR does not open: OpenImageIO is not in this build.
