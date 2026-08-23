@@ -266,3 +266,30 @@ it with `PATH` reduced to `System32`:
 - **Negative control:** renaming `OpenImageIO.dll` away makes the same launch exit
   **`0xC0000135` (STATUS_DLL_NOT_FOUND)** -- so the DLL copy is load-bearing, and
   without it CI would have shipped an exe that cannot start.
+
+## Observed in passing, for stage 2 -- not fixed, not blockers
+
+The 27-channel `icecream_passes0000.exr` **opens and draws its root composite
+correctly** (`Sequence | 1920x1080 | Frame: 0/96`, 97 frames detected). Three
+things about how it gets there are worth having written down before stage 2
+starts, because none of them is visible on screen today.
+
+1. **Three channel-naming conventions exist in this one asset set**, which is
+   stronger than the plan's finding 2. Root layer `R G B`; named layers
+   `Beauty.red` / `Beauty.green` / `Beauty.blue`; and the Cryptomatte file
+   `CryptoMaterial.R` / `.G` / `.B` / `.A` -- uppercase, *with* alpha. A grouper
+   written against any one of the three finds nothing in the other two.
+2. **`loadExr` reads every channel of the file.** `read_image(0, 0, 0, channels,
+   TypeDesc::FLOAT, ...)` with `channels = spec.nchannels` allocates
+   `width x height x nchannels` floats -- on this file that is
+   1920 x 1080 x 27 x 4 = **~224 MB per frame**, of which 24 MB is used. Correct
+   today, and the wrong shape for a 97-frame sequence.
+3. **Channel index 3 is taken as alpha regardless of what it is.** On this file
+   channel 3 is `Beauty.red`, so the display buffer's alpha is the beauty pass's
+   red channel. It is invisible right now because the draw path ignores alpha,
+   which is exactly what makes it a trap: it will surface the moment alpha starts
+   mattering rather than at the point the mistake is made.
+
+Alpha is also currently pushed through the same `pow(x, 1/2.2)` as the colour
+channels in `loadExr`'s `toDisplay8`, which is wrong in principle (alpha is not
+display-referred) and equally invisible for the same reason.
