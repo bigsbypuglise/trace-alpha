@@ -8,6 +8,7 @@
 #include <QElapsedTimer>
 #include <memory>
 
+#include "core/ColorTransform.h"
 #include "core/VideoFrame.h"
 #include "render/OverlayModel.h"
 #include "render/VideoRenderer.h"
@@ -62,7 +63,27 @@ public:
     void setFrame(const trace::core::VideoFrame& frame);
     void clearImage();
     const ViewerPerfStats& perfStats() const { return perfStats_; }
+
+    // THE DECODED SOURCE FRAME, AND DELIBERATELY NOT THE DISPLAYED ONE.
+    //
+    // Copy Current Frame reads this, so it keeps copying source pixels after
+    // the colour transform stage was added -- which is the assessment's item 6
+    // ("if the transform is applied into that buffer, Copy Frame silently
+    // becomes 'copies the transformed image'") answered structurally rather
+    // than by remembering. The transformed buffer never enters frame_; it is
+    // handed straight to the renderer and held only as displayFrame_.
     const trace::core::VideoFrame& frame() const { return frame_; }
+
+    // THE DISPLAY TRANSFORM STAGE. Non-owning: MainWindow owns the state
+    // because the menu, the persistence and the HUD all live there, and the
+    // viewer only needs to ask "is this active" once per delivered frame.
+    // Null, or inactive, means setFrame() is exactly what it was before this
+    // existed -- a refcount bump and an update().
+    void setColorTransform(const trace::core::ColorTransform* transform);
+    // Re-runs the stage over the frame already on screen. This is what makes
+    // toggling the bypass visible on a PAUSED picture without going back to the
+    // decoder, and it is why ON/OFF never needs media reopened.
+    void refreshColorTransform();
     QString rendererName() const;
     // Whether the adopted backend can take Y/U/V planes and convert them
     // itself, so the decoder may skip swscale for full-resolution frames.
@@ -244,6 +265,12 @@ private:
     // Kept here as well as in the renderer so "which frame is displayed" is
     // answerable without asking the backend.
     trace::core::VideoFrame frame_;
+    // The transformed buffer handed to the renderer. Held only so it
+    // outlives the renderer's use of it; nothing else reads it, and it is
+    // null whenever the stage is inactive.
+    trace::core::VideoFrame displayFrame_;
+    const trace::core::ColorTransform* colorTransform_ = nullptr;
+    void applyColorTransformToRenderer();
     ViewerPerfStats perfStats_{};
     // Single monotonic source for this widget, so update()->paint latency is
     // measured against one clock rather than two independent timers.

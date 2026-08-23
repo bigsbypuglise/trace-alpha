@@ -249,6 +249,8 @@ add_executable(Trace WIN32
   ../src/core/ViewState.h
   ../src/core/PlaybackController.h
   ../src/core/PlaybackController.cpp
+  ../src/core/ColorTransform.h
+  ../src/core/ColorTransform.cpp
   ../src/core/StillImageLoader.h
   ../src/core/StillImageLoader.cpp
   ../src/core/SequenceDescriptor.h

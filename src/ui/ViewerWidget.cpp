@@ -481,9 +481,51 @@ void ViewerWidget::leaveEvent(QEvent* event) {
     QWidget::leaveEvent(event);
 }
 
+// THE ONE PLACE THE DISPLAY STAGE RUNS.
+//
+// frame_ is the SOURCE and stays untouched (Copy Frame reads it). What reaches
+// the renderer is the transformed buffer when the stage is active, and the
+// source itself -- by refcount, no copy, no branch cost worth measuring -- when
+// it is not. Two properties follow structurally rather than by convention:
+// source pixels are never modified, and the whole feature is inert when off.
+void ViewerWidget::applyColorTransformToRenderer() {
+    if (!renderer_) return;
+
+    if (colorTransform_ && colorTransform_->isActive()) {
+        trace::core::VideoFrame transformed;
+        if (colorTransform_->apply(frame_, transformed)) {
+            displayFrame_ = std::move(transformed);
+            renderer_->setFrame(displayFrame_);
+            return;
+        }
+        // apply() declines rather than throws for a layout it cannot take
+        // (planar YUV). Falling through to the source is the honest answer --
+        // an untransformed picture, not a black one -- and MainWindow keeps
+        // planar output off whenever the stage is active so this is not the
+        // path a user lands on.
+    }
+    displayFrame_ = trace::core::VideoFrame{};
+    renderer_->setFrame(frame_);
+}
+
+void ViewerWidget::setColorTransform(const trace::core::ColorTransform* transform) {
+    colorTransform_ = transform;
+}
+
+void ViewerWidget::refreshColorTransform() {
+    if (frame_.isNull()) return;
+    applyColorTransformToRenderer();
+    updateRequestedNs_ = clock_.nsecsElapsed();
+    ++perfStats_.updateCount;
+    // repaint(), not update(): a paused picture is the case this exists for,
+    // and a merely scheduled repaint leaves the HUD reporting the previous
+    // state -- the repaint trap this project has now recorded eight times.
+    repaint();
+}
+
 void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
     frame_ = frame;
-    if (renderer_) renderer_->setFrame(frame);
+    applyColorTransformToRenderer();
     // Timestamp the repaint request so the queued update()->paintEvent latency
     // can be separated from paint cost itself.
     updateRequestedNs_ = clock_.nsecsElapsed();
@@ -493,6 +535,7 @@ void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
 
 void ViewerWidget::clearImage() {
     frame_ = trace::core::VideoFrame{};
+    displayFrame_ = trace::core::VideoFrame{};
     if (renderer_) renderer_->clearFrame();
     update();
 }

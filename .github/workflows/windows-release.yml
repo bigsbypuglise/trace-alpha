@@ -492,6 +492,37 @@ jobs:
       #
       # Runs against the DEPLOYED folder, not the build tree, so it also proves
       # the packaged exe starts with the Qt runtime windeployqt actually shipped.
+      - name: Verify OpenColorIO links and executes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $exe = Join-Path $PWD "dist\$env:DIST_NAME\Trace.exe"
+
+          # STAGE 0 LINKED OCIO AND NOTHING REFERENCED IT, so the linker emitted
+          # no direct import and TRACE_WITH_OCIO=1 was a claim nothing tested --
+          # the same silent-degradation class the renderer self-test above exists
+          # for. This runs the colour stage inside the SHIPPED binary: it reads
+          # the OCIO version, loads a config, compiles a processor and applies it
+          # to a pixel, and it fails if the pixel did not move (a transform that
+          # compiles and then does nothing is indistinguishable from no transform
+          # by every other signal).
+          #
+          # The config is OCIO's OWN BUILT-IN ACES config, not a file: a runner
+          # has no colour configs and no test assets, and a check that needed one
+          # could not run here at all.
+          #
+          # Start-Process -Wait for the same reason as every other step that
+          # reads an exit code off this GUI-subsystem binary.
+          $so = Join-Path $env:RUNNER_TEMP "ocio-selftest-out.txt"
+          $se = Join-Path $env:RUNNER_TEMP "ocio-selftest-err.txt"
+          $p = Start-Process -FilePath $exe -ArgumentList '--ocio-selftest' `
+            -Wait -PassThru -RedirectStandardOutput $so -RedirectStandardError $se
+          $code = $p.ExitCode
+          @(Get-Content $so; Get-Content $se) | ForEach-Object { Write-Host $_ }
+          if ($code -ne 0) {
+            throw "OCIO self-test failed (exit $code). 20=not compiled in, 21=no version, 22=config, 23=processor, 24=transform did not move the pixel."
+          }
+
       - name: Verify the renderer initializes
         shell: pwsh
         run: |

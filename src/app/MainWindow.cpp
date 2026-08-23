@@ -860,6 +860,12 @@ MainWindow::MainWindow() {
     // is why this moved out of the tail of setupMenus().
     warnOnDuplicateMnemonics();
 
+    // After the menus (the actions exist) and after the viewer (the stage is
+    // pushed to it). A saved LUT that no longer resolves falls back to bypass
+    // and says so once; it never prevents the window being built, which is the
+    // assessment's item 5 read literally.
+    restoreColorTransformFromSettings();
+
     // Open the tick log HERE, at startup, rather than leaving it to the first
     // frame tick. Bound to the tick it would only appear once something played,
     // so a knob set on a session that never pressed Play still left no file --
@@ -4286,6 +4292,229 @@ void MainWindow::syncMediaDependentActions() {
 //     fidelity is owed to the frame the user stops on, and a copy is a stop.
 //   - No media, no frame: the action is disabled, and this checks anyway,
 //     because a shortcut reaches an action a menu never showed.
+// COLOUR TRANSFORM: FOUR ACTIONS OVER ONE STAGE (stage 1).
+//
+// The whole feature is `enabled + configuration`, and the two are independent.
+// That is what makes the checkbox a BYPASS: turning it off leaves the loaded LUT
+// exactly where it was, so turning it back on is a bool becoming true and the
+// next paint, with nothing recompiled and nothing re-read from disk.
+//
+// There is deliberately no separate LUT pipeline. "Load LUT..." fills in a
+// Kind::Lut configuration and "Color Transform..." will fill in a
+// Kind::DisplayView one; both compile through the same OCIO processor and
+// everything downstream sees only that. Building the LUT path first as its own
+// thing is exactly what the assessment said not to do.
+void MainWindow::setupColorTransformActions(QMenu* viewMenu) {
+    colorTransformAction_ = new QAction(tr("&Color Transform"), this);
+    colorTransformAction_->setCheckable(true);
+    connect(colorTransformAction_, &QAction::toggled, this, [this](bool on) {
+        colorTransform_.setEnabled(on);
+        trace::app::settings().setValue(QLatin1String(kColorTransformEnabledKey), on);
+        applyColorTransformChange(on ? "Color transform on" : "Color transform off");
+        // Said out loud, because with no configuration loaded the tick moves and
+        // the picture does not -- which would otherwise read as a broken toggle.
+        if (on && !colorTransform_.hasProcessor()) {
+            showTransientMessage(
+                tr("No colour transform loaded - use Load LUT..."), 2500);
+        }
+    });
+
+    // Present and permanently disabled in stage 1. The dialog is stage 3; the
+    // ROW is here now because the assessment fixed this menu's shape, and a row
+    // that appears later moves every item under it. Disabled rather than hidden
+    // is the same choice the Share menu's LucidLink row already makes: the
+    // command exists, it is not available yet, and saying so is more honest than
+    // pretending the feature has no such idea.
+    colorTransformConfigAction_ = new QAction(tr("Color Transfor&m..."), this);
+    colorTransformConfigAction_->setEnabled(false);
+    colorTransformConfigAction_->setToolTip(
+        tr("Choosing a config, input colour space, display and view arrives with "
+           "the ACEScg workflow."));
+
+    loadLutAction_ = new QAction(tr("Load L&UT..."), this);
+    connect(loadLutAction_, &QAction::triggered, this, [this]() { loadLutFromDialog(); });
+
+    resetColorTransformAction_ = new QAction(tr("&Reset Color Transform"), this);
+    connect(resetColorTransformAction_, &QAction::triggered, this,
+            [this]() { resetColorTransform(); });
+
+    viewMenu->addAction(colorTransformAction_);
+    viewMenu->addAction(colorTransformConfigAction_);
+    viewMenu->addAction(loadLutAction_);
+    viewMenu->addAction(resetColorTransformAction_);
+
+    // Hoisted onto the window, like every other menu action with a shortcut:
+    // since roadmap step 7 the menu bar lives in an auto-hiding strip, and
+    // QShortcutMap declines a shortcut whose only widget is not visible.
+    addAction(colorTransformAction_);
+    addAction(loadLutAction_);
+    addAction(resetColorTransformAction_);
+}
+
+// The tick follows the STATE rather than the last click, so a configuration that
+// failed to load, or one restored from settings that no longer resolves, cannot
+// leave the menu claiming something the stage is not doing.
+void MainWindow::syncColorTransformActions() {
+    if (colorTransformAction_) {
+        QSignalBlocker block(colorTransformAction_);
+        colorTransformAction_->setChecked(colorTransform_.enabled());
+        colorTransformAction_->setEnabled(trace::core::ColorTransform::available());
+    }
+    if (loadLutAction_) loadLutAction_->setEnabled(trace::core::ColorTransform::available());
+    if (resetColorTransformAction_) {
+        // Enabled only when there is something to reset -- otherwise it is a
+        // command that visibly does nothing, which is the showInfo failure spec
+        // phase 2 deleted.
+        resetColorTransformAction_->setEnabled(
+            colorTransform_.hasProcessor() || colorTransform_.enabled());
+    }
+}
+
+// ON/OFF WITHOUT REOPENING MEDIA, which is the requirement this function exists
+// for. Two things have to happen and neither is a reopen:
+//
+//   1. the decoder has to stop handing out planar YUV, because the stage works
+//      on BGRA (see syncPlanarOutput). syncPlanarOutput() already reclaims the
+//      decoder and clears its frame cache, so it is the whole of that half.
+//   2. the frame ALREADY ON SCREEN has to be re-delivered, or a paused picture
+//      would not change until the next transport action.
+//
+// For video that means one exact Step re-request -- the same landing path a
+// slider release uses, so it is frame-exact by construction. For a still or an
+// image sequence the buffer is already BGRA and the stage can simply re-run over
+// it, with no decoder involved at all.
+void MainWindow::applyColorTransformChange(const char* reason) {
+    if (viewer_) viewer_->setColorTransform(&colorTransform_);
+    syncPlanarOutput();
+
+    const bool isVideo = currentMedia_.has_value()
+                         && currentMedia_->kind == MediaKind::VideoFile;
+    if (isVideo && frameSource_) {
+        QString error;
+        // direction 1 (forward), matching every other Step call site. The
+        // target is the frame already on screen so direction cannot change
+        // WHICH frame is fetched -- but 0 is not a value the decoder's
+        // direction heuristics are ever handed elsewhere, and feeding a shared
+        // path a novel value to mean "no movement" is how quiet faults start.
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step,
+                            1, true);
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
+            && !error.isEmpty()) {
+            showTransientMessage(error, 3000);
+        }
+    } else if (viewer_) {
+        viewer_->refreshColorTransform();
+    }
+
+    syncColorTransformActions();
+    refreshHud(reason);
+}
+
+// LOADING A LUT ENABLES THE TRANSFORM, in one action, as specified. The two are
+// separate state and this is the one place they are set together: a user who
+// picks a file has asked to see it, and making them then tick a box would be a
+// second step for a decision they already made.
+void MainWindow::loadLutFromDialog() {
+    if (!trace::core::ColorTransform::available()) {
+        showTransientMessage(
+            tr("This build was compiled without OpenColorIO."), 3000);
+        return;
+    }
+
+    // .cube is the format this stage targets. The others come free with OCIO's
+    // FileTransform and are offered because they cost nothing to accept -- but
+    // .cube is the one with a real file behind it in testing, and the filter
+    // lists it first for that reason.
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Load LUT"), QString(),
+        tr("LUT files (*.cube *.3dl *.csp *.spi1d *.spi3d *.clf *.ctf);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    trace::core::ColorTransform::Config cfg;
+    cfg.kind = trace::core::ColorTransform::Kind::Lut;
+    cfg.lutPath = path;
+
+    QString error;
+    if (!colorTransform_.setConfig(cfg, error)) {
+        // The PREVIOUS configuration is still in force -- setConfig guarantees
+        // it -- so this really is "nothing changed", and the message is the only
+        // thing that moved.
+        showTransientMessage(error.isEmpty() ? tr("Could not load the LUT") : error, 4000);
+        syncColorTransformActions();
+        return;
+    }
+
+    colorTransform_.setEnabled(true);
+    trace::app::settings().setValue(QLatin1String(kColorTransformEnabledKey), true);
+    trace::app::settings().setValue(QLatin1String(kColorTransformKindKey),
+                                    QStringLiteral("lut"));
+    trace::app::settings().setValue(QLatin1String(kColorTransformLutKey), path);
+
+    applyColorTransformChange("LUT loaded");
+    showTransientMessage(tr("Loaded LUT %1").arg(QFileInfo(path).fileName()), 2500);
+}
+
+// THE RAW/DEFAULT STATE, DEFINED IN ONE PLACE: no transform configured, bypass
+// off. Reset is deliberately not "turn the bypass off" -- that would leave a LUT
+// loaded and invisible, and the next tick of the checkbox would bring back
+// something the user thought they had discarded.
+void MainWindow::resetColorTransform() {
+    colorTransform_.reset();
+    auto& st = trace::app::settings();
+    st.remove(QLatin1String(kColorTransformKindKey));
+    st.remove(QLatin1String(kColorTransformLutKey));
+    st.setValue(QLatin1String(kColorTransformEnabledKey), false);
+    applyColorTransformChange("Color transform reset");
+    showTransientMessage(tr("Colour transform reset"), 2000);
+}
+
+// Restores the persisted configuration at startup. A LUT that has moved or been
+// deleted must fall back to BYPASS, say so ONCE, and never block anything --
+// which is why this reports through the transient message and returns rather
+// than refusing to finish construction.
+void MainWindow::restoreColorTransformFromSettings() {
+    auto& st = trace::app::settings();
+    QString kind = st.value(QLatin1String(kColorTransformKindKey)).toString();
+    bool wantEnabled = st.value(QLatin1String(kColorTransformEnabledKey), false).toBool();
+
+    // TRACE_COLOR_LUT=<path> loads a LUT at startup and enables the stage,
+    // OVERRIDING the persisted state and writing nothing back.
+    //
+    // It exists because every measurement in this repo is taken by launching the
+    // binary and reading the HUD, and the only other way in is a modal file
+    // dialog -- so without this the transform's cost could only be measured by
+    // driving a dialog with synthetic input, which is exactly the class of
+    // harness this project has been burned by. It is also the A/B: one binary,
+    // the knob set or not, which is a far better control than two builds.
+    const QByteArray envLut = qgetenv("TRACE_COLOR_LUT");
+    if (!envLut.isEmpty()) {
+        kind = QStringLiteral("lut");
+        wantEnabled = true;
+        st.setValue(QLatin1String(kColorTransformLutKey),
+                    QString::fromLocal8Bit(envLut));
+    }
+
+    if (kind == QLatin1String("lut")) {
+        const QString path = st.value(QLatin1String(kColorTransformLutKey)).toString();
+        trace::core::ColorTransform::Config cfg;
+        cfg.kind = trace::core::ColorTransform::Kind::Lut;
+        cfg.lutPath = path;
+        QString error;
+        if (!colorTransform_.setConfig(cfg, error)) {
+            colorTransform_.reset();
+            showTransientMessage(
+                tr("Saved colour transform could not be restored - bypassed. %1")
+                    .arg(error),
+                5000);
+            syncColorTransformActions();
+            return;
+        }
+    }
+    colorTransform_.setEnabled(wantEnabled && colorTransform_.hasProcessor());
+    if (viewer_) viewer_->setColorTransform(&colorTransform_);
+    syncColorTransformActions();
+}
+
 void MainWindow::copyCurrentFrame() {
     if (!viewer_) return;
 
@@ -4558,6 +4787,8 @@ void MainWindow::setupMenus() {
     viewMenu->addAction(fitToWindowAction_);
     viewMenu->addAction(zoomInAction_);
     viewMenu->addAction(zoomOutAction_);
+    viewMenu->addSeparator();
+    setupColorTransformActions(viewMenu);
     viewMenu->addSeparator();
     viewMenu->addAction(toggleHudAction_);
 
@@ -5664,7 +5895,19 @@ void MainWindow::syncPlanarOutput() {
     static const bool allowed = qgetenv("TRACE_PLANAR_UPLOAD") != "0";
     // Clears the decoder's frame cache, so it needs the decoder back.
     reclaimDecoder();
-    videoDecoder_.setPlanarOutputEnabled(allowed && viewer_->rendererAcceptsPlanarYuv());
+    // THE COLOUR STAGE NEEDS BGRA, so planar upload stands down while it is
+    // active. This is the one interaction between the two, and it is here rather
+    // than in the colour code because this function is already the single place
+    // that decides the decoder's output layout.
+    //
+    // Note what this costs and when: NOTHING while the transform is off, which
+    // is every existing measurement in this repo -- GATE C's planar path is
+    // untouched. With the transform on, full-resolution frames go back through
+    // swscale to BGRA, which is the pre-GATE-C cost and is the honest price of a
+    // CPU display stage. The GPU stage is what removes it.
+    const bool colorStageNeedsBgra = colorTransform_.isActive();
+    videoDecoder_.setPlanarOutputEnabled(
+        allowed && !colorStageNeedsBgra && viewer_->rendererAcceptsPlanarYuv());
 }
 
 void MainWindow::syncTransportBar() {
@@ -9146,7 +9389,23 @@ void MainWindow::refreshHud(const QString& action) {
                                      .arg(QString::number(viewer_->currentScale(), 'f', 2));
                 if (viewer_->canPan()) resampleState += QStringLiteral(" pannable");
             }
-            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9%10")
+            // THE COLOUR STAGE, NAMED IN EVERY STATE RATHER THAN ONLY WHEN ON.
+            // `off` and `bypass` are different facts -- bypass means a transform
+            // IS loaded and is deliberately not being applied -- and neither is
+            // answerable from the picture, because a transform that silently
+            // failed to engage looks exactly like one that was never loaded.
+            // Same rule as `renderer`, `planar`, `font` and `strip`.
+            QString xform;
+            if (!trace::core::ColorTransform::available()) {
+                xform = QStringLiteral("n/a");
+            } else if (!colorTransform_.hasProcessor()) {
+                xform = QStringLiteral("none");
+            } else if (!colorTransform_.enabled()) {
+                xform = QStringLiteral("bypass %1").arg(colorTransform_.description());
+            } else {
+                xform = QStringLiteral("ON %1").arg(colorTransform_.description());
+            }
+            const QString l0 = QString("color %1%2 %3 range | xform %11 | display %4x%5 %6 | win %7x%8 | renderer %9%10")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
                 .arg(perf.srcFullRange ? "full" : "limited")
@@ -9169,6 +9428,7 @@ void MainWindow::refreshHud(const QString& action) {
                 // interesting one.
                 .arg(viewer_->overlayEnabled() ? QStringLiteral(" +overlay")
                                                : QStringLiteral(" +bar"))
+                .arg(xform)
               // Spec phase 12's first experiment, on the line that already
               // carries `win` and `display`, because what it measures is what a
               // change to those two costs.

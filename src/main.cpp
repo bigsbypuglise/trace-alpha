@@ -13,6 +13,11 @@
 #include "app/MainWindow.h"
 #include "app/Theme.h"
 #include "app/WindowShape.h"
+#include "core/ColorTransform.h"
+#ifdef TRACE_WITH_OCIO
+#include <OpenColorIO/OpenColorIO.h>
+#endif
+
 #include "ui/ViewerWidget.h"
 
 namespace {
@@ -106,6 +111,155 @@ int runRendererSelfTest(const QString& expected) {
                "this build." << Qt::endl;
         return 4;
     }
+    return 0;
+}
+
+// `Trace.exe --ocio-selftest[=<file>]`: prove that THIS BINARY links and
+// executes OpenColorIO, not merely that CI managed to build the library.
+//
+// Stage 0 shipped OCIO on the link line and nothing referenced it, so the
+// linker emitted no direct import and `TRACE_WITH_OCIO=1` was a claim nothing
+// tested -- the same silent-degradation class as a renderer that quietly falls
+// back, which is what --renderer-selftest exists for. This is that check for
+// the colour stage, and it is deliberately five separate assertions rather than
+// one "did it throw", because each can fail on its own and they fail for
+// different reasons:
+//
+//   1. the library is compiled in at all      -> exit 20
+//   2. its runtime version can be read        -> exit 21
+//   3. a KNOWN config loads                   -> exit 22
+//   4. a processor and CPU processor compile  -> exit 23
+//   5. the transform actually MOVES A PIXEL   -> exit 24
+//
+// (5) is the one that matters and the one an "it did not throw" check would
+// miss. A processor that compiles and then applies an identity is
+// indistinguishable from a working one by every other signal here, and identity
+// is exactly what a mis-resolved colour space produces -- the stage-0 measurement
+// of getColorSpaceFromFilepath() returning "Raw" for .exr is that failure in the
+// wild. So the pixel is compared before and after and the test fails if nothing
+// changed.
+//
+// THE CONFIG IS OCIO'S OWN BUILT-IN ACES CONFIG, not a file on disk. A CI runner
+// has no colour configs and no test assets, and a selftest that needs one could
+// not run there -- which is the whole point of adding it to CI. `ocio://default`
+// is compiled into the library, so this command works anywhere the binary does.
+// An optional `=<file>` additionally loads a real config or LUT, for a machine
+// that has one.
+int runOcioSelfTest(const QString& file) {
+    QTextStream out(stdout);
+    QTextStream err(stderr);
+
+    if (!trace::core::ColorTransform::available()) {
+        err << "trace-ocio: FAIL - this build was compiled without OpenColorIO."
+            << Qt::endl;
+        return 20;
+    }
+
+    const QString version = trace::core::ColorTransform::ocioVersion();
+    if (version.isEmpty()) {
+        err << "trace-ocio: FAIL - OpenColorIO reported no version." << Qt::endl;
+        return 21;
+    }
+
+#ifdef TRACE_WITH_OCIO
+    std::string display, view, input;
+    try {
+        auto cfg = OCIO_NAMESPACE::Config::CreateFromBuiltinConfig("ocio://default");
+        if (!cfg) {
+            err << "trace-ocio: FAIL - the built-in config loaded as null." << Qt::endl;
+            return 22;
+        }
+        // scene_linear rather than the file rules -- the stage-0 finding, applied
+        // here so the selftest exercises the same decision the product makes.
+        const char* role = cfg->getCanonicalName(OCIO_NAMESPACE::ROLE_SCENE_LINEAR);
+        input = (role && *role) ? role : "";
+        display = cfg->getDefaultDisplay() ? cfg->getDefaultDisplay() : "";
+        view = (!display.empty() && cfg->getDefaultView(display.c_str()))
+                   ? cfg->getDefaultView(display.c_str()) : "";
+        if (input.empty() || display.empty() || view.empty()) {
+            err << "trace-ocio: FAIL - built-in config states no scene_linear "
+                   "role or no default display/view." << Qt::endl;
+            return 22;
+        }
+
+        auto dvt = OCIO_NAMESPACE::DisplayViewTransform::Create();
+        dvt->setSrc(input.c_str());
+        dvt->setDisplay(display.c_str());
+        dvt->setView(view.c_str());
+
+        auto proc = cfg->getProcessor(dvt);
+        if (!proc) {
+            err << "trace-ocio: FAIL - no processor from the display/view transform."
+                << Qt::endl;
+            return 23;
+        }
+        auto cpu = proc->getDefaultCPUProcessor();
+        if (!cpu) {
+            err << "trace-ocio: FAIL - no CPU processor." << Qt::endl;
+            return 23;
+        }
+
+        // 18% scene-linear grey through an ACES display transform must not come
+        // back as 18% linear. Executed, not assumed.
+        float px[3] = {0.18f, 0.18f, 0.18f};
+        const float before[3] = {px[0], px[1], px[2]};
+        cpu->applyRGB(px);
+        const bool moved = (px[0] != before[0]) || (px[1] != before[1]) || (px[2] != before[2]);
+
+        out << "trace-ocio: version=" << version
+            << " config=ocio://default"
+            << " input=" << QString::fromStdString(input)
+            << " display=" << QString::fromStdString(display)
+            << " view=" << QString::fromStdString(view)
+            << " rgb 0.18->" << QString::number(px[0], 'f', 5)
+            << "," << QString::number(px[1], 'f', 5)
+            << "," << QString::number(px[2], 'f', 5)
+            << " moved=" << (moved ? 1 : 0)
+            << Qt::endl;
+        out.flush();
+
+        if (!moved) {
+            err << "trace-ocio: FAIL - the transform compiled but left the pixel "
+                   "unchanged, which is indistinguishable from no transform at all."
+                << Qt::endl;
+            return 24;
+        }
+    } catch (const std::exception& e) {
+        err << "trace-ocio: FAIL - " << QString::fromUtf8(e.what()) << Qt::endl;
+        return 22;
+    }
+#endif
+
+    // Optional second half: a real file, when one is named. Goes through the
+    // PRODUCT's own ColorTransform rather than a second copy of the logic, so a
+    // pass here is a statement about the shipping stage.
+    if (!file.isEmpty()) {
+        trace::core::ColorTransform ct;
+        trace::core::ColorTransform::Config cfg;
+        cfg.kind = file.endsWith(QStringLiteral(".ocio"), Qt::CaseInsensitive)
+                       ? trace::core::ColorTransform::Kind::DisplayView
+                       : trace::core::ColorTransform::Kind::Lut;
+        if (cfg.kind == trace::core::ColorTransform::Kind::Lut) cfg.lutPath = file;
+        else cfg.configPath = file;
+
+        QString error;
+        if (!ct.setConfig(cfg, error)) {
+            err << "trace-ocio: FAIL - " << error << Qt::endl;
+            return 25;
+        }
+        ct.setEnabled(true);
+        out << "trace-ocio: file=" << file
+            << " kind=" << (cfg.kind == trace::core::ColorTransform::Kind::Lut ? "lut" : "displayview")
+            << " active=" << (ct.isActive() ? 1 : 0)
+            << Qt::endl;
+        out.flush();
+        if (!ct.isActive()) {
+            err << "trace-ocio: FAIL - the configuration compiled but the stage "
+                   "is not active." << Qt::endl;
+            return 25;
+        }
+    }
+
     return 0;
 }
 
@@ -321,6 +475,14 @@ int main(int argc, char* argv[]) {
         if (!arg.startsWith(QStringLiteral("--renderer-selftest"))) continue;
         const qsizetype eq = arg.indexOf(QLatin1Char('='));
         return runRendererSelfTest(eq < 0 ? QString() : arg.mid(eq + 1));
+    }
+
+    // Needs no widget, no renderer and no window -- and no colour config on
+    // disk either, which is what lets CI run it.
+    for (const QString& arg : app.arguments()) {
+        if (!arg.startsWith(QStringLiteral("--ocio-selftest"))) continue;
+        const qsizetype eq = arg.indexOf(QLatin1Char('='));
+        return runOcioSelfTest(eq < 0 ? QString() : arg.mid(eq + 1));
     }
 
     // Pure arithmetic: no widget, no renderer, no window. It runs anywhere the

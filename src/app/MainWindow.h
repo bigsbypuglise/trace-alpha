@@ -14,6 +14,7 @@
 #include "core/ViewState.h"
 #include "core/PlaybackController.h"
 #include "core/StillImageLoader.h"
+#include "core/ColorTransform.h"
 #include "core/FrameCache.h"
 #include "core/VideoDecoderFFmpeg.h"
 #include "core/FrameSource.h"
@@ -1641,6 +1642,35 @@ private:
     // one of.
     QAction* lockAspectAction_ = nullptr;
     static constexpr const char* kLockAspectKey = "view/lockWindowToMediaAspect";
+
+    // ---- Colour transform (stage 1) ---------------------------------------
+    //
+    // FOUR ACTIONS OVER ONE STAGE. colorTransformAction_ is the master bypass
+    // and nothing else: it never touches the configuration, which is what makes
+    // "disable, then re-enable" restore instantly instead of reloading.
+    QAction* colorTransformAction_ = nullptr;        // checkable: the bypass
+    QAction* colorTransformConfigAction_ = nullptr;  // "Color Transform..."
+    QAction* loadLutAction_ = nullptr;               // "Load LUT..."
+    QAction* resetColorTransformAction_ = nullptr;   // back to raw
+
+    // Persisted so a session's transform survives a restart. A configuration
+    // that no longer resolves on reopen falls back to BYPASS, says so once, and
+    // must never stop the media opening -- assessment item 5.
+    static constexpr const char* kColorTransformEnabledKey = "color/transformEnabled";
+    static constexpr const char* kColorTransformKindKey    = "color/transformKind";
+    static constexpr const char* kColorTransformLutKey     = "color/lutPath";
+
+    void setupColorTransformActions(QMenu* viewMenu);
+    void syncColorTransformActions();
+    // Pushes the stage to the viewer and re-delivers the CURRENT frame, so
+    // toggling is visible immediately on a paused picture without reopening
+    // media. `reason` reaches the HUD.
+    void applyColorTransformChange(const char* reason);
+    void loadLutFromDialog();
+    void restoreColorTransformFromSettings();
+    void resetColorTransform();
+
+    trace::core::ColorTransform colorTransform_;
     // Spec phase 14, through the same one home. (Loop's key, "playback/loop",
     // is GONE: owner item 6, 2026-08-18, reversed the phase 14 persistence
     // decision -- Loop starts off every session and survives only a file
