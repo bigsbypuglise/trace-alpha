@@ -203,3 +203,31 @@ Nothing about the fault was changed. This commit is the scoreboard only —
 `period max` was already telling the truth and now there is a count, a
 threshold, and an attribution beside it, so a fix can be judged rather than
 believed.
+
+## Addendum: the HUD is not a readable instrument for this (2026-08-23)
+
+Owner, on being asked to read the counters: *"too much text and happens too fast
+for me to read the HUD — what I can tell you is the entire HUD pauses when I
+click and hold the top chrome, almost as if the entire app pauses."*
+
+**That is itself a measurement and it widens the finding.** It is not the frame
+tick alone that stops — the HUD's own refresh stops with it, so the whole UI
+thread is unserviced for the duration. Consistent with the delivery diagnosis,
+and it constrains Job 2: any fix that lives on the same message queue is
+suspect, because the queue is demonstrably not being drained at all.
+
+It also makes the HUD the wrong readout by construction: **the one moment the
+number matters is the one moment the display of it is frozen.**
+
+**`TRACE_TICK_LOG=1`** therefore appends one line per late tick to
+`%TEMP%\trace_tickstall.txt` — same reasoning as `TRACE_IO_LOG` and
+`TRACE_OPEN_LOG`, read afterwards at rest, diffable, no OCR. The header is
+written at open, so a run that stalls nothing leaves an empty-but-present file,
+which is distinguishable from a run where the knob was never set.
+
+Verified end to end on the synthetic caption hold, and the whole diagnosis fits
+on one line:
+
+    t=3.37s period=160.17ms handler=2.04ms budget=41.67ms sizemove=1
+
+160ms of delivery against 2ms of work, inside the modal move loop.

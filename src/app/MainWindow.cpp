@@ -322,6 +322,45 @@ bool asyncLandingEnabled() {
     return on;
 }
 
+// TRACE_TICK_LOG=1 appends one line per LATE TICK to %TEMP%	race_tickstall.txt.
+//
+// It exists because the fault this measures is transient, and the HUD is not a
+// readable instrument for it: the owner's own report of the title-bar stall is
+// that "the entire HUD pauses", which is the same UI-thread starvation the
+// counters are trying to count -- so the one moment the number matters is the
+// one moment the display of it is frozen. A file is read afterwards, at rest,
+// and diffs exactly. Same reasoning TRACE_IO_LOG and TRACE_OPEN_LOG already
+// carry.
+//
+// One line per event, so a run that never stalls produces an EMPTY FILE rather
+// than no file -- the header is written at open, which is what tells a run that
+// found nothing apart from a run where the knob was never set.
+bool tickLogEnabled() {
+    static const bool on = !qgetenv("TRACE_TICK_LOG").isEmpty()
+                        && qgetenv("TRACE_TICK_LOG") != "0";
+    return on;
+}
+
+void tickLogLine(const QString& line) {
+    static QFile* f = [] {
+        auto* file = new QFile(QDir::tempPath() + "/trace_tickstall.txt");
+        if (file->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
+            file->write("# TRACE_TICK_LOG -- one line per tick delivered late.\n");
+            file->write("# period = handler entry to handler entry (DELIVERY).\n");
+            file->write("# handler = what that tick actually did (WORK).\n");
+            file->write("# period >> handler means the tick was NOT CALLED.\n");
+            file->write("# sizemove=1 means Windows' modal move/size loop owned the thread.\n");
+            file->flush();
+        }
+        return file;
+    }();
+    if (f && f->isOpen()) {
+        f->write(line.toUtf8());
+        f->write("\n");
+        f->flush();
+    }
+}
+
 // Checkpoint 2 stage one. How many frames ahead of the presentation point
 // ordinary 1x forward playback may decode. DEFAULT 0 = OFF, so this commit
 // changes nothing until it is measured and reported.
@@ -627,6 +666,20 @@ MainWindow::MainWindow() {
             if (inSizeMove_) {
                 maxPeriodInSizeMoveMs_ =
                     std::max(maxPeriodInSizeMoveMs_, lastPeriodMs_);
+            }
+            // The HUD is not a readable instrument for a transient stall --
+            // the owner's report is that the HUD itself freezes during it --
+            // so every late tick is also written to a file that can be read
+            // afterwards, at rest. Costs nothing when the knob is unset.
+            if (tickLogEnabled() && tickFrameDurationMs_ > 0.0
+                && lastPeriodMs_ > tickFrameDurationMs_ * kTickLateFactor) {
+                tickLogLine(QString("t=%1s period=%2ms handler=%3ms budget=%4ms sizemove=%5")
+                    .arg(QString::number(sessionClock_.isValid()
+                            ? sessionClock_.elapsed() / 1000.0 : 0.0, 'f', 2))
+                    .arg(QString::number(lastPeriodMs_, 'f', 2))
+                    .arg(QString::number(lastHandlerMs_, 'f', 2))
+                    .arg(QString::number(tickFrameDurationMs_, 'f', 2))
+                    .arg(inSizeMove_ ? 1 : 0));
             }
         }
         frameCycleClock_.restart();
