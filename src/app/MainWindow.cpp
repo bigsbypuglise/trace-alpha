@@ -137,6 +137,39 @@ constexpr int kScrubCoalesceMs = 12;
 // move when the monitor does.
 constexpr double kScrubHitchMs = 33.3;
 
+// A TICK DELIVERY interval long enough that the picture visibly stopped.
+//
+// This is the `hitch` idea moved to the other half of the pipeline, and it
+// exists because the paint-gap counters beside it could not see the fault it
+// was added for. `stalls`/`hitch` are fed from exactly two sites, both inside
+// the scrub drag path (paintScrubFrameNow and the synchronous walk), so during
+// ORDINARY PLAYBACK they have no samples at all and read `0 of 0` -- which is
+// what the title-bar stall investigation kept reading on frames whose own
+// `period max` said 512ms. A counter with no samples is not a clean result.
+//
+// The quantity here is the interval between consecutive frame-tick HANDLER
+// ENTRIES, which is what `period` already reports as last/avg/max. What was
+// missing was a COUNT, because a max is one event and says nothing about
+// whether it recurred, and a count needs a threshold.
+//
+// Two thresholds, for the reason kScrubHitchMs already gives: one relative and
+// one absolute.
+//
+//   late  - period > kTickLateFactor x the frame budget, i.e. the tick was so
+//           late that at least one whole frame opportunity went by unused.
+//           Relative, so it means the same thing at 24 and 60fps. It is the
+//           same bar the cadence line's 1.5-2.5x bucket uses.
+//   stall - period > kTickStallMs, absolute, so it is comparable across frame
+//           rates and across sessions the way `hitch` is. 100ms is between two
+//           and three frames at 24fps and six at 60fps -- unmistakably the
+//           picture having stopped, not a scheduler wobble.
+//
+// 33.3ms would be wrong here and the reason is worth stating: a paint gap of
+// 33ms during a drag is a stall, while a TICK period of 33ms at 24fps is
+// EARLY. The thresholds are not interchangeable between the two pipelines.
+constexpr double kTickLateFactor = 1.5;
+constexpr double kTickStallMs = 100.0;
+
 // Fraction of the remaining distance a shuttle slice covers. Sets how tightly
 // the picture tracks the pointer: the steady-state lag under a constant drag
 // is roughly (frames the pointer moves per slice) / kScrubEase, so halving the
@@ -564,6 +597,37 @@ MainWindow::MainWindow() {
             avgPeriodMs_ += (lastPeriodMs_ - avgPeriodMs_) / cn;
             avgOutsideMs_ += (lastOutsideMs_ - avgOutsideMs_) / cn;
             maxPeriodMs_ = std::max(maxPeriodMs_, lastPeriodMs_);
+
+            // DELIVERY, not work. Everything else on this line and the two
+            // above measures what the tick DID; these count the times it was
+            // not called. The distinction is the whole title-bar finding: on
+            // frames carrying period max 512ms the handler max was 0.77ms, so
+            // no cost counter moved and the drag-scoped `stalls`/`hitch` had
+            // no samples at all. See kTickStallMs for the thresholds.
+            //
+            // tickFrameDurationMs_ still holds the PREVIOUS tick's budget here
+            // -- it is recomputed further down this handler -- which is the
+            // correct reference for the same reason the jitter block below
+            // gives: it is the period this wake was actually scheduled under.
+            // Guarded because it is 0 before the first full tick.
+            if (tickFrameDurationMs_ > 0.0
+                && lastPeriodMs_ > tickFrameDurationMs_ * kTickLateFactor) {
+                ++tickLate_;
+            }
+            if (lastPeriodMs_ > kTickStallMs) {
+                ++tickStalls_;
+                // Attribution, not just detection. inSizeMove_ is true from
+                // WM_ENTERSIZEMOVE until WM_EXITSIZEMOVE, so a stall counted
+                // here was delivered while DefWindowProc's modal move/size
+                // loop owned the message pump -- which is exactly the window
+                // the title-bar press opens, and it is the field that tells a
+                // caption stall apart from an ordinary overrun.
+                if (inSizeMove_) ++tickStallsInSizeMove_;
+            }
+            if (inSizeMove_) {
+                maxPeriodInSizeMoveMs_ =
+                    std::max(maxPeriodInSizeMoveMs_, lastPeriodMs_);
+            }
         }
         frameCycleClock_.restart();
         QElapsedTimer handlerTimer;
@@ -6556,6 +6620,8 @@ void MainWindow::beginPlaybackTimeline() {
     cycleSamples_ = 0;
     lastHandlerMs_ = avgHandlerMs_ = 0.0;
     lastPeriodMs_ = avgPeriodMs_ = maxPeriodMs_ = 0.0;
+    tickLate_ = tickStalls_ = tickStallsInSizeMove_ = 0;
+    maxPeriodInSizeMoveMs_ = 0.0;
     lastOutsideMs_ = avgOutsideMs_ = 0.0;
     schedulerTickClock_.invalidate();
     schedulerTicks_ = 0;
@@ -8864,7 +8930,24 @@ void MainWindow::refreshHud(const QString& action) {
             // that was within 1.8ms of its deadline.
             // `rephase` counts slots abandoned because a handler overran, which
             // is cost overrun (cause B) and is not something GATE E fixes.
-            const QString l5 = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | rephase %8 | drift %9ms | ticks %10 | presents %11")
+            // `tick-late` and `tick-stall` count DELIVERY failures: ticks that
+            // arrived so late a whole frame opportunity went unused, and ticks
+            // that arrived so late the picture visibly stopped. Everything else
+            // on this line and the next measures what the tick DID; these count
+            // the times it was not called at all, which is a fault no cost
+            // counter can see -- on the title-bar stall the handler max was
+            // 0.77ms against a period max of 512ms.
+            //
+            // They exist because the smooth line's `stalls`/`hitch` are
+            // DRAG-scoped: both sample sites are inside the scrub path, so with
+            // no drag in progress they have no samples and read `0 of 0`, which
+            // was read as a clean result across a dozen harness runs of exactly
+            // this gesture. `sizemove` is the subset delivered while the modal
+            // move/size loop owned the pump, with its own max beside it --
+            // non-zero on a caption press and zero on an ordinary overrun,
+            // which is the attribution a bare count cannot make.
+            const QString l5 = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | rephase %8 | drift %9ms | ticks %10 | presents %11"
+                                       " | tick-late %12 of %13 (>%14x) | tick-stall %15 (>%16ms) | sizemove %17 max %18ms")
                 .arg(schedulerIntervalMs_)
                 .arg(QString::number(lastTickJitterMs_, 'f', 2))
                 .arg(QString::number(avgTickJitterMs_, 'f', 2))
@@ -8875,7 +8958,14 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(presentRephaseCount_)
                 .arg(QString::number(lastDriftMs_, 'f', 1))
                 .arg(schedulerTicks_)
-                .arg(presentSamples_);
+                .arg(presentSamples_)
+                .arg(tickLate_)
+                .arg(cycleSamples_)
+                .arg(QString::number(kTickLateFactor, 'f', 1))
+                .arg(tickStalls_)
+                .arg(QString::number(kTickStallMs, 'f', 0))
+                .arg(tickStallsInSizeMove_)
+                .arg(QString::number(maxPeriodInSizeMoveMs_, 'f', 1));
 
             // Cadence distribution. The rate above averages and reads 98-99%
             // whether the fault is the tick beat or per-frame cost overrun, so
@@ -9178,7 +9268,16 @@ void MainWindow::refreshHud(const QString& action) {
             // also says the gap figures beside it are measuring gated paints,
             // which read differently from every pre-gate record -- `wasted`
             // in particular collapses toward 0 by construction.
-            const QString l7b = QString("smooth | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | gated %11 | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
+            //
+            // THE WHOLE LINE IS DRAG-SCOPED AND SAYS SO IN ITS LABEL. Both
+            // sample sites are inside the scrub path -- paintScrubFrameNow()
+            // and the synchronous walk -- so with no drag in progress the
+            // sample count is 0 and every counter on it reads 0 for that
+            // reason and not because nothing stalled. A `stalls 0 of 0` here
+            // was read as a clean result across a dozen title-bar harness runs
+            // whose own `period max` said 512ms. The playback-side answer is
+            // `tick-late`/`tick-stall` on the period line above.
+            const QString l7b = QString("smooth/drag | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | gated %11 | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
                 .arg(QString::number(scrubPaintGapLastMs_, 'f', 1))
                 .arg(QString::number(gapAvg, 'f', 1))
                 .arg(QString::number(scrubPaintGapMaxMs_, 'f', 1))

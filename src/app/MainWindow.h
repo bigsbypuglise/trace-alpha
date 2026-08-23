@@ -1097,6 +1097,33 @@ private:
     double maxPeriodMs_ = 0.0;
     long long cycleSamples_ = 0;
 
+    // TICK DELIVERY counters -- the missing half of the smoothness instrument.
+    //
+    // `stalls` and `hitch` on the smooth line are DRAG counters: they are fed
+    // only from paintScrubFrameNow() and the synchronous scrub walk, so during
+    // ordinary playback they have no samples and read `0 of 0`. That blind spot
+    // is why a title-bar press that left `period max` at 512ms scored a clean
+    // sheet on every harness run -- the counters were not wrong, they were not
+    // looking. These count the same class of event on the playback path.
+    //
+    // Sampled from lastPeriodMs_, i.e. handler entry to handler entry, so they
+    // measure DELIVERY (was the tick called) rather than WORK (did the tick
+    // take long). A late tick with a 0.7ms handler is this instrument's whole
+    // subject and is invisible to every other counter in the HUD except the
+    // period max itself.
+    long long tickLate_ = 0;         // period > kTickLateFactor x budget
+    long long tickStalls_ = 0;       // period > kTickStallMs, absolute
+    // Of the stalls, the ones delivered while the modal move/size loop owned
+    // the thread. This is what turns a count into an attribution: an ordinary
+    // overrun and a title-bar press look identical in `tickStalls_` alone, and
+    // separating them is the difference between "something stalled" and "the
+    // caption press stalled it". inSizeMove_ is already maintained by
+    // nativeEvent's WM_ENTERSIZEMOVE/WM_EXITSIZEMOVE pair.
+    long long tickStallsInSizeMove_ = 0;
+    // Worst period observed while inSizeMove_ was true, so the size-move case
+    // carries its own max rather than being read off the shared one.
+    double maxPeriodInSizeMoveMs_ = 0.0;
+
     // Cadence distribution for the current run. The presented RATE averages, and
     // reads 98-99% under two unrelated faults, so it cannot say which one a file
     // is suffering from -- see the long comment at the present site. These are
@@ -1152,6 +1179,12 @@ private:
     //   hitch   - gaps over kScrubHitchMs, an absolute duration. This is the
     //             one to compare across sessions; `stalls` silently changes
     //             unit when the display mode does.
+    //
+    // ALL THREE ARE DRAG-SCOPED. They are fed from exactly two sites, both in
+    // the scrub path, so during ordinary playback there are no samples and the
+    // HUD reads `stalls 0 of 0` -- which is an empty measurement and was read
+    // as a clean one for a whole investigation. The playback-side equivalents
+    // are tickLate_/tickStalls_ above.
     double scrubPaintGapLastMs_ = 0.0;
     double scrubPaintGapMaxMs_ = 0.0;
     double scrubPaintGapSumMs_ = 0.0;
