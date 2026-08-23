@@ -112,10 +112,39 @@ jobs:
       # qtmultimedia supplies QAudioSink for audio output. Without it CMake
       # builds a silent Trace rather than failing, so the verify step below
       # asserts the DLL actually shipped.
+      # Qt 6.11.2, and it is the SAME Qt the development box builds against.
+      #
+      # CI pinned 6.7.2 while dev ran 6.10.2, and that gap was never merely
+      # untidy: the Windows audio sink was rewritten in 6.9.1, so processedUSecs()
+      # and bytesFree() -- the two terms AudioOutput::advanceClock() uses as the
+      # master clock -- did not mean the same thing in the shipped ZIP as in the
+      # build the clock was tuned on. Every release before this one ran a
+      # differently-behaving clock than the one it was measured with.
+      #
+      # 6.10.2 was NOT taken as an intermediate step. The hypothesis that gap was
+      # kept alive for -- that the sink rewrite explains the window-drag audio
+      # dropout -- was measured and refuted first: 6.7.2 and 6.10.2 gap
+      # identically, and so does 6.11.2. See docs/audio-window-drag.md.
+      #
+      # THE aqtsource PIN IS NOT OPTIONAL AND IS PINNED FOR THE SAME REASON VCPKG
+      # IS. install-qt-action@v4 pins aqtinstall ==3.3.*, and no released
+      # aqtinstall can fetch 6.11.x -- Qt changed its download-repo folder layout
+      # at 6.11 and the fix is only on aqtinstall's master. Verified rather than
+      # assumed: released aqt 3.3.0 resolves 6.10.2's arch list and fails
+      # 6.11.1 and 6.11.2 identically with "Failed to download checksum for the
+      # file 'Updates.xml'".
+      #
+      # It is pinned to a COMMIT rather than to the branch, because pointing CI
+      # at a moving master would reintroduce exactly the drift the vcpkg pin
+      # above removes -- a green run and a red run differing only by what
+      # upstream did that morning. This commit is the one the development box
+      # installed and validated 6.11.2 with.
       - name: Install Qt 6 (Widgets + imageformats + multimedia)
         uses: jurplel/install-qt-action@v4
         with:
-          version: "6.7.2"
+          version: "6.11.2"
+          arch: "win64_msvc2022_64"
+          aqtsource: "git+https://github.com/miurahr/aqtinstall.git@16db45a70b5905ad596941b223469bc86a56901e"
           modules: "qtimageformats qtmultimedia"
           cache: true
 

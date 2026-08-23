@@ -165,20 +165,33 @@ These are deliberately different and should not be confused:
 | | Local build | CI build (`.github/workflows/windows-release.yml`) |
 |---|---|---|
 | Purpose | Iteration, profiling, perf A/B | The artifact Anj tests and ships |
-| Qt | 6.10.2 `msvc2022_64` | **6.7.2** via `install-qt-action` |
-| FFmpeg | vcpkg, 8.1.2 (`avcodec-62`) | vcpkg, cached under `VCPKG_CACHE_VERSION` |
+| Qt | **6.11.2** `msvc2022_64` | **6.11.2** via `install-qt-action` |
+| FFmpeg (shipped) | minimal MinGW/GCC **9.0.1** (`avcodec-63`) via `TRACE_FFMPEG_ROOT` | same, built from pinned source |
+| FFmpeg (toolchain slot) | vcpkg, 8.1.2 (`avcodec-62`) | vcpkg **pinned** at `17f35ad2`, 8.1.2 |
 | Packaging | manual `windeployqt` | `windeployqt` + verified DLL manifest, uploaded as a folder |
 | Authority | none | **source of truth for releases** |
 
-**The Qt versions differ (6.10.2 local vs 6.7.2 in CI).** Trace uses only stable
-Qt Widgets APIs and pins no version, and no divergence has been observed — but a
-local build passing is not proof CI will pass. Green CI is still the gate.
+**The Qt versions MATCH as of 2026-08-22, and that is a correctness property
+rather than tidiness.** CI pinned 6.7.2 while dev ran 6.10.2 for months. The
+Windows audio sink was rewritten in 6.9.1, so `processedUSecs()` and
+`bytesFree()` — the two terms `AudioOutput::advanceClock()` uses as the master
+clock — did not mean the same thing in the shipped ZIP as in the build the clock
+was tuned on. Every release before this one ran a differently-behaving clock than
+the one it was measured with. A local green is still not proof CI is green, but
+the two are now the same Qt.
 
-FFmpeg was realigned in commit `63801ae` by bumping `VCPKG_CACHE_VERSION` to
-`v2`, because the `v1` cache still held FFmpeg 7.x (`avcodec-61`) while local
-resolves to 8.x. That pins the *cache*, not the version: vcpkg is cloned
-unpinned, so a future cache miss can drift again. Pin a vcpkg baseline commit if
-exact reproducibility ever matters.
+**Qt 6.10.2 is still installed at `C:\Qt\6.10.2` and is deliberately kept** as
+the control for this upgrade; the command examples above work against either kit
+root. Note **6.11.x needs an `aqtsource` pin in CI** — no released `aqtinstall`
+can fetch it, because Qt changed its download-repo layout at 6.11.
+
+**vcpkg is pinned to a commit and the cache key carries the pin.** It used to be
+cloned unpinned behind a 7-day cache, which made every CI result a function of
+the day it happened to run; the `v2` bump recorded in commit `63801ae` treated
+that symptom and left the cause. Note the vcpkg FFmpeg is **not** the shipped
+FFmpeg — `TRACE_FFMPEG_ROOT` points the build at the minimal MinGW tree with
+`NO_DEFAULT_PATH`, and vcpkg is the toolchain host and the documented revert
+path. See `docs/ffmpeg-9-upgrade.md`.
 
 CI artifacts are uploaded as a **folder, never a .zip** — `upload-artifact`
 always zips its input, so uploading a zip produced a zip-inside-a-zip with no
