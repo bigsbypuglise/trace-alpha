@@ -283,3 +283,78 @@ would be the same mechanism that is currently failing, and would buy nothing by
 construction. That needs confirming against the Qt 6.11.2 source before it is
 stated as fact, but it is the reason the obvious fix is not the first thing to
 try.
+
+---
+
+# MEASURED: the thread is BLOCKED, and it is blocked BEFORE the move loop (2026-08-23)
+
+Owner run, one motionless caption press, physical panel, `TRACE_MSG_LOG=1` +
+`TRACE_TICK_LOG=1`, shipping HUD hidden. Full timeline kept at
+`docs/titlebar-msgpump-owner-log.txt`.
+
+**Exactly one silence in the whole session, and it is the gesture:**
+
+    15555.27     0.33  == FRAME TICK ==
+    15557.21     1.94  WM_USER+1 (Qt posted events)
+    15557.36     0.15  WM_USER+1 (Qt posted events)
+    15561.43     4.07  WM_NCLBUTTONDOWN
+    16062.16   500.73  == WM_ENTERSIZEMOVE ==   <-- GAP
+    16062.71     0.55  WM_USER+1 (Qt posted events)
+    16063.03     0.32  == FRAME TICK ==
+
+Matching tick-stall line: `period=507.76ms handler=1.86ms sizemove=1`.
+
+## Four things this settles, and three of them overturn what is written above
+
+**1. THE PUMP IS SILENT, NOT STARVED.** For 500.73ms the thread retrieved **no
+message of any kind** — no input, no `WM_TIMER`, and no `WM_USER+1`, which is
+Qt's own posted-event message and is otherwise present every few milliseconds
+throughout the file. The thread is blocked inside `DefWindowProc`, not pumping
+a busy queue.
+
+**This kills the `SetTimer` + `WM_TIMER` fix by measurement rather than by
+suspicion.** A posted message cannot be retrieved by a thread that is retrieving
+nothing. So can any other UI-thread mechanism. The owner's caution was right,
+and for a stronger reason than either the caution or Qt's timer implementation
+gave.
+
+**2. IT IS NOT THE MODAL MOVE LOOP. THE MOVE LOOP IS INNOCENT.** The silence
+runs from `WM_NCLBUTTONDOWN` to `WM_ENTERSIZEMOVE` — it is over *before* the
+loop starts. **After** entry, the rest of the ~1.9s hold contains **47 frame
+ticks and not one gap over 20ms.** Playback inside the move loop is perfect.
+
+That inverts the hypothesis at the top of this document. "`WM_TIMER` is starved
+because the queue is not empty at loop entry" is wrong twice over: the queue is
+not busy, and the fault is not at loop entry.
+
+**3. `inSizeMove_` IS TRUE WHEN THE LATE TICK LANDS, WHICH IS CORRECT ABOUT THE
+TICK AND MISLEADING ABOUT THE STALL.** The `sizemove=1` attribution is not a
+bug — the tick really did arrive inside the loop — but the stall itself
+*precedes* the loop. Read the flag as "the tick landed inside a size/move
+gesture", never as "the size/move loop caused it". The message timeline is what
+separates those, and no counter can.
+
+**4. THE 500ms IS THE DOUBLE-CLICK INTERVAL, to within 0.73ms.**
+`GetDoubleClickTime()` is **500ms** on this box; the silence is **500.73ms**;
+the owner's twelve earlier holds ran 508–558ms. The synthetic reproduction on
+the Parsec display measured 213.97ms of silence in the same position — smaller,
+same shape, same bracketing messages — so the position is machine-independent
+even where the duration is not.
+
+The reading: `DefWindowProc` handling `WM_NCLBUTTONDOWN` on `HTCAPTION` blocks
+the thread for the double-click interval, deciding whether the press is a
+double-click or the start of a drag, and only then enters the move loop.
+
+**Stated as the leading mechanism, not as proof.** Proving it means changing the
+system double-click time, which is a machine-wide settings change and was not
+taken. It is also not the load-bearing part: what decides the fix is that the
+thread is blocked, and that is measured directly.
+
+## Why the freeze ends while the button is still down
+
+The owner's original report — "freezes, then resumes **while the button is still
+down**" — is now explained exactly. The block is a fixed timeout, not a
+condition that lasts for the gesture. It expires, the move loop starts, and
+playback is immediately healthy again. Nothing about holding longer makes it
+worse, which is why `docs/audio-window-drag.md` measured mid-drag and correctly
+found everything fine.

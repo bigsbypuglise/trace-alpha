@@ -1,0 +1,1193 @@
+
+===== message pump timeline (size/move gesture) -- 867 entries
+# gap = ms since the previous line.
+#   A long gap with NOTHING in it        -> the pump was SILENT.
+#   A long gap between FRAME TICK lines
+#   that is FULL of messages             -> pump alive, timer starved.
+#     ms      gap  message
+#
+# ---- LARGEST SILENCES DURING PLAYBACK -- no message retrieved at all ----
+#     500.73 ms silent, after WM_NCLBUTTONDOWN -> next was == WM_ENTERSIZEMOVE == (at t=15561.43 ms)
+#
+      0.11     0.00  0x031f
+      0.27     0.16  0x031f
+      0.44     0.17  WM_USER+1 (Qt posted events)
+      0.66     0.21  0x031f
+      0.96     0.30  0xc0dc
+      1.15     0.20  WM_USER+1 (Qt posted events)
+      1.32     0.17  0x0060
+      2.29     0.97  WM_MOUSEMOVE
+      2.66     0.36  0x0060
+      3.17     0.52  WM_PAINT
+      3.70     0.53  WM_USER+1 (Qt posted events)
+      4.07     0.37  0x0060
+      4.17     0.10  WM_PAINT
+      4.86     0.69  WM_USER+1 (Qt posted events)
+      5.79     0.93  0x0060
+      6.56     0.77  WM_PAINT
+     10.25     3.69  WM_USER+1 (Qt posted events)
+     10.36     0.10  WM_PAINT
+     10.69     0.34  WM_USER+1 (Qt posted events)
+     10.78     0.08  WM_PAINT
+     11.01     0.23  WM_TIMER
+     11.19     0.19  WM_TIMER
+    311.94   300.74  WM_TIMER   <-- GAP
+    734.73   422.79  WM_MOUSEMOVE   <-- GAP
+    738.14     3.42  WM_MOUSEMOVE
+    750.79    12.65  WM_MOUSEMOVE
+    756.26     5.46  WM_MOUSEMOVE
+    771.10    14.85  WM_MOUSEMOVE
+    775.41     4.30  WM_MOUSEMOVE
+    775.62     0.21  WM_USER+1 (Qt posted events)
+    779.14     3.53  WM_MOUSEMOVE
+    787.68     8.53  WM_MOUSEMOVE
+    792.83     5.16  WM_MOUSEMOVE
+    801.79     8.96  WM_MOUSEMOVE
+    810.83     9.04  WM_MOUSEMOVE
+    825.69    14.85  WM_MOUSEMOVE
+    834.75     9.06  WM_MOUSEMOVE
+    836.71     1.96  WM_MOUSEMOVE
+    841.91     5.20  WM_MOUSEMOVE
+    852.07    10.16  WM_MOUSEMOVE
+    858.34     6.28  WM_MOUSEMOVE
+    869.87    11.53  WM_MOUSEMOVE
+    877.67     7.80  WM_MOUSEMOVE
+    883.25     5.58  WM_MOUSEMOVE
+    899.91    16.66  WM_MOUSEMOVE
+    902.57     2.66  WM_MOUSEMOVE
+    907.25     4.68  WM_MOUSEMOVE
+    915.24     8.00  WM_MOUSEMOVE
+    927.37    12.13  WM_MOUSEMOVE
+    937.06     9.68  WM_MOUSEMOVE
+    937.31     0.25  WM_MOUSELEAVE
+    937.55     0.24  WM_USER+1 (Qt posted events)
+    939.86     2.31  WM_MOUSEMOVE
+    940.04     0.18  WM_USER+1 (Qt posted events)
+    953.79    13.75  WM_MOUSEMOVE
+    953.96     0.18  WM_USER+1 (Qt posted events)
+   1164.61   210.65  WM_MOUSEMOVE   <-- GAP
+   1164.78     0.17  WM_USER+1 (Qt posted events)
+   1172.51     7.73  WM_MOUSEMOVE
+   1172.72     0.21  WM_USER+1 (Qt posted events)
+   1180.60     7.88  WM_MOUSEMOVE
+   1180.76     0.16  WM_USER+1 (Qt posted events)
+   1190.25     9.49  WM_MOUSEMOVE
+   1190.45     0.20  WM_USER+1 (Qt posted events)
+   1196.67     6.22  WM_NCMOUSEMOVE
+   1196.94     0.27  WM_MOUSELEAVE
+   1197.11     0.17  WM_USER+1 (Qt posted events)
+   1205.00     7.89  WM_NCMOUSELEAVE
+   1865.59   660.59  WM_USER+1 (Qt posted events)   <-- GAP
+   1866.38     0.78  0x0060
+   1866.87     0.50  0x0060
+   1867.89     1.01  WM_USER+1 (Qt posted events)
+   1962.66    94.77  WM_TIMER   <-- GAP
+   2186.77   224.11  WM_TIMER   <-- GAP
+   2943.66   756.89  WM_TIMER   <-- GAP
+   2959.50    15.84  WM_USER+1 (Qt posted events)
+   2960.17     0.66  WM_USER+1 (Qt posted events)
+   2975.83    15.66  WM_USER+1 (Qt posted events)
+   2976.15     0.32  WM_USER+1 (Qt posted events)
+   2991.82    15.68  WM_USER+1 (Qt posted events)
+   2992.13     0.31  WM_USER+1 (Qt posted events)
+   3007.33    15.20  WM_USER+1 (Qt posted events)
+   3007.68     0.35  WM_USER+1 (Qt posted events)
+   3023.77    16.08  WM_USER+1 (Qt posted events)
+   3024.07     0.30  WM_USER+1 (Qt posted events)
+   3039.35    15.28  WM_USER+1 (Qt posted events)
+   3039.78     0.43  WM_USER+1 (Qt posted events)
+   3055.51    15.73  WM_USER+1 (Qt posted events)
+   3055.81     0.29  WM_USER+1 (Qt posted events)
+   3071.82    16.01  WM_USER+1 (Qt posted events)
+   3072.20     0.38  WM_USER+1 (Qt posted events)
+   3087.69    15.49  WM_USER+1 (Qt posted events)
+   3088.08     0.39  WM_USER+1 (Qt posted events)
+   3103.73    15.65  WM_USER+1 (Qt posted events)
+   3104.04     0.31  WM_USER+1 (Qt posted events)
+   3119.94    15.90  WM_USER+1 (Qt posted events)
+   3120.87     0.92  WM_USER+1 (Qt posted events)
+   3121.33     0.46  WM_USER+1 (Qt posted events)
+   3121.66     0.33  WM_USER+1 (Qt posted events)
+  11317.66  8196.00  WM_NCMOUSEMOVE   <-- GAP
+  11318.04     0.39  WM_USER+1 (Qt posted events)
+  11560.68   242.64  WM_NCMOUSEMOVE   <-- GAP
+  11560.98     0.29  WM_USER+1 (Qt posted events)
+  11569.51     8.53  WM_NCMOUSEMOVE
+  11569.81     0.30  WM_USER+1 (Qt posted events)
+  11578.51     8.70  WM_NCMOUSEMOVE
+  11578.79     0.28  WM_USER+1 (Qt posted events)
+  11585.69     6.90  WM_NCMOUSEMOVE
+  11585.96     0.27  WM_USER+1 (Qt posted events)
+  11600.68    14.72  WM_NCMOUSEMOVE
+  11600.95     0.27  WM_USER+1 (Qt posted events)
+  11624.77    23.82  WM_NCMOUSEMOVE   <-- GAP
+  11625.04     0.27  WM_USER+1 (Qt posted events)
+  11762.35   137.31  WM_NCLBUTTONDOWN   <-- GAP
+  11777.59    15.24  WM_MOUSEMOVE
+  11852.76    75.17  WM_LBUTTONUP   <-- GAP
+  11853.39     0.63  WM_USER+1 (Qt posted events)
+  11853.57     0.18  0x0060
+  11853.67     0.11  0x0060
+  11853.78     0.10  WM_NCMOUSELEAVE
+  11854.23     0.45  WM_USER+1 (Qt posted events)
+  11861.18     6.95  WM_NCMOUSEMOVE
+  11861.45     0.27  WM_USER+1 (Qt posted events)
+  12068.66   207.22  WM_TIMER   <-- GAP
+  12190.63   121.96  WM_NCMOUSEMOVE   <-- GAP
+  12190.91     0.28  WM_USER+1 (Qt posted events)
+  12196.20     5.29  WM_NCMOUSEMOVE
+  12196.44     0.24  WM_USER+1 (Qt posted events)
+  12204.44     8.00  WM_NCMOUSEMOVE
+  12204.72     0.28  WM_USER+1 (Qt posted events)
+  12213.07     8.35  WM_MOUSEMOVE
+  12214.71     1.63  WM_NCMOUSELEAVE
+  12214.86     0.15  WM_USER+1 (Qt posted events)
+  12214.99     0.14  WM_PAINT
+  12216.29     1.30  WM_USER+1 (Qt posted events)
+  12216.41     0.12  WM_PAINT
+  12221.83     5.42  WM_MOUSEMOVE
+  12229.05     7.22  WM_USER+1 (Qt posted events)
+  12230.09     1.04  WM_MOUSEMOVE
+  12230.47     0.38  WM_USER+1 (Qt posted events)
+  12236.52     6.05  WM_MOUSEMOVE
+  12244.73     8.21  WM_USER+1 (Qt posted events)
+  12245.31     0.58  WM_USER+1 (Qt posted events)
+  12246.28     0.97  WM_MOUSEMOVE
+  12252.87     6.59  WM_MOUSEMOVE
+  12261.55     8.68  WM_MOUSEMOVE
+  12261.76     0.22  WM_USER+1 (Qt posted events)
+  12262.21     0.44  WM_USER+1 (Qt posted events)
+  12268.71     6.50  WM_MOUSEMOVE
+  12277.36     8.64  WM_USER+1 (Qt posted events)
+  12278.16     0.80  WM_MOUSEMOVE
+  12278.65     0.49  WM_USER+1 (Qt posted events)
+  12285.53     6.89  WM_MOUSEMOVE
+  12293.34     7.80  WM_MOUSEMOVE
+  12293.52     0.18  WM_USER+1 (Qt posted events)
+  12293.87     0.35  WM_USER+1 (Qt posted events)
+  12303.73     9.85  WM_MOUSEMOVE
+  12309.50     5.77  WM_USER+1 (Qt posted events)
+  12310.13     0.63  WM_USER+1 (Qt posted events)
+  12311.65     1.53  WM_MOUSEMOVE
+  12318.60     6.94  WM_MOUSEMOVE
+  12325.03     6.43  WM_USER+1 (Qt posted events)
+  12325.39     0.36  WM_USER+1 (Qt posted events)
+  12327.14     1.76  WM_MOUSEMOVE
+  12334.23     7.09  WM_MOUSEMOVE
+  12341.80     7.57  WM_USER+1 (Qt posted events)
+  12342.35     0.56  WM_MOUSEMOVE
+  12342.74     0.38  WM_USER+1 (Qt posted events)
+  12350.10     7.36  WM_MOUSEMOVE
+  12357.83     7.73  WM_USER+1 (Qt posted events)
+  12358.19     0.36  WM_USER+1 (Qt posted events)
+  12373.07    14.87  WM_USER+1 (Qt posted events)
+  12373.44     0.38  WM_USER+1 (Qt posted events)
+  12389.58    16.13  WM_USER+1 (Qt posted events)
+  12389.89     0.31  WM_USER+1 (Qt posted events)
+  14028.57  1638.68  0x0100   <-- GAP
+  14029.13     0.56  0x0102
+  14029.41     0.28  0x0102
+  14029.58     0.17  WM_USER+1 (Qt posted events)
+  14030.05     0.47  0x0060
+  14030.24     0.19  0x0060
+  14056.37    26.12  WM_USER+1 (Qt posted events)   <-- GAP
+  14064.94     8.58  WM_USER+1 (Qt posted events)
+  14074.91     9.97  WM_USER+1 (Qt posted events)
+  14084.94    10.03  WM_USER+1 (Qt posted events)
+  14094.93     9.99  WM_USER+1 (Qt posted events)
+  14097.14     2.22  WM_USER+1 (Qt posted events)
+  14097.33     0.19  == FRAME TICK ==
+  14101.83     4.50  WM_USER+1 (Qt posted events)
+  14105.02     3.19  WM_USER+1 (Qt posted events)
+  14113.99     8.98  0x0101
+  14114.40     0.41  WM_USER+1 (Qt posted events)
+  14114.95     0.55  WM_USER+1 (Qt posted events)
+  14124.97    10.02  WM_USER+1 (Qt posted events)
+  14134.93     9.95  WM_USER+1 (Qt posted events)
+  14138.46     3.53  WM_USER+1 (Qt posted events)
+  14138.64     0.18  == FRAME TICK ==
+  14145.00     6.36  WM_USER+1 (Qt posted events)
+  14154.92     9.92  WM_USER+1 (Qt posted events)
+  14164.93    10.02  WM_USER+1 (Qt posted events)
+  14174.94    10.01  WM_USER+1 (Qt posted events)
+  14181.46     6.52  WM_USER+1 (Qt posted events)
+  14181.64     0.18  == FRAME TICK ==
+  14184.95     3.31  WM_USER+1 (Qt posted events)
+  14195.06    10.11  WM_USER+1 (Qt posted events)
+  14205.02     9.96  WM_USER+1 (Qt posted events)
+  14215.00     9.98  WM_USER+1 (Qt posted events)
+  14221.95     6.95  WM_USER+1 (Qt posted events)
+  14222.10     0.15  == FRAME TICK ==
+  14225.65     3.55  WM_USER+1 (Qt posted events)
+  14234.95     9.30  WM_USER+1 (Qt posted events)
+  14244.95    10.00  WM_USER+1 (Qt posted events)
+  14254.94     9.98  WM_USER+1 (Qt posted events)
+  14264.54     9.61  WM_USER+1 (Qt posted events)
+  14264.69     0.15  == FRAME TICK ==
+  14267.51     2.82  WM_USER+1 (Qt posted events)
+  14274.98     7.47  WM_USER+1 (Qt posted events)
+  14284.97     9.99  WM_USER+1 (Qt posted events)
+  14294.94     9.97  WM_USER+1 (Qt posted events)
+  14304.98    10.03  WM_USER+1 (Qt posted events)
+  14305.73     0.75  WM_USER+1 (Qt posted events)
+  14305.88     0.16  == FRAME TICK ==
+  14309.02     3.13  WM_USER+1 (Qt posted events)
+  14315.11     6.09  WM_USER+1 (Qt posted events)
+  14318.90     3.80  WM_MOUSEMOVE
+  14325.04     6.13  WM_USER+1 (Qt posted events)
+  14333.53     8.49  WM_MOUSEMOVE
+  14335.00     1.47  WM_USER+1 (Qt posted events)
+  14339.62     4.62  WM_MOUSEMOVE
+  14345.04     5.43  WM_USER+1 (Qt posted events)
+  14346.92     1.88  WM_MOUSEMOVE
+  14347.27     0.34  == FRAME TICK ==
+  14351.30     4.03  WM_USER+1 (Qt posted events)
+  14351.53     0.23  WM_USER+1 (Qt posted events)
+  14354.15     2.62  WM_MOUSEMOVE
+  14355.13     0.98  WM_USER+1 (Qt posted events)
+  14363.73     8.60  WM_MOUSEMOVE
+  14365.14     1.40  WM_USER+1 (Qt posted events)
+  14370.13     4.99  WM_MOUSEMOVE
+  14375.02     4.89  WM_USER+1 (Qt posted events)
+  14385.10    10.07  WM_USER+1 (Qt posted events)
+  14386.80     1.71  WM_MOUSEMOVE
+  14387.94     1.14  WM_MOUSEMOVE
+  14389.96     2.02  WM_USER+1 (Qt posted events)
+  14390.15     0.19  == FRAME TICK ==
+  14393.29     3.14  WM_USER+1 (Qt posted events)
+  14394.15     0.86  WM_MOUSEMOVE
+  14395.04     0.89  WM_USER+1 (Qt posted events)
+  14399.74     4.70  WM_MOUSEMOVE
+  14404.98     5.24  WM_USER+1 (Qt posted events)
+  14410.94     5.96  WM_MOUSEMOVE
+  14414.98     4.04  WM_USER+1 (Qt posted events)
+  14418.21     3.23  WM_MOUSEMOVE
+  14424.91     6.69  WM_USER+1 (Qt posted events)
+  14427.71     2.80  WM_MOUSEMOVE
+  14431.35     3.64  WM_MOUSEMOVE
+  14432.05     0.71  WM_USER+1 (Qt posted events)
+  14432.21     0.15  == FRAME TICK ==
+  14435.11     2.90  WM_USER+1 (Qt posted events)
+  14444.66     9.56  WM_MOUSEMOVE
+  14445.01     0.34  WM_USER+1 (Qt posted events)
+  14449.50     4.50  WM_MOUSEMOVE
+  14454.95     5.45  WM_USER+1 (Qt posted events)
+  14456.80     1.85  WM_MOUSEMOVE
+  14464.94     8.14  WM_USER+1 (Qt posted events)
+  14467.34     2.40  WM_MOUSEMOVE
+  14472.85     5.51  WM_USER+1 (Qt posted events)
+  14473.52     0.67  WM_MOUSEMOVE
+  14473.78     0.26  == FRAME TICK ==
+  14476.90     3.13  WM_USER+1 (Qt posted events)
+  14480.71     3.81  WM_MOUSEMOVE
+  14484.96     4.25  WM_USER+1 (Qt posted events)
+  14491.99     7.02  WM_MOUSEMOVE
+  14494.96     2.97  WM_USER+1 (Qt posted events)
+  14500.07     5.12  WM_MOUSEMOVE
+  14504.91     4.84  WM_USER+1 (Qt posted events)
+  14507.80     2.89  WM_MOUSEMOVE
+  14514.08     6.28  WM_USER+1 (Qt posted events)
+  14514.31     0.23  == FRAME TICK ==
+  14517.69     3.38  WM_USER+1 (Qt posted events)
+  14525.00     7.31  WM_USER+1 (Qt posted events)
+  14527.46     2.45  WM_MOUSEMOVE
+  14528.53     1.08  WM_MOUSEMOVE
+  14534.99     6.46  WM_USER+1 (Qt posted events)
+  14544.97     9.98  WM_USER+1 (Qt posted events)
+  14555.02    10.05  WM_USER+1 (Qt posted events)
+  14556.42     1.40  WM_USER+1 (Qt posted events)
+  14556.60     0.18  == FRAME TICK ==
+  14559.55     2.95  WM_USER+1 (Qt posted events)
+  14564.97     5.43  WM_USER+1 (Qt posted events)
+  14574.94     9.97  WM_USER+1 (Qt posted events)
+  14585.09    10.15  WM_USER+1 (Qt posted events)
+  14594.94     9.85  WM_USER+1 (Qt posted events)
+  14597.81     2.87  WM_USER+1 (Qt posted events)
+  14598.00     0.19  == FRAME TICK ==
+  14600.93     2.93  WM_USER+1 (Qt posted events)
+  14604.97     4.04  WM_USER+1 (Qt posted events)
+  14615.04    10.07  WM_USER+1 (Qt posted events)
+  14625.08    10.05  WM_USER+1 (Qt posted events)
+  14634.90     9.82  WM_USER+1 (Qt posted events)
+  14639.73     4.83  WM_USER+1 (Qt posted events)
+  14639.92     0.19  == FRAME TICK ==
+  14642.83     2.91  WM_USER+1 (Qt posted events)
+  14644.96     2.13  WM_USER+1 (Qt posted events)
+  14654.92     9.95  WM_USER+1 (Qt posted events)
+  14664.92    10.00  WM_USER+1 (Qt posted events)
+  14674.89     9.97  WM_USER+1 (Qt posted events)
+  14680.88     5.99  WM_USER+1 (Qt posted events)
+  14681.09     0.20  == FRAME TICK ==
+  14684.03     2.94  WM_USER+1 (Qt posted events)
+  14684.97     0.94  WM_USER+1 (Qt posted events)
+  14694.95     9.98  WM_USER+1 (Qt posted events)
+  14704.93     9.98  WM_USER+1 (Qt posted events)
+  14714.95    10.02  WM_USER+1 (Qt posted events)
+  14722.85     7.90  WM_USER+1 (Qt posted events)
+  14723.07     0.22  == FRAME TICK ==
+  14726.06     2.99  WM_USER+1 (Qt posted events)
+  14734.91     8.85  WM_USER+1 (Qt posted events)
+  14744.95    10.03  WM_USER+1 (Qt posted events)
+  14754.95    10.01  WM_USER+1 (Qt posted events)
+  14763.62     8.67  WM_USER+1 (Qt posted events)
+  14763.80     0.18  == FRAME TICK ==
+  14766.71     2.90  WM_USER+1 (Qt posted events)
+  14773.64     6.93  WM_MOUSEMOVE
+  14774.96     1.32  WM_USER+1 (Qt posted events)
+  14780.99     6.03  WM_MOUSEMOVE
+  14784.98     3.99  WM_USER+1 (Qt posted events)
+  14792.85     7.87  WM_MOUSEMOVE
+  14794.92     2.06  WM_USER+1 (Qt posted events)
+  14796.45     1.54  WM_MOUSEMOVE
+  14796.85     0.40  WM_MOUSELEAVE
+  14796.98     0.13  WM_USER+1 (Qt posted events)
+  14804.67     7.70  WM_MOUSEMOVE
+  14804.88     0.21  WM_USER+1 (Qt posted events)
+  14806.00     1.12  WM_USER+1 (Qt posted events)
+  14806.18     0.18  == FRAME TICK ==
+  14809.05     2.87  WM_USER+1 (Qt posted events)
+  14814.28     5.23  WM_MOUSEMOVE
+  14814.49     0.20  WM_USER+1 (Qt posted events)
+  14814.99     0.50  WM_USER+1 (Qt posted events)
+  14821.13     6.14  WM_MOUSEMOVE
+  14821.34     0.20  WM_USER+1 (Qt posted events)
+  14825.08     3.75  WM_USER+1 (Qt posted events)
+  14829.07     3.98  WM_MOUSEMOVE
+  14829.24     0.17  WM_USER+1 (Qt posted events)
+  14834.90     5.66  WM_USER+1 (Qt posted events)
+  14838.41     3.51  WM_MOUSEMOVE
+  14838.59     0.18  WM_USER+1 (Qt posted events)
+  14845.16     6.57  WM_USER+1 (Qt posted events)
+  14845.83     0.67  WM_MOUSEMOVE
+  14846.01     0.18  WM_USER+1 (Qt posted events)
+  14847.12     1.11  WM_USER+1 (Qt posted events)
+  14847.28     0.16  == FRAME TICK ==
+  14850.18     2.90  WM_USER+1 (Qt posted events)
+  14854.21     4.03  WM_MOUSEMOVE
+  14854.40     0.19  WM_USER+1 (Qt posted events)
+  14855.11     0.71  WM_USER+1 (Qt posted events)
+  14864.07     8.96  WM_MOUSEMOVE
+  14864.28     0.21  WM_USER+1 (Qt posted events)
+  14864.94     0.66  WM_USER+1 (Qt posted events)
+  14869.25     4.31  WM_NCMOUSEMOVE
+  14869.53     0.28  WM_MOUSELEAVE
+  14869.71     0.18  WM_USER+1 (Qt posted events)
+  14874.93     5.22  WM_USER+1 (Qt posted events)
+  14880.61     5.68  WM_NCMOUSEMOVE
+  14880.85     0.24  WM_USER+1 (Qt posted events)
+  14884.92     4.08  WM_USER+1 (Qt posted events)
+  14889.24     4.32  WM_USER+1 (Qt posted events)
+  14889.36     0.12  == FRAME TICK ==
+  14892.33     2.97  WM_USER+1 (Qt posted events)
+  14893.17     0.84  WM_NCMOUSEMOVE
+  14893.43     0.26  WM_USER+1 (Qt posted events)
+  14894.44     1.01  WM_NCMOUSEMOVE
+  14894.65     0.21  WM_USER+1 (Qt posted events)
+  14894.97     0.32  WM_USER+1 (Qt posted events)
+  14901.84     6.87  WM_NCMOUSEMOVE
+  14902.01     0.17  WM_USER+1 (Qt posted events)
+  14904.95     2.94  WM_USER+1 (Qt posted events)
+  14909.32     4.37  WM_NCMOUSEMOVE
+  14909.57     0.24  WM_USER+1 (Qt posted events)
+  14914.96     5.39  WM_USER+1 (Qt posted events)
+  14920.63     5.67  WM_NCMOUSEMOVE
+  14920.83     0.21  WM_USER+1 (Qt posted events)
+  14924.93     4.09  WM_USER+1 (Qt posted events)
+  14930.06     5.14  WM_USER+1 (Qt posted events)
+  14930.28     0.22  == FRAME TICK ==
+  14933.38     3.10  WM_USER+1 (Qt posted events)
+  14935.10     1.72  WM_USER+1 (Qt posted events)
+  14935.79     0.70  WM_NCMOUSEMOVE
+  14936.02     0.23  WM_USER+1 (Qt posted events)
+  14944.94     8.92  WM_USER+1 (Qt posted events)
+  14954.93     9.99  WM_USER+1 (Qt posted events)
+  14956.83     1.90  WM_NCMOUSEMOVE
+  14957.07     0.24  WM_USER+1 (Qt posted events)
+  14964.94     7.87  WM_USER+1 (Qt posted events)
+  14972.10     7.15  WM_USER+1 (Qt posted events)
+  14972.26     0.17  == FRAME TICK ==
+  14975.12     2.86  WM_USER+1 (Qt posted events)
+  14976.41     1.30  WM_NCMOUSEMOVE
+  14976.82     0.41  WM_USER+1 (Qt posted events)
+  14984.96     8.13  WM_USER+1 (Qt posted events)
+  14991.43     6.47  WM_NCMOUSEMOVE
+  14991.69     0.26  WM_USER+1 (Qt posted events)
+  14994.92     3.23  WM_USER+1 (Qt posted events)
+  14998.76     3.84  WM_NCMOUSEMOVE
+  14998.97     0.21  WM_USER+1 (Qt posted events)
+  15004.93     5.95  WM_USER+1 (Qt posted events)
+  15014.10     9.18  WM_USER+1 (Qt posted events)
+  15014.28     0.18  == FRAME TICK ==
+  15017.04     2.75  WM_USER+1 (Qt posted events)
+  15025.12     8.08  WM_USER+1 (Qt posted events)
+  15025.76     0.65  WM_NCMOUSEMOVE
+  15025.98     0.22  WM_USER+1 (Qt posted events)
+  15032.55     6.56  WM_NCMOUSEMOVE
+  15032.76     0.22  WM_USER+1 (Qt posted events)
+  15034.96     2.20  WM_USER+1 (Qt posted events)
+  15044.93     9.97  WM_USER+1 (Qt posted events)
+  15054.91     9.97  WM_USER+1 (Qt posted events)
+  15056.08     1.17  WM_USER+1 (Qt posted events)
+  15056.36     0.28  == FRAME TICK ==
+  15059.29     2.94  WM_USER+1 (Qt posted events)
+  15059.64     0.35  WM_USER+1 (Qt posted events)
+  15060.06     0.42  WM_NCMOUSEMOVE
+  15060.30     0.24  WM_USER+1 (Qt posted events)
+  15064.97     4.67  WM_USER+1 (Qt posted events)
+  15072.14     7.17  WM_NCMOUSEMOVE
+  15072.39     0.25  WM_USER+1 (Qt posted events)
+  15074.95     2.56  WM_USER+1 (Qt posted events)
+  15084.90     9.95  WM_USER+1 (Qt posted events)
+  15089.07     4.17  WM_NCMOUSEMOVE
+  15089.33     0.26  WM_USER+1 (Qt posted events)
+  15094.88     5.55  WM_USER+1 (Qt posted events)
+  15096.33     1.45  WM_USER+1 (Qt posted events)
+  15096.45     0.13  == FRAME TICK ==
+  15099.29     2.84  WM_USER+1 (Qt posted events)
+  15104.93     5.64  WM_USER+1 (Qt posted events)
+  15114.93    10.00  WM_USER+1 (Qt posted events)
+  15124.90     9.97  WM_USER+1 (Qt posted events)
+  15134.92    10.02  WM_USER+1 (Qt posted events)
+  15139.60     4.68  WM_USER+1 (Qt posted events)
+  15139.78     0.18  == FRAME TICK ==
+  15142.65     2.87  WM_USER+1 (Qt posted events)
+  15144.93     2.28  WM_USER+1 (Qt posted events)
+  15154.96    10.03  WM_USER+1 (Qt posted events)
+  15165.03    10.07  WM_USER+1 (Qt posted events)
+  15174.96     9.92  WM_USER+1 (Qt posted events)
+  15181.11     6.15  WM_USER+1 (Qt posted events)
+  15181.30     0.19  == FRAME TICK ==
+  15184.09     2.80  WM_USER+1 (Qt posted events)
+  15184.94     0.85  WM_USER+1 (Qt posted events)
+  15194.94    10.00  WM_USER+1 (Qt posted events)
+  15204.90     9.96  WM_USER+1 (Qt posted events)
+  15214.93    10.03  WM_USER+1 (Qt posted events)
+  15222.16     7.23  WM_USER+1 (Qt posted events)
+  15222.29     0.13  == FRAME TICK ==
+  15225.05     2.75  WM_USER+1 (Qt posted events)
+  15234.95     9.90  WM_USER+1 (Qt posted events)
+  15245.03    10.09  WM_USER+1 (Qt posted events)
+  15254.90     9.87  WM_USER+1 (Qt posted events)
+  15255.31     0.41  WM_TIMER
+  15255.44     0.12  WM_TIMER
+  15263.70     8.26  WM_USER+1 (Qt posted events)
+  15263.87     0.17  == FRAME TICK ==
+  15266.84     2.97  WM_USER+1 (Qt posted events)
+  15274.96     8.12  WM_USER+1 (Qt posted events)
+  15284.93     9.97  WM_USER+1 (Qt posted events)
+  15294.92     9.99  WM_USER+1 (Qt posted events)
+  15304.90     9.98  WM_USER+1 (Qt posted events)
+  15306.15     1.25  WM_USER+1 (Qt posted events)
+  15306.34     0.18  == FRAME TICK ==
+  15309.17     2.83  WM_USER+1 (Qt posted events)
+  15314.97     5.80  WM_USER+1 (Qt posted events)
+  15324.94     9.97  WM_USER+1 (Qt posted events)
+  15334.97    10.03  WM_USER+1 (Qt posted events)
+  15344.93     9.96  WM_USER+1 (Qt posted events)
+  15347.61     2.68  WM_USER+1 (Qt posted events)
+  15347.84     0.23  == FRAME TICK ==
+  15350.57     2.72  WM_USER+1 (Qt posted events)
+  15354.95     4.38  WM_USER+1 (Qt posted events)
+  15364.94     9.99  WM_USER+1 (Qt posted events)
+  15374.92     9.98  WM_USER+1 (Qt posted events)
+  15384.91     9.99  WM_USER+1 (Qt posted events)
+  15389.13     4.22  WM_USER+1 (Qt posted events)
+  15389.28     0.16  == FRAME TICK ==
+  15392.36     3.07  WM_USER+1 (Qt posted events)
+  15394.96     2.61  WM_USER+1 (Qt posted events)
+  15404.95     9.99  WM_USER+1 (Qt posted events)
+  15414.96    10.01  WM_USER+1 (Qt posted events)
+  15424.94     9.99  WM_USER+1 (Qt posted events)
+  15430.24     5.30  WM_USER+1 (Qt posted events)
+  15430.44     0.19  == FRAME TICK ==
+  15433.16     2.73  WM_USER+1 (Qt posted events)
+  15434.96     1.79  WM_USER+1 (Qt posted events)
+  15444.95     9.99  WM_USER+1 (Qt posted events)
+  15454.90     9.96  WM_USER+1 (Qt posted events)
+  15464.88     9.98  WM_USER+1 (Qt posted events)
+  15471.27     6.39  WM_USER+1 (Qt posted events)
+  15471.41     0.14  == FRAME TICK ==
+  15474.17     2.75  WM_USER+1 (Qt posted events)
+  15474.95     0.78  WM_USER+1 (Qt posted events)
+  15485.11    10.16  WM_USER+1 (Qt posted events)
+  15494.93     9.82  WM_USER+1 (Qt posted events)
+  15504.92     9.99  WM_USER+1 (Qt posted events)
+  15514.14     9.22  WM_USER+1 (Qt posted events)
+  15514.32     0.17  == FRAME TICK ==
+  15516.36     2.04  WM_USER+1 (Qt posted events)
+  15524.99     8.63  WM_USER+1 (Qt posted events)
+  15535.03    10.04  WM_USER+1 (Qt posted events)
+  15544.97     9.94  WM_USER+1 (Qt posted events)
+  15554.94     9.98  WM_USER+1 (Qt posted events)
+  15555.27     0.33  == FRAME TICK ==
+  15557.21     1.94  WM_USER+1 (Qt posted events)
+  15557.36     0.15  WM_USER+1 (Qt posted events)
+  15561.43     4.07  WM_NCLBUTTONDOWN
+  16062.16   500.73  == WM_ENTERSIZEMOVE ==   <-- GAP
+  16062.71     0.55  WM_USER+1 (Qt posted events)
+  16063.03     0.32  == FRAME TICK ==
+  16067.11     4.08  WM_USER+1 (Qt posted events)
+  16067.56     0.46  WM_USER+1 (Qt posted events)
+  16074.91     7.34  WM_USER+1 (Qt posted events)
+  16077.56     2.66  WM_MOUSEMOVE
+  16077.67     0.10  WM_NCMOUSELEAVE
+  16084.92     7.25  WM_USER+1 (Qt posted events)
+  16093.90     8.98  WM_MOUSEMOVE
+  16094.92     1.02  WM_USER+1 (Qt posted events)
+  16097.61     2.69  WM_USER+1 (Qt posted events)
+  16097.68     0.07  == FRAME TICK ==
+  16099.97     2.28  WM_USER+1 (Qt posted events)
+  16104.89     4.92  WM_USER+1 (Qt posted events)
+  16114.97    10.08  WM_USER+1 (Qt posted events)
+  16124.88     9.91  WM_USER+1 (Qt posted events)
+  16134.93    10.05  WM_USER+1 (Qt posted events)
+  16139.04     4.11  WM_USER+1 (Qt posted events)
+  16139.12     0.08  == FRAME TICK ==
+  16141.10     1.98  WM_USER+1 (Qt posted events)
+  16145.04     3.93  WM_USER+1 (Qt posted events)
+  16154.89     9.86  WM_USER+1 (Qt posted events)
+  16164.94    10.05  WM_USER+1 (Qt posted events)
+  16174.92     9.99  WM_USER+1 (Qt posted events)
+  16181.24     6.31  WM_USER+1 (Qt posted events)
+  16181.31     0.07  == FRAME TICK ==
+  16183.33     2.02  WM_USER+1 (Qt posted events)
+  16184.89     1.56  WM_USER+1 (Qt posted events)
+  16194.91    10.02  WM_USER+1 (Qt posted events)
+  16204.90    10.00  WM_USER+1 (Qt posted events)
+  16214.89     9.99  WM_USER+1 (Qt posted events)
+  16221.37     6.48  WM_USER+1 (Qt posted events)
+  16221.45     0.07  == FRAME TICK ==
+  16223.42     1.97  WM_USER+1 (Qt posted events)
+  16224.92     1.51  WM_USER+1 (Qt posted events)
+  16234.91     9.99  WM_USER+1 (Qt posted events)
+  16244.90    10.00  WM_USER+1 (Qt posted events)
+  16254.92    10.02  WM_USER+1 (Qt posted events)
+  16264.11     9.19  WM_USER+1 (Qt posted events)
+  16264.20     0.09  == FRAME TICK ==
+  16266.31     2.11  WM_USER+1 (Qt posted events)
+  16274.94     8.63  WM_USER+1 (Qt posted events)
+  16284.90     9.96  WM_USER+1 (Qt posted events)
+  16294.91    10.01  WM_USER+1 (Qt posted events)
+  16304.87     9.96  WM_USER+1 (Qt posted events)
+  16306.19     1.32  WM_USER+1 (Qt posted events)
+  16306.25     0.06  == FRAME TICK ==
+  16308.17     1.92  WM_USER+1 (Qt posted events)
+  16314.92     6.75  WM_USER+1 (Qt posted events)
+  16324.90     9.99  WM_USER+1 (Qt posted events)
+  16334.88     9.97  WM_USER+1 (Qt posted events)
+  16344.90    10.02  WM_USER+1 (Qt posted events)
+  16348.13     3.23  WM_USER+1 (Qt posted events)
+  16348.21     0.08  == FRAME TICK ==
+  16350.37     2.16  WM_USER+1 (Qt posted events)
+  16354.90     4.53  WM_USER+1 (Qt posted events)
+  16364.92    10.02  WM_USER+1 (Qt posted events)
+  16374.88     9.97  WM_USER+1 (Qt posted events)
+  16384.88     9.99  WM_USER+1 (Qt posted events)
+  16389.57     4.69  WM_USER+1 (Qt posted events)
+  16389.65     0.08  == FRAME TICK ==
+  16391.62     1.97  WM_USER+1 (Qt posted events)
+  16394.95     3.33  WM_USER+1 (Qt posted events)
+  16404.89     9.94  WM_USER+1 (Qt posted events)
+  16414.87     9.98  WM_USER+1 (Qt posted events)
+  16424.88    10.01  WM_USER+1 (Qt posted events)
+  16431.16     6.28  WM_USER+1 (Qt posted events)
+  16431.24     0.09  == FRAME TICK ==
+  16433.20     1.96  WM_USER+1 (Qt posted events)
+  16434.92     1.72  WM_USER+1 (Qt posted events)
+  16445.01    10.10  WM_USER+1 (Qt posted events)
+  16454.92     9.90  WM_USER+1 (Qt posted events)
+  16464.92    10.01  WM_USER+1 (Qt posted events)
+  16471.87     6.95  WM_USER+1 (Qt posted events)
+  16471.95     0.08  == FRAME TICK ==
+  16473.91     1.96  WM_USER+1 (Qt posted events)
+  16474.92     1.01  WM_USER+1 (Qt posted events)
+  16484.87     9.95  WM_USER+1 (Qt posted events)
+  16495.04    10.17  WM_USER+1 (Qt posted events)
+  16504.87     9.82  WM_USER+1 (Qt posted events)
+  16513.87     9.01  WM_USER+1 (Qt posted events)
+  16513.94     0.06  == FRAME TICK ==
+  16515.93     1.99  WM_USER+1 (Qt posted events)
+  16524.89     8.96  WM_USER+1 (Qt posted events)
+  16534.92    10.03  WM_USER+1 (Qt posted events)
+  16544.92    10.00  WM_USER+1 (Qt posted events)
+  16554.86     9.94  WM_USER+1 (Qt posted events)
+  16556.49     1.63  WM_USER+1 (Qt posted events)
+  16556.56     0.07  == FRAME TICK ==
+  16558.70     2.14  WM_USER+1 (Qt posted events)
+  16565.00     6.30  WM_USER+1 (Qt posted events)
+  16574.91     9.91  WM_USER+1 (Qt posted events)
+  16584.90     9.99  WM_USER+1 (Qt posted events)
+  16594.87     9.97  WM_USER+1 (Qt posted events)
+  16598.47     3.60  WM_USER+1 (Qt posted events)
+  16598.54     0.07  == FRAME TICK ==
+  16600.48     1.94  WM_USER+1 (Qt posted events)
+  16604.87     4.40  WM_USER+1 (Qt posted events)
+  16614.90    10.03  WM_USER+1 (Qt posted events)
+  16624.88     9.97  WM_USER+1 (Qt posted events)
+  16634.85     9.97  WM_USER+1 (Qt posted events)
+  16639.36     4.51  WM_USER+1 (Qt posted events)
+  16639.41     0.06  == FRAME TICK ==
+  16641.43     2.01  WM_USER+1 (Qt posted events)
+  16644.91     3.49  WM_USER+1 (Qt posted events)
+  16654.92    10.01  WM_USER+1 (Qt posted events)
+  16664.89     9.97  WM_USER+1 (Qt posted events)
+  16674.87     9.98  WM_USER+1 (Qt posted events)
+  16680.94     6.07  WM_USER+1 (Qt posted events)
+  16681.01     0.08  == FRAME TICK ==
+  16682.97     1.96  WM_USER+1 (Qt posted events)
+  16684.89     1.92  WM_USER+1 (Qt posted events)
+  16694.89    10.00  WM_USER+1 (Qt posted events)
+  16704.90    10.00  WM_USER+1 (Qt posted events)
+  16714.86     9.96  WM_USER+1 (Qt posted events)
+  16722.02     7.16  WM_USER+1 (Qt posted events)
+  16722.11     0.09  == FRAME TICK ==
+  16724.15     2.04  WM_USER+1 (Qt posted events)
+  16724.91     0.76  WM_USER+1 (Qt posted events)
+  16734.92    10.01  WM_USER+1 (Qt posted events)
+  16744.86     9.94  WM_USER+1 (Qt posted events)
+  16754.86    10.01  WM_USER+1 (Qt posted events)
+  16764.90    10.04  WM_USER+1 (Qt posted events)
+  16765.23     0.33  == FRAME TICK ==
+  16767.31     2.08  WM_USER+1 (Qt posted events)
+  16774.90     7.59  WM_USER+1 (Qt posted events)
+  16784.92    10.01  WM_USER+1 (Qt posted events)
+  16794.57     9.65  WM_TIMER
+  16794.86     0.29  WM_USER+1 (Qt posted events)
+  16804.86    10.00  WM_USER+1 (Qt posted events)
+  16806.99     2.13  WM_USER+1 (Qt posted events)
+  16807.07     0.08  == FRAME TICK ==
+  16809.04     1.97  WM_USER+1 (Qt posted events)
+  16811.16     2.12  WM_USER+1 (Qt posted events)
+  16811.41     0.25  WM_USER+1 (Qt posted events)
+  16814.89     3.47  WM_USER+1 (Qt posted events)
+  16824.88     9.99  WM_USER+1 (Qt posted events)
+  16827.00     2.12  WM_USER+1 (Qt posted events)
+  16827.25     0.25  WM_USER+1 (Qt posted events)
+  16834.89     7.64  WM_USER+1 (Qt posted events)
+  16842.54     7.65  WM_USER+1 (Qt posted events)
+  16842.78     0.24  WM_USER+1 (Qt posted events)
+  16844.93     2.15  WM_USER+1 (Qt posted events)
+  16847.08     2.15  WM_USER+1 (Qt posted events)
+  16847.17     0.09  == FRAME TICK ==
+  16849.16     2.00  WM_USER+1 (Qt posted events)
+  16854.88     5.72  WM_USER+1 (Qt posted events)
+  16859.09     4.20  WM_USER+1 (Qt posted events)
+  16859.36     0.28  WM_USER+1 (Qt posted events)
+  16864.89     5.52  WM_USER+1 (Qt posted events)
+  16874.88     9.99  WM_USER+1 (Qt posted events)
+  16875.10     0.21  WM_USER+1 (Qt posted events)
+  16875.34     0.24  WM_USER+1 (Qt posted events)
+  16884.87     9.53  WM_USER+1 (Qt posted events)
+  16889.59     4.72  WM_USER+1 (Qt posted events)
+  16889.66     0.07  == FRAME TICK ==
+  16891.86     2.20  WM_USER+1 (Qt posted events)
+  16894.96     3.11  WM_USER+1 (Qt posted events)
+  16904.88     9.92  WM_USER+1 (Qt posted events)
+  16906.58     1.70  WM_USER+1 (Qt posted events)
+  16906.84     0.26  WM_USER+1 (Qt posted events)
+  16914.90     8.06  WM_USER+1 (Qt posted events)
+  16923.14     8.24  WM_USER+1 (Qt posted events)
+  16923.36     0.22  WM_USER+1 (Qt posted events)
+  16924.88     1.51  WM_USER+1 (Qt posted events)
+  16931.00     6.13  WM_USER+1 (Qt posted events)
+  16931.09     0.08  == FRAME TICK ==
+  16933.16     2.07  WM_USER+1 (Qt posted events)
+  16934.95     1.79  WM_USER+1 (Qt posted events)
+  16938.89     3.95  WM_USER+1 (Qt posted events)
+  16939.11     0.21  WM_USER+1 (Qt posted events)
+  16944.91     5.80  WM_USER+1 (Qt posted events)
+  16954.85     9.93  WM_USER+1 (Qt posted events)
+  16955.15     0.30  WM_USER+1 (Qt posted events)
+  16964.88     9.74  WM_USER+1 (Qt posted events)
+  16971.25     6.37  WM_USER+1 (Qt posted events)
+  16971.95     0.70  == FRAME TICK ==
+  16973.97     2.01  WM_USER+1 (Qt posted events)
+  16974.37     0.40  WM_USER+1 (Qt posted events)
+  16974.57     0.20  WM_USER+1 (Qt posted events)
+  16974.91     0.34  WM_USER+1 (Qt posted events)
+  16984.92    10.01  WM_USER+1 (Qt posted events)
+  16994.92    10.00  WM_USER+1 (Qt posted events)
+  17004.87     9.95  WM_USER+1 (Qt posted events)
+  17013.96     9.08  WM_USER+1 (Qt posted events)
+  17014.05     0.09  == FRAME TICK ==
+  17016.05     2.00  WM_USER+1 (Qt posted events)
+  17024.91     8.86  WM_USER+1 (Qt posted events)
+  17034.90     9.99  WM_USER+1 (Qt posted events)
+  17044.89     9.99  WM_USER+1 (Qt posted events)
+  17054.87     9.98  WM_USER+1 (Qt posted events)
+  17056.63     1.76  WM_USER+1 (Qt posted events)
+  17056.72     0.09  == FRAME TICK ==
+  17058.70     1.98  WM_USER+1 (Qt posted events)
+  17064.97     6.27  WM_USER+1 (Qt posted events)
+  17074.90     9.93  WM_USER+1 (Qt posted events)
+  17084.86     9.95  WM_USER+1 (Qt posted events)
+  17094.84     9.98  WM_USER+1 (Qt posted events)
+  17097.76     2.92  WM_USER+1 (Qt posted events)
+  17097.84     0.08  == FRAME TICK ==
+  17099.77     1.93  WM_USER+1 (Qt posted events)
+  17104.87     5.10  WM_USER+1 (Qt posted events)
+  17114.89    10.02  WM_USER+1 (Qt posted events)
+  17124.88     9.99  WM_USER+1 (Qt posted events)
+  17134.85     9.97  WM_USER+1 (Qt posted events)
+  17139.60     4.75  WM_USER+1 (Qt posted events)
+  17139.68     0.08  == FRAME TICK ==
+  17141.80     2.12  WM_USER+1 (Qt posted events)
+  17145.01     3.20  WM_USER+1 (Qt posted events)
+  17154.85     9.85  WM_USER+1 (Qt posted events)
+  17164.85    10.00  WM_USER+1 (Qt posted events)
+  17174.84     9.99  WM_USER+1 (Qt posted events)
+  17181.23     6.39  WM_USER+1 (Qt posted events)
+  17181.31     0.07  == FRAME TICK ==
+  17183.34     2.03  WM_USER+1 (Qt posted events)
+  17185.00     1.65  WM_USER+1 (Qt posted events)
+  17194.88     9.89  WM_USER+1 (Qt posted events)
+  17204.97    10.09  WM_USER+1 (Qt posted events)
+  17214.82     9.85  WM_USER+1 (Qt posted events)
+  17221.98     7.16  WM_USER+1 (Qt posted events)
+  17222.07     0.09  == FRAME TICK ==
+  17224.13     2.06  WM_USER+1 (Qt posted events)
+  17224.89     0.76  WM_USER+1 (Qt posted events)
+  17234.90    10.01  WM_USER+1 (Qt posted events)
+  17244.87     9.97  WM_USER+1 (Qt posted events)
+  17254.85     9.98  WM_USER+1 (Qt posted events)
+  17263.92     9.07  WM_USER+1 (Qt posted events)
+  17263.98     0.06  == FRAME TICK ==
+  17265.96     1.98  WM_USER+1 (Qt posted events)
+  17274.88     8.92  WM_USER+1 (Qt posted events)
+  17284.85     9.97  WM_USER+1 (Qt posted events)
+  17294.85     9.99  WM_USER+1 (Qt posted events)
+  17304.86    10.01  WM_USER+1 (Qt posted events)
+  17305.47     0.62  WM_USER+1 (Qt posted events)
+  17305.54     0.06  == FRAME TICK ==
+  17307.51     1.97  WM_USER+1 (Qt posted events)
+  17314.88     7.37  WM_USER+1 (Qt posted events)
+  17324.91    10.03  WM_USER+1 (Qt posted events)
+  17334.86     9.95  WM_USER+1 (Qt posted events)
+  17344.90    10.04  WM_USER+1 (Qt posted events)
+  17348.45     3.55  WM_USER+1 (Qt posted events)
+  17348.53     0.08  == FRAME TICK ==
+  17350.45     1.92  WM_USER+1 (Qt posted events)
+  17354.88     4.43  WM_USER+1 (Qt posted events)
+  17364.89    10.01  WM_USER+1 (Qt posted events)
+  17374.86     9.96  WM_USER+1 (Qt posted events)
+  17384.85     9.99  WM_USER+1 (Qt posted events)
+  17389.95     5.10  WM_USER+1 (Qt posted events)
+  17390.05     0.10  == FRAME TICK ==
+  17392.08     2.03  WM_USER+1 (Qt posted events)
+  17394.90     2.81  WM_USER+1 (Qt posted events)
+  17404.89     9.99  WM_USER+1 (Qt posted events)
+  17414.83     9.95  WM_USER+1 (Qt posted events)
+  17424.88    10.04  WM_USER+1 (Qt posted events)
+  17431.05     6.17  WM_USER+1 (Qt posted events)
+  17431.12     0.07  == FRAME TICK ==
+  17432.99     1.87  WM_USER+1 (Qt posted events)
+  17434.90     1.91  WM_USER+1 (Qt posted events)
+  17444.90    10.01  WM_USER+1 (Qt posted events)
+  17454.87     9.96  WM_USER+1 (Qt posted events)
+  17464.86     9.99  WM_USER+1 (Qt posted events)
+  17471.14     6.28  WM_USER+1 (Qt posted events)
+  17471.22     0.08  == FRAME TICK ==
+  17473.21     1.99  WM_USER+1 (Qt posted events)
+  17474.88     1.67  WM_USER+1 (Qt posted events)
+  17485.00    10.12  WM_USER+1 (Qt posted events)
+  17494.86     9.86  WM_USER+1 (Qt posted events)
+  17504.86    10.00  WM_USER+1 (Qt posted events)
+  17514.12     9.26  WM_USER+1 (Qt posted events)
+  17514.19     0.06  == FRAME TICK ==
+  17516.19     2.00  WM_USER+1 (Qt posted events)
+  17524.88     8.70  WM_USER+1 (Qt posted events)
+  17534.88     9.99  WM_USER+1 (Qt posted events)
+  17544.84     9.97  WM_USER+1 (Qt posted events)
+  17554.85    10.01  WM_USER+1 (Qt posted events)
+  17555.99     1.15  WM_USER+1 (Qt posted events)
+  17556.06     0.07  == FRAME TICK ==
+  17558.09     2.02  WM_USER+1 (Qt posted events)
+  17564.90     6.81  WM_USER+1 (Qt posted events)
+  17574.88     9.98  WM_USER+1 (Qt posted events)
+  17584.89    10.01  WM_USER+1 (Qt posted events)
+  17594.94    10.05  WM_USER+1 (Qt posted events)
+  17597.93     2.99  WM_USER+1 (Qt posted events)
+  17598.02     0.08  == FRAME TICK ==
+  17600.00     1.99  WM_USER+1 (Qt posted events)
+  17604.92     4.91  WM_USER+1 (Qt posted events)
+  17614.90     9.98  WM_USER+1 (Qt posted events)
+  17624.87     9.97  WM_USER+1 (Qt posted events)
+  17634.85     9.98  WM_USER+1 (Qt posted events)
+  17638.93     4.08  WM_USER+1 (Qt posted events)
+  17639.00     0.08  == FRAME TICK ==
+  17641.19     2.19  WM_USER+1 (Qt posted events)
+  17644.91     3.71  WM_USER+1 (Qt posted events)
+  17654.87     9.96  WM_USER+1 (Qt posted events)
+  17664.87    10.01  WM_USER+1 (Qt posted events)
+  17674.86     9.98  WM_USER+1 (Qt posted events)
+  17681.41     6.55  WM_USER+1 (Qt posted events)
+  17681.47     0.07  == FRAME TICK ==
+  17683.42     1.94  WM_USER+1 (Qt posted events)
+  17684.86     1.45  WM_USER+1 (Qt posted events)
+  17694.90    10.04  WM_USER+1 (Qt posted events)
+  17704.87     9.97  WM_USER+1 (Qt posted events)
+  17714.86     9.98  WM_USER+1 (Qt posted events)
+  17722.31     7.45  WM_USER+1 (Qt posted events)
+  17722.39     0.08  == FRAME TICK ==
+  17724.32     1.93  WM_USER+1 (Qt posted events)
+  17724.90     0.59  WM_USER+1 (Qt posted events)
+  17734.89     9.99  WM_USER+1 (Qt posted events)
+  17744.86     9.97  WM_USER+1 (Qt posted events)
+  17754.98    10.12  WM_USER+1 (Qt posted events)
+  17763.95     8.97  WM_USER+1 (Qt posted events)
+  17764.03     0.07  == FRAME TICK ==
+  17766.16     2.14  WM_USER+1 (Qt posted events)
+  17774.88     8.71  WM_USER+1 (Qt posted events)
+  17784.89    10.01  WM_USER+1 (Qt posted events)
+  17794.86     9.97  WM_USER+1 (Qt posted events)
+  17804.85     9.99  WM_USER+1 (Qt posted events)
+  17806.19     1.33  WM_USER+1 (Qt posted events)
+  17806.26     0.07  == FRAME TICK ==
+  17808.22     1.96  WM_USER+1 (Qt posted events)
+  17814.87     6.65  WM_USER+1 (Qt posted events)
+  17824.88    10.02  WM_USER+1 (Qt posted events)
+  17834.87     9.99  WM_USER+1 (Qt posted events)
+  17844.83     9.96  WM_USER+1 (Qt posted events)
+  17847.24     2.41  WM_USER+1 (Qt posted events)
+  17847.33     0.09  == FRAME TICK ==
+  17849.37     2.05  WM_USER+1 (Qt posted events)
+  17854.92     5.55  WM_USER+1 (Qt posted events)
+  17864.90     9.98  WM_USER+1 (Qt posted events)
+  17874.83     9.93  WM_USER+1 (Qt posted events)
+  17884.91    10.08  WM_USER+1 (Qt posted events)
+  17889.61     4.70  WM_USER+1 (Qt posted events)
+  17889.72     0.11  == FRAME TICK ==
+  17891.91     2.19  WM_USER+1 (Qt posted events)
+  17894.90     2.99  WM_USER+1 (Qt posted events)
+  17904.95    10.05  WM_USER+1 (Qt posted events)
+  17914.87     9.92  WM_USER+1 (Qt posted events)
+  17924.87    10.00  WM_USER+1 (Qt posted events)
+  17930.77     5.90  WM_USER+1 (Qt posted events)
+  17930.84     0.07  == FRAME TICK ==
+  17932.98     2.14  WM_USER+1 (Qt posted events)
+  17934.89     1.91  WM_USER+1 (Qt posted events)
+  17944.89    10.00  WM_USER+1 (Qt posted events)
+  17954.87     9.98  WM_USER+1 (Qt posted events)
+  17964.87     9.99  WM_USER+1 (Qt posted events)
+  17973.12     8.25  WM_USER+1 (Qt posted events)
+  17973.20     0.08  == FRAME TICK ==
+  17975.31     2.11  WM_USER+1 (Qt posted events)
+  17984.99     9.68  WM_USER+1 (Qt posted events)
+  17994.89     9.90  WM_USER+1 (Qt posted events)
+  18001.53     6.64  WM_LBUTTONUP
+  18002.22     0.69  == WM_EXITSIZEMOVE ==
+
+===== message pump timeline (process exit) -- 301 entries
+# gap = ms since the previous line.
+#   A long gap with NOTHING in it        -> the pump was SILENT.
+#   A long gap between FRAME TICK lines
+#   that is FULL of messages             -> pump alive, timer starved.
+#     ms      gap  message
+#
+# ---- LARGEST SILENCES DURING PLAYBACK -- no message retrieved at all ----
+#     470.51 ms silent, after WM_NCMOUSELEAVE -> next was WM_NCMOUSEMOVE (at t=19933.32 ms)
+#     332.98 ms silent, after WM_USER+1 (Qt posted events) -> next was WM_NCMOUSEMOVE (at t=19495.29 ms)
+#     100.70 ms silent, after WM_USER+1 (Qt posted events) -> next was WM_USER+1 (Qt posted events) (at t=19394.58 ms)
+#      31.98 ms silent, after WM_USER+1 (Qt posted events) -> next was WM_NCMOUSEMOVE (at t=19828.50 ms)
+#
+  18004.32     0.00  WM_USER+1 (Qt posted events)
+  18004.90     0.58  WM_USER+1 (Qt posted events)
+  18011.34     6.43  WM_NCMOUSEMOVE
+  18011.87     0.53  WM_USER+1 (Qt posted events)
+  18014.28     2.42  WM_USER+1 (Qt posted events)
+  18014.46     0.18  == FRAME TICK ==
+  18016.60     2.14  WM_USER+1 (Qt posted events)
+  18024.90     8.30  WM_USER+1 (Qt posted events)
+  18027.76     2.86  WM_NCMOUSEMOVE
+  18027.98     0.22  WM_USER+1 (Qt posted events)
+  18034.91     6.93  WM_USER+1 (Qt posted events)
+  18044.91     9.99  WM_USER+1 (Qt posted events)
+  18054.88     9.98  WM_USER+1 (Qt posted events)
+  18055.54     0.66  WM_USER+1 (Qt posted events)
+  18055.72     0.18  == FRAME TICK ==
+  18057.66     1.94  WM_USER+1 (Qt posted events)
+  18064.93     7.27  WM_USER+1 (Qt posted events)
+  18074.87     9.94  WM_USER+1 (Qt posted events)
+  18084.89    10.02  WM_USER+1 (Qt posted events)
+  18094.86     9.98  WM_USER+1 (Qt posted events)
+  18098.05     3.18  WM_USER+1 (Qt posted events)
+  18098.24     0.19  == FRAME TICK ==
+  18100.24     2.01  WM_USER+1 (Qt posted events)
+  18104.89     4.65  WM_USER+1 (Qt posted events)
+  18114.94    10.05  WM_USER+1 (Qt posted events)
+  18124.87     9.93  WM_USER+1 (Qt posted events)
+  18134.87    10.00  WM_USER+1 (Qt posted events)
+  18139.12     4.25  WM_USER+1 (Qt posted events)
+  18139.26     0.14  == FRAME TICK ==
+  18141.28     2.02  WM_USER+1 (Qt posted events)
+  18144.95     3.68  WM_USER+1 (Qt posted events)
+  18154.96    10.01  WM_USER+1 (Qt posted events)
+  18164.91     9.95  WM_USER+1 (Qt posted events)
+  18174.86     9.95  WM_USER+1 (Qt posted events)
+  18180.28     5.42  WM_USER+1 (Qt posted events)
+  18180.45     0.18  == FRAME TICK ==
+  18182.43     1.98  WM_USER+1 (Qt posted events)
+  18185.04     2.60  WM_USER+1 (Qt posted events)
+  18194.93     9.89  WM_USER+1 (Qt posted events)
+  18204.88     9.95  WM_USER+1 (Qt posted events)
+  18214.90    10.02  WM_USER+1 (Qt posted events)
+  18222.35     7.45  WM_USER+1 (Qt posted events)
+  18222.58     0.22  == FRAME TICK ==
+  18224.54     1.96  WM_USER+1 (Qt posted events)
+  18224.99     0.46  WM_USER+1 (Qt posted events)
+  18234.86     9.87  WM_USER+1 (Qt posted events)
+  18244.87    10.01  WM_USER+1 (Qt posted events)
+  18254.88    10.00  WM_USER+1 (Qt posted events)
+  18264.05     9.17  WM_USER+1 (Qt posted events)
+  18264.19     0.14  == FRAME TICK ==
+  18266.17     1.98  WM_USER+1 (Qt posted events)
+  18275.11     8.95  WM_USER+1 (Qt posted events)
+  18284.91     9.80  WM_USER+1 (Qt posted events)
+  18295.03    10.12  WM_USER+1 (Qt posted events)
+  18304.86     9.83  WM_USER+1 (Qt posted events)
+  18305.94     1.08  WM_USER+1 (Qt posted events)
+  18306.09     0.15  == FRAME TICK ==
+  18308.03     1.94  WM_USER+1 (Qt posted events)
+  18314.90     6.87  WM_USER+1 (Qt posted events)
+  18324.90     9.99  WM_USER+1 (Qt posted events)
+  18334.88     9.98  WM_USER+1 (Qt posted events)
+  18344.92    10.04  WM_USER+1 (Qt posted events)
+  18347.43     2.51  WM_USER+1 (Qt posted events)
+  18347.62     0.19  == FRAME TICK ==
+  18349.48     1.86  WM_USER+1 (Qt posted events)
+  18354.90     5.42  WM_USER+1 (Qt posted events)
+  18364.89     9.99  WM_USER+1 (Qt posted events)
+  18374.83     9.94  WM_USER+1 (Qt posted events)
+  18384.85    10.02  WM_USER+1 (Qt posted events)
+  18390.29     5.44  WM_USER+1 (Qt posted events)
+  18390.47     0.18  == FRAME TICK ==
+  18392.53     2.06  WM_USER+1 (Qt posted events)
+  18394.95     2.41  WM_USER+1 (Qt posted events)
+  18404.91     9.96  WM_USER+1 (Qt posted events)
+  18414.89     9.98  WM_USER+1 (Qt posted events)
+  18425.05    10.16  WM_USER+1 (Qt posted events)
+  18430.95     5.91  WM_USER+1 (Qt posted events)
+  18431.17     0.22  == FRAME TICK ==
+  18433.60     2.43  WM_USER+1 (Qt posted events)
+  18434.92     1.32  WM_USER+1 (Qt posted events)
+  18444.94    10.02  WM_USER+1 (Qt posted events)
+  18454.93     9.98  WM_USER+1 (Qt posted events)
+  18464.90     9.97  WM_USER+1 (Qt posted events)
+  18472.47     7.57  WM_USER+1 (Qt posted events)
+  18472.83     0.36  == FRAME TICK ==
+  18475.02     2.19  WM_USER+1 (Qt posted events)
+  18485.14    10.12  WM_USER+1 (Qt posted events)
+  18494.94     9.80  WM_USER+1 (Qt posted events)
+  18504.88     9.94  WM_USER+1 (Qt posted events)
+  18514.12     9.24  WM_USER+1 (Qt posted events)
+  18514.30     0.18  == FRAME TICK ==
+  18516.25     1.95  WM_USER+1 (Qt posted events)
+  18524.91     8.66  WM_USER+1 (Qt posted events)
+  18534.86     9.95  WM_USER+1 (Qt posted events)
+  18544.92    10.06  WM_USER+1 (Qt posted events)
+  18554.56     9.64  WM_USER+1 (Qt posted events)
+  18554.73     0.16  == FRAME TICK ==
+  18556.71     1.99  WM_USER+1 (Qt posted events)
+  18564.92     8.21  WM_USER+1 (Qt posted events)
+  18574.90     9.98  WM_USER+1 (Qt posted events)
+  18584.91    10.01  WM_USER+1 (Qt posted events)
+  18594.92    10.01  WM_USER+1 (Qt posted events)
+  18598.45     3.53  WM_USER+1 (Qt posted events)
+  18598.79     0.35  == FRAME TICK ==
+  18601.06     2.27  WM_USER+1 (Qt posted events)
+  18604.93     3.87  WM_USER+1 (Qt posted events)
+  18614.88     9.95  WM_USER+1 (Qt posted events)
+  18624.86     9.98  WM_USER+1 (Qt posted events)
+  18634.87    10.02  WM_USER+1 (Qt posted events)
+  18638.78     3.91  WM_USER+1 (Qt posted events)
+  18638.97     0.18  == FRAME TICK ==
+  18640.93     1.96  WM_USER+1 (Qt posted events)
+  18644.88     3.95  WM_USER+1 (Qt posted events)
+  18654.87    10.00  WM_USER+1 (Qt posted events)
+  18664.87    10.00  WM_USER+1 (Qt posted events)
+  18674.84     9.97  WM_USER+1 (Qt posted events)
+  18681.63     6.80  WM_USER+1 (Qt posted events)
+  18681.80     0.16  == FRAME TICK ==
+  18683.78     1.98  WM_USER+1 (Qt posted events)
+  18684.90     1.12  WM_USER+1 (Qt posted events)
+  18694.91    10.01  WM_USER+1 (Qt posted events)
+  18704.84     9.93  WM_USER+1 (Qt posted events)
+  18714.86    10.03  WM_USER+1 (Qt posted events)
+  18721.84     6.98  WM_USER+1 (Qt posted events)
+  18722.01     0.17  == FRAME TICK ==
+  18724.07     2.06  WM_USER+1 (Qt posted events)
+  18724.89     0.82  WM_USER+1 (Qt posted events)
+  18734.88     9.99  WM_USER+1 (Qt posted events)
+  18744.90    10.02  WM_USER+1 (Qt posted events)
+  18754.88     9.98  WM_USER+1 (Qt posted events)
+  18763.90     9.03  WM_USER+1 (Qt posted events)
+  18764.09     0.19  == FRAME TICK ==
+  18766.14     2.05  WM_USER+1 (Qt posted events)
+  18774.90     8.75  WM_USER+1 (Qt posted events)
+  18784.87     9.98  WM_USER+1 (Qt posted events)
+  18794.89    10.02  WM_USER+1 (Qt posted events)
+  18804.85     9.96  WM_USER+1 (Qt posted events)
+  18806.88     2.02  WM_USER+1 (Qt posted events)
+  18807.05     0.17  == FRAME TICK ==
+  18809.02     1.98  WM_USER+1 (Qt posted events)
+  18814.93     5.91  WM_USER+1 (Qt posted events)
+  18825.01    10.08  WM_USER+1 (Qt posted events)
+  18834.86     9.85  WM_USER+1 (Qt posted events)
+  18844.87    10.01  WM_USER+1 (Qt posted events)
+  18846.95     2.08  WM_USER+1 (Qt posted events)
+  18847.10     0.15  == FRAME TICK ==
+  18849.13     2.03  WM_USER+1 (Qt posted events)
+  18854.90     5.77  WM_USER+1 (Qt posted events)
+  18864.88     9.98  WM_USER+1 (Qt posted events)
+  18874.88    10.00  WM_USER+1 (Qt posted events)
+  18884.87     9.99  WM_USER+1 (Qt posted events)
+  18889.00     4.13  WM_USER+1 (Qt posted events)
+  18889.16     0.16  == FRAME TICK ==
+  18891.09     1.93  WM_USER+1 (Qt posted events)
+  18894.93     3.84  WM_USER+1 (Qt posted events)
+  18904.88     9.95  WM_USER+1 (Qt posted events)
+  18914.85     9.97  WM_USER+1 (Qt posted events)
+  18924.86    10.01  WM_USER+1 (Qt posted events)
+  18931.15     6.29  WM_USER+1 (Qt posted events)
+  18931.33     0.18  == FRAME TICK ==
+  18933.24     1.91  WM_USER+1 (Qt posted events)
+  18934.91     1.67  WM_USER+1 (Qt posted events)
+  18944.87     9.95  WM_USER+1 (Qt posted events)
+  18954.86     9.99  WM_USER+1 (Qt posted events)
+  18964.84     9.98  WM_USER+1 (Qt posted events)
+  18971.24     6.40  WM_USER+1 (Qt posted events)
+  18971.43     0.18  == FRAME TICK ==
+  18973.20     1.77  WM_USER+1 (Qt posted events)
+  18974.90     1.70  WM_USER+1 (Qt posted events)
+  18984.87     9.97  WM_USER+1 (Qt posted events)
+  18994.87    10.00  WM_USER+1 (Qt posted events)
+  19004.92    10.05  WM_USER+1 (Qt posted events)
+  19014.13     9.21  WM_USER+1 (Qt posted events)
+  19014.31     0.18  == FRAME TICK ==
+  19016.08     1.77  WM_USER+1 (Qt posted events)
+  19024.89     8.81  WM_USER+1 (Qt posted events)
+  19034.84     9.94  WM_USER+1 (Qt posted events)
+  19044.88    10.04  WM_USER+1 (Qt posted events)
+  19054.82     9.95  WM_USER+1 (Qt posted events)
+  19056.33     1.50  WM_USER+1 (Qt posted events)
+  19056.51     0.18  == FRAME TICK ==
+  19058.31     1.80  WM_USER+1 (Qt posted events)
+  19064.92     6.61  WM_USER+1 (Qt posted events)
+  19074.92    10.00  WM_USER+1 (Qt posted events)
+  19084.86     9.94  WM_USER+1 (Qt posted events)
+  19094.84     9.98  WM_USER+1 (Qt posted events)
+  19097.54     2.69  WM_USER+1 (Qt posted events)
+  19097.74     0.20  == FRAME TICK ==
+  19099.76     2.02  WM_USER+1 (Qt posted events)
+  19104.87     5.11  WM_USER+1 (Qt posted events)
+  19114.88    10.01  WM_USER+1 (Qt posted events)
+  19124.86     9.99  WM_USER+1 (Qt posted events)
+  19134.86     9.99  WM_USER+1 (Qt posted events)
+  19138.55     3.69  WM_USER+1 (Qt posted events)
+  19138.70     0.15  == FRAME TICK ==
+  19140.45     1.75  WM_USER+1 (Qt posted events)
+  19145.29     4.84  WM_USER+1 (Qt posted events)
+  19154.90     9.61  WM_USER+1 (Qt posted events)
+  19164.84     9.94  WM_USER+1 (Qt posted events)
+  19174.83     9.99  WM_USER+1 (Qt posted events)
+  19180.51     5.68  WM_USER+1 (Qt posted events)
+  19180.68     0.18  == FRAME TICK ==
+  19182.49     1.81  WM_USER+1 (Qt posted events)
+  19184.89     2.40  WM_USER+1 (Qt posted events)
+  19194.84     9.94  WM_USER+1 (Qt posted events)
+  19204.84    10.01  WM_USER+1 (Qt posted events)
+  19214.83     9.99  WM_USER+1 (Qt posted events)
+  19223.64     8.81  WM_USER+1 (Qt posted events)
+  19223.82     0.18  == FRAME TICK ==
+  19225.88     2.06  WM_USER+1 (Qt posted events)
+  19234.85     8.97  WM_USER+1 (Qt posted events)
+  19244.83     9.98  WM_USER+1 (Qt posted events)
+  19254.86    10.03  WM_USER+1 (Qt posted events)
+  19263.70     8.85  WM_USER+1 (Qt posted events)
+  19263.87     0.17  == FRAME TICK ==
+  19265.61     1.74  WM_USER+1 (Qt posted events)
+  19274.87     9.26  WM_USER+1 (Qt posted events)
+  19284.85     9.98  WM_USER+1 (Qt posted events)
+  19294.84     9.99  WM_USER+1 (Qt posted events)
+  19304.80     9.95  WM_USER+1 (Qt posted events)
+  19304.97     0.17  == FRAME TICK ==
+  19307.06     2.09  WM_USER+1 (Qt posted events)
+  19314.87     7.81  WM_USER+1 (Qt posted events)
+  19324.86     9.99  WM_USER+1 (Qt posted events)
+  19334.83     9.98  WM_USER+1 (Qt posted events)
+  19344.89    10.06  WM_USER+1 (Qt posted events)
+  19347.09     2.20  WM_USER+1 (Qt posted events)
+  19347.23     0.14  == FRAME TICK ==
+  19349.04     1.81  WM_USER+1 (Qt posted events)
+  19354.90     5.86  WM_USER+1 (Qt posted events)
+  19364.88     9.97  WM_USER+1 (Qt posted events)
+  19374.82     9.94  WM_USER+1 (Qt posted events)
+  19384.86    10.04  WM_USER+1 (Qt posted events)
+  19389.54     4.68  WM_USER+1 (Qt posted events)
+  19389.69     0.15  == FRAME TICK ==
+  19394.58     4.89  WM_USER+1 (Qt posted events)
+  19495.29   100.70  WM_USER+1 (Qt posted events)   <-- GAP
+  19828.26   332.98  WM_NCMOUSEMOVE   <-- GAP
+  19828.50     0.24  WM_USER+1 (Qt posted events)
+  19860.48    31.98  WM_NCMOUSEMOVE   <-- GAP
+  19860.66     0.18  WM_USER+1 (Qt posted events)
+  19868.44     7.77  WM_NCMOUSEMOVE
+  19868.68     0.24  WM_USER+1 (Qt posted events)
+  19885.65    16.97  WM_NCMOUSEMOVE
+  19885.86     0.21  WM_USER+1 (Qt posted events)
+  19892.66     6.81  WM_NCMOUSEMOVE
+  19892.88     0.21  WM_USER+1 (Qt posted events)
+  19900.50     7.62  WM_NCMOUSEMOVE
+  19900.75     0.25  WM_USER+1 (Qt posted events)
+  19909.18     8.43  WM_NCMOUSEMOVE
+  19909.42     0.24  WM_USER+1 (Qt posted events)
+  19917.08     7.66  WM_NCMOUSEMOVE
+  19917.53     0.45  WM_USER+1 (Qt posted events)
+  19924.87     7.34  WM_NCMOUSEMOVE
+  19925.13     0.26  WM_USER+1 (Qt posted events)
+  19933.32     8.19  WM_NCMOUSELEAVE
+  20403.83   470.51  WM_NCMOUSEMOVE   <-- GAP
+  20404.46     0.62  WM_USER+1 (Qt posted events)
+  20410.59     6.14  WM_NCMOUSEMOVE
+  20410.78     0.19  WM_USER+1 (Qt posted events)
+  20420.91    10.14  WM_NCMOUSEMOVE
+  20421.21     0.30  WM_USER+1 (Qt posted events)
+  20427.70     6.49  WM_NCMOUSEMOVE
+  20427.94     0.23  WM_USER+1 (Qt posted events)
+  20435.21     7.28  WM_NCMOUSEMOVE
+  20435.43     0.22  WM_USER+1 (Qt posted events)
+  20451.15    15.71  WM_NCMOUSEMOVE
+  20451.38     0.24  WM_USER+1 (Qt posted events)
+  20532.36    80.98  WM_NCMOUSEMOVE   <-- GAP
+  20532.56     0.20  WM_USER+1 (Qt posted events)
+  20548.24    15.69  WM_NCMOUSEMOVE
+  20548.44     0.19  WM_USER+1 (Qt posted events)
+  20556.83     8.39  WM_NCMOUSEMOVE
+  20557.07     0.24  WM_USER+1 (Qt posted events)
+  20564.56     7.49  WM_NCMOUSEMOVE
+  20564.76     0.21  WM_USER+1 (Qt posted events)
+  20572.51     7.74  WM_NCMOUSEMOVE
+  20572.72     0.21  WM_USER+1 (Qt posted events)
+  20580.70     7.99  WM_NCMOUSEMOVE
+  20581.12     0.42  WM_USER+1 (Qt posted events)
+  20597.02    15.90  WM_NCMOUSEMOVE
+  20597.27     0.25  WM_USER+1 (Qt posted events)
+  20613.14    15.87  WM_NCMOUSEMOVE
+  20613.41     0.27  WM_USER+1 (Qt posted events)
+  20621.21     7.80  WM_NCMOUSEMOVE
+  20621.44     0.23  WM_USER+1 (Qt posted events)
+  20670.09    48.65  WM_NCMOUSEMOVE   <-- GAP
+  20670.30     0.21  WM_USER+1 (Qt posted events)
+  20719.45    49.15  WM_NCMOUSEMOVE   <-- GAP
+  20719.70     0.25  WM_USER+1 (Qt posted events)
+  20744.03    24.33  WM_NCMOUSEMOVE   <-- GAP
+  20744.27     0.24  WM_USER+1 (Qt posted events)
+  20758.64    14.37  WM_NCMOUSEMOVE
+  20758.88     0.24  WM_USER+1 (Qt posted events)
+  20807.49    48.61  WM_NCMOUSEMOVE   <-- GAP
+  20807.71     0.21  WM_USER+1 (Qt posted events)
+  20860.75    53.04  WM_NCLBUTTONDOWN   <-- GAP
+  20964.49   103.74  WM_LBUTTONUP   <-- GAP
+  20965.11     0.62  WM_USER+1 (Qt posted events)
+  20965.39     0.28  WM_NCMOUSELEAVE
+  20990.58    25.19  WM_USER+1 (Qt posted events)   <-- GAP
