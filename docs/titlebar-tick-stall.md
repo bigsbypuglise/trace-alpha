@@ -358,3 +358,75 @@ condition that lasts for the gesture. It expires, the move loop starts, and
 playback is immediately healthy again. Nothing about holding longer makes it
 worse, which is why `docs/audio-window-drag.md` measured mid-drag and correctly
 found everything fine.
+
+---
+
+# The caption-press interception was BUILT, MEASURED and REFUTED (2026-08-23)
+
+`TRACE_CAPTION_FASTMOVE=1`: consume `WM_NCLBUTTONDOWN` on `HTCAPTION` and post
+`WM_SYSCOMMAND` / `SC_MOVE|HTCAPTION` ourselves, so Windows starts the move
+immediately instead of taking its 500ms decision first.
+
+**The interception works perfectly. It does not help at all.**
+
+    10102.84     4.56  WM_NCLBUTTONDOWN
+    10103.03     0.19  WM_SYSCOMMAND          <- ours, 0.19ms later
+    10317.92   214.89  WM_MOUSEMOVE   <-- GAP
+    10351.96     0.59  == WM_ENTERSIZEMOVE ==
+
+Against the same gesture with the knob off:
+
+    10067.68     5.51  WM_NCLBUTTONDOWN
+    10282.65   214.96  WM_MOUSEMOVE   <-- GAP
+    10316.59     0.59  == WM_ENTERSIZEMOVE ==
+
+**214.89ms against 214.96ms.** The block moved from `DefWindowProc`'s
+`WM_NCLBUTTONDOWN` handling to `DefWindowProc`'s `SC_MOVE` handling and kept its
+duration to within 0.07ms. The wait is not in the message dispatch; it is inside
+the move-start path itself, which is code we still have to call in order to
+start a move at all.
+
+(Both figures are the synthetic reproduction on the Parsec-class display, where
+the wait measures ~215ms rather than the ~500ms a real hand sees on the panel.
+They are compared against each other, same machine, same session, same gesture —
+never against the owner figures.)
+
+## THE HUD FIELD CAUGHT A MIS-SET KNOB ON ITS FIRST RUN
+
+The first fastmove measurement came back looking like a clean refutation and was
+not one: the HUD read **`fastmove off`** throughout. `tickstall.ps1` was invoked
+as `-Env "A=1,B=1,C=1"`, which through `powershell -File` arrives as ONE string;
+`restart.ps1` split it on the first `=` and set `TRACE_MSG_LOG` to the nonsense
+value `1,TRACE_TICK_LOG=1,TRACE_CAPTION_FASTMOVE=1`. First knob on with a
+garbage value, every later knob silently absent.
+
+**That is the recorded array-flattening trap in a new costume, and it would have
+produced a false negative** — a build whose fix never ran, reported as a fix that
+does not work. It was caught only because the field prints `off` versus a count
+rather than being inferable from the command line, which is the same reason
+`renderer`, `planar`, `font` and `strip` are on that line. `tickstall.ps1` splits
+on commas now.
+
+## What this rules out, and what is left
+
+**Every UI-thread fix is now dead by measurement rather than by argument.** The
+thread retrieves no messages during the block, so nothing posted to the queue is
+seen; and the block survives being asked to start the move by a different route.
+
+What would actually remove the freeze is performing the window move **ourselves**
+— capture, hit-testing, `SetWindowPos` — never calling `DefWindowProc`'s move at
+all. That reimplements Snap, Aero Shake, snap layouts, edge magnetism and
+multi-monitor behaviour by hand, which is precisely the work the owner declined
+when he closed roadmap step 12 and kept the native title bar. **Not proposed.**
+
+**So the freeze stays, and the remaining work is the fallback: stop the picture
+JUMPING when it resumes.** That was always the owner's stated second option and
+it is now the only one left.
+
+**It needs one measurement first, and the answer is not obvious.** If audio keeps
+running through the freeze, then the picture jumping is *correct* — it is how
+sync is maintained — and freezing the video clock instead would leave the picture
+permanently behind the sound. If audio stalls too, the clock can be re-anchored
+cleanly. The owner reports picture and sound freezing together, and
+`AudioOutput` owns its own decode thread while `advanceClock()` runs on the
+frozen UI thread, so the two halves may well disagree. Measure before building.

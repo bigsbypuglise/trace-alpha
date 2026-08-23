@@ -72,6 +72,15 @@ function Focus-Trace([IntPtr]$h) {
     return [TS]::GetForegroundWindow() -eq $h
 }
 
+# SPLIT ON COMMAS AS WELL AS ON ARRAY ELEMENTS. Invoked through
+# "powershell -File", -Env "A=1,B=1" arrives as ONE string, and restart.ps1
+# then splits it on the first = and sets A to "1,B=1" -- so the first knob is
+# on with a nonsense value and every later one is silently absent. That is the
+# recorded array-flattening trap wearing a different hat, and it cost a run
+# here: a fastmove measurement came back looking like the fix did nothing, and
+# the HUD field read "fastmove off" throughout.
+$Env = @($Env | ForEach-Object { $_ -split "," } | Where-Object { $_ })
+
 New-Item -ItemType Directory -Force $OutDir | Out-Null
 
 # A scratch INI for the reason cadence.ps1 gives: Loop left on re-establishes

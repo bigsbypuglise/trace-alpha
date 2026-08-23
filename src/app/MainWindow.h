@@ -1658,6 +1658,12 @@ private:
     QRect sizeMoveStartRect_;
     bool inSizeMove_ = false;
 
+    // Caption presses this build handled itself instead of handing to
+    // DefWindowProc (TRACE_CAPTION_FASTMOVE). On the HUD because a knob that
+    // silently did nothing would look exactly like a fix that worked -- the
+    // same reason , ,  and  are on there.
+    long long captionFastMoves_ = 0;
+
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;
     // The video frame most recently pulled from the decoder. Held across

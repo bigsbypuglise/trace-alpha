@@ -323,6 +323,48 @@ bool asyncLandingEnabled() {
 }
 
 
+
+#ifdef Q_OS_WIN
+// TRACE_CAPTION_FASTMOVE=1 -- start the window move immediately on a caption
+// press instead of letting DefWindowProc decide first. DEFAULT OFF.
+//
+// WHAT IT IS FOR, measured rather than reasoned (docs/titlebar-tick-stall.md):
+// a press on the real Windows caption blocks this thread for the double-click
+// interval -- 500.73ms against a GetDoubleClickTime() of 500 on the owner box --
+// and during that block the thread retrieves NO message of any kind, not even
+// Qt's own posted-event message. Playback and the whole UI stop dead, then
+// resume while the button is still down. The modal move loop that follows is
+// innocent: the rest of a 1.9s hold carried 47 frame ticks with no gap over
+// 20ms.
+//
+// Because the thread retrieves NOTHING, no fix that lives on the UI thread's
+// message queue can work -- a second SetTimer least of all, since Qt already
+// implements QTimer on Windows with real Win32 timers. That is why this
+// intervenes at the message rather than beside it.
+//
+// WHY IT IS DEFAULT OFF AND MUST STAY THAT WAY UNTIL THE OWNER SAYS OTHERWISE.
+// This is the one place in Trace that takes a native window behaviour away from
+// Windows and performs it itself. The owner declined the frameless window
+// (roadmap step 12) specifically to keep Snap, Aero Shake, Win+arrow,
+// multi-monitor and accessibility working, so a change here is against the
+// grain of a standing decision. `period max` returning to ~44ms is NOT
+// sufficient acceptance; double-click-to-maximise, Aero Shake, drag-to-snap and
+// Win+arrow all have to survive, and if any of them does not then the 500ms
+// freeze is the better of the two outcomes.
+//
+// IT MAY ALSO SIMPLY NOT WORK. If DefWindowProc's WM_SYSCOMMAND/SC_MOVE path
+// takes the same decision the WM_NCLBUTTONDOWN path does, this moves the block
+// rather than removing it. That is a measurement, not an argument: read
+// `period max` and the message timeline, not the diff.
+bool captionFastMoveEnabled() {
+    static const bool on = !qgetenv("TRACE_CAPTION_FASTMOVE").isEmpty()
+                        && qgetenv("TRACE_CAPTION_FASTMOVE") != "0";
+    return on;
+}
+#else
+inline bool captionFastMoveEnabled() { return false; }
+#endif
+
 #ifdef Q_OS_WIN
 // ---------------------------------------------------------------------------
 // TRACE_MSG_LOG=1 -- the message-pump diagnostic. INSTRUMENT ONLY.
@@ -5491,6 +5533,38 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                     return true;
                 }
                 break;
+            // THE CAPTION PRESS, TAKEN OFF DefWindowProc. Behind
+            // TRACE_CAPTION_FASTMOVE, DEFAULT OFF -- see captionFastMoveEnabled()
+            // for the measurement that motivates it and the risk that gates it.
+            //
+            // Measured: DefWindowProc blocks this thread for the double-click
+            // interval on a caption press before entering the move loop, and
+            // during that block the thread retrieves NO message of any kind.
+            // Posting SC_MOVE ourselves and consuming the press asks Windows to
+            // start the move immediately instead of deciding first.
+            //
+            // HTCAPTION ONLY, deliberately. The minimise, maximise and close
+            // buttons hit-test as HTMINBUTTON/HTMAXBUTTON/HTCLOSE, the icon as
+            // HTSYSMENU, and the borders as HTLEFT and friends -- none of them
+            // reach this branch, so none of their behaviour is altered. Windows
+            // 11 snap layouts hang off the maximise button and are likewise
+            // untouched.
+            case WM_NCLBUTTONDOWN:
+                if (captionFastMoveEnabled() && msg->wParam == HTCAPTION) {
+                    ++captionFastMoves_;
+                    // The documented idiom for "start moving this window now".
+                    // ReleaseCapture is part of it and is harmless here -- a
+                    // non-client press leaves us without capture anyway.
+                    ReleaseCapture();
+                    // POSTED, not sent: sending would run the move loop inside
+                    // this filter, with Qt's own dispatch frame still on the
+                    // stack underneath it.
+                    PostMessageW(reinterpret_cast<HWND>(winId()), WM_SYSCOMMAND,
+                                 SC_MOVE | HTCAPTION, msg->lParam);
+                    if (result) *result = 0;
+                    return true;
+                }
+                break;
             case WM_ENTERSIZEMOVE: {
                 msgLogRecord(kMsgLogEnterSize, 0);
                 ++wmEnterSizeMove_;
@@ -9102,7 +9176,7 @@ void MainWindow::refreshHud(const QString& action) {
               // syncScrubPreviewSize itself. `wm` is sizing/enter/exit, counted
               // so the messages the aspect lock will be built on are proved to
               // arrive before anything depends on them.
-              + QString(" | resize %1 chg %2 drop %3 sync %4/%5ms | wm %6/%7/%8 size %9")
+              + QString(" | resize %1 chg %2 drop %3 sync %4/%5ms | wm %6/%7/%8 size %9 | fastmove %10")
                 .arg(resizeEvents_)
                 .arg(previewSizeChanges_)
                 .arg(cacheEntriesDropped_)
@@ -9112,6 +9186,13 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(wmEnterSizeMove_)
                 .arg(wmExitSizeMove_)
                 .arg(wmSize_)
+                // Caption presses this build took off DefWindowProc. 
+                // when the knob is unset; a NUMBER when it is on, so a knob
+                // that was set and never fired is visibly different from one
+                // that is working. A silent no-op looks exactly like a fix.
+                .arg(captionFastMoveEnabled()
+                         ? QString::number(captionFastMoves_)
+                         : QStringLiteral("off"))
               // Section 20.4. `win` and `display` are both DEVICE pixels, so on
               // their own they cannot say whether a change came from a resize
               // or from a scale-factor change -- and that is precisely the
