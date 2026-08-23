@@ -322,6 +322,273 @@ bool asyncLandingEnabled() {
     return on;
 }
 
+
+#ifdef Q_OS_WIN
+// ---------------------------------------------------------------------------
+// TRACE_MSG_LOG=1 -- the message-pump diagnostic. INSTRUMENT ONLY.
+//
+// The question it exists to answer, and it is the only question: during the
+// ~520ms title-bar stall, is the UI thread message pump STILL RUNNING with only
+// the playback timer starved, or is the thread silent for the duration? Those
+// two answers point at completely different families of fix, and choosing
+// between them by argument rather than by measurement is how this
+// investigation has already lost several sessions.
+//
+// WHY A WH_GETMESSAGE HOOK AND NOT nativeEvent(). nativeEvent only sees
+// messages dispatched to this window own HWND. Qt implements QTimer on Windows
+// with real Win32 timers owned by the event dispatcher own MESSAGE-ONLY
+// WINDOW, so playTimer_ WM_TIMER never reaches MainWindow at all and could not
+// be observed there -- which is precisely the message whose absence is the
+// hypothesis. A thread-level WH_GETMESSAGE hook fires for every message the
+// thread RETRIEVES FROM ITS QUEUE, whatever window it is addressed to, so it
+// sees the pump itself rather than one window share of it.
+//
+// WHAT THE TWO OUTCOMES LOOK LIKE:
+//   messages retrieved throughout, WM_TIMER absent  -> the pump is alive and
+//       the timer specifically is filtered or outranked. A queue-side fix is on
+//       the table, though NOT a second SetTimer: that is the same mechanism.
+//   nothing retrieved for the whole gap             -> the thread is blocked,
+//       or spinning on an empty queue. Nothing living on this thread helps.
+//
+// One ambiguity, stated rather than hidden: recording nothing means "no message
+// was retrieved", which covers both a blocked thread and a loop peeking at an
+// empty queue. Both are "the pump has nothing to hand the timer"; they differ
+// in cause, not in consequence for the fix.
+//
+// IT BUFFERS IN MEMORY AND WRITES NOTHING WHILE THE GESTURE IS RUNNING. A file
+// write per message, on the very thread whose responsiveness is the subject,
+// would be the instrument changing the measurement -- a trap this project has
+// paid for repeatedly. Fixed circular buffer, no allocation on the hot path,
+// dumped at WM_EXITSIZEMOVE once the gesture is over.
+//
+// Circular rather than start-on-entry because the interesting run-up -- the
+// WM_NCLBUTTONDOWN, the SC_MOVE, whatever precedes WM_ENTERSIZEMOVE -- happens
+// BEFORE there is any flag to switch on.
+//
+// Default off. With the knob unset no hook is installed and the recording call
+// is one static-bool branch, so the shipping path is unchanged.
+// ---------------------------------------------------------------------------
+bool msgLogEnabled() {
+    static const bool on = !qgetenv("TRACE_MSG_LOG").isEmpty()
+                        && qgetenv("TRACE_MSG_LOG") != "0";
+    return on;
+}
+
+// Sentinels for things that are not Windows messages but belong on the same
+// timeline. Correlating the tick against the messages around it is the whole
+// point -- a list of messages alone cannot show WHICH gap the tick fell into.
+constexpr unsigned kMsgLogTick      = 0xF0000001u;  // frame tick handler entered
+constexpr unsigned kMsgLogEnterSize = 0xF0000002u;  // WM_ENTERSIZEMOVE reached us
+constexpr unsigned kMsgLogExitSize  = 0xF0000003u;  // WM_EXITSIZEMOVE reached us
+
+struct MsgLogEntry {
+    qint64 ns = 0;
+    unsigned msg = 0;
+    quintptr hwnd = 0;
+};
+
+// UI thread only -- the hook is thread-local and the tick runs on the same
+// thread, so no locking is needed and none is taken. A lock here would be a
+// second way for the instrument to perturb the thread it is measuring.
+constexpr int kMsgLogCapacity = 32768;
+MsgLogEntry* msgLogRing() {
+    static MsgLogEntry* ring = new MsgLogEntry[kMsgLogCapacity];
+    return ring;
+}
+long long g_msgLogWritten = 0;
+QElapsedTimer g_msgLogClock;
+
+void msgLogRecord(unsigned msg, quintptr hwnd) {
+    if (!msgLogEnabled()) return;
+    if (!g_msgLogClock.isValid()) g_msgLogClock.start();
+    MsgLogEntry& e = msgLogRing()[g_msgLogWritten % kMsgLogCapacity];
+    e.ns = g_msgLogClock.nsecsElapsed();
+    e.msg = msg;
+    e.hwnd = hwnd;
+    ++g_msgLogWritten;
+}
+
+// Only the messages carrying meaning for this question are named; everything
+// else prints as hex, which is enough to show that SOMETHING was retrieved.
+const char* msgLogName(unsigned m) {
+    switch (m) {
+        case kMsgLogTick:        return "== FRAME TICK ==";
+        case kMsgLogEnterSize:   return "== WM_ENTERSIZEMOVE ==";
+        case kMsgLogExitSize:    return "== WM_EXITSIZEMOVE ==";
+        case 0x0113:             return "WM_TIMER";
+        case 0x0118:             return "WM_SYSTIMER (undocumented)";
+        case 0x000F:             return "WM_PAINT";
+        case 0x0200:             return "WM_MOUSEMOVE";
+        case 0x00A0:             return "WM_NCMOUSEMOVE";
+        case 0x00A1:             return "WM_NCLBUTTONDOWN";
+        case 0x00A2:             return "WM_NCLBUTTONUP";
+        case 0x0201:             return "WM_LBUTTONDOWN";
+        case 0x0202:             return "WM_LBUTTONUP";
+        case 0x0112:             return "WM_SYSCOMMAND";
+        case 0x0084:             return "WM_NCHITTEST";
+        case 0x0020:             return "WM_SETCURSOR";
+        case 0x0214:             return "WM_SIZING";
+        case 0x0216:             return "WM_MOVING";
+        case 0x0231:             return "WM_ENTERSIZEMOVE";
+        case 0x0232:             return "WM_EXITSIZEMOVE";
+        case 0x0046:             return "WM_WINDOWPOSCHANGING";
+        case 0x0047:             return "WM_WINDOWPOSCHANGED";
+        case 0x0005:             return "WM_SIZE";
+        case 0x0003:             return "WM_MOVE";
+        case 0x0014:             return "WM_ERASEBKGND";
+        case 0x0086:             return "WM_NCACTIVATE";
+        case 0x0006:             return "WM_ACTIVATE";
+        case 0x001A:             return "WM_SETTINGCHANGE";
+        case 0x0031:             return "WM_ENTERIDLE";
+        // Qt posted-event message. It dominates the timeline, and that is
+        // useful rather than noise: it is Qt own event loop being pumped, so
+        // its ABSENCE across a gap is what makes the gap SILENCE rather than
+        // just an absence of input.
+        case 0x0401:             return "WM_USER+1 (Qt posted events)";
+        case 0x02A2:             return "WM_NCMOUSELEAVE";
+        case 0x02A3:             return "WM_MOUSELEAVE";
+        case 0x0021:             return "WM_MOUSEACTIVATE";
+        default:                 return nullptr;
+    }
+}
+
+void msgLogDump(const char* why) {
+    if (!msgLogEnabled() || g_msgLogWritten == 0) return;
+    QFile f(QDir::tempPath() + "/trace_msglog.txt");
+    if (!f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) return;
+
+    const long long total = g_msgLogWritten;
+    const long long have = std::min<long long>(total, kMsgLogCapacity);
+    const long long first = total - have;
+
+    QString head = QString("\n===== message pump timeline (%1) -- %2 entries")
+                       .arg(QString::fromLatin1(why)).arg(have);
+    if (total > kMsgLogCapacity) {
+        head += QString(", OLDEST %1 DROPPED (ring full)").arg(total - kMsgLogCapacity);
+    }
+    f.write(head.toUtf8());
+    f.write("\n# gap = ms since the previous line.\n");
+    f.write("#   A long gap with NOTHING in it        -> the pump was SILENT.\n");
+    f.write("#   A long gap between FRAME TICK lines\n");
+    f.write("#   that is FULL of messages             -> pump alive, timer starved.\n");
+    f.write("#     ms      gap  message\n");
+
+    // THE VERDICT, COMPUTED RATHER THAN EYEBALLED. The whole file runs to a
+    // thousand-odd lines and the answer is one comparison, so the answer goes
+    // at the top: the biggest silences, and what bracketed each of them.
+    //
+    // A "silence" here is a stretch during which the thread retrieved NO
+    // message of any kind -- not Qt posted events, not input, not WM_TIMER.
+    // That is exactly the distinction this diagnostic exists to make:
+    //
+    //   a long silence          -> the pump stopped. Nothing on this thread runs.
+    //   no silence, but a long
+    //   gap between FRAME TICK  -> the pump ran and the timer alone was starved.
+    {
+        struct Gap { double ms; long long at; };
+        std::vector<Gap> gaps;
+        qint64 pv = -1;
+        for (long long i = first; i < total; ++i) {
+            const MsgLogEntry& e = msgLogRing()[i % kMsgLogCapacity];
+            if (pv >= 0) {
+                const double g = static_cast<double>(e.ns - pv) / 1000000.0;
+                // ONLY SILENCES THAT INTERRUPTED PLAYBACK. A paused or idle
+                // app retrieves nothing for seconds at a time and those gaps
+                // are not a fault -- on the first run of this they buried the
+                // one that matters in eighth place. A gap counts only if the
+                // frame tick was still running into it, which is asked by
+                // looking back for a FRAME TICK marker within one second.
+                bool ticking = false;
+                for (long long k = i - 1; k >= first; --k) {
+                    const MsgLogEntry& b = msgLogRing()[k % kMsgLogCapacity];
+                    if (pv - b.ns > 1000000000LL) break;
+                    if (b.msg == kMsgLogTick) { ticking = true; break; }
+                }
+                if (g >= 20.0 && ticking) gaps.push_back({g, i});
+            }
+            pv = e.ns;
+        }
+        std::sort(gaps.begin(), gaps.end(),
+                  [](const Gap& x, const Gap& y) { return x.ms > y.ms; });
+        f.write("#\n# ---- LARGEST SILENCES DURING PLAYBACK -- no message retrieved at all ----\n");
+        if (gaps.empty()) {
+            f.write("#   none over 20ms. The pump never went quiet.\n");
+        }
+        const std::size_t show = std::min<std::size_t>(gaps.size(), 8);
+        for (std::size_t k = 0; k < show; ++k) {
+            const MsgLogEntry& after = msgLogRing()[gaps[k].at % kMsgLogCapacity];
+            const MsgLogEntry& before = msgLogRing()[(gaps[k].at - 1) % kMsgLogCapacity];
+            const char* bn = msgLogName(before.msg);
+            const char* an = msgLogName(after.msg);
+            f.write(QString("#   %1 ms silent, after %2 -> next was %3 (at t=%4 ms)\n")
+                        .arg(QString::number(gaps[k].ms, 'f', 2), 8)
+                        .arg(bn ? QString::fromLatin1(bn)
+                                : QString("0x%1").arg(before.msg, 4, 16, QLatin1Char('0')))
+                        .arg(an ? QString::fromLatin1(an)
+                                : QString("0x%1").arg(after.msg, 4, 16, QLatin1Char('0')))
+                        .arg(QString::number(static_cast<double>(before.ns) / 1000000.0, 'f', 2))
+                        .toUtf8());
+        }
+        f.write("#\n");
+    }
+
+    qint64 prev = -1;
+    for (long long i = first; i < total; ++i) {
+        const MsgLogEntry& e = msgLogRing()[i % kMsgLogCapacity];
+        const double ms = static_cast<double>(e.ns) / 1000000.0;
+        const double gap = (prev < 0) ? 0.0
+                         : static_cast<double>(e.ns - prev) / 1000000.0;
+        prev = e.ns;
+        const char* nm = msgLogName(e.msg);
+        const QString label = nm ? QString::fromLatin1(nm)
+                                 : QString("0x%1").arg(e.msg, 4, 16, QLatin1Char('0'));
+        // Flag the gaps worth looking at so the file can be skimmed rather than
+        // read line by line. 20ms is under half a frame at 24fps, so anything
+        // marked is already interesting and nothing routine is.
+        const char* flag = (gap >= 20.0) ? "   <-- GAP" : "";
+        f.write(QString("%1 %2  %3%4\n")
+                    .arg(QString::number(ms, 'f', 2), 10)
+                    .arg(QString::number(gap, 'f', 2), 8)
+                    .arg(label)
+                    .arg(QString::fromLatin1(flag))
+                    .toUtf8());
+    }
+    f.flush();
+    g_msgLogWritten = 0;   // next gesture starts a fresh timeline
+}
+
+HHOOK g_msgLogHook = nullptr;
+
+LRESULT CALLBACK msgLogGetMsgProc(int code, WPARAM wParam, LPARAM lParam) {
+    if (code == HC_ACTION && lParam) {
+        const MSG* m = reinterpret_cast<const MSG*>(lParam);
+        msgLogRecord(m->message, reinterpret_cast<quintptr>(m->hwnd));
+    }
+    return CallNextHookEx(g_msgLogHook, code, wParam, lParam);
+}
+
+void msgLogInstall() {
+    if (!msgLogEnabled() || g_msgLogHook) return;
+    // Thread-local: this thread id and a null module, so it hooks this process
+    // UI thread only and touches nothing else on the machine.
+    g_msgLogHook = SetWindowsHookExW(WH_GETMESSAGE, msgLogGetMsgProc,
+                                     nullptr, GetCurrentThreadId());
+}
+
+void msgLogRemove() {
+    if (g_msgLogHook) { UnhookWindowsHookEx(g_msgLogHook); g_msgLogHook = nullptr; }
+}
+#else
+inline bool msgLogEnabled() { return false; }
+inline void msgLogRecord(unsigned, quintptr) {}
+inline void msgLogDump(const char*) {}
+inline void msgLogInstall() {}
+inline void msgLogRemove() {}
+constexpr unsigned kMsgLogTick = 0;
+constexpr unsigned kMsgLogEnterSize = 0;
+constexpr unsigned kMsgLogExitSize = 0;
+#endif
+
 // TRACE_TICK_LOG=1 appends one line per LATE TICK to %TEMP%	race_tickstall.txt.
 //
 // It exists because the fault this measures is transient, and the HUD is not a
@@ -529,9 +796,19 @@ MainWindow::~MainWindow() {
     endShuttleRun(/*landExactly=*/false);
     reclaimDecoder();
     scrubWorker_.stop();
+    // Instrument only; no-ops unless TRACE_MSG_LOG is set. The dump is
+    // repeated here so a session that never entered a move loop -- or one
+    // whose last gesture did not exit cleanly -- still leaves its timeline
+    // rather than nothing at all.
+    msgLogDump("process exit");
+    msgLogRemove();
 }
 
 MainWindow::MainWindow() {
+    // Instrument only, a no-op unless TRACE_MSG_LOG is set. Installed here
+    // rather than at first use so the timeline covers startup and every
+    // later gesture with no first-gesture special case.
+    msgLogInstall();
     setWindowTitle("Trace");
     setAcceptDrops(true);
     // The dev HUD ships hidden (UI roadmap step 2); `H` toggles it. TRACE_HUD=1
@@ -599,6 +876,11 @@ MainWindow::MainWindow() {
     }
 
     connect(&playTimer_, &QTimer::timeout, this, [this]() {
+        // On the message-pump timeline (TRACE_MSG_LOG), before every early
+        // return below: the question is whether the tick was DELIVERED, so
+        // a tick that arrives and declines to do anything still counts as
+        // arriving. No-op unless the knob is set.
+        msgLogRecord(kMsgLogTick, 0);
         // GATE E: the timer is re-armed per wake against an absolute deadline,
         // so it does not free-run. EVERY exit path below has to re-arm or
         // playback stops dead -- hence a scope guard declared before the first
@@ -5210,6 +5492,7 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 }
                 break;
             case WM_ENTERSIZEMOVE: {
+                msgLogRecord(kMsgLogEnterSize, 0);
                 ++wmEnterSizeMove_;
                 RECT r{};
                 if (GetWindowRect(reinterpret_cast<HWND>(winId()), &r)) {
@@ -5219,8 +5502,14 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, qintptr
                 break;
             }
             case WM_EXITSIZEMOVE:
+                msgLogRecord(kMsgLogExitSize, 0);
                 ++wmExitSizeMove_;
                 inSizeMove_ = false;
+                // Dumped HERE rather than during the gesture: writing a file
+                // on the thread whose responsiveness is the subject would be
+                // the instrument changing the measurement. No-op unless the
+                // knob is set.
+                msgLogDump("size/move gesture");
                 // Measured at experiment 1: deferring the preview-size sync to
                 // here saves NOTHING, because the drag discards one cache's
                 // worth of entries however many times it clears -- nothing
