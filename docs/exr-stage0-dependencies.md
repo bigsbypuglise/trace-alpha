@@ -46,11 +46,14 @@ evicts LRU, so a 6 GB entry would start pushing the Qt and ffmin caches out --
 which is exactly the "a green run and a red run differ only by whether the cache
 aged out" scar the `VCPKG_PIN` comment already records.
 
-**Honest limit on that flag:** it is documented as cleaning buildtrees, packages
-and downloads after each package; both exact CI command forms were confirmed to
-parse and exit 0 locally; and `installed/` -- the only tree the CMake toolchain
-reads -- is not among what it removes. The cleaning itself was **not** exercised
-end to end on a from-source build here; that needs a cold rebuild.
+**And the flag is now demonstrated rather than reasoned.** The first CI run after
+this change was a cold, from-source install of both ports, and its cache upload
+was **268,812,508 B (256 MB compressed)** under
+`vcpkg-v4-windows-2022-deps-x64-17f35ad2...`. Against an uncleaned tree of ~6 GB
+that is the flag doing exactly what it is here for, on the machine that matters.
+(The `~453 MB` and `~719 MB` cache figures in the same log are the **Qt** and
+**minimal-FFmpeg** caches being *restored*, not this one -- easy to misattribute,
+so they are named here.)
 
 ## THE FFmpeg TRAP: `build/` had been linking the wrong FFmpeg, and the status line could not say so
 
@@ -277,6 +280,37 @@ it with `PATH` reduced to `System32`:
 - **Negative control:** renaming `OpenImageIO.dll` away makes the same launch exit
   **`0xC0000135` (STATUS_DLL_NOT_FOUND)** -- so the DLL copy is load-bearing, and
   without it CI would have shipped an exe that cannot start.
+
+### CI is green, with every verification step read individually
+
+Run [32647950705](https://github.com/bigsbypuglise/trace-alpha/actions/runs/32647950705)
+on `6be43f88`, branch `exr-stage0-dependencies`. Step 6 (the cold vcpkg install of
+both ports from source) took **37.8 min**; the minimal-FFmpeg cache **hit**, so
+that build was skipped; Trace itself compiled in **1.9 min**.
+
+```
+derived:   33 embedded files, plus their SVG masters
+minimal FFmpeg DLLs: 20.9 MB
+dependency check: all DLLs import only Windows system libraries
+-- Trace: FFmpeg avcodec resolved to D:/a/_temp/ffmin/out/lib/avcodec.lib
+-- Trace: OpenImageIO enabled (EXR reader) 3.1.14.0
+-- Trace: OpenColorIO enabled 2.5.2
+FFmpeg detected by CMake.
+Audio dependencies detected by CMake.
+OpenImageIO + OpenColorIO detected by CMake.
+Package verified: 11 required files present, 118.3 MB total.
+trace-selftest: renderer=d3d11 fellback=0 planar=1
+trace-shape: OK - 11 shapes x 4 scale factors
+```
+
+Four of those are worth pointing at. **`fellback=0` is the hardware path** -- the
+check accepts `d3d11 (warp)` by prefix, so a WARP pass would look identical in the
+step's tick and different in that line. **`118.3 MB` matches the locally built
+`dist` to the digit**, so the packaging is deterministic across the two machines.
+**The new resolved-path FFmpeg line works on CI and names the ffmin tree**, which
+is the line that would have caught the local fault. And OCIO **v2.5.2** and OIIO
+**v3.1.14.0** were fetched and built from source on the runner, so the versions
+are confirmed there and not only on the dev box.
 
 ## Observed in passing, for stage 2 -- not fixed, not blockers
 

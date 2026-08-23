@@ -944,6 +944,23 @@ both from the pinned vcpkg tree, linked in dev and CI.
   delta 0`** full-res planar, `hitch 0`, `land 0`, release 22.4 vs 22.6ms - all three
   selftests green on both - `verify_trace_assets --strict` green at **33 embedded
   files**, unchanged as it must be.
+- **CI IS GREEN, EVERY VERIFICATION STEP READ INDIVIDUALLY** (run `32647950705`,
+  branch `exr-stage0-dependencies`, cold install 37.8 min, Trace build 1.9 min):
+  `derived: 33 embedded files` - `dependency check: all DLLs import only Windows
+  system libraries` - **`Trace: FFmpeg avcodec resolved to .../ffmin/out/lib/
+  avcodec.lib`** (the new resolved-path line working on CI, naming the right tree) -
+  `Trace: OpenImageIO enabled 3.1.14.0` - `Trace: OpenColorIO enabled 2.5.2` -
+  `FFmpeg detected` + `Audio dependencies detected` + **`OpenImageIO + OpenColorIO
+  detected by CMake.`** - **`Package verified: 11 required files present, 118.3 MB
+  total.`** (matching the locally built dist TO THE DIGIT) - **`renderer=d3d11
+  fellback=0 planar=1`** (the HARDWARE path -- the check accepts `d3d11 (warp)` by
+  prefix, so a WARP pass looks identical in the tick and different in that line) -
+  `OK - 11 shapes x 4 scale factors`. OCIO 2.5.2 and OIIO 3.1.14.0 were fetched and
+  built from source ON THE RUNNER, so the versions are confirmed there too.
+  **`--clean-after-build` is demonstrated rather than reasoned: the vcpkg cache
+  upload was 268,812,508 B (256 MB compressed) against a ~6 GB uncleaned tree.**
+  Note the `~453 MB` and `~719 MB` figures in the same log are the Qt and
+  minimal-FFmpeg caches being RESTORED, not this one.
 - **THE CI PACKAGING CHANGE WAS PROVEN ABLE TO FAIL.** A `dist` built with exactly the
   CI sequence launches with `PATH` reduced to `System32` and reports
   `renderer=d3d11 fellback=0 planar=1`; renaming `OpenImageIO.dll` away makes the same
