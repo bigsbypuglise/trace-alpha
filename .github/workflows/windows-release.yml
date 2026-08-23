@@ -53,7 +53,10 @@ env:
   # from hashing its build script -- editing the identity invalidates the cache
   # by construction, and nobody has to remember to bump a string.
   VCPKG_PIN: 17f35ad2418007a895ced8a4cece4ab34068a58d
-  VCPKG_CACHE_VERSION: v3
+  # v4: the tree now carries OpenImageIO + OpenColorIO as well as FFmpeg, so a v3
+  # entry is a DIFFERENT set of packages under the same name. Bumped as well as
+  # renaming the key below, so the intent is legible rather than implied.
+  VCPKG_CACHE_VERSION: v4
 
 jobs:
   build-windows:
@@ -151,14 +154,14 @@ jobs:
       # FFmpeg is compiled from source by vcpkg and dominates build time.
       # Cache the whole vcpkg tree so only the first build after a cache miss
       # pays that cost. Cache entries expire after 7 days idle.
-      - name: Restore vcpkg + FFmpeg cache
+      - name: Restore vcpkg dependency cache (FFmpeg + OpenImageIO/OpenColorIO)
         id: vcpkg-cache
         uses: actions/cache@v4
         with:
           path: ${{ runner.temp }}\vcpkg
-          key: vcpkg-${{ env.VCPKG_CACHE_VERSION }}-windows-2022-ffmpeg-x64-${{ env.VCPKG_PIN }}
+          key: vcpkg-${{ env.VCPKG_CACHE_VERSION }}-windows-2022-deps-x64-${{ env.VCPKG_PIN }}
 
-      - name: Install vcpkg + FFmpeg (only on cache miss)
+      - name: Install vcpkg dependencies (only on cache miss)
         if: steps.vcpkg-cache.outputs.cache-hit != 'true'
         shell: pwsh
         run: |
@@ -189,8 +192,38 @@ jobs:
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat"
           if ($LASTEXITCODE -ne 0) { throw "vcpkg bootstrap failed ($LASTEXITCODE)" }
 
-          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install ffmpeg:x64-windows
+          # --clean-after-build DELETES buildtrees/ AND packages/ AFTER EACH PORT, AND
+          # THAT IS A CACHE-SIZE DECISION WITH A MEASURED NUMBER BEHIND IT. This whole
+          # directory is what actions/cache stores, and on the dev box the OIIO graph
+          # leaves buildtrees at 3,795 MB and packages at 610 MB against an installed/
+          # of 610 MB -- so without this the entry is ~6 GB, of which ~4.4 GB is
+          # intermediate rubble. GitHub allows 10 GB per repository and evicts LRU, so a
+          # 6 GB entry starts pushing the Qt and ffmin caches out -- which is exactly the
+          # "a green run and a red run differ only by whether the cache aged out" scar
+          # the VCPKG_PIN comment above records. installed/ is the only part the CMake
+          # toolchain reads and this flag does not touch it.
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install --clean-after-build ffmpeg:x64-windows
           if ($LASTEXITCODE -ne 0) { throw "vcpkg install ffmpeg failed ($LASTEXITCODE)" }
+
+          # OpenImageIO is the EXR reader; OpenColorIO is the colour pipeline.
+          #
+          # openimageio[opencolorio] -- the FEATURE, not merely the dependency. OCIO is
+          # already a hard dependency of the port so it installs either way; the feature
+          # is what sets USE_OPENCOLORIO=ON in OIIO's own build and makes its exported
+          # CMake config emit find_dependency(OpenColorIO). Checked in the pinned tree:
+          # ports/openimageio/portfile.cmake maps opencolorio -> USE_OPENCOLORIO.
+          #
+          # OpenEXR is a hard, non-optional dependency of OIIO 3.x -- there is no openexr
+          # feature to request and none is needed.
+          #
+          # TWO FEATURES ARE DELIBERATELY NOT REQUESTED, and each would be silent damage:
+          #   viewer -- pulls vcpkg's qtbase (6.11.1), a DIFFERENT Qt from the 6.11.2 this
+          #             workflow installs and ships.
+          #   ffmpeg -- requests ffmpeg with default-features:false + avresample, i.e. a
+          #             different feature set from the ffmpeg:x64-windows above, which
+          #             would force vcpkg to rebuild it.
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install --clean-after-build "openimageio[opencolorio]:x64-windows"
+          if ($LASTEXITCODE -ne 0) { throw "vcpkg install openimageio failed ($LASTEXITCODE)" }
 
       - name: Resolve build tools and dependency paths
         shell: pwsh
@@ -329,6 +362,20 @@ jobs:
           }
           Write-Host "Audio dependencies detected by CMake."
 
+          # EXR AND THE COLOUR STAGE DEGRADE SILENTLY TOO, so they are asserted here
+          # rather than discovered when someone opens an .exr and is told the feature
+          # was not compiled in. find_package(... QUIET) is deliberately optional in
+          # CMakeLists -- a toolchain without these must still build a working player --
+          # which is exactly what makes an unnoticed miss possible on THIS toolchain,
+          # where they are supposed to be present.
+          if ($cache -notmatch 'OpenImageIO_DIR:PATH=(?!.*NOTFOUND)') {
+            throw "OpenImageIO was not found during configure - the build would not open EXR."
+          }
+          if ($cache -notmatch 'OpenColorIO_DIR:PATH=(?!.*NOTFOUND)') {
+            throw "OpenColorIO was not found during configure - the build would have no colour transform stage."
+          }
+          Write-Host "OpenImageIO + OpenColorIO detected by CMake."
+
       - name: Build Trace target (Release)
         shell: pwsh
         run: |
@@ -357,6 +404,21 @@ jobs:
           New-Item -ItemType Directory -Path $dist -Force | Out-Null
           Copy-Item $exe (Join-Path $dist "Trace.exe") -Force
 
+          # THE VCPKG RUNTIME DLLs, TAKEN FROM THE BUILD TREE RATHER THAN RE-DERIVED.
+          # vcpkg's applocal deployment has already computed this exe's transitive DLL
+          # closure and put it beside the exe, so copying that directory is reusing
+          # vcpkg's own answer instead of maintaining a second list here that would go
+          # stale the first time a dependency gained one. Before OpenImageIO the closure
+          # was empty and nothing needed copying; with it, omitting this ships an exe
+          # that cannot start -- and "green must mean launchable" is this workflow's
+          # whole contract, which is why the verify step below names these DLLs.
+          #
+          # The ffmin FFmpeg copy stays LAST so it wins any name collision. There is
+          # none today (vcpkg is avcodec-62, ffmin is avcodec-63) and the ordering is
+          # what keeps that a fact rather than a coincidence.
+          $buildDir = Split-Path $exe -Parent
+          Copy-Item (Join-Path $buildDir "*.dll") $dist -Force -ErrorAction SilentlyContinue
+
           # windeployqt copies the Qt DLLs and the platform plugin next to the
           # exe. Its exit code was previously ignored, so a failure here shipped
           # an exe that could not start.
@@ -380,7 +442,16 @@ jobs:
             "Qt6Gui.dll",
             "Qt6Widgets.dll",
             "Qt6Multimedia.dll",
-            "platforms\qwindows.dll"
+            "platforms\qwindows.dll",
+            # The EXR/colour runtime. OpenColorIO_2_5.dll is reached THROUGH OpenImageIO
+            # (Trace itself references no OCIO symbol yet, so the linker emits no direct
+            # import for it) -- it is named here anyway, because what must be true is
+            # that the file ships, not that a particular exe imports it.
+            "OpenImageIO.dll",
+            "OpenImageIO_Util.dll",
+            "OpenColorIO_2_5.dll",
+            "OpenEXR-3_4.dll",
+            "Imath-3_2.dll"
           )
 
           $missing = @()
