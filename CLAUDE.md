@@ -857,6 +857,100 @@ planar=1`, `11 shapes x 4 scale factors`, `--scrub-selftest`) ·
   already records for `overlay.ps1`, not a rendering difference, and §20.3's
   150% case is owner-accepted since GATE B. Not investigated further.
 
+**THE EXR + COLOUR PHASE HAS STARTED AND STAGE 0 (DEPENDENCIES) IS DONE (2026-08-23).
+EXR OPENS -- AS A STILL AND AS A 217-FRAME SEQUENCE -- WITH NO CODE CHANGE BEYOND THE
+BUILD.** Assessment `docs/exr-ocio-plan.md`; stage-0 record
+`docs/exr-stage0-dependencies.md`. **Nothing in the Color Transform feature was built
+and the View menu was not touched.** OpenImageIO **3.1.14.0** + OpenColorIO **2.5.2**,
+both from the pinned vcpkg tree, linked in dev and CI.
+
+- **THE PIN DID NOT MOVE, AND THAT IS NOW A SECURITY CONSTRAINT.** OCIO 2.5.2 fixes
+  **CVE-2026-42450**, stack buffer overflows in the `.cube`/`.spi1d`/`.spi3d`/`.lut`
+  parsers affecting all prior 1.x and 2.x -- which is precisely the code path a
+  "load an arbitrary LUT" feature exposes. **The pin must never move backwards.**
+- **COST: cold 5.1 min for 20 packages, warm 7 s** (19 restored from the binary cache
+  in 988 ms). Binary cache 7 -> 27 entries, 64.3 -> 164.9 MB; package 95.4 -> 118.3 MB;
+  Trace's own compile time unchanged; **launch to window flat** (med 936.5 vs the
+  control's 945.4 ms over 7 alternating reps, ~60 ms spread within each set).
+- **CI PASSES `--clean-after-build` AND THAT IS A CACHE-SIZE DECISION WITH A NUMBER.**
+  CI caches the whole vcpkg tree; the OIIO graph leaves `buildtrees` at **3,795 MB**
+  and `packages` at **610 MB** against an `installed/` of 610 MB, so an uncleaned
+  entry is ~6 GB of which ~4.4 GB is rubble -- against GitHub's 10 GB LRU limit, that
+  starts evicting the Qt and ffmin caches, i.e. the exact "green or red depending on
+  whether the cache aged out" scar `VCPKG_PIN` already records. **`viewer` and
+  `ffmpeg` features are deliberately NOT requested** (viewer pulls vcpkg's qtbase
+  6.11.1, a different Qt from the shipped 6.11.2; ffmpeg asks for a different feature
+  set from the pinned one and would rebuild it).
+- **`build/` HAD BEEN LINKING THE WRONG FFmpeg SINCE THE 9.0.1 UPGRADE, AND THE STATUS
+  LINE COULD NOT SAY SO.** Found while establishing the control; **pre-existing, not
+  caused by this change** -- the pre-change binary imports it too. `find_library`
+  writes CACHE entries and returns early when one is set, so a tree first configured
+  without `TRACE_FFMPEG_ROOT` keeps vcpkg's answer forever and adding the flag later
+  changes nothing: the cache read `TRACE_FFMPEG_ROOT=C:/tw_ff9/out` beside
+  `FFMPEG_AVCODEC_LIBRARY=C:/vcpkg/.../debug/lib/avcodec.lib`. Import tables:
+  pre-change **`avcodec-62`** (vcpkg 8.1.2, MSVC) against a fresh tree's
+  **`avcodec-63`** (ffmin 9.0.1, GCC) -- the ~18%-slower-decode toolchain, under a
+  status line saying otherwise. **Fixed both ways**: the cache vars are `unset` before
+  searching when the flag is set, and the line now prints the **RESOLVED** path rather
+  than echoing the request -- the old one printed correctly throughout the fault,
+  because it was a claim that could not fail. Same rule as the HUD's `renderer` /
+  `planar` / `font` / `strip` fields. **Any local figure taken in that tree since the
+  9.0.1 upgrade was taken on 8.1.2.**
+- **`/utf-8` COSTS NOTHING BECAUSE QT ALREADY SETS IT.** fmt's PUBLIC option is
+  *required* rather than cosmetic (`fmt/base.h` static_asserts on it, and OIIO's
+  `imageio.h` reaches it) -- but the CONTROL vcxproj already carries
+  `-Zc:__cplusplus -utf-8` from Qt's mkspec and the new one carries
+  `-Zc:__cplusplus -utf-8 /utf-8`. Same MSVC flag, different prefix: a literal
+  duplicate. (All `src/`+`app/` sources are pure ASCII too, so it was a no-op either
+  way -- but the duplicate finding needs no assumption about future sources.)
+- **BOTH EXR QUESTIONS ARE YES, AND THE SEQUENCE PATH NEVER NEEDED WIRING.** There is
+  **no extension whitelist** on it: `openPath` branches mp4/mov and the audio
+  extensions, and *everything else* falls through to `SequenceParser::detect()`, whose
+  regex matches any suffix; `ImageSequenceFrameSource` then calls
+  `StillImageLoader::load`, which dispatches `.exr` to the pre-existing `loadExr`. An
+  isolated single EXR reads `Still | 1920x1080 | Frame: 0/0`; the 217-frame folder
+  reads `Sequence | Frame: 216/216 | Seconds: 9.000` and **played end to end** (217
+  frames at 24fps is 9.04s), warm, ~1.6 GB in ~9 s. **NOT a cadence claim** -- the
+  sequence path exposes no `drop`/`rephase` counters and cold storage is unmeasured.
+- **THE PLAN'S FILE FINDINGS ARE CONFIRMED FROM THE HEADERS**: `nchannels=3`, `R G B`,
+  `half`, `piz` (and `dwaa` on the Redshift beauty), **`chromaticities` ABSENT**. And
+  finding 1 is now MEASURED rather than predicted: `scene_linear` resolves to
+  **`ACEScg`** (the right default) while `getColorSpaceFromFilepath("x.exr")` returns
+  **`Raw`** (the wrong one, from the config's own file rules).
+- **`TRACE_WITH_OCIO=1` IS CURRENTLY A CLAIM NOTHING IN THE PRODUCT TESTS.** Trace
+  references no OCIO symbol yet, so the linker emits no direct import -- the DLL ships
+  only transitively through OIIO. Proven outside the product with a standalone probe
+  (OCIO 2.5.2 live, the Redshift config loading, and the real ARRI `.cube` applying
+  0.18 -> 0.14753/0.15410/0.15887 through `FileTransform`). **Recommended stage-1
+  entry item: an `--ocio-selftest` beside the renderer and shape selftests**, so CI
+  asserts OCIO initialises rather than merely linking. Not built -- new code path,
+  and this stage was scoped to dependencies.
+- **ONE DISCREPANCY REPORTED, NOT FIXED: the HUD reads `ch:4` on a 3-channel file.**
+  `MainWindow.cpp:6539` hard-codes `info.channels = 4` on the frame-handoff path --
+  honest about the DISPLAY BUFFER (always RGBA after handoff), misleading as a label,
+  and only visibly wrong now that EXR opens. What that field should say is a stage-2
+  decision (the plan wants raw channel names there), so it was left alone.
+- **Regression flat, physical panel 5120x1440 @ 239.999Hz**, against a control built
+  from IDENTICAL SOURCE with `-DCMAKE_DISABLE_FIND_PACKAGE_OpenImageIO=ON
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenColorIO=ON` -- the two libraries are the only
+  variable, and both binaries were confirmed on `avcodec-63` first:
+  `scrubbar.ps1` full pool **PASS -- 22 files, 88 legs, `delta 0` throughout** (5.0
+  min warm; Jeep, WeLo and Universe all passed) - 4K H.264 cadence x2 each
+  **100.0% on all four reps**, `drop 0`, `rephase 0`, `tick-late 0`, `tick-stall 0`,
+  buckets `~1x 119`, and `handler>budget 0 of 119 (max 4.8 / 4.5)` **identical to the
+  digit on both binaries** - 4444 x2 each **99.8% on all four**, `0 of 260`, handler
+  avg 20.74-20.75 (the `<0.9x` bucket reads 3/4 new vs 1/1 control, inside this file's
+  recorded 1-10 span -- do not chase it) - 4444 `-SnapRelease` **`target 261 shown 261
+  delta 0`** full-res planar, `hitch 0`, `land 0`, release 22.4 vs 22.6ms - all three
+  selftests green on both - `verify_trace_assets --strict` green at **33 embedded
+  files**, unchanged as it must be.
+- **THE CI PACKAGING CHANGE WAS PROVEN ABLE TO FAIL.** A `dist` built with exactly the
+  CI sequence launches with `PATH` reduced to `System32` and reports
+  `renderer=d3d11 fellback=0 planar=1`; renaming `OpenImageIO.dll` away makes the same
+  launch exit **`0xC0000135` (STATUS_DLL_NOT_FOUND)**. Without the DLL copy CI would
+  have shipped an exe that cannot start. The configure-time assertion was likewise
+  negative-controlled against `build-control/CMakeCache.txt`.
+
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
@@ -4477,7 +4571,15 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    **What is left is 4K ProRes 4444, and it is decode-bound**: 15.4ms of its 17.7ms/frame is the ProRes decoder itself, so no cache or conversion work can reach it and FFmpeg's ProRes decoder has no `lowres` path. ~56 frames/sec, about 2.3x playback, against the owner's "~4x on a fast drag". The only remaining levers are skipping frames — which the shuttle deliberately never does — or decoding off the UI thread. Treat "4x on 4444" as a product decision to take explicitly rather than a bug to fix.
 
    Reverse *playback* (as opposed to dragging) beyond the cache is still the same underlying problem — H.264 needs GOP-aware backward buffering.
-7. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`). **EXR does not open today**: OpenImageIO is not installed in vcpkg and not built in CI, so `TRACE_WITH_OIIO` is undefined in both.
+7. **EXR AND COLOUR MANAGEMENT IS THE OPEN PHASE (2026-08-23). STAGE 0 IS DONE: EXR
+   OPENS.** Assessment `docs/exr-ocio-plan.md`, stage-0 record
+   `docs/exr-stage0-dependencies.md` -- read both before proposing anything here.
+   OpenImageIO **3.1.14.0** and OpenColorIO **2.5.2** are installed from the pinned
+   vcpkg tree and linked in dev and CI, so `TRACE_WITH_OIIO` and `TRACE_WITH_OCIO` are
+   both defined, and a single EXR opens as a still while the 217-frame folder opens and
+   plays as a sequence. **The previous text here -- "EXR does not open today" -- is
+   superseded.** Stages 1-5 (the OCIO-backed Color Transform stage, AOV cycling, the
+   config/display/view dialog, Cryptomatte, the GPU stage) are NOT started.
 
 ## Where scrub stands (2026-08-07, second session)
 
