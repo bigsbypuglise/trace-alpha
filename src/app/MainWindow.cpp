@@ -604,13 +604,12 @@ constexpr unsigned kMsgLogExitSize = 0;
 // One line per event, so a run that never stalls produces an EMPTY FILE rather
 // than no file -- the header is written at open, which is what tells a run that
 // found nothing apart from a run where the knob was never set.
-bool tickLogEnabled() {
-    static const bool on = !qgetenv("TRACE_TICK_LOG").isEmpty()
-                        && qgetenv("TRACE_TICK_LOG") != "0";
-    return on;
-}
-
-void tickLogLine(const QString& line) {
+// Separated from tickLogLine() so the header can be written when the KNOB is
+// read rather than when the first late tick arrives. Created lazily inside
+// tickLogLine(), a clean run left no file at all, which is indistinguishable
+// from a run where the knob was never set -- the "null result from a knob you
+// cannot read back" trap, and it cost a session an hour before it was noticed.
+QFile* tickLogFile() {
     static QFile* f = [] {
         auto* file = new QFile(QDir::tempPath() + "/trace_tickstall.txt");
         if (file->open(QIODevice::WriteOnly | QIODevice::Truncate | QIODevice::Text)) {
@@ -622,10 +621,31 @@ void tickLogLine(const QString& line) {
             file->write("# audio proc = ms of sound HANDED TO THE DEVICE across that gap.\n");
             file->write("#   proc ~= period -> audio played through: the jump is REQUIRED for sync.\n");
             file->write("#   proc ~= 0      -> audio stalled too: the jump is REMOVABLE.\n");
+            file->write("# HEADER ONLY BELOW THIS LINE = the run found no late tick.\n");
             file->flush();
         }
         return file;
     }();
+    return f;
+}
+
+bool tickLogEnabled() {
+    static const bool on = [] {
+        const bool enabled = !qgetenv("TRACE_TICK_LOG").isEmpty()
+                          && qgetenv("TRACE_TICK_LOG") != "0";
+        // Open it now, while we are already inside a one-shot static init, so
+        // the header exists whether or not a late tick ever arrives. Nothing
+        // else changes: the file is still written to only from tickLogLine(),
+        // still one line per late tick, and when the knob is off no QFile is
+        // constructed and no path is touched.
+        if (enabled) tickLogFile();
+        return enabled;
+    }();
+    return on;
+}
+
+void tickLogLine(const QString& line) {
+    QFile* f = tickLogFile();
     if (f && f->isOpen()) {
         f->write(line.toUtf8());
         f->write("\n");
@@ -839,6 +859,14 @@ MainWindow::MainWindow() {
     // bare-key command. The second comparison needs the shortcut table, which
     // is why this moved out of the tail of setupMenus().
     warnOnDuplicateMnemonics();
+
+    // Open the tick log HERE, at startup, rather than leaving it to the first
+    // frame tick. Bound to the tick it would only appear once something played,
+    // so a knob set on a session that never pressed Play still left no file --
+    // the same "did it find nothing, or was it never on?" ambiguity in a
+    // smaller costume. Pure diagnostic: when TRACE_TICK_LOG is unset this
+    // constructs nothing and touches no path.
+    tickLogEnabled();
 
     // Open Recent (spec phase 11). Reads stored strings and builds the submenu
     // from them; NOTHING here touches the filesystem, so a list full of
