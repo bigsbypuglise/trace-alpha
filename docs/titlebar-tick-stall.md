@@ -231,3 +231,55 @@ on one line:
     t=3.37s period=160.17ms handler=2.04ms budget=41.67ms sizemove=1
 
 160ms of delivery against 2ms of work, inside the modal move loop.
+
+## Owner confirmation of the instrument (2026-08-23) — and a new lead
+
+Twelve holds, physical panel, `TRACE_TICK_LOG=1`, shipping HUD hidden. Raw log
+kept at `docs/titlebar-tick-stall-owner-log.txt`. Every line:
+
+    t=4.31s period=558.44ms handler=1.91ms budget=41.67ms sizemove=1
+    t=2.50s period=548.59ms handler=2.12ms budget=41.67ms sizemove=1
+    t=4.43s period=514.15ms handler=2.16ms budget=41.67ms sizemove=1
+    t=6.21s period=508.01ms handler=1.95ms budget=41.67ms sizemove=1
+    t=1.70s period=538.77ms handler=2.16ms budget=41.67ms sizemove=1
+    t=3.95s period=539.59ms handler=2.20ms budget=41.67ms sizemove=1
+    t=6.10s period=521.42ms handler=2.01ms budget=41.67ms sizemove=1
+    t=1.79s period=524.03ms handler=2.29ms budget=41.67ms sizemove=1
+    t=3.76s period=533.28ms handler=2.15ms budget=41.67ms sizemove=1
+    t=5.87s period=520.33ms handler=1.91ms budget=41.67ms sizemove=1
+    t=3.40s period=529.28ms handler=2.17ms budget=41.67ms sizemove=1
+    t=5.12s period=536.70ms handler=2.11ms budget=41.67ms sizemove=1
+
+**Twelve of twelve, `sizemove=1`, handler 1.91-2.29ms, period 508-558ms.** No
+stall in the whole session was anything else — no false positives to filter and
+no second cause. The instrument sees the fault, attributes it, and the numbers
+land on the doc's own hand-measured 512ms.
+
+(The `t=` values are not monotonic because `sessionClock_` restarts on each
+Play; they are position within a run, not a session timeline.)
+
+### THE SPREAD IS TOO TIGHT FOR QUEUE STARVATION, AND 500 IS A REAL NUMBER HERE
+
+`GetDoubleClickTime()` on this box returns **500ms**, and every one of the twelve
+stalls is *just over* it: 508, 514, 520, 521, 524, 529, 533, 537, 539, 549, 558.
+Range 50ms on a 520ms mean, i.e. **±5%**.
+
+That is the signature of a **timeout**, not of a queue that happens to be busy.
+Input traffic varies run to run; a bound does not. It is evidence *against* the
+standing hypothesis at the top of this document — "`WM_TIMER` is starved because
+the input queue is not empty at loop entry" — because a motionless press
+generates almost no input, and because queue congestion would not land twelve
+samples inside 50ms of each other.
+
+**It is a correlation, not a mechanism, and it is not yet proven.** Proving it by
+changing the system double-click time is a machine-wide settings change and was
+not taken. What separates the two families non-invasively is stated in the Job 2
+note below.
+
+**Do not build the `SetTimer` + `WM_TIMER` fix off the back of this.** Beyond the
+owner's own caution, Qt's Windows event dispatcher already implements `QTimer`
+with real Win32 timers, so `playTimer_` is *already* a `WM_TIMER` — a second one
+would be the same mechanism that is currently failing, and would buy nothing by
+construction. That needs confirming against the Qt 6.11.2 source before it is
+stated as fact, but it is the reason the obvious fix is not the first thing to
+try.

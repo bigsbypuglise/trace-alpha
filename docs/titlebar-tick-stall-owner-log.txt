@@ -1,0 +1,17 @@
+# TRACE_TICK_LOG -- one line per tick delivered late.
+# period = handler entry to handler entry (DELIVERY).
+# handler = what that tick actually did (WORK).
+# period >> handler means the tick was NOT CALLED.
+# sizemove=1 means Windows' modal move/size loop owned the thread.
+t=4.31s period=558.44ms handler=1.91ms budget=41.67ms sizemove=1
+t=2.50s period=548.59ms handler=2.12ms budget=41.67ms sizemove=1
+t=4.43s period=514.15ms handler=2.16ms budget=41.67ms sizemove=1
+t=6.21s period=508.01ms handler=1.95ms budget=41.67ms sizemove=1
+t=1.70s period=538.77ms handler=2.16ms budget=41.67ms sizemove=1
+t=3.95s period=539.59ms handler=2.20ms budget=41.67ms sizemove=1
+t=6.10s period=521.42ms handler=2.01ms budget=41.67ms sizemove=1
+t=1.79s period=524.03ms handler=2.29ms budget=41.67ms sizemove=1
+t=3.76s period=533.28ms handler=2.15ms budget=41.67ms sizemove=1
+t=5.87s period=520.33ms handler=1.91ms budget=41.67ms sizemove=1
+t=3.40s period=529.28ms handler=2.17ms budget=41.67ms sizemove=1
+t=5.12s period=536.70ms handler=2.11ms budget=41.67ms sizemove=1
