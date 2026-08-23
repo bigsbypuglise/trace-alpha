@@ -221,9 +221,20 @@ so the libraries are the only variable.
   **inside this file's recorded 1-10 run-to-run span**, and CLAUDE.md's standing
   instruction is not to chase a 4444 bucket spread. Presented rate, `drop` and
   `handler>budget` are identical.
+- **4K 60fps cadence x2 each -- the tightest budget in the pool at 16.67 ms, so the
+  place any added per-frame cost would show first: 100.0% on all four reps**, 162
+  frames, `drop 0`, `rephase 0`, `tick-late 0`, `tick-stall 0`,
+  `handler>budget 0 of 161` with max **4.2/4.4 (new)** against **4.3/4.4
+  (control)**. The `<0.9x` bucket spans 0-7 on the new binary and 1-5 on the
+  control, i.e. overlapping run-to-run spread on both.
 - **4444 `scrub -SnapRelease`, both binaries:** `target 261 shown 261 delta 0`,
   full-res `YUV444P12 planar`, `walk 0f`, `hitch 0`, `land 0`; release 22.4 ms
   (new) against 22.6 ms (control).
+- **4K H.264 reversal drag (real mouse), both binaries:** `scrub exact target 2
+  shown 2 delta 0`, **`hitch 1`** on both -- the recorded figure -- `seeks 4`,
+  `behind 0/24f`, `supply 95/96%`, release 49.9 ms (new) against 51.0 ms (control).
+- **`transitions.ps1 -All`: 25 of 25 PASS** on the new binary
+  (`TRACE_TRANSPORT_BAR=1`, `TRACE_HUD=0`, on the clip its header names).
 - **Selftests on both binaries:** `renderer=d3d11 fellback=0 planar=1`,
   `OK - 11 shapes x 4 scale factors` (44 rows), `--scrub-selftest` exit 0 on all
   88 legs. `verify_trace_assets.py --strict --no-pillow` green at **33 embedded
