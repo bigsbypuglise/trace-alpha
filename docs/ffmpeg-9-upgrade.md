@@ -134,3 +134,72 @@ would have made the toolchain A/B compare vcpkg with vcpkg. CI was never exposed
 (it copies `FFMPEG_BIN` over the top explicitly). At 9.0.1 the sonames no longer
 collide, so the substitution cannot happen: the right DLLs are present or the app
 does not start.
+
+## Accepted on CI, run 32605822554 (`de7bae4`) — green
+
+A genuine cold build: **both caches missed by construction**, the vcpkg key
+because it now carries the pin and the ffmin key because it hashes the build
+script this change edited. So the runner fetched a pinned vcpkg and compiled
+FFmpeg 9.0.1 from source with none of the toolchain preinstalled.
+
+Every verification step read individually rather than trusted from its tick.
+
+**The pin took effect on a clean runner**
+
+```
+Cache not found for input keys: vcpkg-v3-windows-2022-ffmpeg-x64-17f35ad2418007a895ced8a4cece4ab34068a58d
+vcpkg pinned at 17f35ad2418007a895ced8a4cece4ab34068a58d
+```
+
+The second line is the assertion, not the request — it is `rev-parse HEAD` read
+back after the fetch.
+
+**FFmpeg 9.0.1 built from scratch, from the pinned source**
+
+```
+Cache not found for input keys: ffmin-24e3619000...-windows-2022-x64
+  ffmpeg.zip   ok  sha256 D16837DDBB0963753AA2739971A09B07...
+src   : D:\a\_temp\ffmin\work\ffmpeg\FFmpeg-n9.0.1
+```
+
+**The new sonames, and the byte sizes are IDENTICAL to the local build**
+
+```
+  import lib avcodec.lib      <- avcodec-63.def
+  import lib avformat.lib     <- avformat-63.def
+  import lib avutil.lib       <- avutil-61.def
+  import lib swresample.lib   <- swresample-7.def
+  import lib swscale.lib      <- swscale-10.def
+avcodec-63.dll       16,547,854 bytes      avformat-63.dll    1,957,902 bytes
+avutil-61.dll         1,136,654 bytes      swresample-7.dll     181,262 bytes
+swscale-10.dll        2,119,694 bytes
+minimal FFmpeg DLLs: 20.9 MB
+dependency check: all DLLs import only Windows system libraries
+```
+
+Byte-for-byte the same sizes as the local build of the same script — pinned
+compiler, pinned assembler, pinned source, reproduced on a machine that had none
+of them. That is what the pinning was for, and it is the first time it has been
+demonstrated across two machines rather than asserted.
+
+**The rest, in order**
+
+```
+FFmpeg detected by CMake.
+Audio dependencies detected by CMake.
+Package verified: 6 required files present, 95.6 MB total.
+trace-selftest: renderer=d3d11 fellback=0 planar=1
+trace-shape: OK - 11 shapes x 4 scale factors
+```
+
+**Both selftests run `dist\trace-windows-x64\Trace.exe` — the PACKAGED binary,
+not the build tree** — so "the package launches" is tested rather than inferred.
+`fellback=0` means the runner took the **hardware** D3D11 path; the check accepts
+`d3d11 (warp)` by prefix, so a WARP pass would look identical in the step status
+and different in that line. Artifact `trace-windows-x64`, 40.7 MB.
+
+Package total 95.4 → **95.6 MB**, consistent with the marginally larger 9.0.1
+DLL set and nothing else.
+
+**FFmpeg 9.0.1 is accepted.** Qt is the next independent step and is deliberately
+not mixed into this one.
