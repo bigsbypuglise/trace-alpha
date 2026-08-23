@@ -733,6 +733,130 @@ throughout; nothing about playback behaviour changed.
   shipping-path cost of everything added is two comparisons and one `std::max`
   per tick behind a `tickFrameDurationMs_ > 0` guard, plus one HUD field.
 
+**THE TICK INSTRUMENTS COST NOTHING, MEASURED AT THE PANEL (2026-08-23) — the
+outstanding regression above is DONE and the nine commits are pushed.** Control
+built from `cb6b04b` in a worktree and run beside every leg; the two binaries
+were proven distinct by their own strings (`tick-late`, `tick-stall`,
+`smooth/drag`, `TRACE_TICK_LOG` PRESENT in HEAD, ABSENT in control) rather than
+by a hash alone, and their DLL sets were made **byte-identical by hash** so the
+executable is the only variable.
+
+- **`handler max` DID NOT MOVE**, which was the owner's stated bar. 4K H.264:
+  control 4.7/5.6 against HEAD **4.3/4.5**; 1080p: control 1.7/1.8 against HEAD
+  **1.6/1.7**; audio-mastered 4K: control 4.3/4.8 against HEAD **4.4/4.6**.
+  HEAD sits at or below the control's own spread on every configuration.
+  `drop 0`, `rephase 0`, `handler>budget 0` throughout. **Read `handler` on the
+  HUD as last/avg — the true max is the `(max N)` inside `handler>budget`**, and
+  quoting the two-value field as avg/max is how this gets misread.
+- **THE FILE LOG IS FREE TOO, INCLUDING WITH AUDIO PLAYING** — the expensive
+  branch, since `audio_.stats()` plus a six-argument format runs every tick only
+  when the sink is live. Audio-mastered 4K with `TRACE_TICK_LOG=1` reads handler
+  max **4.7/4.4** against the same build's 4.4/4.6 without it. The knob was
+  proven LIVE first (one `tickstall.ps1 -Mode caption` run wrote
+  `period=285.29ms handler=2.18ms sizemove=1`), because a null result from a
+  knob you cannot read back is not a result.
+- **THE OWNER'S RECORDED `handler 0.63/0.70` DOES NOT REPRODUCE ON ANY POOL CLIP
+  and is NOT a regression.** The cheapest clip measured reads 1.03/1.07 (1080p).
+  Everything else in that envelope matches to the digit — presented 24.00/24.00,
+  ~100%, `drop 0`, period 40.x/41.67/43.x, jitter ~-1.0/0.5/1.9 — so the handler
+  term is clip- and window-size-dependent (it carries upload and draw, which
+  scale with the drawn size). **Control and HEAD agree on it**, which is the only
+  comparison that answers the question. Ruled non-blocking by the owner.
+- **THE TICK LOG NOW MATCHES ITS OWN COMMENT.** The comment promised that a
+  header written at open distinguishes "found nothing" from "the knob was never
+  set"; the code created the file lazily inside `tickLogLine()`, so a clean run
+  left **no file at all** and the two cases were indistinguishable. `tickLogFile()`
+  is separated out and opened from `tickLogEnabled()`'s static init, which is
+  called once from the **constructor** — bound to the first tick it still would
+  not appear on a session that never pressed Play. Verified both ways: knob on
+  and never played leaves **9 header lines, 0 data lines**; knob off leaves **no
+  file**. Nothing else moved — same per-tick cached-bool read, same one line per
+  late tick.
+
+**A TOOLTIP CAN BE MISTAKEN FOR THE MAIN WINDOW, AND IT VOIDS A RUN SILENTLY
+(2026-08-23; new `scripts/measure/tracewindow.ps1`).** `Get-Process -Name Trace
+| Where MainWindowHandle -ne 0` returns the process's first top-level VISIBLE
+window — **and a tooltip is one**. With the pointer parked over Trace's chrome
+(any earlier leg can leave it there; a caption leg did), the handle resolves to a
+**55x19** tooltip: `SendKeys` goes nowhere, `capture.ps1` builds a 55x19 bitmap
+or throws, and the run reports **`frames 0 | ticks 0 | presents 0`** — which
+reads exactly like a build that cannot play. It hit **both binaries on every
+clip** mid-session, an hour after the same 4K clip had recorded 120 frames.
+**Reproduced deliberately** (hover Minimize → old lookup 55x19, hover Close →
+35x19, new resolver 1294x1122 both times) and fixed at the shared foundation:
+park the cursor clear, reject a rect under 300px, verify foreground by reading
+`GetForegroundWindow()` back with `AttachThreadInput` and the Alt-tap unlock.
+`play.ps1` and `capture.ps1` route through it, so `cadence.ps1` and
+`gatec_perf.ps1` inherit it; **`scrubbar.ps1`/`scrubsweep.ps1` are immune by
+construction** — they drive `--scrub-selftest` through `Start-Process` and
+resolve no window. **~35 other scripts still carry their own copy of the raw
+lookup** and are unconverted.
+
+- **`play.ps1` NOW ASSERTS THE RUN HAPPENED**, retries three times, and reports
+  failure on the **warning stream** — every caller pipes it to `Out-Null`, which
+  swallows the success stream and would hide the one message saying the figure
+  is void. `cadence.ps1` and `gatec_perf.ps1` hard-stop on its exit code.
+- **THE FIRST MOTION CHECK FAILED A CORRECT BUILD, WHICH IS THE TRAP THIS
+  PROJECT KEEPS PAYING FOR.** Picture-only motion reads **0.0%** on the 1x1 and
+  4x5 ProRes ads for their first seconds — they open on a static slate, which
+  their own `00:59:53:00` leader timecode predicts — while the HUD showed
+  `frames 217, 100.0% of real time, drop 0`. It samples a **second band, the
+  HUD**, whose per-tick counters change whatever the picture does, and passes if
+  either moved. **Proven able to fail**: paused reads `picture 0.0% / hud 0.00%
+  STATIC`, the same static-slate clip playing reads `picture 0.1% / hud 5.22%
+  advancing`. A caller on deliberately static material in the shipping
+  HUD-hidden configuration passes `-RequireMotion:$false`.
+
+**THE REGRESSION AT HEAD, PHYSICAL PANEL 5120x1440 @ 239.999Hz, FLAT.**
+`scrubbar.ps1` full pool **PASS — 22 files, 88 legs, `delta 0` throughout**,
+every leg's own verdict PASS and `kf-land 0` on 86 of 88 rows · cadence x2 each,
+`TRACE_NO_AUDIO=1`, all `drop 0` / `rephase 0` / `tick-late 0` / `tick-stall 0` /
+`sizemove 0`: **4K H.264 24 100.0%** (`0 of 119`) · **1080p 24 100.0%**
+(`0 of 239`) · **1080p CFR 30 100.0%** (`0 of 299`, `sched tick 33ms`) · **4K 60
+100.0%** (`0 of 161`, the 16.67ms budget) · **422 HQ 99.9/99.8%** (`0 of 167`) ·
+**4444 99.8% x2** (`0 of 260`) · **1x1 and 4x5 ProRes 100.0% x2 each** · two
+4s edge clips **100.0%** · 4444 `-SnapRelease` **`target 261 shown 261 delta 0`**
+full-res planar, `release 21.9ms`, `hitch 0`, `land 0` · 4K H.264 reversals
+`delta 0`, **`hitch 1`**, `seeks 4`, `rev-hit 96.2%`, `cache 152/152` · GATE C
+422 HQ **`sws 14.58 -> 3.57ms`** planar (recorded 3.52) with all three configs
+`drop 0` · all three selftests green on **both** binaries (`d3d11 fellback=0
+planar=1`, `11 shapes x 4 scale factors`, `--scrub-selftest`) ·
+`verify_trace_assets --strict` green at **33 embedded files**.
+
+- **NO 30fps CLIP EXISTS IN THE POOL** — it is all 24/23.976 plus one 60. The
+  CFR 30 row above is a **session-generated fixture** (`fps=30`, `libx264`,
+  `-fps_mode cfr`, 301 frames, `r_frame_rate` and `avg_frame_rate` both `30/1`),
+  kept in scratch and not committed. **The pool's ProRes is 422 HQ (`apch`) and
+  4444 (`ap4h`) only; there is no plain 422 (`apcn`)**, including the 1x1 and 4x5
+  ads, which are also `apch`.
+- **A FULL-POOL SWEEP IS ~3 MINUTES WARM AND WAS ~2 HOURS COLD, and the cold run
+  failed a row.** The first `scrubbar.ps1` of the session read **FAIL — Jeep leg
+  2, `p2p_end 231.6 > 191ms`**, with the other 21 files passing. That is the row
+  CLAUDE.md already names as the recorded flake-risk boundary file, and its own
+  instruction — a Jeep-only failure is variance to re-run, WeLo or Universe
+  failing is decisive — held: **WeLo and Universe both passed**, the leg's own
+  verdict was PASS, `behind_end 0` and `delta 0`. Five standalone Jeep runs read
+  leg 2 `p2p end` **90.9 / 85.5 / 113.6 / 93.3 / 111.0ms**, roughly half the bar,
+  and the re-run passed the whole pool. The dominant variable is the **OS file
+  cache** — the first sweep read the whole multi-GB pool from disk — with
+  harness polling on top of it. **Do not poll a running sweep, and do not read a
+  cold first sweep as a regression; re-run it warm.**
+- **`gatec_perf.ps1`'s SCRUB LEG HAS BEEN STALE SINCE PHASE 6 and is unfixed.**
+  Its configs set only `TRACE_RENDERER`, so the docked bar is not in the layout
+  and `scrub.ps1`'s groove scan finds nothing — the scrub rows read `frames 0`
+  and `display -1x-1` with `renderer cpu +overlay` printed on the capture that
+  proves it. Pre-existing, not this session's, and the PLAY rows it exists for
+  are valid. The scrub regression was taken separately with
+  `TRACE_TRANSPORT_BAR=1`. Left as a known harness gap rather than changing what
+  that script measures.
+- **`gateb_visual.ps1` is OWNER-JUDGEMENT MATERIAL, not a verdict** (its own
+  header says the abdiff figure is the weaker evidence). At HEAD: `large`
+  **0.017%, max delta 6** and `fullscreen` **0.016%, max delta 5** — both
+  NEAR-IDENTICAL; `fit-window` **2.66%, max 34**; `scale150` **13.4%, max 255**.
+  **A max channel delta of 255 is the different-FRAME signature** this file
+  already records for `overlay.ps1`, not a rendering difference, and §20.3's
+  150% case is owner-accepted since GATE B. Not investigated further.
+
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
