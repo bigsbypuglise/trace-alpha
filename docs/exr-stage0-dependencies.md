@@ -303,7 +303,17 @@ trace-selftest: renderer=d3d11 fellback=0 planar=1
 trace-shape: OK - 11 shapes x 4 scale factors
 ```
 
-Four of those are worth pointing at. **`fellback=0` is the hardware path** -- the
+**The next run confirmed the warm path, which is the half that decides whether this
+is a one-time cost.** Run
+[32650343995](https://github.com/bigsbypuglise/trace-alpha/actions/runs/32650343995)
+(docs-only, so the same toolchain) logged
+`Cache hit for: vcpkg-v4-windows-2022-deps-x64-17f35ad2...` followed by
+`Cache restored from key: ...`; **step 6 was skipped outright (0.0 min)** and the
+restore cost 0.2 min. **The entire job ran in 3.8 min against ~42 min cold.** So on
+CI the added cost of these two libraries is 37.8 min once, and zero build time on
+every run after it -- which is the same shape as the ffmin FFmpeg cache beside it.
+
+Four of the shipped lines are worth pointing at. **`fellback=0` is the hardware path** -- the
 check accepts `d3d11 (warp)` by prefix, so a WARP pass would look identical in the
 step's tick and different in that line. **`118.3 MB` matches the locally built
 `dist` to the digit**, so the packaging is deterministic across the two machines.

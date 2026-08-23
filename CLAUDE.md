@@ -960,7 +960,11 @@ both from the pinned vcpkg tree, linked in dev and CI.
   **`--clean-after-build` is demonstrated rather than reasoned: the vcpkg cache
   upload was 268,812,508 B (256 MB compressed) against a ~6 GB uncleaned tree.**
   Note the `~453 MB` and `~719 MB` figures in the same log are the Qt and
-  minimal-FFmpeg caches being RESTORED, not this one.
+  minimal-FFmpeg caches being RESTORED, not this one. **THE WARM PATH IS CONFIRMED
+  TOO** (run `32650343995`, docs-only): `Cache hit for: vcpkg-v4-...` then `Cache
+  restored from key: ...`, **step 6 SKIPPED at 0.0 min**, and the **whole job in
+  3.8 min against ~42 min cold**. So CI pays 37.8 min once and zero build time
+  after -- the same shape as the ffmin cache beside it.
 - **THE CI PACKAGING CHANGE WAS PROVEN ABLE TO FAIL.** A `dist` built with exactly the
   CI sequence launches with `PATH` reduced to `System32` and reports
   `renderer=d3d11 fellback=0 planar=1`; renaming `OpenImageIO.dll` away makes the same
