@@ -1124,6 +1124,20 @@ private:
     // carries its own max rather than being read off the shared one.
     double maxPeriodInSizeMoveMs_ = 0.0;
 
+    // Audio state snapshotted at the previous tick, so a LATE tick can report
+    // what the sink did while the UI thread was not running. Only read when
+    // TRACE_TICK_LOG is set -- stats() is not free and the shipping tick must
+    // not pay for a diagnostic.
+    //
+    // processedUSecs is the decisive term and it is the ONE audio quantity
+    // that can see through a frozen UI thread: it counts bytes handed to the
+    // device, and the device is pulled by its own MMCSS thread. underruns and
+    // silenceBytes count the RING side, so a device that simply stops being
+    // pulled leaves both at 0 while going quiet -- they cannot answer this on
+    // their own, which is a trap this project has already recorded once.
+    long long tickLogPrevProcUSecs_ = -1;
+    double tickLogPrevClockS_ = -1.0;
+
     // Cadence distribution for the current run. The presented RATE averages, and
     // reads 98-99% under two unrelated faults, so it cannot say which one a file
     // is suffering from -- see the long comment at the present site. These are
@@ -1658,11 +1672,6 @@ private:
     QRect sizeMoveStartRect_;
     bool inSizeMove_ = false;
 
-    // Caption presses this build handled itself instead of handing to
-    // DefWindowProc (TRACE_CAPTION_FASTMOVE). On the HUD because a knob that
-    // silently did nothing would look exactly like a fix that worked -- the
-    // same reason , ,  and  are on there.
-    long long captionFastMoves_ = 0;
 
     std::optional<trace::core::MediaItem> currentMedia_;
     std::optional<trace::core::LoadedImageInfo> currentImage_;
