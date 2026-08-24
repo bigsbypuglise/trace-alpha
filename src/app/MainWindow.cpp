@@ -4412,6 +4412,18 @@ void MainWindow::setupExrPassActions(QMenu* viewMenu) {
     viewMenu->addAction(prevPassAction_);
     viewMenu->addAction(nextPassAction_);
 
+    // THE PASS LIST. A submenu rather than a flat run of rows, because a
+    // multilayer render can carry dozens of AOVs and they would otherwise push
+    // every item below them off the bottom of View.
+    //
+    // It is rebuilt when the LIST changes and never on aboutToShow: identical
+    // cost today, but aboutToShow is the natural home for a later "just check
+    // quickly", and this menu must never touch a file. The rows are drawn from
+    // the pass list the loader already built -- there is no second enumeration.
+    passMenu_ = viewMenu->addMenu(tr("E&XR Pass"));
+    passGroup_ = new QActionGroup(this);
+    passGroup_->setExclusive(true);
+
     // Hoisted onto the window like every other menu action with a shortcut:
     // since roadmap step 7 the menu bar lives in an auto-hiding strip, and
     // QShortcutMap declines a shortcut whose only widget is not visible. Ctrl+O
@@ -4432,6 +4444,81 @@ void MainWindow::syncExrPassActions() {
     const bool cyclable = image && image->passes.size() > 1;
     if (prevPassAction_) prevPassAction_->setEnabled(cyclable);
     if (nextPassAction_) nextPassAction_->setEnabled(cyclable);
+    rebuildExrPassMenu();
+    if (passMenu_) passMenu_->setEnabled(image && !image->passes.empty());
+
+    // The tick follows the LOADED pass, never the requested one -- same rule as
+    // the overlay message. choosePass() falls back when a frame does not carry
+    // the requested pass, and a menu ticking something that is not on screen is
+    // the disagreement this whole sync exists to prevent.
+    if (passGroup_ && image) {
+        const auto rows = passGroup_->actions();
+        for (int i = 0; i < rows.size(); ++i) {
+            QSignalBlocker block(rows.at(i));
+            rows.at(i)->setChecked(i == image->activePass);
+        }
+    }
+}
+
+// REBUILT ONLY WHEN THE PASS LIST CHANGES. syncExrPassActions() runs from
+// refreshHud(), i.e. after every transport action and every loaded frame, so an
+// unconditional rebuild would destroy and recreate a menu several times a second
+// during playback -- and would do it while the user might have it open.
+//
+// The key is the joined display names plus the count, which is a property of the
+// FILE's channel layout: every frame of a sequence produces the same one, so a
+// 97-frame sequence builds this menu exactly once.
+void MainWindow::rebuildExrPassMenu() {
+    if (!passMenu_ || !passGroup_) return;
+    const auto* image = currentImage_.has_value() ? &currentImage_.value() : nullptr;
+
+    QString key;
+    if (image) {
+        for (const auto& p : image->passes) {
+            key += p.displayName;
+            key += QLatin1Char('\x1f');
+            key += p.duplicateOf;
+            key += QLatin1Char('\x1e');
+        }
+    }
+    if (key == passMenuKey_) return;
+    passMenuKey_ = key;
+
+    for (QAction* old : passGroup_->actions()) {
+        passGroup_->removeAction(old);
+        old->deleteLater();
+    }
+    passMenu_->clear();
+
+    if (!image || image->passes.empty()) {
+        // A row that says why the menu is empty, rather than an empty menu: the
+        // same choice the Share menu's LucidLink row makes.
+        QAction* none = passMenu_->addAction(tr("No EXR passes in this media"));
+        none->setEnabled(false);
+        return;
+    }
+
+    for (int i = 0; i < static_cast<int>(image->passes.size()); ++i) {
+        const auto& p = image->passes[static_cast<std::size_t>(i)];
+        // NAME, CLASS, AND THE DUPLICATE IF THERE IS ONE. The class is on the
+        // row because it decides the display mapping, so a pass that will be
+        // normalised says so before it is chosen rather than after.
+        QString label = QString("%1  -  %2").arg(p.displayName,
+                                                 trace::core::passClassName(p.cls));
+        if (!p.duplicateOf.isEmpty()) label += tr("  =  %1").arg(p.duplicateOf);
+        if (!p.ambiguous.isEmpty())
+            label += tr("  [%n unplaceable channel(s)]", "", p.ambiguous.size());
+        // Mnemonics are NOT assigned: a pass name is file data, and letting it
+        // claim an Alt key would make the menu's keyboard behaviour a property
+        // of whatever a renderer happened to call an AOV.
+        label.replace(QLatin1Char('&'), QLatin1String("&&"));
+
+        QAction* row = passMenu_->addAction(label);
+        row->setCheckable(true);
+        row->setChecked(i == image->activePass);
+        passGroup_->addAction(row);
+        connect(row, &QAction::triggered, this, [this, i]() { applyExrPass(i, "pass menu"); });
+    }
 }
 
 // WHAT A PASS CHANGE ACTUALLY IS: a different set of CHANNELS read from the same
@@ -4460,15 +4547,23 @@ void MainWindow::syncExrPassActions() {
 // pass in the list has an empty layer name, so "" is never what gets set.
 void MainWindow::cycleExrPass(int delta) {
     if (!currentImage_.has_value()) return;
-    const auto& passes = currentImage_->passes;
-    const int n = static_cast<int>(passes.size());
+    const int n = static_cast<int>(currentImage_->passes.size());
     if (n < 2) return;
-
     const int current = currentImage_->activePass;
     const int from = (current >= 0 && current < n) ? current : 0;
-    const int to = ((from + delta) % n + n) % n;
+    applyExrPass(((from + delta) % n + n) % n, delta > 0 ? "next pass" : "previous pass");
+}
 
-    stillLoader_.setPreferredPass(passes[static_cast<std::size_t>(to)].layer);
+// THE ONE PLACE A PASS CHANGE HAPPENS. `[`, `]` and every row of the View
+// submenu route through here, so the reload, the cache clear, the overlay and
+// the menu tick cannot disagree about which pass is showing.
+void MainWindow::applyExrPass(int index, const char* reason) {
+    if (!currentImage_.has_value()) return;
+    const auto& passes = currentImage_->passes;
+    const int n = static_cast<int>(passes.size());
+    if (index < 0 || index >= n) return;
+
+    stillLoader_.setPreferredPass(passes[static_cast<std::size_t>(index)].layer);
     frameCache_.clear();
 
     QString error;
@@ -4483,20 +4578,26 @@ void MainWindow::cycleExrPass(int delta) {
     // that is not on screen, which is the one thing this message exists to
     // prevent.
     //
-    // The existing transient toast, not a dedicated pass overlay: that overlay
-    // is still on part 2's list. This is the feedback the keyboard surface needs
-    // in order to be testable at all, through machinery ~35 other sites use.
+    // THE EXISTING COMPOSITED TOAST IS THE OVERLAY, deliberately, rather than a
+    // second mechanism beside it. It already draws over the picture, outside the
+    // transport's fade, and expires on its own timer -- which is the whole of
+    // what "a small temporary overlay naming the pass" asks for. Building a
+    // second one would be the duplication roadmap step 3 removed from the empty
+    // state, and would give one message two sources of truth.
     const auto* shown = currentImage_->activePassInfo();
     if (shown) {
-        showTransientMessage(tr("Pass %1/%2: %3")
-                                 .arg(currentImage_->activePass + 1)
-                                 .arg(n)
-                                 .arg(shown->displayName),
-                             1800);
+        QString msg = tr("Pass %1/%2: %3  (%4)")
+                          .arg(currentImage_->activePass + 1)
+                          .arg(n)
+                          .arg(shown->displayName,
+                               trace::core::passClassName(shown->cls));
+        if (!shown->duplicateOf.isEmpty())
+            msg += tr("  - same picture as %1").arg(shown->duplicateOf);
+        showTransientMessage(msg, 1800);
     }
 
     syncExrPassActions();
-    refreshHud(delta > 0 ? "next pass" : "previous pass");
+    refreshHud(reason);
 }
 
 // The tick follows the STATE rather than the last click, so a configuration that

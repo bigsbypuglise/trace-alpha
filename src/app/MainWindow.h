@@ -1672,6 +1672,9 @@ private:
     QAction* loadLutAction_ = nullptr;               // "Load LUT..."
     QAction* resetColorTransformAction_ = nullptr;   // back to raw
     QAction* prevPassAction_ = nullptr;               // EXR pass cycling, `[`
+    QMenu* passMenu_ = nullptr;                       // View > EXR Pass
+    QActionGroup* passGroup_ = nullptr;
+    QString passMenuKey_;                             // what passMenu_ was built from
     QAction* nextPassAction_ = nullptr;               // EXR pass cycling, `]`
 
     // Persisted so a session's transform survives a restart. A configuration
@@ -1697,6 +1700,13 @@ private:
     void setupExrPassActions(QMenu* viewMenu);
     void syncExrPassActions();
     void cycleExrPass(int delta);
+    // The one place a pass change happens. `[`, `]` and every row of the View
+    // submenu route through it, so the reload, the cache clear, the overlay and
+    // the tick cannot disagree about which pass is showing.
+    void applyExrPass(int index, const char* reason);
+    // Rebuilt only when the pass LIST changes, never per refresh: the key is the
+    // joined display names, so a 97-frame sequence builds the menu once.
+    void rebuildExrPassMenu();
     // Pushes the stage to the viewer and re-delivers the CURRENT frame, so
     // toggling is visible immediately on a paused picture without reopening
     // media. `reason` reaches the HUD.
