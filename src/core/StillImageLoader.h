@@ -70,6 +70,16 @@ private:
     bool loadExr(const QString& path, LoadedImageInfo& out, QString& error) const;
 
     QString preferredPass_;
+
+    // DUPLICATE PASSES, MEASURED ONCE PER CHANNEL LAYOUT RATHER THAN PER FRAME.
+    //
+    // Keyed on the file's joined channel names, which is constant across every
+    // frame of a sequence -- so a 97-frame sequence pays the comparison on its
+    // first frame and never again. The relationship is taken from that frame and
+    // asserted for the rest, which is what "measured at open" means and is
+    // stated on the HUD rather than implied.
+    mutable QString duplicateKey_;
+    mutable QStringList duplicateLabels_;   // parallel to the pass list
 };
 
 } // namespace trace::core
