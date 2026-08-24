@@ -857,9 +857,171 @@ planar=1`, `11 shapes x 4 scale factors`, `--scrub-selftest`) ·
   already records for `overlay.ps1`, not a rendering difference, and §20.3's
   150% case is owner-accepted since GATE B. Not investigated further.
 
+**EXR/COLOUR STAGE 2 PART 1 IS DONE (2026-08-24): A FLOAT DISPLAY BUFFER ON THE
+EXR PATH, AND ONLY THERE.** Record `docs/exr-stage2-float-buffer.md` — read it
+before touching the EXR path. Commits `28cca98` (float), `2da029e` (Copy Frame),
+`f31bf57` (record), on branch `exr-stage0-dependencies`, **pushed, NOT merged —
+the panel regression is the gate on merging and the merge stays the owner's**.
+**PART 2 IS NOT STARTED**; what it owes is listed at the end of this block.
+
+- **CHECK THE DISPLAY BEFORE MEASURING ANYTHING, AND DO NOT SKIP IT.** This
+  session ran **over Parsec, on a 1920x1080 @ 59.999Hz virtual display**
+  (`parsecd` running, `QueryDisplayConfig` naming that as the active path) — and
+  **the 4090's own panel read 5120x1440 @ 59Hz, NOT 239.999Hz**. So the panel was
+  in a different mode from every recorded figure in this file, as well as being
+  behind a remote session. **Neither the Parsec display nor a 59Hz panel is the
+  configuration the records were taken on.** `scripts/measure/refresh.ps1` is the
+  check and it takes seconds; run `Get-CimInstance Win32_VideoController` beside
+  it, because `refresh.ps1` reports the ACTIVE path and will happily describe the
+  virtual display without ever saying the panel changed underneath it. **No
+  absolute figure in `docs/exr-stage2-float-buffer.md` is a panel baseline** —
+  that doc says so at the top, and it is why THE FULL PANEL REGRESSION IS
+  OUTSTANDING and is the merge gate.
+- **WHERE FLOAT STOPS IS THE WHOLE SAFETY ARGUMENT, and the renderers were not
+  touched at all.** `PixelLayout::RGBAF32` runs from `loadExr` to the display
+  stage in `ViewerWidget::setFrame` and no further; the stage emits BGRA8, which
+  is what both backends already present. Neither backend CAN draw a float frame —
+  `qtFormatFor(RGBAF32)` returns `Format_Invalid` so `toQImage()` is null, and the
+  D3D11 `setFrame` takes planar or BGRA8 and clears otherwise — and
+  `applyColorTransformToRenderer()` is the SINGLE function that hands a frame to a
+  backend. So "the measured present path is unchanged" is a property of one choke
+  point rather than a convention observed at call sites. **What it buys: the clip
+  to 8 bits now happens at the END of the chain instead of inside `loadExr` before
+  OCIO ever sees the pixels. What it does NOT buy: more than 8 bits OUT.** 10-bit
+  output and HDR are unmoved and still behind their own two external gates.
+- **THE JUSTIFICATION IS A NUMBER, NOT A PRINCIPLE: 48% of red, 42% of green and
+  66% of blue samples in the Redshift beauty pass exceed 1.0**, and `loadExr`
+  clipped every one of them. Range 0.0029..2.5195. Measured with the new
+  `scripts/measure/exrprobe` (channel order, per-channel ranges, channel-against-
+  channel comparison, read cost) — a standalone probe against the same pinned
+  OIIO, because the grouper had to be written against the order **OIIO presents**
+  rather than against EXR's alphabetical storage order.
+- **THE EXR DISPLAY HAD RED AND BLUE TRANSPOSED, ON EVERY EXR, AND IT SHIPPED IN
+  STAGE 0.** `loadExr` filled a `QImage::Format_RGBA8888` — memory order R,G,B,A —
+  by writing `qRgba()` through a `QRgb*`, and `qRgba()` packs `0xAARRGGBB`, which
+  on little-endian is **B,G,R,A in memory**. Blue landed in the red slot. It
+  survived stage 0 and stage 1 because the file it was developed against is a
+  near-neutral cream ice-cream render, where the swap looks almost right.
+  **THE PROOF METHOD MATTERS AS MUCH AS THE BUG, because the same test certifies
+  the replacement**: against a control built from `34b039c`, the new picture
+  differs from the control on **50.50%** of sampled pixels as captured, and on
+  **0 of 829,184 pixels at max channel delta 0** with the control's red and blue
+  swapped. An exact zero under exactly one channel permutation IS the diagnosis —
+  **and that same zero is what proves the rewritten gamma path is BIT-EXACT
+  against the old `powf` one**, which is otherwise a separate claim needing a
+  separate test. Sample pixel: new `(153,140,119)`, control `(119,140,153)`.
+  *(The first run of that comparison read 0.11% at max delta 116; the offenders
+  were all at x < 16, i.e. Windows 11's invisible resize border inside
+  `GetWindowRect` — the recorded `transitions.ps1` trap arriving in a new harness.
+  Exclude the first and last 16 columns of any window-capture diff.)*
+- **A SEQUENCE PATTERN IS PRINTF-SHAPED AND `QString::arg` READ IT AS ITS OWN
+  PLACEHOLDERS.** `icecream_passes%04d.exr` printed as `icecream_passes27d.exr` —
+  `%04` substituted with the channel count. Pre-existing, and visible on the
+  control. Both media HUD lines put their text fields in **last, together, through
+  the multi-arg overload**, which substitutes in ONE pass and never rescans what
+  it inserted; that also covers a file name containing a percent sign. **Any HUD
+  line carrying user text needs the same shape.**
+- **THE HUD's `ch:` FIELD MEANS THE SOURCE NOW** (stage 0 carry-forward item 5,
+  closed): it read `4` on a 3-channel EXR because the frame-handoff path
+  hard-coded the display buffer's channel count, and the loader knew the answer
+  all along with no way to ask it. The media line also carries the compression
+  (**`dwaa (lossy)`** — said out loud so nobody debugs a compression artefact as a
+  Trace bug), the active pass with its **raw channel names**, and the display
+  mapping with its measured range and fraction above 1.0.
+- **`ColorTransform` HAS TWO CPU PROCESSORS FOR ONE TRANSFORM.** `uint8 -> uint8`
+  is the video path, **unchanged byte for byte**; `f32 -> uint8` is the EXR path.
+  A float processor that fails to build is not fatal (video still works) but
+  `hasFloatProcessor()` is what the EXR path asks, so it cannot show an
+  untransformed picture while the HUD claims the transform is ON.
+- **THE MAPPING IS CHOSEN PER PASS CLASS AND NEVER PER PASS NAME**, and which one
+  is in force is ALWAYS on screen with the range it measured — normalising is
+  allowed, doing it quietly is not. `src/core/DisplayMapping.*`: `Gamma22` colour,
+  `Normalise` position/depth, `SignedUnit` normals, `Raw` data. Classification is
+  **exact name matches against small closed sets, never `contains()`** —
+  "Specular" contains a *p* and "Reflections" contains an *n*, and a substring
+  test sends both through a data mapping. The gamma conversion is a **binary
+  search over 255 OUTPUT thresholds**, not `powf` per sample (~124ms at 1080p,
+  three frame budgets) and not a table on the INPUT (the curve is near-vertical at
+  the bottom: the linear values separating output levels 0, 1 and 2 all sit below
+  1.5e-5, which a 16-bit input table cannot resolve — exactly the deep shadow
+  detail a scene-linear render is being reviewed for).
+- **MEMORY: a float frame is `w x h x 16`, and `FrameCache` is a WINDOW cache of
+  radius 1, so at most three.** 1080p **33.2 MB** (99.5 MB cached) · 4K
+  **132.7 MB** (398 MB) · **8K 530.8 MB (1.59 GB)**. **The 4K and 8K rows are
+  ARITHMETIC** — there is no 4K or 8K EXR in the asset set, and
+  `12_8K_ProRes4444` is a ProRes plate on the untouched video path. **If 8K EXR
+  ever arrives, bound that window cache by BYTES rather than by frame count.**
+  Measured at 1080p on the 27-channel file: **peak working set 523.3 -> 339.6 MB**
+  (the 224 MB whole-file read is gone), resident **+55 MB**.
+- **READING ONE PASS COSTS ABOUT HALF THE TIME AND A NINTH OF THE MEMORY, not a
+  ninth of the time** — DWAA decodes in blocks and there is fixed overhead. All 27
+  channels **75.40ms / 213.6 MB**; the root RGB pass **37.98ms / 23.7 MB**; `P`
+  **41.40ms / 23.7 MB**. **Sequence playback is UNCHANGED and that is the honest
+  reading**: both builds keep real time at 1080p because prefetch hides the
+  decode, so the channel-reading fix shows up as PEAK MEMORY, not frame rate, on
+  this material. The sequence path exposes no cadence counters and no rate figure
+  is claimed.
+- **REGRESSION AGAINST A CONTROL BUILT FROM `34b039c`** — DLL sets made
+  byte-identical by hash, the two binaries proven distinct **by their own
+  strings** rather than by a hash alone. **Parsec-class display, so this is an A/B
+  and NOT a set of baselines**: 4K H.264 cadence x2 each **100.0/100.0% on both**,
+  `drop 0`, `rephase 0`, buckets `~1x 119`, handler 1.88/1.77 new against
+  1.81/1.80 control · 4444 x2 each **99.8% on all four**, handler 18.97/19.10 new
+  against 19.56/19.61 control (the `<0.9x` bucket reads 2/1 against 1/1, inside
+  that file's recorded 1-10 span — do not chase it) · **`scrubbar.ps1` full pool
+  PASS — 22 files, 88 legs, `delta 0` throughout** · 4444 `-SnapRelease`
+  **`target 261 shown 261 delta 0`** on both with `dst YUV444P12 planar`
+  (**GATE C intact**), release 21.0 new / 21.7 control, `hitch 0`, `land 0`,
+  `kf-land 0` · all four selftests green · `verify_trace_assets --strict` at
+  **33 embedded files**.
+- **ALL THREE COMMITS ARE INDEPENDENTLY REVERTABLE, CHECKED RATHER THAN ASSUMED**:
+  each reverts cleanly AND the reverted tree builds, tested one at a time. The
+  Copy Frame commit is separable on purpose — it is the one behaviour change a
+  tester might want taken back on its own — which is why its edits are
+  deliberately NON-ADJACENT to the float commit's in every file they share.
+- **A HARNESS LESSON, AND IT PRODUCED THE FLATTERING ANSWER.** `scrub.ps1`
+  performs the GESTURE ONLY and captures nothing; the capture is a separate
+  `capture.ps1` call. Reading `%TEMP%\scrub-4444-snap-hud.png` after running it
+  returned a file from **five days earlier**, so a control and a candidate
+  "measured" byte-identical figures including `release 21.9ms` — which reads as
+  perfect agreement rather than as no measurement at all. **Check the timestamp
+  of any harness output you did not just watch being written.**
+
+### WHAT STAGE 2 PART 2 STILL OWES
+
+1. **`[` and `]` pass cycling, and the `C` bypass binding — DECIDED BY THE OWNER
+   (2026-08-24) AND NOT BUILT.** They are to be decided and tested **together as
+   one keyboard surface, not one at a time**. Both must be checked against phase
+   7's text-field guard (Qt's `ShortcutOverride` through `QLineEdit`, which covers
+   PRINTABLE keys only) and against `barekeys.ps1`'s menu-bar-focus case. **Note
+   the asymmetry: `[` and `]` are not letters, so the `QMenuBar` mnemonic path
+   cannot claim them while the `QLineEdit` guard does apply — and `C` is the other
+   way round.** Test both, reason neither.
+2. **The transient pass overlay** naming the current pass on screen.
+3. **The full pass list in the View menu.**
+4. **`ExrPass::duplicateOf` IS DECLARED AND NEVER FILLED.** Root RGB and a named
+   `Beauty` layer are the same render written twice, and **the difference is
+   COMPRESSION, NOT CONTENT** — measured channel against channel: mean absolute
+   difference 0.0035/0.0028/0.0048 on values whose mean is ~1.0, max
+   0.041/0.029/0.053, only 5-7% of pixels bit-identical, which is exactly what
+   independent DWAA compression of two identical channel sets produces. The
+   mechanism is settled and cheap: read a BAND OF SCANLINES from both channel
+   ranges at open and compare — a few hundred KB rather than a whole frame. **It
+   must land WITH the pass list**: an unfilled field that the HUD would print is
+   exactly the kind of thing that quietly never gets done.
+5. **The full regression AT THE PHYSICAL PANEL. This is the merge gate.**
+
+**ONE THING FOUND IN PASSING AND NOT BUILT:** `R2_OP_Stacks_01_00000.exr` carries
+`framesPerSecond = 24/1` and `smpte:TimeCode = 00:00:00:00` in its header, and
+Trace reads neither — image sequences still get the nominal 24fps and no source
+timecode. Recorded, not built, and note it would interact with spec phase 7's
+`hasSourceTimecode_` gate rather than being a free addition.
+
 **THE EXR + COLOUR PHASE: STAGE 0 AND STAGE 1 ARE BOTH DONE AND STAGE 1 IS
-ACCEPTED BY THE OWNER (2026-08-23). THE NEXT SESSION STARTS AT STAGE 2 —
-MULTILAYER EXR / CHANNEL GROUPING.** Assessment `docs/exr-ocio-plan.md`; records
+ACCEPTED BY THE OWNER (2026-08-23). SUPERSEDED ON THE "NEXT SESSION" POINT BY THE
+STAGE 2 PART 1 BLOCK ABOVE — STAGE 2 PART 1 IS BUILT AND THE NEXT SESSION STARTS
+AT PART 2 (pass cycling, the keys, the overlay, the menu list, the duplicate
+label). Everything else here stands.** Assessment `docs/exr-ocio-plan.md`; records
 `docs/exr-stage0-dependencies.md` and `docs/exr-stage1-color-transform.md`. Read
 all three before proposing anything in this area. Everything is on branch
 `exr-stage0-dependencies`, **not merged to `main` — the merge is the owner's**.
@@ -874,6 +1036,14 @@ below:** stage 2 (multilayer/AOV cycling), stage 3 (the `Color Transform...`
 config/display/view dialog), stage 4 (Cryptomatte), stage 5 (the GPU stage).
 
 ### STAGE 2 CARRY-FORWARD — the starting point, measured in stage 0, not to be re-derived
+
+**READ THE SUPERSESSION FIRST: items 2, 3, 4 and 5 ARE CLOSED by stage 2 part 1
+(2026-08-24) and are kept as the record of what was found, not as open work.**
+Channel 3 is no longer taken as alpha (2); only the pass being displayed is read,
+so the 224 MB whole-file allocation is gone (3); alpha is no longer pushed through
+the colour gamma (4); and the HUD's `ch:` field means the SOURCE now (5). **Item 1
+is not superseded and is still the thing not to re-derive** — the three naming
+conventions are what the grouper in `src/core/ExrChannels.*` is written against.
 
 1. **THERE ARE THREE CHANNEL-NAMING CONVENTIONS IN THE ASSET SET, NOT TWO**, and a
    grouper written against any one of them finds nothing in the other two. Read
@@ -907,7 +1077,11 @@ config/display/view dialog), stage 4 (Cryptomatte), stage 5 (the GPU stage).
 ### THREE THINGS DEFERRED, DELIBERATELY, WITH THEIR REASONS
 
 - **THE DISPLAY PATH IS 8-BIT END TO END, AND THAT IS THE ACEScg / GPU-DISPLAY-PATH
-  ISSUE.** The colour stage is built `BIT_DEPTH_UINT8` in and out because the frame
+  ISSUE. HALF SUPERSEDED (2026-08-24): the EXR path is FLOAT IN and 8-bit OUT
+  now — the clip happens after OCIO instead of before it. The OUTPUT is still
+  8-bit and a float texture upload is still stage 5's, so everything below about
+  the GPU stage stands; what expired is "a scene-linear EXR is flattened before
+  the stage sees it".** The colour stage is built `BIT_DEPTH_UINT8` in and out because the frame
   at its seam already is an 8-bit BGRA display buffer — that is what both renderers
   present. Fine for the display-referred video the LUT workflow was accepted on;
   **not fine for scene-linear ACEScg**, because an EXR carries values above 1.0 and
@@ -922,7 +1096,10 @@ config/display/view dialog), stage 4 (Cryptomatte), stage 5 (the GPU stage).
   At ~33 Mpx even the parallel stage is of the order of a whole frame budget — and
   `12_8K_ProRes4444` already fails to reach real time with no colour work at all
   (best recorded 56.9%). **Do not quote the 4K figure for that file.**
-- **THE `C` SHORTCUT IS UNDECIDED AND IS LEFT SO.** `C` is free (only `Ctrl+C` is
+- **THE `C` SHORTCUT IS UNDECIDED AND IS LEFT SO. SUPERSEDED (owner, 2026-08-24):
+  `C` IS DECIDED — it binds to the Color Transform bypass — and is NOT YET BUILT.
+  It ships with `[` and `]` as one keyboard surface in stage 2 part 2, and the
+  guard requirement below is unchanged and still binding.** `C` is free (only `Ctrl+C` is
   bound) and the assessment reserves it for the Color Transform bypass, but the
   stage-1 brief specified the menu only, so nothing was bound. **Binding it needs
   phase 7's text-field guard checked first** — that guard is Qt's, covers PRINTABLE
@@ -930,7 +1107,23 @@ config/display/view dialog), stage 4 (Cryptomatte), stage 5 (the GPU stage).
   this project is required to be tested against it rather than assumed safe. Owner
   decision.
 
-### COPY FRAME REMAINS RAW / SOURCE PIXELS
+### COPY FRAME REMAINS RAW / SOURCE PIXELS — SUPERSEDED 2026-08-24, READ THIS FIRST
+
+**OWNER DECISION, 2026-08-24: COPY FRAME COPIES WHAT IS ON SCREEN.** It reads
+`ViewerWidget::displayedFrame()` now, so with a LUT active the clipboard holds the
+graded picture rather than the flat source. Measured with its own negative
+control: with no transform loaded the clipboard is IDENTICAL to the old behaviour
+to two decimals (mean RGB 108.93/110.35/113.66), and with the LUT on it reads
+183.95/188.39/194.05. **It is also the only thing that CAN be copied for an EXR**,
+whose source frame is now scene-referred float with no correct 8-bit reading of
+its own. **This is a user-visible behaviour change and belongs in the release
+notes.** Commit `2da029e`, separately revertable.
+
+**THE PARAGRAPHS BELOW ARE THE STAGE 1 RECORD AND NO LONGER DESCRIBE THE
+BEHAVIOUR.** One thing in them DOES still stand and was re-verified rather than
+assumed: **the user's view transform (rotate/flip) is still not applied**, because
+it lives in the RENDERER, downstream of `displayFrame_`, and was never in this
+buffer. Phase 10's decision is untouched.
 
 **Unchanged by stage 1, and verified rather than assumed**: with the ARRI LUT
 active and the vivid Rec.709 picture on screen, `Ctrl+C` put the **flat LogC4
@@ -4794,11 +4987,20 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    plays as a sequence. **The previous text here -- "EXR does not open today" -- is
    superseded.** **STAGE 1 IS DONE AND ACCEPTED BY THE OWNER (2026-08-23)**: one
    OCIO-backed display transform, LUT-first, with `--ocio-selftest` in CI -- record
-   `docs/exr-stage1-color-transform.md`. **THE NEXT SESSION STARTS AT STAGE 2 --
-   multilayer EXR / channel grouping -- and the STAGE 2 CARRY-FORWARD block above
-   is its starting point** (three channel-naming conventions, channel-3-as-alpha,
-   the ~224 MB/frame allocation). Stages 3-5 (the config/display/view dialog,
-   Cryptomatte, the GPU stage) are NOT started.
+   `docs/exr-stage1-color-transform.md`. **STAGE 2 PART 1 IS DONE
+   (2026-08-24): a FLOAT display buffer on the EXR path and only there, the
+   channel grouper, per-pass reading, per-class display mappings, and Copy Frame
+   changed to copy what is on screen -- record
+   `docs/exr-stage2-float-buffer.md`.** It also found and fixed a bug that
+   SHIPPED IN STAGE 0: **EXR display had red and blue transposed**.
+   **THE NEXT SESSION STARTS AT STAGE 2 PART 2** -- `[` and `]` pass cycling, the
+   `C` bypass binding (owner-decided, unbuilt), the transient pass overlay, the
+   View-menu pass list, and the root-versus-Beauty duplicate label -- and the
+   "WHAT STAGE 2 PART 2 STILL OWES" list above is its starting point. **CHECK THE
+   DISPLAY FIRST: the last session ran over Parsec and the panel itself was at
+   5120x1440 @ 59Hz, not 239.999Hz, so nothing recorded there is a panel
+   baseline and THE FULL PANEL REGRESSION IS THE MERGE GATE.** Stages 3-5 (the
+   config/display/view dialog, Cryptomatte, the GPU stage) are NOT started.
 
 ## Where scrub stands (2026-08-07, second session)
 

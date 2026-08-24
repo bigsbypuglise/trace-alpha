@@ -20,8 +20,19 @@ active path as 1920x1080 @ 59.999Hz; the RTX 4090's own panel was at 5120x1440
 
 The consequence is precise, and it cuts one way only:
 
-- **No absolute figure below is comparable to a physical-panel record.** Do not
-  file any of these numbers as a cadence baseline.
+- **NO ABSOLUTE NUMBER IN THIS DOCUMENT IS A PANEL BASELINE.** Not the cadence
+  percentages, not the handler times, not the release latencies, not the memory
+  figures. Every one of them was taken on the Parsec display; none of them may be
+  compared against a figure recorded at the panel, and none may be quoted as a
+  new baseline. The only claims here that survive the display are the ones made
+  as a **difference between two binaries measured beside each other**.
+- **The panel itself was also in the wrong mode: 5120x1440 @ 59Hz, not
+  239.999Hz.** So a session that merely closes Parsec is still not on the
+  configuration the records were taken on. **Check both before measuring:**
+  `scripts/measure/refresh.ps1` for the active path, and
+  `Get-CimInstance Win32_VideoController` for the physical adapter's mode —
+  `refresh.ps1` describes the ACTIVE display and will not say the panel changed
+  underneath it.
 - **The control comparison is still decisive**, which is what the owner's
   constraint actually asked for ("video playback must be provably unmoved.
   Measure it, do not assert it"). A control binary was built from `34b039c` and
