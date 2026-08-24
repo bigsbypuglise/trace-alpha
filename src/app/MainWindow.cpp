@@ -2553,6 +2553,13 @@ void MainWindow::setupShortcuts() {
     // part keyPressEvent happens to own.
     shortcuts_.addAction(ShortcutGroup::View, inspectorAction_);
 
+    // EXR/colour stage 2. A documentation row, because `C` lives on the action
+    // rather than in this table's dispatched half -- see setupColorTransform-
+    // Actions() for why that is required and not merely tidier. Listed so the
+    // Keyboard Shortcuts window renders the COMPLETE contract, which is the
+    // whole reason the documentation half exists.
+    shortcuts_.addAction(ShortcutGroup::View, colorTransformAction_);
+
     // Spec phase 14, all documentation rows for the same reason as the block
     // above: every one carries a modifier, so Qt dispatches it and the row
     // exists so the Keyboard Shortcuts window this phase renders is the
@@ -4308,6 +4315,25 @@ void MainWindow::syncMediaDependentActions() {
 void MainWindow::setupColorTransformActions(QMenu* viewMenu) {
     colorTransformAction_ = new QAction(tr("&Color Transform"), this);
     colorTransformAction_->setCheckable(true);
+    // `C` IS A QAction SHORTCUT, NOT A ShortcutTable ROW, AND THAT IS THE WHOLE
+    // ANSWER TO Ctrl+C (owner decision 2026-08-24; the key was reserved by the
+    // stage-0 assessment and left unbound until it could ship with [ and ] as
+    // one keyboard surface).
+    //
+    // The table's dispatcher ignores modifiers, so a bare-C row there would also
+    // fire on Ctrl+C -- Copy Current Frame -- and would be safe only for as long
+    // as Qt's shortcut map consumed Ctrl+C first. warnOnShortcutCollisions()
+    // prints exactly that class, and it already reports one live instance
+    // (bare L against Ctrl+L). On a QAction, C and Ctrl+C are two distinct
+    // sequences that Qt resolves properly, so the collision cannot exist rather
+    // than being masked.
+    //
+    // It is also what makes the menu-bar-focus case correct for free. Qt runs an
+    // action's shortcut in the shortcut map BEFORE QMenuBar::keyPressEvent sees
+    // the key, which is why bare H was never reproducible in the 2026-08-21
+    // bare-letter bug while F, S, E and T -- table rows, reached by the menu bar
+    // first -- all were.
+    colorTransformAction_->setShortcut(QKeySequence(Qt::Key_C));
     connect(colorTransformAction_, &QAction::toggled, this, [this](bool on) {
         colorTransform_.setEnabled(on);
         trace::app::settings().setValue(QLatin1String(kColorTransformEnabledKey), on);
