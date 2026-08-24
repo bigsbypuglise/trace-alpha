@@ -152,14 +152,6 @@ private:
     // every modifier'd action in Trace. A collision that is only hidden by
     // dispatch order is exactly the kind that ships.
     void warnOnShortcutCollisions() const;
-
-    // EXR pass cycling (stage 2 part 2). Both are QActions for the same reason
-    // `C` is: Qt's shortcut map resolves them before the menu bar sees the key,
-    // and a disabled action declines its own shortcut, so [ and ] fall through
-    // harmlessly on media that has no passes.
-    void setupExrPassActions(QMenu* viewMenu);
-    void syncExrPassActions();
-    void cycleExrPass(int delta);
     // Runs the shortcut table for one key event and reveals the transport if it
     // did. Shared by keyPressEvent and the menu bar's event filter.
     bool dispatchShortcutKey(QKeyEvent* event);
@@ -1691,6 +1683,20 @@ private:
 
     void setupColorTransformActions(QMenu* viewMenu);
     void syncColorTransformActions();
+
+    // EXR pass cycling (stage 2 part 2), beside the colour-transform methods
+    // because that is the group it belongs to -- and deliberately NOT beside
+    // warnOnShortcutCollisions(), where it first went. Two separately-revertable
+    // commits must not touch adjacent lines: git can only see that they touch,
+    // so reverting either conflicts on whichever landed second.
+    //
+    // Both commands are QActions for the same reason `C` is: Qt's shortcut map
+    // resolves them before the menu bar sees the key, and a disabled QAction
+    // declines its own shortcut, so [ and ] fall through harmlessly on media
+    // that has no passes.
+    void setupExrPassActions(QMenu* viewMenu);
+    void syncExrPassActions();
+    void cycleExrPass(int delta);
     // Pushes the stage to the viewer and re-delivers the CURRENT frame, so
     // toggling is visible immediately on a paused picture without reopening
     // media. `reason` reaches the HUD.
