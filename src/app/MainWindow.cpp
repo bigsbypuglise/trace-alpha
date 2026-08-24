@@ -859,6 +859,7 @@ MainWindow::MainWindow() {
     // bare-key command. The second comparison needs the shortcut table, which
     // is why this moved out of the tail of setupMenus().
     warnOnDuplicateMnemonics();
+    warnOnShortcutCollisions();
 
     // After the menus (the actions exist) and after the viewer (the stage is
     // pushed to it). A saved LUT that no longer resolves falls back to bypass
@@ -4903,6 +4904,99 @@ void MainWindow::setupMenus() {
 // a corruption; failing the launch over one would be worse than the defect. It
 // goes to stderr through fprintf for the reason TRACE_SHAPE_LOG does: in this
 // GUI-subsystem build Qt's message handler does not reliably reach a console.
+// EVERY BARE KEY THIS WINDOW DISPATCHES ITSELF, CHECKED AGAINST EVERY SHORTCUT
+// QT DISPATCHES FOR IT.
+//
+// ShortcutTable::dispatch() matches on the key and ignores modifiers. That is
+// deliberate and is what the flat switch it replaced did -- but it means a
+// table-dispatched row for `C` fires on Ctrl+C, Shift+C and Alt+C as well, and
+// the ONLY thing standing between that and a real fault is whether Qt's
+// shortcut map consumed the modifier'd combination before keyPressEvent was
+// reached. It does today, for every modifier'd action in Trace. A collision
+// masked by dispatch order is still a collision, and it is the class that ships
+// unnoticed, so it is said out loud here.
+//
+// WHY THIS IS A WARNING AND NOT AN ASSERT: the collision it reports is usually
+// harmless, and one of them is live and expected (Ctrl+L rotates left while a
+// bare L is the forward shuttle). The value is that the NEXT bare key cannot
+// introduce one silently -- which is what happened to the F/E menu mnemonics
+// before warnOnDuplicateMnemonics() grew its second check.
+//
+// It also explains, in code, why the EXR pass keys and the colour-transform
+// bypass are QActions rather than table rows: on a QAction, `C` and `Ctrl+C`
+// are two distinct sequences that Qt's shortcut map resolves properly, so the
+// collision cannot exist rather than being masked.
+void MainWindow::warnOnShortcutCollisions() const {
+    struct Bound {
+        int key = 0;
+        Qt::KeyboardModifiers mods = Qt::NoModifier;
+        QString label;
+        bool dispatchedHere = false;
+    };
+    std::vector<Bound> bound;
+
+    for (const auto& row : shortcuts_.rows()) {
+        QString label = row.label();
+        label.remove(QLatin1Char('&'));
+        const bool here = (row.invoke != nullptr && row.key != Qt::Key_unknown);
+        if (here) {
+            bound.push_back(Bound{static_cast<int>(row.key), Qt::NoModifier, label, true});
+            continue;
+        }
+        for (const QKeySequence& seq : row.keys()) {
+            // Multi-chord sequences have no single key to collide on, and
+            // Trace has none; skipping them keeps the report exact rather
+            // than approximating one.
+            if (seq.count() != 1) continue;
+            const QKeyCombination combo = seq[0];
+            if (combo.key() == Qt::Key_unknown) continue;
+            bound.push_back(Bound{combo.key(), combo.keyboardModifiers(), label, false});
+        }
+    }
+
+    const auto describe = [](const Bound& b) {
+        return QKeySequence(QKeyCombination(b.mods, static_cast<Qt::Key>(b.key)))
+            .toString(QKeySequence::NativeText);
+    };
+
+    for (std::size_t i = 0; i < bound.size(); ++i) {
+        for (std::size_t j = i + 1; j < bound.size(); ++j) {
+            const Bound& a = bound[i];
+            const Bound& b = bound[j];
+            if (a.key != b.key) continue;
+
+            const bool sameCombination = (a.mods == b.mods);
+            if (sameCombination) {
+                fprintf(stderr,
+                        "trace-keys: DUPLICATE SHORTCUT %s -- \"%s\" and \"%s\". "
+                        "Whichever is registered first wins and the other is "
+                        "unreachable.\n",
+                        qPrintable(describe(a)), qPrintable(a.label), qPrintable(b.label));
+                continue;
+            }
+
+            // Different modifiers. Only a problem when one side is a row THIS
+            // window dispatches, because that is the only dispatcher that
+            // ignores modifiers. Two QActions differing by a modifier are two
+            // distinct shortcuts to Qt and are fine.
+            const Bound* bare = a.dispatchedHere ? &a : (b.dispatchedHere ? &b : nullptr);
+            if (!bare) continue;
+            const Bound& other = (bare == &a) ? b : a;
+            if (other.dispatchedHere) continue;
+
+            fprintf(stderr,
+                    "trace-keys: MASKED COLLISION -- \"%s\" is dispatched on bare "
+                    "%s by ShortcutTable, which ignores modifiers, so it would "
+                    "also fire on %s (\"%s\"). Safe only while Qt's shortcut map "
+                    "consumes %s first. Put a new binding on a QAction to avoid "
+                    "this entirely.\n",
+                    qPrintable(bare->label), qPrintable(describe(*bare)),
+                    qPrintable(describe(other)), qPrintable(other.label),
+                    qPrintable(describe(other)));
+        }
+    }
+}
+
 void MainWindow::warnOnDuplicateMnemonics() const {
     const auto scan = [](const QList<QAction*>& actions, const QString& menuName) {
         QHash<QChar, QString> seen;

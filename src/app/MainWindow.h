@@ -141,6 +141,17 @@ private:
     // needs shortcuts_ populated and therefore runs from the constructor rather
     // than from setupMenus().
     void warnOnDuplicateMnemonics() const;
+    // A BARE KEY THAT IS ALSO THE KEY HALF OF A MODIFIER'D SHORTCUT.
+    //
+    // Separate from warnOnDuplicateMnemonics() because it catches a different
+    // failure, and one that is MASKED rather than visible: ShortcutTable's
+    // dispatcher matches on the key and IGNORES MODIFIERS (its own header says
+    // so, and Shift+Right stepping a frame is that rule working). So a
+    // table-dispatched row for `C` would also fire on Ctrl+C -- unless Qt's
+    // shortcut map happens to consume Ctrl+C first, which it does today for
+    // every modifier'd action in Trace. A collision that is only hidden by
+    // dispatch order is exactly the kind that ships.
+    void warnOnShortcutCollisions() const;
     // Runs the shortcut table for one key event and reveals the transport if it
     // did. Shared by keyPressEvent and the menu bar's event filter.
     bool dispatchShortcutKey(QKeyEvent* event);
