@@ -81,12 +81,15 @@ PassClass classifyPass(const QString& layer, const QString& firstRawName, int ch
 
 std::vector<ExrPass> groupExrChannels(const QStringList& channelNames) {
     std::vector<ExrPass> passes;
-    // Layer name -> index into `passes`, so first appearance decides order.
-    std::vector<QString> order;
 
-    auto findPass = [&](const QString& layer) -> ExrPass* {
+    // ONLY LAYER GROUPS ARE LOOKED UP. A standalone channel's pass is keyed on
+    // its own raw name, and if that name also occurs as a layer prefix the two
+    // are DIFFERENT passes -- merging them dropped `Z.R`, `Z.G` and `Z.B`
+    // entirely on a file that also carried a bare `Z`, which the channel
+    // selftest caught as "channel 1 appears in no pass".
+    auto findLayer = [&](const QString& layer) -> ExrPass* {
         for (auto& p : passes)
-            if (p.layer == layer) return &p;
+            if (!p.standalone && p.layer == layer) return &p;
         return nullptr;
     };
 
@@ -103,6 +106,7 @@ std::vector<ExrPass> groupExrChannels(const QStringList& channelNames) {
             // collide, and replicated across R,G,B so it draws as grey rather
             // than as a red-only picture.
             ExrPass p;
+            p.standalone = true;
             p.layer = raw;
             p.displayName = raw;
             p.channel[0] = p.channel[1] = p.channel[2] = i;
@@ -112,7 +116,7 @@ std::vector<ExrPass> groupExrChannels(const QStringList& channelNames) {
             continue;
         }
 
-        ExrPass* p = findPass(layer);
+        ExrPass* p = findLayer(layer);
         if (!p) {
             ExrPass fresh;
             fresh.layer = layer;
@@ -123,10 +127,13 @@ std::vector<ExrPass> groupExrChannels(const QStringList& channelNames) {
         }
         // A duplicate component in one layer keeps the FIRST. Two channels
         // claiming the same slot is a malformed file, and taking the later one
-        // would silently change which pixels are shown.
+        // would silently change which pixels are shown -- but the loser is
+        // RECORDED rather than dropped without trace.
         if (p->channel[comp] < 0) {
             p->channel[comp] = i;
             p->rawNames[comp] = raw;
+        } else {
+            p->ambiguous << raw;
         }
     }
 
@@ -144,6 +151,33 @@ std::vector<ExrPass> groupExrChannels(const QStringList& channelNames) {
         // colour picture. Replicate it so it is at least visible.
         if (p.channelCount() == 1 && p.channel[0] >= 0 && p.channel[1] < 0 && p.channel[2] < 0) {
             p.channel[1] = p.channel[2] = p.channel[0];
+        }
+        // AN ALPHA-ONLY LAYER HAS NOTHING IN ANY COLOUR SLOT, and the loader
+        // would draw it as a black frame with an alpha nothing reads -- a pass
+        // that is present, selectable, and invisible. Replicate alpha across
+        // R,G,B for the same reason a bare data channel is replicated: showing
+        // it as grey is the honest reading of a single-channel mask.
+        if (p.channel[0] < 0 && p.channel[1] < 0 && p.channel[2] < 0 && p.channel[3] >= 0) {
+            p.channel[0] = p.channel[1] = p.channel[2] = p.channel[3];
+            const QString alphaName = p.rawNames.size() > 3 ? p.rawNames.at(3) : p.layer;
+            p.rawNames = QStringList{alphaName, alphaName, alphaName, alphaName};
+        }
+    }
+
+    // UNIQUE IDENTITIES, BECAUSE `layer` IS WHAT setPreferredPass() STORES AND
+    // `displayName` IS WHAT THE MENU AND THE HUD PRINT. Two passes sharing
+    // either would make pass selection ambiguous -- the standalone `Z` and the
+    // layer `Z` above are exactly that case, now that they are no longer merged.
+    // The LAYER group keeps the bare name; a colliding standalone channel is
+    // marked, because the layer is the thing a renderer meant to be a pass.
+    for (std::size_t i = 0; i < passes.size(); ++i) {
+        for (std::size_t j = 0; j < i; ++j) {
+            if (passes[j].layer != passes[i].layer) continue;
+            const QString suffix = passes[i].standalone ? QStringLiteral(" (channel)")
+                                                        : QStringLiteral(" (layer)");
+            passes[i].layer += suffix;
+            passes[i].displayName += suffix;
+            j = static_cast<std::size_t>(-1);   // restart: the new name may collide too
         }
     }
 

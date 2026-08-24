@@ -14,6 +14,7 @@
 #include "app/Theme.h"
 #include "app/WindowShape.h"
 #include "core/ColorTransform.h"
+#include "core/ExrChannels.h"
 #ifdef TRACE_WITH_OCIO
 #include <OpenColorIO/OpenColorIO.h>
 #endif
@@ -263,6 +264,270 @@ int runOcioSelfTest(const QString& file) {
     return 0;
 }
 
+// `Trace.exe --exr-channels-selftest`: drive the EXR channel grouper over a
+// table of synthetic channel lists, print every pass it produces, and fail on
+// anything that does not hold.
+//
+// IT EXISTS BECAUSE THE ASSET SET CONTAINS ONLY TWO OF THE THREE RECORDED
+// NAMING CONVENTIONS. Measured with OpenImageIO over every EXR in the pool: the
+// root layer spells its components `R G B`, and every Redshift AOV -- including
+// that file's own Cryptomatte -- spells them `Beauty.red` / `.green` / `.blue`.
+// The third convention, upper-case with alpha (`CryptoMaterial.R/.G/.B/.A`), is
+// recorded in CLAUDE.md from stage 0 and has NO FILE HERE to exercise it. A
+// grouper written against any one convention finds nothing in the other two, so
+// the one that cannot be tested against real media is precisely the one that
+// needs a test, and a synthetic channel list is the only way to write it.
+//
+// It is pure logic over a QStringList: no file, no OpenImageIO, no window. That
+// is what lets it run in CI beside the shape and OCIO selftests, and it is also
+// the honest limit of what it proves -- that the RULES are right, not that any
+// particular file decodes. The file half is covered by opening real media.
+//
+// THE ASSERTIONS ARE PROPERTIES FIRST AND EXPECTATIONS SECOND. Five invariants
+// are checked on every case, including ones with no expectation table, because
+// they are the things whose violation is silent:
+//
+//   1. every channel index in the file appears in at least one pass -- nothing
+//      in the file is invisible;
+//   2. every stored index is in range;
+//   3. a component slot holds a channel whose OWN NAME ends in that component --
+//      the check that resolution is by identity and never by position, which is
+//      the assumption stage 0 recorded as a live defect;
+//   4. no two passes share a display name -- an ambiguity the UI could not
+//      express;
+//   5. a Colour pass has all three of R, G and B.
+static int runExrChannelsSelfTest() {
+    using namespace trace::core;
+    QTextStream out(stdout);
+    int failures = 0;
+
+    struct Expect {
+        const char* displayName;
+        const char* className;
+        const char* rawNames;   // joined with ',' -- empty means "do not check"
+    };
+    struct Case {
+        const char* name;
+        QStringList channels;
+        std::vector<Expect> expect;   // empty means invariants only
+    };
+
+    const std::vector<Case> cases = {
+        // The two files in the pool that are a plain render.
+        {"root RGB (Beauty_Only, R2_OP_Stacks)",
+         {"R", "G", "B"},
+         {{"(root)", "colour", "R,G,B"}}},
+
+        {"root RGBA",
+         {"R", "G", "B", "A"},
+         {{"(root)", "colour", "R,G,B,A"}}},
+
+        // The 27-channel Redshift file, channel for channel as OIIO presents it.
+        {"Redshift multilayer, 27 channels",
+         {"R", "G", "B",
+          "Beauty.red", "Beauty.green", "Beauty.blue",
+          "Cryptomatte.red", "Cryptomatte.green", "Cryptomatte.blue",
+          "DiffuseFilter.red", "DiffuseFilter.green", "DiffuseFilter.blue",
+          "GI.red", "GI.green", "GI.blue",
+          "P.red", "P.green", "P.blue",
+          "Reflections.red", "Reflections.green", "Reflections.blue",
+          "Shadows.red", "Shadows.green", "Shadows.blue",
+          "SpecularLighting.red", "SpecularLighting.green", "SpecularLighting.blue"},
+         {{"(root)", "colour", "R,G,B"},
+          {"Beauty", "colour", "Beauty.red,Beauty.green,Beauty.blue"},
+          {"Cryptomatte", "data", "Cryptomatte.red,Cryptomatte.green,Cryptomatte.blue"},
+          {"DiffuseFilter", "colour", ""},
+          {"GI", "colour", ""},
+          {"P", "position", "P.red,P.green,P.blue"},
+          {"Reflections", "colour", ""},
+          {"Shadows", "colour", ""},
+          {"SpecularLighting", "colour", ""}}},
+
+        // CONVENTION 3, which no file here has: upper-case, WITH alpha.
+        {"Cryptomatte upper-case with alpha (no file in the pool)",
+         {"CryptoMaterial.R", "CryptoMaterial.G", "CryptoMaterial.B", "CryptoMaterial.A"},
+         {{"CryptoMaterial", "data",
+           "CryptoMaterial.R,CryptoMaterial.G,CryptoMaterial.B,CryptoMaterial.A"}}},
+
+        // Case is not meaningful in a component suffix.
+        {"mixed case suffixes",
+         {"Beauty.Red", "Beauty.GREEN", "Beauty.blue", "Beauty.Alpha"},
+         {{"Beauty", "colour", "Beauty.Red,Beauty.GREEN,Beauty.blue,Beauty.Alpha"}}},
+
+        // THE POSITIONAL ASSUMPTION, WRITTEN AS A TEST. Stored out of order in
+        // the file; a grouper resolving by position would put blue in red.
+        {"components out of order in the file",
+         {"foo.B", "foo.A", "foo.R", "foo.G"},
+         {{"foo", "colour", "foo.R,foo.G,foo.B,foo.A"}}},
+
+        // A layer whose name is a class keyword, and the substring trap: neither
+        // "Specular" (contains p) nor "Reflections" (contains n) may be caught.
+        {"class keywords and the substring trap",
+         {"Z", "N.red", "N.green", "N.blue",
+          "Specular.red", "Specular.green", "Specular.blue"},
+         {{"Z", "depth", "Z,Z,Z"},
+          {"N", "normal", "N.red,N.green,N.blue"},
+          {"Specular", "colour", "Specular.red,Specular.green,Specular.blue"}}},
+
+        {"nested layer name",
+         {"diffuse.light1.R", "diffuse.light1.G", "diffuse.light1.B"},
+         {{"diffuse.light1", "colour", "diffuse.light1.R,diffuse.light1.G,diffuse.light1.B"}}},
+
+        // A bare data channel becomes its own pass and is replicated across RGB
+        // so it draws as grey rather than as a red-only picture.
+        {"bare data channels",
+         {"R", "G", "B", "Z", "materialId"},
+         {{"(root)", "colour", "R,G,B"},
+          {"Z", "depth", "Z,Z,Z"},
+          {"materialId", "data", "materialId,materialId,materialId"}}},
+
+        // EDGE CASES WITH NO EXPECTATION TABLE: the invariants alone decide, and
+        // these are the shapes most likely to be malformed in the wild.
+        // An alpha-only layer replicates alpha across RGB. Without it the loader
+        // draws a black frame with an alpha nothing reads: present, selectable
+        // and invisible.
+        {"alpha-only layer", {"mask.A"},
+         {{"mask", "data", "mask.A,mask.A,mask.A,mask.A"}}},
+
+        // A bare `Z` and a `Z.*` layer are DIFFERENT passes. Merged, the three
+        // layer channels were dropped entirely.
+        {"layer name colliding with a bare channel", {"Z", "Z.R", "Z.G", "Z.B"},
+         {{"Z", "depth", "Z,Z,Z"},
+          {"Z (layer)", "depth", "Z.R,Z.G,Z.B"}}},
+
+        // The loser of a slot contest is recorded, not discarded.
+        {"duplicate component in one layer", {"foo.R", "foo.R", "foo.G", "foo.B"},
+         {{"foo", "colour", "foo.R,foo.G,foo.B"}}},
+        {"two channels only", {"uv.R", "uv.G"}, {}},
+        {"single bare channel", {"Y"}, {}},
+    };
+
+    for (const Case& c : cases) {
+        const std::vector<ExrPass> passes = groupExrChannels(c.channels);
+        out << "-- " << c.name << "  (" << c.channels.size() << " channels -> "
+            << static_cast<int>(passes.size()) << " passes)\n";
+
+        for (const ExrPass& p : passes) {
+            out << QString("     %1  %2  [%3]  ch %4,%5,%6,%7%8\n")
+                       .arg(p.displayName, -22)
+                       .arg(passClassName(p.cls), -9)
+                       .arg(p.rawNames.join(QLatin1Char(',')))
+                       .arg(p.channel[0]).arg(p.channel[1])
+                       .arg(p.channel[2]).arg(p.channel[3])
+                       .arg(p.ambiguous.isEmpty()
+                                ? QString()
+                                : QStringLiteral("  ambiguous:")
+                                      + p.ambiguous.join(QLatin1Char(',')));
+        }
+
+        const auto fail = [&](const QString& why) {
+            out << "     FAIL: " << why << "\n";
+            ++failures;
+        };
+
+        // (1) and (2): nothing in the file is invisible, nothing is out of range.
+        std::vector<bool> seen(static_cast<std::size_t>(c.channels.size()), false);
+        for (const ExrPass& p : passes) {
+            for (int k = 0; k < 4; ++k) {
+                const int idx = p.channel[k];
+                if (idx < 0) continue;
+                if (idx >= c.channels.size()) {
+                    fail(QString("pass %1 slot %2 holds out-of-range index %3")
+                             .arg(p.displayName).arg(k).arg(idx));
+                    continue;
+                }
+                seen[static_cast<std::size_t>(idx)] = true;
+            }
+            // A channel recorded as ambiguous is ACCOUNTED FOR: it cannot be
+            // shown, because its component slot was already filled, but it has
+            // not vanished. Silently disappearing is the failure this invariant
+            // exists for; being named as unplaceable is the correct answer for a
+            // malformed file.
+            for (const QString& amb : p.ambiguous) {
+                for (int i = 0; i < c.channels.size(); ++i)
+                    if (c.channels.at(i) == amb) seen[static_cast<std::size_t>(i)] = true;
+            }
+        }
+        for (int i = 0; i < c.channels.size(); ++i) {
+            if (!seen[static_cast<std::size_t>(i)])
+                fail(QString("channel %1 (%2) is in no pass and is not recorded as ambiguous")
+                         .arg(i).arg(c.channels.at(i)));
+        }
+
+        // (3) RESOLUTION IS BY IDENTITY, NOT POSITION. A slot must hold a
+        // channel whose own name ends in that component.
+        static const char* kSuffix[4][2] = {{"r", "red"}, {"g", "green"},
+                                            {"b", "blue"}, {"a", "alpha"}};
+        for (const ExrPass& p : passes) {
+            for (int k = 0; k < 4; ++k) {
+                const int idx = p.channel[k];
+                if (idx < 0 || idx >= c.channels.size()) continue;
+                const QString raw = c.channels.at(idx);
+                const int dot = raw.lastIndexOf(QLatin1Char('.'));
+                const QString suffix = (dot > 0 ? raw.mid(dot + 1) : raw).toLower();
+                const bool isComponent = (suffix == QLatin1String(kSuffix[k][0]) ||
+                                          suffix == QLatin1String(kSuffix[k][1]));
+                // A replicated data channel legitimately sits in all three
+                // colour slots under its own name; that is not a mis-resolution.
+                const bool replicated = (p.channel[0] == p.channel[1] &&
+                                         p.channel[1] == p.channel[2]);
+                if (!isComponent && !replicated)
+                    fail(QString("pass %1 slot %2 holds \"%3\", whose name is not that component")
+                             .arg(p.displayName).arg(k).arg(raw));
+            }
+        }
+
+        // (4) no two passes share a display name.
+        for (std::size_t i = 0; i < passes.size(); ++i)
+            for (std::size_t j = i + 1; j < passes.size(); ++j)
+                if (passes[i].displayName == passes[j].displayName)
+                    fail(QString("two passes share the display name \"%1\"")
+                             .arg(passes[i].displayName));
+
+        // (5) a colour pass has all three colour components.
+        for (const ExrPass& p : passes) {
+            if (p.cls != PassClass::Colour) continue;
+            if (p.channel[0] < 0 || p.channel[1] < 0 || p.channel[2] < 0)
+                fail(QString("colour pass %1 is missing a component").arg(p.displayName));
+        }
+
+        // The expectation table, where there is one.
+        if (!c.expect.empty()) {
+            if (passes.size() != c.expect.size()) {
+                fail(QString("expected %1 passes, got %2")
+                         .arg(static_cast<int>(c.expect.size()))
+                         .arg(static_cast<int>(passes.size())));
+            } else {
+                for (std::size_t i = 0; i < passes.size(); ++i) {
+                    const Expect& e = c.expect[i];
+                    if (passes[i].displayName != QLatin1String(e.displayName))
+                        fail(QString("pass %1: expected name \"%2\", got \"%3\"")
+                                 .arg(static_cast<int>(i)).arg(e.displayName, passes[i].displayName));
+                    if (passClassName(passes[i].cls) != QLatin1String(e.className))
+                        fail(QString("pass %1 (%2): expected class %3, got %4")
+                                 .arg(static_cast<int>(i)).arg(passes[i].displayName)
+                                 .arg(e.className, passClassName(passes[i].cls)));
+                    const QString rn = QString::fromLatin1(e.rawNames);
+                    if (!rn.isEmpty() && passes[i].rawNames.join(QLatin1Char(',')) != rn)
+                        fail(QString("pass %1 (%2): expected raw names \"%3\", got \"%4\"")
+                                 .arg(static_cast<int>(i)).arg(passes[i].displayName)
+                                 .arg(rn, passes[i].rawNames.join(QLatin1Char(','))));
+                }
+            }
+        }
+    }
+
+    if (failures == 0) {
+        out << QString("trace-exr-channels: OK - %1 channel layouts\n")
+                   .arg(static_cast<int>(cases.size()));
+        out.flush();
+        return 0;
+    }
+    out << QString("trace-exr-channels: FAIL - %1 assertions\n").arg(failures);
+    out.flush();
+    return 5;
+}
+
 // `Trace.exe --window-shape-selftest`: drive spec section 4's opening-geometry
 // calculation across the aspect matrix at DPR 1.00, 1.25, 1.50 and 2.00, print
 // every row, and fail on anything that does not hold.
@@ -490,6 +755,13 @@ int main(int argc, char* argv[]) {
     // cannot.
     for (const QString& arg : app.arguments()) {
         if (arg == QStringLiteral("--window-shape-selftest")) return runWindowShapeSelfTest();
+    }
+
+    // Pure logic over a channel-name list: no file, no OpenImageIO, no window.
+    // Runs anywhere the binary does, which is what lets CI check the naming
+    // convention the asset set has no file for.
+    for (const QString& arg : app.arguments()) {
+        if (arg == QStringLiteral("--exr-channels-selftest")) return runExrChannelsSelfTest();
     }
 
     // `Trace.exe --scrub-selftest=<clip>` (or `--scrub-selftest <clip>`): the

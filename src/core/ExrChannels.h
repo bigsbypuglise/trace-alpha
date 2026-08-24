@@ -44,6 +44,21 @@ struct ExrPass {
     // name. Empty when this pass stands alone.
     QString duplicateOf;
 
+    // A channel with NO component suffix, made into its own pass (Z, materialId).
+    // Held so the grouper never merges one into a layer group that happens to
+    // share its name: a file carrying both `Z` and `Z.R/.G/.B` would otherwise
+    // drop three channels on the floor, which the selftest caught.
+    bool standalone = false;
+
+    // RAW NAMES THIS PASS COULD NOT PLACE, kept rather than discarded.
+    //
+    // A component slot is filled once: two channels claiming the same slot is a
+    // malformed file, and taking the later one would silently change which
+    // pixels are shown. Keeping the FIRST is the safe half; recording what was
+    // dropped is the other half, because a channel that vanishes with no trace
+    // is exactly the failure nobody notices. Surfaced on the HUD.
+    QStringList ambiguous;
+
     int channelCount() const {
         int n = 0;
         for (int i = 0; i < 4; ++i)
