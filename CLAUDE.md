@@ -857,6 +857,96 @@ planar=1`, `11 shapes x 4 scale factors`, `--scrub-selftest`) ·
   already records for `overlay.ps1`, not a rendering difference, and §20.3's
   150% case is owner-accepted since GATE B. Not investigated further.
 
+**THE EXR + COLOUR PHASE: STAGE 0 AND STAGE 1 ARE BOTH DONE AND STAGE 1 IS
+ACCEPTED BY THE OWNER (2026-08-23). THE NEXT SESSION STARTS AT STAGE 2 —
+MULTILAYER EXR / CHANNEL GROUPING.** Assessment `docs/exr-ocio-plan.md`; records
+`docs/exr-stage0-dependencies.md` and `docs/exr-stage1-color-transform.md`. Read
+all three before proposing anything in this area. Everything is on branch
+`exr-stage0-dependencies`, **not merged to `main` — the merge is the owner's**.
+
+**What is DONE:** OpenImageIO 3.1.14.0 + OpenColorIO 2.5.2 from the pinned vcpkg
+tree, in dev and CI; EXR opens as a still and as a 217-frame sequence with no code
+change beyond the build; one OCIO-backed display transform, LUT-first, with the
+whole View menu, bypass, persistence and a real `--ocio-selftest` in CI.
+
+**What is NOT started, and must not be begun without reading the carry-forward
+below:** stage 2 (multilayer/AOV cycling), stage 3 (the `Color Transform...`
+config/display/view dialog), stage 4 (Cryptomatte), stage 5 (the GPU stage).
+
+### STAGE 2 CARRY-FORWARD — the starting point, measured in stage 0, not to be re-derived
+
+1. **THERE ARE THREE CHANNEL-NAMING CONVENTIONS IN THE ASSET SET, NOT TWO**, and a
+   grouper written against any one of them finds nothing in the other two. Read
+   out of the actual headers with OIIO:
+   - **root layer**: `R G B` (and `A` where present)
+   - **named layers, Redshift**: `Beauty.red` / `Beauty.green` / `Beauty.blue` —
+     lower-case words, on every one of the 27-channel file's eight layers
+   - **Cryptomatte**: `CryptoMaterial.R` / `.G` / `.B` / `.A` — **upper-case, and
+     WITH alpha**
+   Group case-insensitively on a suffix set of `{R, red, G, green, B, blue, A,
+   alpha}` and keep the raw channel names for the HUD so a mismatch is visible
+   rather than silent. The assessment predicted two conventions; the third was
+   found by measurement.
+2. **`loadExr` TAKES CHANNEL INDEX 3 AS ALPHA REGARDLESS OF WHAT THAT CHANNEL IS.**
+   On the 27-channel Redshift file channel 3 is `Beauty.red`, so the display
+   buffer's alpha is the beauty pass's red channel. **Invisible today** because the
+   draw path ignores alpha — which is exactly what makes it a trap rather than a
+   bug: it surfaces the moment alpha starts mattering, not where the mistake is.
+3. **`loadExr` READS EVERY CHANNEL OF THE FILE.** `read_image(0, 0, 0, nchannels,
+   FLOAT, ...)` allocates `width x height x nchannels` floats — **~224 MB per frame**
+   on the 27-channel 1920x1080 file, of which 24 MB is used. Correct today and the
+   wrong shape for a 97-frame sequence.
+4. **Alpha is pushed through the same `pow(x, 1/2.2)` as the colour channels** in
+   `loadExr`'s `toDisplay8`, which is wrong in principle (alpha is not
+   display-referred) and invisible for the same reason as (2).
+5. **The dev HUD reads `ch:4` on a 3-channel file.** `MainWindow.cpp:6539`
+   hard-codes `info.channels = 4` on the frame-handoff path — honest about the
+   DISPLAY BUFFER (always RGBA after handoff), misleading as a label. What that
+   field should say is a stage-2 decision, so it was deliberately left alone.
+
+### THREE THINGS DEFERRED, DELIBERATELY, WITH THEIR REASONS
+
+- **THE DISPLAY PATH IS 8-BIT END TO END, AND THAT IS THE ACEScg / GPU-DISPLAY-PATH
+  ISSUE.** The colour stage is built `BIT_DEPTH_UINT8` in and out because the frame
+  at its seam already is an 8-bit BGRA display buffer — that is what both renderers
+  present. Fine for the display-referred video the LUT workflow was accepted on;
+  **not fine for scene-linear ACEScg**, because an EXR carries values above 1.0 and
+  `loadExr` already flattens to 8-bit with a `pow(1/2.2)` long before the stage sees
+  it. **Full precision needs a float display buffer end to end** — a float
+  `PixelLayout`, both renderers carrying it, and the transform applied in the
+  shader. That is stage 5's problem and it is the reason stage 3's dialog cannot be
+  called "correct ACES" on its own. Recorded rather than half-built.
+- **THE TRANSFORM'S COST ON THE 8K PLATE IS UNMEASURED AND MUST NOT BE ASSUMED.**
+  It was measured at 9.3 ns/pixel single-threaded, linear in pixel count, and
+  parallel row bands took a 4K frame to 13.3ms / 99.7% of real time with `drop 0`.
+  At ~33 Mpx even the parallel stage is of the order of a whole frame budget — and
+  `12_8K_ProRes4444` already fails to reach real time with no colour work at all
+  (best recorded 56.9%). **Do not quote the 4K figure for that file.**
+- **THE `C` SHORTCUT IS UNDECIDED AND IS LEFT SO.** `C` is free (only `Ctrl+C` is
+  bound) and the assessment reserves it for the Color Transform bypass, but the
+  stage-1 brief specified the menu only, so nothing was bound. **Binding it needs
+  phase 7's text-field guard checked first** — that guard is Qt's, covers PRINTABLE
+  keys through `QLineEdit`'s `ShortcutOverride`, and every new bare-key shortcut in
+  this project is required to be tested against it rather than assumed safe. Owner
+  decision.
+
+### COPY FRAME REMAINS RAW / SOURCE PIXELS
+
+**Unchanged by stage 1, and verified rather than assumed**: with the ARRI LUT
+active and the vivid Rec.709 picture on screen, `Ctrl+C` put the **flat LogC4
+source** on the clipboard at the full 4608x3164. It also still does not apply the
+user's view transform (rotate/flip), which is the pre-existing phase 10 decision.
+
+**This is structural, not a convention to remember.** `copyCurrentFrame()` reads
+`viewer_->frame()`, and the colour stage runs downstream of that member — the
+transformed buffer never enters it. That is why the stage lives in
+`ViewerWidget::setFrame()` between `frame_` and the renderer and nowhere else.
+
+**It is also the one behaviour worth re-opening deliberately.** A reviewer copying
+a frame to send to someone may well want what they are looking at. Changing it is
+a one-line change at that seam and would have to be said out loud in the release
+notes — which is precisely why it was not changed quietly here.
+
 **EXR/COLOUR STAGE 1 IS DONE (2026-08-23): ONE OCIO-BACKED DISPLAY TRANSFORM,
 LUT-FIRST, WITH A REAL `--ocio-selftest` IN CI.** Record
 `docs/exr-stage1-color-transform.md`; assessment `docs/exr-ocio-plan.md`. **NOT
@@ -4702,10 +4792,13 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    vcpkg tree and linked in dev and CI, so `TRACE_WITH_OIIO` and `TRACE_WITH_OCIO` are
    both defined, and a single EXR opens as a still while the 217-frame folder opens and
    plays as a sequence. **The previous text here -- "EXR does not open today" -- is
-   superseded.** **STAGE 1 IS ALSO DONE (2026-08-23)**: one OCIO-backed display
-   transform, LUT-first, with `--ocio-selftest` in CI -- record
-   `docs/exr-stage1-color-transform.md`. **Stages 2-5 (AOV cycling, the
-   config/display/view dialog, Cryptomatte, the GPU stage) are NOT started.**
+   superseded.** **STAGE 1 IS DONE AND ACCEPTED BY THE OWNER (2026-08-23)**: one
+   OCIO-backed display transform, LUT-first, with `--ocio-selftest` in CI -- record
+   `docs/exr-stage1-color-transform.md`. **THE NEXT SESSION STARTS AT STAGE 2 --
+   multilayer EXR / channel grouping -- and the STAGE 2 CARRY-FORWARD block above
+   is its starting point** (three channel-naming conventions, channel-3-as-alpha,
+   the ~224 MB/frame allocation). Stages 3-5 (the config/display/view dialog,
+   Cryptomatte, the GPU stage) are NOT started.
 
 ## Where scrub stands (2026-08-07, second session)
 

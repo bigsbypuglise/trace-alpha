@@ -3,6 +3,16 @@
 Record of stage 1 (2026-08-23). Stage 0 is `docs/exr-stage0-dependencies.md`; the
 assessment both implement is `docs/exr-ocio-plan.md`.
 
+> **ACCEPTED BY THE OWNER, 2026-08-23, and the session closed here.** Read the
+> acceptance at its stated width: what was accepted is **the OCIO-backed display
+> transform stage, its View menu, LUT loading and the `--ocio-selftest`** -- on
+> the LUT-on-display-referred-video workflow it was measured on. It is **NOT** an
+> acceptance of a scene-linear ACEScg pipeline, which the 8-bit limit in section 4
+> says this stage cannot serve; **NOT** of the transform's cost on the 8K plate,
+> which is unmeasured; and **NOT** of a `C` shortcut, which was deliberately left
+> unbound. The next session starts at **stage 2, multilayer EXR / channel
+> grouping**, from the carry-forward at the end of this document.
+
 **Not started, by instruction:** multilayer/AOV cycling, Cryptomatte, EXR channel
 regrouping, the `Color Transform...` dialog, the GPU stage. **Unmoved:** the vcpkg
 pin, decode and playback scheduling.
@@ -361,7 +371,24 @@ point of the whole step: `moved=1` there means a real ACES display transform
 compiled and executed inside the SHIPPED binary on a machine that has no colour
 configs and no test assets. Stage 0 could only say the library had been built.
 
-## Deferred to stage 2, recorded here so they are not re-derived
+## Deferred, with their reasons
+
+- **The display path is 8-bit end to end -- the ACEScg / GPU-display-path issue.**
+  Section 4 states it. Full precision needs a float `PixelLayout`, both renderers
+  carrying it, and the transform applied in the shader. Stage 5's problem, and the
+  reason stage 3's dialog cannot be called "correct ACES" on its own.
+- **The transform's cost on the 8K plate is unmeasured.** 9.3 ns/pixel
+  single-threaded, linear in pixel count; at ~33 Mpx even the parallel stage is of
+  the order of a whole frame budget, and that file already fails to reach real time
+  with no colour work at all (best recorded 56.9%). **Do not quote the 4K figure
+  for it.**
+- **The `C` shortcut is undecided and left so.** Free, reserved by the assessment,
+  deliberately unbound because the brief specified the menu only -- and a new
+  bare-key shortcut has to be checked against phase 7's text-field guard first.
+  Owner decision.
+
+## Stage 2 carry-forward, recorded here so they are not re-derived
+
 
 - **Three channel-naming conventions**, not two: root `R G B`, named layers
   `.red/.green/.blue`, Cryptomatte `.R/.G/.B/.A` (uppercase, with alpha). A
@@ -373,3 +400,14 @@ configs and no test assets. Stage 0 could only say the library had been built.
   per frame on that file, of which 24 MB is used.
 - Alpha is pushed through the same `pow(1/2.2)` as the colour channels in
   `loadExr`, which is wrong in principle and invisible for the same reason.
+- **The dev HUD reads `ch:4` on a 3-channel file.** `MainWindow.cpp:6539`
+  hard-codes `info.channels = 4` on the frame-handoff path -- honest about the
+  display buffer (always RGBA after handoff), misleading as a label, and only
+  visibly wrong now that EXR opens. What that field should say is a stage-2
+  decision, which is why it was left alone.
+
+**Nothing here was fixed in stage 1, deliberately.** Each is either invisible
+today or a decision that belongs with the layer work, and touching them piecemeal
+would have meant redesigning EXR channel handling inside a colour-transform
+stage -- which the brief ruled out and which would have made both harder to
+judge.
