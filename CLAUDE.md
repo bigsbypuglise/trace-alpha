@@ -1077,11 +1077,94 @@ pass overlay, the View-menu pass list and `duplicateOf` are still NOT built.
   multiset of non-comment lines); all three then revert cleanly and each
   reverted tree builds.
 
+**THE MULTILAYER PASS MODEL IS BUILT AND MEASURED (2026-08-24, physical panel).
+Record `docs/exr-stage2-pass-model.md` — read it before touching the grouper,
+the pass list or a display mapping.** Commits `bb159db` (grouper selftest + two
+fixes) · `5301e74` (duplicateOf) · `5b7158e` (pass list + one route) · `c73aedd`
+(pinned Normalise range). **NOT merged.** Cryptomatte interpretation is NOT
+started.
+
+- **MOST OF THE BRIEF'S PRIORITY LIST WAS ALREADY BUILT, AND THE 224 MB PREMISE
+  HAS EXPIRED.** Channel enumeration, the three-convention grouper, raw-name
+  preservation, the stable ordered list, name-based alpha, per-pass rendering and
+  the `[`/`]` wiring were all done in parts 1 and 2. **`loadExr` has read only
+  the active pass's span since part 1** — measured **23.7 MB per pass against
+  213.6 MB for all 27 channels** — so "do not optimise the ~224 MB allocation
+  yet" is answered by it already being gone. What was genuinely unbuilt: the View
+  pass list, `duplicateOf`, and any test of the grouper at all.
+- **`--exr-channels-selftest` IS THE FOURTH SELFTEST: 14 channel layouts, pure
+  logic, CI-safe.** It exists because **the asset set has only TWO of the three
+  recorded conventions** — every EXR in the pool is either `R G B` or Redshift's
+  `.red/.green/.blue`, *including that file's own `Cryptomatte`*, and the
+  upper-case-with-alpha form stage 0 recorded has **no file here**. The
+  convention that cannot be tested against real media is exactly the one that
+  needs a test. Five invariants run on every case, the load-bearing one being
+  **a component slot must hold a channel whose OWN NAME ends in that component**
+  — resolution by identity, never by position. **Proven able to fail twice.**
+- **TWO SILENT DEFECTS IT FOUND, neither reachable by any file in the pool.**
+  A bare channel and a layer of the same name were MERGED, so a file carrying `Z`
+  and `Z.R/.G/.B` **dropped three channels entirely** with no error. And an
+  **alpha-only layer rendered BLACK** — `mask.A` left every colour slot unset, a
+  pass that is present, selectable and invisible. A component slot still keeps
+  the FIRST claimant, but the loser is now RECORDED in `ExrPass::ambiguous`
+  instead of vanishing.
+- **`duplicateOf` IS FILLED AND IT IS MEASURED FROM PIXELS.** Bit-equality finds
+  nothing — the root and `Beauty` copies are compressed INDEPENDENTLY with lossy
+  DWAA, so only 5-7% of pixels match — so it is a **relative mean absolute
+  difference over a 24-scanline band**, tolerance 2%, with the figure carried to
+  the HUD: **`pass 2/9 Beauty ... = (root) (0.36%)`**, which is part 1's own
+  independently measured MAD from a different direction. **No false positives on
+  the other seven**, including three dark passes a naive absolute test would have
+  matched. Two passes that are BOTH empty are deliberately not called duplicates.
+  One read covers every pass and is cached on the channel names, so a 97-frame
+  sequence pays it once.
+- **`View > EXR Pass` LISTS THE PASSES, AND `applyExrPass()` IS THE ONE ROUTE.**
+  `[`, `]` and every menu row go through it, so the reload, the cache clear, the
+  overlay and the tick cannot disagree — and both the tick and the overlay name
+  the **LOADED** pass, never the requested one, because `choosePass()` falls back.
+  Rebuilt only when the pass LIST changes (keyed on the joined display names), or
+  it would be recreated several times a second from `refreshHud()`. Rows carry no
+  mnemonics: a pass name is file data. The overlay is the **existing composited
+  toast** by choice, not a second mechanism — `Pass 7/9: Reflections (colour)`.
+- **THE PASS MODEL EXPOSED A REAL DEFECT: `Normalise` WAS AUTO-RANGING PER
+  FRAME**, which is exactly what the owner's stage-5 ruling forbids. Measured on
+  the P pass: **frame 0 `[-44.2500..44.2500]` against frame 96
+  `[-39.2500..44.0000]`** — the same world position a different grey depending on
+  the playhead. The range is measured from a pass's FIRST frame and **pinned**;
+  after, frames 0, 1 and 96 all read `[-44.2500..44.2500]`. The `>1` fraction
+  still tracks each frame because that is REPORTING, not mapping. It is also the
+  stage-5 prerequisite: a whole-frame reduction cannot become a shader without a
+  separate pass, two pinned scalars are two uniforms. **The pin is per PASS** —
+  `setDisplayMap()` drops it only when the MAPPING changes (it runs every frame),
+  and `applyExrPass()` clears it explicitly because two position passes share one
+  mapping.
+- **Regression flat**: `scrubbar.ps1` full pool **PASS — 22 files, 88 legs,
+  `delta 0`** · 4K H.264 cadence x2 **100.0/100.0%** (`0 of 119`) · 4444 x2
+  **99.8/99.8%** (`0 of 260`) · **four** selftests green · `passkeys.ps1` all
+  seven legs PASS · assets 33. **Working set 246.6 MB / peak 351.7 MB** on the
+  27-channel file against part 1's recorded 254.9 / 339.6 — flat. Both EXR
+  sequences play to their last frame, and **pass selection survives frame
+  stepping** (`pass 6/9 P` at frames 0, 1, 4 and 96).
+- **REVERTABILITY: three of four revert alone; `bb159db` is a PREREQUISITE.** The
+  pass menu reads `ExrPass::ambiguous`, which the grouper commit introduces — a
+  genuine dependency rather than an adjacency accident. Reverting the pair in
+  order is clean and builds; checked, not assumed.
+- **STILL NOT STARTED, and what each needs first.** Cryptomatte (stage 4) needs
+  the header manifest read, the **rank-pair convention** modelled
+  (`CryptoMaterial00.R/.G/.B/.A` is *(id, coverage)*, not colour — the grouper's
+  current neutral RGBA answer is right but uninterpreted), and **real test
+  material, which the pool does not have.** EXR playback optimisation needs the
+  **window cache bounded by BYTES** (8K would want 1.6 GB) and, before anything
+  else, **a cadence instrument for the sequence path — no EXR playback rate has
+  ever been measured in this project.**
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
-1. **The keyboard surface is DONE — see the block above.** `[`, `]` and `C` are
-   built, measured together and regression-clean. What remains of part 2 is the
-   list below.
+1. **The keyboard surface and the pass model are DONE — see the two blocks
+   above.** Everything the part-2 list named is built: `[`, `]`, `C`, the pass
+   overlay, the View pass list and `duplicateOf`. What is left of stage 2 is
+   Cryptomatte interpretation (stage 4) and the EXR playback work, both listed
+   at the end of `docs/exr-stage2-pass-model.md`.
 2. **The transient pass overlay** naming the current pass on screen.
 3. **The full pass list in the View menu.**
 4. **`ExrPass::duplicateOf` IS DECLARED AND NEVER FILLED.** Root RGB and a named
@@ -4000,6 +4083,12 @@ FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt ru
 - **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
 - **Green must mean launchable** (Aug 2026): the workflow checks native tool exit codes (`windeployqt` failures used to pass silently), asserts FFmpeg was found at configure time, and verifies `Trace.exe` + Qt DLLs + `platforms/qwindows.dll` + av* DLLs exist before publishing. If a build goes green, the download starts.
 - **CI checks the interface assets against the `.qrc` contract, before the build** (2026-08-15, `3e0c936`): `scripts/verify_trace_assets.py --strict --no-pillow`, second step in the workflow because it needs no toolchain. It catches the class `rcc` cannot — a 25px export named `-24`. Its set is **derived** from `app/resources.qrc` and `app/trace.rc`; see the asset-tree entry above for why that is what made it CI-safe.
+- **CI can assert the EXR channel grouper** (2026-08-24): `Trace.exe
+  --exr-channels-selftest` drives `groupExrChannels()` over 14 synthetic channel
+  layouts and exits 5 on any failure. Pure logic -- no file, no OpenImageIO, no
+  window -- so it runs anywhere the binary does. It exists because the asset set
+  carries only two of the three recorded naming conventions, so the third can
+  only be tested synthetically. **Not yet added to the workflow.**
 - **CI asserts the renderer initializes** (Aug 2026, `b5ad4d2`): `Trace.exe --renderer-selftest=d3d11` builds the viewer, lets it adopt whatever `TRACE_RENDERER` selects, prints `renderer=`/`fellback=`/`planar=` and exits. It runs the real path — `ViewerWidget`'s constructor applies the native-surface contract and calls `initialize()`, which creates the device, the child surface window, the flip-model swapchain, every shader and the render target. **No `show()`**: `initialize()` reaches the HWND through `winId()`, so the check does not need an interactive desktop. The match is a **prefix**, so a runner that falls back to the software rasteriser and renames itself `d3d11 (warp)` still passes. (In the event the first run reported plain `d3d11` — the GitHub runner's device took the hardware path.) **Exit 3 is the selected backend failing to initialize, exit 4 is that backend never having been built** (no `fxc`); the two are separate codes because they are separate faults, and that is also why the expected name is an argument to the exe rather than a grep in the YAML. `planar=1` is asserted too — a failed YUV shader is deliberately non-fatal at runtime (GATE C), which makes it exactly the silent degradation this step exists to catch. **It was printed for one run before being asserted**, because whether the runner's device supplies `ps_4_0` had never been observed and guessing would have turned the first build red on a guess.
 - vcpkg/FFmpeg and Qt are cached; the ~20+ min build only recurs on cache miss (7-day idle expiry). Bump `VCPKG_CACHE_VERSION` in the workflow to force a clean FFmpeg rebuild.
 - **Whether Claude can push depends on which machine the session is on — check, don't assume.** On the **Windows box** (repo at `C:\Users\andre\Documents\Claude_Cowork\Trace_Windows`) github.com **is reachable and Claude can push directly**; verified Aug 2026 by a read-only `git ls-remote` followed by a real push. On the **macOS sandbox** the proxy blocks github.com, so commits are made locally and Anj pushes from `~/Claude/Trace`.
@@ -5078,12 +5167,14 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    changed to copy what is on screen -- record
    `docs/exr-stage2-float-buffer.md`.** It also found and fixed a bug that
    SHIPPED IN STAGE 0: **EXR display had red and blue transposed**.
-   **STAGE 2 PART 2's KEYBOARD SURFACE IS DONE (2026-08-24): `[`, `]` and `C`
-   are built, measured together and regression-clean at the panel -- record
-   `docs/exr-stage2-keyboard-surface.md`.** What remains of part 2 is the
-   transient pass overlay, the View-menu pass list and the root-versus-Beauty
-   duplicate label; the "WHAT STAGE 2 PART 2 STILL OWES" list above is the
-   starting point. **CHECK THE
+   **STAGE 2 PART 2 IS DONE (2026-08-24): the keyboard surface (`[`, `]`, `C`
+   -- record `docs/exr-stage2-keyboard-surface.md`) AND the multilayer pass
+   model (grouper selftest, duplicateOf, the View pass list, the pass overlay,
+   and the pinned Normalise range -- record `docs/exr-stage2-pass-model.md`).**
+   Both are regression-clean at the panel. What is left of the EXR phase is
+   Cryptomatte (stage 4), the config/display/view dialog (stage 3), the GPU
+   stage (5), and EXR playback optimisation -- whose prerequisites are listed at
+   the end of the pass-model record. **CHECK THE
    DISPLAY FIRST: the last session ran over Parsec and the panel itself was at
    5120x1440 @ 59Hz, not 239.999Hz, so nothing recorded there is a panel
    baseline and THE FULL PANEL REGRESSION IS THE MERGE GATE.** Stages 3-5 (the
