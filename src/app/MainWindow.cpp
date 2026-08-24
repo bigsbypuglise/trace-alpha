@@ -4444,6 +4444,12 @@ void MainWindow::loadLutFromDialog() {
         return;
     }
 
+    // setConfig() can succeed and still report something: the float processor
+    // is built beside the 8-bit one and is not fatal if it fails, but a silent
+    // failure would show an untransformed EXR under a HUD saying the transform
+    // is ON.
+    const QString warning = error;
+
     colorTransform_.setEnabled(true);
     trace::app::settings().setValue(QLatin1String(kColorTransformEnabledKey), true);
     trace::app::settings().setValue(QLatin1String(kColorTransformKindKey),
@@ -4451,7 +4457,11 @@ void MainWindow::loadLutFromDialog() {
     trace::app::settings().setValue(QLatin1String(kColorTransformLutKey), path);
 
     applyColorTransformChange("LUT loaded");
-    showTransientMessage(tr("Loaded LUT %1").arg(QFileInfo(path).fileName()), 2500);
+    showTransientMessage(
+        warning.isEmpty()
+            ? tr("Loaded LUT %1").arg(QFileInfo(path).fileName())
+            : warning,
+        warning.isEmpty() ? 2500 : 5000);
 }
 
 // THE RAW/DEFAULT STATE, DEFINED IN ONE PLACE: no transform configured, bypass
@@ -6705,14 +6715,21 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     if (currentMedia_->kind == MediaKind::ImageSequence) {
         frameCache_.setWindowCenter(frameIndex);
         if (const auto cached = frameCache_.get(frameIndex); cached.has_value()) {
-            trace::core::LoadedImageInfo info;
+            // The pass list, the active pass and the compression belong to the
+            // SEQUENCE, not to the frame, so they are carried across a cache hit
+            // rather than rebuilt from the cache entry (which does not hold
+            // them). A pass change clears the cache, so they cannot be stale.
+            trace::core::LoadedImageInfo info =
+                currentImage_.has_value() ? *currentImage_ : trace::core::LoadedImageInfo{};
             info.filePath = cached->path;
             info.fileName = QFileInfo(cached->path).fileName();
             info.extension = QFileInfo(cached->path).suffix().toLower();
             info.width = cached->width;
             info.height = cached->height;
             info.channels = cached->channels;
+            info.buffer.reset();
             currentImage_ = info;
+            syncDisplayMapForActivePass();
             viewer_->setFrame(cached->frame);
             syncTransportBar();
             return true;
@@ -6774,14 +6791,24 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     handoffTimer.start();
 
     trace::core::LoadedImageInfo info;
+    if (auto* seq = imageSequenceSource()) {
+        // WHAT THE FILE ACTUALLY WAS, from the loader that read it.
+        //
+        // This used to hard-code `channels = 4`, which is the DISPLAY BUFFER's
+        // channel count and was printed on the HUD as though it were the
+        // source's -- so a 3-channel EXR read `ch:4`. The loader knows the
+        // answer; before this there was no way to ask it.
+        info = seq->lastInfo();
+    }
     info.filePath = sourcePath;
     info.fileName = QFileInfo(sourcePath).fileName();
     info.extension = QFileInfo(sourcePath).suffix().toLower();
     info.width = targetFrame->width();
     info.height = targetFrame->height();
-    info.channels = 4;
+    if (info.channels <= 0) info.channels = 4;
 
     currentImage_ = info;
+    syncDisplayMapForActivePass();
     viewer_->setFrame(*targetFrame);
 
     lastFrameHandoffMs_ = static_cast<double>(handoffTimer.nsecsElapsed()) / 1'000'000.0;
@@ -6823,8 +6850,7 @@ void MainWindow::prefetchNeighbors() {
         trace::core::CachedFrame cf;
         cf.frameIndex = idx;
         cf.path = info.filePath;
-        // `info` is about to go out of scope, so this moves rather than copies.
-        cf.frame.buffer = trace::core::FrameBuffer::adopt(std::move(info.image));
+        cf.frame.buffer = info.buffer;
         cf.frame.frameIndex = idx;
         if (!cf.frame.buffer) continue;
         cf.width = info.width;
@@ -9405,6 +9431,13 @@ void MainWindow::refreshHud(const QString& action) {
             } else {
                 xform = QStringLiteral("ON %1").arg(colorTransform_.description());
             }
+            // AND HOW A FLOAT SOURCE IS BEING MADE VISIBLE. Appended to the same
+            // field because it is the same question -- what happened to the
+            // pixels between the file and the screen -- and because a mapping
+            // that normalises has to say so and say over what range. Absent
+            // entirely for an 8-bit source, which is every video, so no existing
+            // HUD capture changes shape.
+            xform += displayMapHudText();
             const QString l0 = QString("color %1%2 %3 range | xform %11 | display %4x%5 %6 | win %7x%8 | renderer %9%10")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
@@ -10211,31 +10244,45 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(as.silenceBytes);
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
+            const QString exr = exrHudSuffix();
             // ZERO-BASED, and against the last valid INDEX rather than the
             // count -- which is what the video line has always printed and what
             // these two did not (spec §2 item 8). `Elapsed:` rather than
             // `Timecode:` because an image sequence has no container timecode
             // at all, so calling this one was the clearest instance of the thing
             // the spec forbids.
-            line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Elapsed: %8")
-                .arg(QString::fromStdString(seq.pattern))
+            // THE TWO TEXT FIELDS GO IN LAST, TOGETHER, THROUGH THE MULTI-ARG
+            // OVERLOAD -- and that is a fix, not a style.
+            //
+            // A sequence pattern is printf-shaped: `icecream_passes%04d.exr`.
+            // QString::arg reads `%04` as its own placeholder 4, so inserting
+            // the pattern first and then calling .arg() six more times replaced
+            // it with the channel count and printed `icecream_passes27d.exr`.
+            // Pre-existing, and invisible until a file was opened whose HUD line
+            // anyone read closely. The multi-arg form substitutes in ONE pass and
+            // never rescans what it inserted, so neither the pattern nor a channel
+            // name containing a percent sign can corrupt the line.
+            line = QString("Sequence | %8 | %1x%2 ch:%3%9 | Frame: %4/%5 | Seconds: %6 | Elapsed: %7")
                 .arg(currentImage_.has_value() ? currentImage_->width : 0)
                 .arg(currentImage_.has_value() ? currentImage_->height : 0)
                 .arg(currentImage_.has_value() ? currentImage_->channels : 0)
                 .arg(st.currentFrame)
                 .arg(seq.frames.empty() ? 0 : seq.frames.size() - 1)
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
-                .arg(elapsed);
+                .arg(elapsed)
+                .arg(QString::fromStdString(seq.pattern), exr);
         } else if (currentImage_.has_value()) {
             const auto& im = *currentImage_;
-            line = QString("Still | %1 | %2x%3 ch:%4 | Frame: %5/0 | Seconds: %6 | Elapsed: %7")
-                .arg(im.fileName)
+            // Same one-pass substitution for the same reason: a file name is
+            // user text and may contain a percent sign.
+            line = QString("Still | %7 | %1x%2 ch:%3%8 | Frame: %4/0 | Seconds: %5 | Elapsed: %6")
                 .arg(im.width)
                 .arg(im.height)
                 .arg(im.channels)
                 .arg(st.currentFrame)
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
-                .arg(elapsed);
+                .arg(elapsed)
+                .arg(im.fileName, exrHudSuffix());
         }
     }
 
@@ -10283,6 +10330,89 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
 trace::core::VideoFrameSource* MainWindow::videoFrameSource() {
     return dynamic_cast<trace::core::VideoFrameSource*>(frameSource_.get());
+}
+
+// THE PASS, ITS CLASS, AND THE FILE'S OWN CHANNEL NAMES FOR IT.
+//
+// The raw names are printed rather than the tidy ones because they are the one
+// thing that makes a naming convention we have not met VISIBLE instead of
+// silent: three conventions already live in one asset set (`R G B`,
+// `Beauty.red`, `CryptoMaterial.R`), and a grouper written for any one of them
+// finds nothing in the other two while reporting a perfectly healthy-looking
+// plain RGB image.
+// HOW A FLOAT SOURCE IS BEING MADE VISIBLE, in one expression so the HUD's
+// colour line and its media line cannot print different answers.
+//
+// It carries the measured range and the fraction above 1.0 because those are
+// what say whether the picture on screen is the whole picture: the Redshift
+// beauty pass runs to 2.52 and half of it clips under a plain 2.2 gamma, and
+// nothing else on screen would ever say so.
+QString MainWindow::displayMapHudText() const {
+    if (!viewer_ || !viewer_->displayMapInUse()) return QString();
+    const auto& dm = viewer_->displayMapResult();
+    QString out = QStringLiteral(" | map %1").arg(trace::core::displayMapName(dm.map));
+    if (dm.map != trace::core::DisplayMap::Ocio) {
+        out += QStringLiteral(" [%1..%2, %3")
+                   .arg(QString::number(dm.inputLo, 'f', 4))
+                   .arg(QString::number(dm.inputHi, 'f', 4))
+                   .arg(QString::number(dm.fractionAboveOne * 100.0, 'f', 1));
+        // Written outside the format string: "%%" is not a placeholder to
+        // QString::arg and survives into the output as two characters.
+        out += QStringLiteral("% >1]");
+    }
+    return out;
+}
+
+QString MainWindow::exrHudSuffix() const {
+    if (!currentImage_.has_value()) return QString();
+    const auto& im = *currentImage_;
+    if (im.passes.empty()) return QString();
+
+    QString out;
+    if (!im.compression.isEmpty()) {
+        out += QStringLiteral(" %1").arg(im.compression);
+        // DWAA and DWAB are LOSSY by the renderer's own choice. Saying so here
+        // is cheaper than someone debugging a compression artefact as a Trace
+        // bug -- which is exactly what the root-versus-Beauty difference in the
+        // test file turns out to be.
+        if (im.compression.startsWith(QLatin1String("dwa"), Qt::CaseInsensitive))
+            out += QStringLiteral(" (lossy)");
+    }
+    if (const auto* pass = im.activePassInfo()) {
+        out += QStringLiteral(" | pass %1/%2 %3 %4")
+                   .arg(im.activePass + 1)
+                   .arg(static_cast<int>(im.passes.size()))
+                   .arg(pass->displayName)
+                   .arg(trace::core::passClassName(pass->cls));
+        if (!im.activeRawNames.isEmpty())
+            out += QStringLiteral(" [%1]").arg(im.activeRawNames.join(QLatin1Char(',')));
+        if (!pass->duplicateOf.isEmpty())
+            out += QStringLiteral(" = %1").arg(pass->duplicateOf);
+    }
+    // The mapping goes on THIS line as well as on the colour line, because the
+    // colour line is built inside the video branch and an EXR sequence never
+    // reaches it -- so without this the one media class that always has a
+    // mapping in force would be the one class that never reported it.
+    out += displayMapHudText();
+    return out;
+}
+
+trace::core::ImageSequenceFrameSource* MainWindow::imageSequenceSource() {
+    return dynamic_cast<trace::core::ImageSequenceFrameSource*>(frameSource_.get());
+}
+
+// THE MAPPING FOLLOWS THE PASS'S CLASS, NOT ITS NAME.
+//
+// A world-position pass shown through a colour mapping is black or white and
+// nothing else; a beauty pass shown through a per-frame normalise flickers as
+// the brightest pixel moves. So the mapping is chosen from the class the grouper
+// assigned, and which one is in force is always on screen -- normalising is
+// allowed, doing it quietly is not.
+void MainWindow::syncDisplayMapForActivePass() {
+    if (!viewer_) return;
+    const auto* pass = currentImage_.has_value() ? currentImage_->activePassInfo() : nullptr;
+    viewer_->setDisplayMap(pass ? trace::core::defaultMapForClass(pass->cls)
+                                : trace::core::DisplayMap::Gamma22);
 }
 
 void MainWindow::prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction, bool clearQueue) {

@@ -251,6 +251,11 @@ add_executable(Trace WIN32
   ../src/core/PlaybackController.cpp
   ../src/core/ColorTransform.h
   ../src/core/ColorTransform.cpp
+  ../src/core/DisplayMapping.h
+  ../src/core/DisplayMapping.cpp
+  ../src/core/ExrChannels.h
+  ../src/core/ExrChannels.cpp
+  ../src/core/ParallelBands.h
   ../src/core/StillImageLoader.h
   ../src/core/StillImageLoader.cpp
   ../src/core/SequenceDescriptor.h

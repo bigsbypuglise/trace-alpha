@@ -13,6 +13,7 @@
 #include "core/MediaItem.h"
 #include "core/ViewState.h"
 #include "core/PlaybackController.h"
+#include "core/ImageSequenceFrameSource.h"
 #include "core/StillImageLoader.h"
 #include "core/ColorTransform.h"
 #include "core/FrameCache.h"
@@ -403,6 +404,13 @@ private:
     void queueVideoScrubFrame(long long frameIndex);
     void flushVideoScrub(bool forceExact);
     trace::core::VideoFrameSource* videoFrameSource();
+    // The other frames-from-files source. Needed because the frame-handoff path
+    // has to ask what the file's real channel count and pass list were, and only
+    // the loader behind this source knows.
+    trace::core::ImageSequenceFrameSource* imageSequenceSource();
+    void syncDisplayMapForActivePass();
+    QString exrHudSuffix() const;
+    QString displayMapHudText() const;
     void prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction = 1, bool clearQueue = false);
     // Audio drives playback timing when it is running, so these decide whether
     // this playback run is audio-clocked and stop the device the moment it

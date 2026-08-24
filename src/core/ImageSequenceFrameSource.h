@@ -22,11 +22,21 @@ public:
     bool canPlay() const override;
     QString sourcePathForFrame(long long frameIndex) const override;
 
+    // What the last successfully loaded frame's file actually was. Empty until
+    // the first load succeeds.
+    const LoadedImageInfo& lastInfo() const { return lastInfo_; }
+
+    // Pass selection belongs to the loader (it must be identical for every frame
+    // of a sequence); this is the route to it from a caller that only holds the
+    // source.
+    StillImageLoader* loader() const { return loader_; }
+
 private:
     StillImageLoader* loader_ = nullptr;
     QStringList framePaths_;
     double fps_ = 24.0;
     long long currentFrame_ = 0;
+    LoadedImageInfo lastInfo_;
 };
 
 } // namespace trace::core

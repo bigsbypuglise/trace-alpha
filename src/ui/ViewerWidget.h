@@ -9,6 +9,7 @@
 #include <memory>
 
 #include "core/ColorTransform.h"
+#include "core/DisplayMapping.h"
 #include "core/VideoFrame.h"
 #include "render/OverlayModel.h"
 #include "render/VideoRenderer.h"
@@ -88,6 +89,15 @@ public:
     // Whether the adopted backend can take Y/U/V planes and convert them
     // itself, so the decoder may skip swscale for full-resolution frames.
     bool rendererAcceptsPlanarYuv() const;
+
+    // HOW A FLOAT FRAME IS BEING MADE VISIBLE, and the range it was measured
+    // over. Null-ish for a frame that needed no mapping. Read by the HUD and
+    // the pass overlay, because a viewer that normalises silently is a viewer
+    // that cannot be trusted for review.
+    void setDisplayMap(trace::core::DisplayMap map);
+    trace::core::DisplayMap displayMap() const { return displayMap_; }
+    const trace::core::DisplayMapResult& displayMapResult() const { return displayMapResult_; }
+    bool displayMapInUse() const { return displayMapInUse_; }
     // True when the backend TRACE_RENDERER selected failed to initialize and the
     // CPU backend was adopted in its place. rendererName() alone cannot answer
     // this: the D3D11 backend renames itself "d3d11 (warp)" when it lands on the
@@ -270,6 +280,12 @@ private:
     // null whenever the stage is inactive.
     trace::core::VideoFrame displayFrame_;
     const trace::core::ColorTransform* colorTransform_ = nullptr;
+    // Which mapping a float source is shown through, and what the last one
+    // measured. displayMapInUse_ is false for an ordinary 8-bit frame, so the
+    // HUD can tell "no mapping was needed" from "the default one ran".
+    trace::core::DisplayMap displayMap_ = trace::core::DisplayMap::Gamma22;
+    trace::core::DisplayMapResult displayMapResult_{};
+    bool displayMapInUse_ = false;
     void applyColorTransformToRenderer();
     ViewerPerfStats perfStats_{};
     // Single monotonic source for this widget, so update()->paint latency is

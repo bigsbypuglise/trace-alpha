@@ -491,21 +491,66 @@ void ViewerWidget::leaveEvent(QEvent* event) {
 void ViewerWidget::applyColorTransformToRenderer() {
     if (!renderer_) return;
 
+    // A SCENE-REFERRED FLOAT SOURCE HAS NO CORRECT 8-BIT READING OF ITS OWN, so
+    // one of the two branches below MUST produce a display buffer for it. This
+    // is what keeps RGBAF32 off the renderers entirely: neither backend can draw
+    // it (qtFormatFor declines it, and the D3D11 upload takes BGRA8 or planes),
+    // so the guarantee that the measured present path is unchanged is a property
+    // of this function rather than something to remember at each call site.
+    const bool floatSource = !frame_.isNull() && frame_.buffer
+                             && trace::core::isFloatRgba(frame_.buffer->layout());
+
     if (colorTransform_ && colorTransform_->isActive()) {
         trace::core::VideoFrame transformed;
         if (colorTransform_->apply(frame_, transformed)) {
             displayFrame_ = std::move(transformed);
+            displayMapInUse_ = floatSource;
+            // The range is deliberately NOT measured on this branch: it would be
+            // a second full pass over the frame every frame, purely to fill in a
+            // report, and OCIO is already the answer to "what happened to the
+            // highlights".
+            displayMapResult_ = trace::core::DisplayMapResult{};
+            displayMapResult_.map = trace::core::DisplayMap::Ocio;
             renderer_->setFrame(displayFrame_);
             return;
         }
         // apply() declines rather than throws for a layout it cannot take
-        // (planar YUV). Falling through to the source is the honest answer --
-        // an untransformed picture, not a black one -- and MainWindow keeps
-        // planar output off whenever the stage is active so this is not the
-        // path a user lands on.
+        // (planar YUV), and for a float source when the float processor failed
+        // to build. Falling through is the honest answer -- an untransformed
+        // picture, not a black one -- and MainWindow keeps planar output off
+        // whenever the stage is active so that is not a path a user lands on.
     }
+
+    if (floatSource) {
+        trace::core::VideoFrame mapped;
+        trace::core::DisplayMapResult result;
+        if (trace::core::mapFloatToDisplay(frame_, mapped, displayMap_, &result)) {
+            displayFrame_ = std::move(mapped);
+            displayMapResult_ = result;
+            displayMapInUse_ = true;
+            renderer_->setFrame(displayFrame_);
+            return;
+        }
+        // Nothing here can draw a float frame. Clearing is diagnosable -- the
+        // empty-state mark, with the HUD still naming the media -- where handing
+        // the renderer a buffer it will reject would be a black window with no
+        // statement about why.
+        displayFrame_ = trace::core::VideoFrame{};
+        displayMapInUse_ = false;
+        renderer_->clearFrame();
+        return;
+    }
+
     displayFrame_ = trace::core::VideoFrame{};
+    displayMapInUse_ = false;
     renderer_->setFrame(frame_);
+}
+
+// Changing the mapping does not touch the frame; it changes how the frame is
+// made visible. The caller re-runs the stage (refreshColorTransform) exactly as
+// it does for a bypass toggle, so a paused picture updates without the decoder.
+void ViewerWidget::setDisplayMap(trace::core::DisplayMap map) {
+    displayMap_ = map;
 }
 
 void ViewerWidget::setColorTransform(const trace::core::ColorTransform* transform) {

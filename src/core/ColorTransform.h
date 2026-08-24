@@ -102,9 +102,23 @@ public:
     // and the transient message. Empty for Kind::None.
     QString description() const;
 
-    // THE STAGE ITSELF. `in` must be BGRA8; `out` receives a NEW buffer holding
-    // the transformed pixels. Returns false when not active or when `in` is not
-    // BGRA8, in which case `out` is untouched and the caller displays `in`.
+    // True when a float source can be transformed. Separate from
+    // hasProcessor() because the float processor is built beside the 8-bit one
+    // and either could in principle fail on its own; a caller that asks the
+    // wrong question would silently show an untransformed EXR.
+    bool hasFloatProcessor() const;
+
+    // THE STAGE ITSELF. `in` must be BGRA8 or RGBAF32; `out` receives a NEW
+    // buffer holding the transformed pixels, ALWAYS BGRA8. Returns false when
+    // not active or when `in` is a layout this cannot take (planar YUV), in
+    // which case `out` is untouched and the caller displays `in`.
+    //
+    // THE FLOAT INPUT IS THE POINT OF THE EXR PATH. A scene-linear EXR carries
+    // values well above 1.0 -- measured on the Redshift beauty pass, 48-66% of
+    // samples -- so flattening to 8 bits before this stage handed the view
+    // transform a picture whose highlights had already been clipped. Float in,
+    // 8-bit out means the clip happens at the END of the chain, where the
+    // display actually imposes it, instead of at the start.
     //
     // SOURCE PIXELS ARE NEVER MODIFIED. `in`'s buffer is read-only here, which
     // is what keeps Copy Frame copying the source and what makes the whole stage

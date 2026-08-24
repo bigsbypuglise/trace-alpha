@@ -1,9 +1,11 @@
 #include "core/ColorTransform.h"
 
+#include "core/ParallelBands.h"
+
 #include <QFileInfo>
 
 #include <atomic>
-#include <thread>
+#include <cstddef>
 #include <vector>
 
 #ifdef TRACE_WITH_OCIO
@@ -19,6 +21,13 @@ struct ColorTransform::Impl {
     // the CPU processor rather than the Processor so the optimisation and the
     // bit depths are decided once at compile time instead of per frame.
     OCIO::ConstCPUProcessorRcPtr cpu;
+    // The SAME transform, compiled for a float source. Two processors rather
+    // than one because the optimisation and the internal ops are chosen from the
+    // bit depths at build time, which is the whole reason getOptimizedCPUProcessor
+    // takes them -- asking the uint8 processor to read floats is not a thing it
+    // can do. Video keeps the uint8 one untouched, byte for byte, so nothing
+    // measured on the video path moves because EXR gained a float source.
+    OCIO::ConstCPUProcessorRcPtr cpuFloat;
 #endif
 };
 
@@ -49,11 +58,22 @@ bool ColorTransform::hasProcessor() const {
 #endif
 }
 
+bool ColorTransform::hasFloatProcessor() const {
+#ifdef TRACE_WITH_OCIO
+    return impl_ && static_cast<bool>(impl_->cpuFloat);
+#else
+    return false;
+#endif
+}
+
 void ColorTransform::reset() {
     config_ = Config{};
     enabled_ = false;
 #ifdef TRACE_WITH_OCIO
-    if (impl_) impl_->cpu.reset();
+    if (impl_) {
+        impl_->cpu.reset();
+        impl_->cpuFloat.reset();
+    }
 #endif
 }
 
@@ -73,7 +93,10 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
     if (config.kind == Kind::None) {
         config_ = config;
 #ifdef TRACE_WITH_OCIO
-        if (impl_) impl_->cpu.reset();
+        if (impl_) {
+            impl_->cpu.reset();
+            impl_->cpuFloat.reset();
+        }
 #endif
         return true;
     }
@@ -156,20 +179,42 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
             return false;
         }
 
-        // UINT8 IN AND OUT, AND THAT IS A STATED LIMIT RATHER THAN AN OVERSIGHT.
-        // The frame reaching this stage is already an 8-bit BGRA display buffer
-        // -- that is what both renderers present -- so asking OCIO for a
-        // float pipeline here would add two conversions and buy nothing back
-        // that the buffer can carry. It also means this stage cannot serve a
-        // scene-linear ACEScg workflow at full precision: that needs a float
-        // display buffer end to end, which is the GPU stage's problem and is
-        // recorded as such rather than half-built here.
+        // TWO PROCESSORS FOR ONE TRANSFORM, BECAUSE THERE ARE TWO KINDS OF
+        // SOURCE AND EXACTLY ONE KIND OF DISPLAY.
+        //
+        // uint8 -> uint8 is the VIDEO path, unchanged from stage 1 and
+        // deliberately so: a decoded video frame at this seam already is an
+        // 8-bit BGRA display buffer, so a float pipeline over it would add two
+        // conversions and recover nothing the source ever had.
+        //
+        // f32 -> uint8 is the EXR path, and it is where stage 1's recorded
+        // 8-bit limit is lifted. A scene-linear EXR is not display-referred and
+        // is not bounded at 1.0 -- measured on the Redshift beauty pass, 48% of
+        // red, 42% of green and 66% of blue samples exceed it -- so the old
+        // arrangement handed the view transform a picture whose highlights had
+        // already been clipped by loadExr. The output stays uint8 because that
+        // is what both renderers present and what the panel can show; what
+        // changed is that the clip now happens at the END of the chain.
+        //
+        // 10-bit output and HDR remain formally deferred behind their own two
+        // external gates and are not what this buys.
         impl_->cpu = processor->getOptimizedCPUProcessor(
             OCIO::BIT_DEPTH_UINT8, OCIO::BIT_DEPTH_UINT8,
             OCIO::OPTIMIZATION_DEFAULT);
         if (!impl_->cpu) {
             error = QStringLiteral("OpenColorIO produced no CPU processor.");
             return false;
+        }
+        impl_->cpuFloat = processor->getOptimizedCPUProcessor(
+            OCIO::BIT_DEPTH_F32, OCIO::BIT_DEPTH_UINT8,
+            OCIO::OPTIMIZATION_DEFAULT);
+        if (!impl_->cpuFloat) {
+            // Not fatal: video still works. But it must not be silent, and
+            // hasFloatProcessor() is what the EXR path asks so it cannot show
+            // an untransformed picture while the HUD claims a transform is on.
+            error = QStringLiteral(
+                "OpenColorIO produced no float CPU processor; EXR sources will "
+                "show their default display mapping.");
         }
         config_ = config;
         return true;
@@ -188,7 +233,13 @@ bool ColorTransform::apply(const VideoFrame& in, VideoFrame& out) const {
     return false;
 #else
     if (!isActive() || in.isNull() || !in.buffer) return false;
-    if (in.buffer->layout() != PixelLayout::BGRA8) return false;
+
+    // TWO SOURCE LAYOUTS, ONE DESTINATION. Planar YUV is declined here as it
+    // always was, and MainWindow keeps planar output off while the stage is
+    // active so that is not a path a user lands on.
+    const bool floatSource = isFloatRgba(in.buffer->layout());
+    if (!floatSource && in.buffer->layout() != PixelLayout::BGRA8) return false;
+    if (floatSource && !hasFloatProcessor()) return false;
 
     const int w = in.buffer->width();
     const int h = in.buffer->height();
@@ -223,53 +274,43 @@ bool ColorTransform::apply(const VideoFrame& in, VideoFrame& out) const {
     // is the same descriptor with a different base pointer and height. No tile
     // seams are possible: a display transform is per-pixel, so a row band is
     // exactly independent.
-    const unsigned hw = std::thread::hardware_concurrency();
-    int bands = static_cast<int>(hw == 0 ? 1u : hw);
-    if (bands > 16) bands = 16;              // past this the per-frame thread
-                                             // cost stops paying for itself
-    const int kMinRowsPerBand = 64;          // and a small picture is not worth
-    if (bands > h / kMinRowsPerBand) bands = h / kMinRowsPerBand;
-    if (bands < 1) bands = 1;
-
+    // The band arithmetic itself now lives in ParallelBands.h so this stage and
+    // the float display mapping cannot drift apart on it.
     const uint8_t* srcBase = in.buffer->data();
     const int srcStride = in.buffer->bytesPerLine();
     const int dstStride = dst->bytesPerLine();
 
     std::atomic<bool> ok{true};
+    // The source descriptor is the only thing that differs between a video
+    // frame and an EXR pass: BGRA bytes against RGBA floats. The destination is
+    // BGRA8 either way, because that is what both renderers present.
+    const auto ordering = floatSource ? OCIO::CHANNEL_ORDERING_RGBA
+                                      : OCIO::CHANNEL_ORDERING_BGRA;
+    const auto depth = floatSource ? OCIO::BIT_DEPTH_F32 : OCIO::BIT_DEPTH_UINT8;
+    const OCIO::ConstCPUProcessorRcPtr& cpu = floatSource ? impl_->cpuFloat : impl_->cpu;
+
     auto runBand = [&](int y0, int rows) {
         if (rows <= 0) return;
         try {
             OCIO::PackedImageDesc srcDesc(
-                const_cast<uint8_t*>(srcBase + static_cast<size_t>(y0) * srcStride),
+                const_cast<uint8_t*>(srcBase + static_cast<std::size_t>(y0) * srcStride),
                 static_cast<long>(w), static_cast<long>(rows),
-                OCIO::CHANNEL_ORDERING_BGRA, OCIO::BIT_DEPTH_UINT8,
+                ordering, depth,
                 OCIO::AutoStride, OCIO::AutoStride,
                 static_cast<ptrdiff_t>(srcStride));
             OCIO::PackedImageDesc dstDesc(
-                out8 + static_cast<size_t>(y0) * dstStride,
+                out8 + static_cast<std::size_t>(y0) * dstStride,
                 static_cast<long>(w), static_cast<long>(rows),
                 OCIO::CHANNEL_ORDERING_BGRA, OCIO::BIT_DEPTH_UINT8,
                 OCIO::AutoStride, OCIO::AutoStride,
                 static_cast<ptrdiff_t>(dstStride));
-            impl_->cpu->apply(srcDesc, dstDesc);
+            cpu->apply(srcDesc, dstDesc);
         } catch (const std::exception&) {
             ok.store(false, std::memory_order_relaxed);
         }
     };
 
-    if (bands == 1) {
-        runBand(0, h);
-    } else {
-        const int rowsPer = h / bands;
-        std::vector<std::thread> workers;
-        workers.reserve(static_cast<size_t>(bands) - 1);
-        for (int b = 0; b < bands - 1; ++b)
-            workers.emplace_back(runBand, b * rowsPer, rowsPer);
-        // The calling thread takes the last band, including the remainder rows,
-        // rather than idling while N others work.
-        runBand((bands - 1) * rowsPer, h - (bands - 1) * rowsPer);
-        for (auto& t : workers) t.join();
-    }
+    runInRowBands(h, runBand);
     if (!ok.load(std::memory_order_relaxed)) return false;
 
     out = VideoFrame{};
