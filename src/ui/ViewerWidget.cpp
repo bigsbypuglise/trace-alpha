@@ -524,7 +524,16 @@ void ViewerWidget::applyColorTransformToRenderer() {
     if (floatSource) {
         trace::core::VideoFrame mapped;
         trace::core::DisplayMapResult result;
-        if (trace::core::mapFloatToDisplay(frame_, mapped, displayMap_, &result)) {
+        if (trace::core::mapFloatToDisplay(frame_, mapped, displayMap_, &result,
+                                           &displayMapPin_)) {
+            // FIRST FRAME OF A PASS PINS THE RANGE FOR THE REST OF IT. Only
+            // Normalise has a range to pin; the others are already pure
+            // functions of the sample.
+            if (displayMap_ == trace::core::DisplayMap::Normalise && !displayMapPin_.valid) {
+                displayMapPin_.lo = result.inputLo;
+                displayMapPin_.hi = result.inputHi;
+                displayMapPin_.valid = true;
+            }
             displayFrame_ = std::move(mapped);
             displayMapResult_ = result;
             displayMapInUse_ = true;
@@ -549,7 +558,18 @@ void ViewerWidget::applyColorTransformToRenderer() {
 // Changing the mapping does not touch the frame; it changes how the frame is
 // made visible. The caller re-runs the stage (refreshColorTransform) exactly as
 // it does for a bypass toggle, so a paused picture updates without the decoder.
+void ViewerWidget::resetDisplayMapRange() {
+    displayMapPin_ = trace::core::DisplayRange{};
+}
+
 void ViewerWidget::setDisplayMap(trace::core::DisplayMap map) {
+    // A CHANGED MAPPING DROPS THE PIN, but an unchanged one must not: this is
+    // called from syncDisplayMapForActivePass() on EVERY loaded frame, so
+    // clearing unconditionally would re-measure per frame and undo the whole
+    // point. A pass change that lands on the SAME mapping -- two position
+    // passes, say -- is handled by MainWindow calling resetDisplayMapRange()
+    // explicitly, because only it knows the pass moved.
+    if (displayMap_ != map) displayMapPin_ = trace::core::DisplayRange{};
     displayMap_ = map;
 }
 

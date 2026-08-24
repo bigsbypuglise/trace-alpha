@@ -105,6 +105,10 @@ public:
     // the pass overlay, because a viewer that normalises silently is a viewer
     // that cannot be trusted for review.
     void setDisplayMap(trace::core::DisplayMap map);
+    // Drop the pinned Normalise range so the next float frame re-measures it.
+    // Called when the PASS or the MEDIA changes -- never per frame, which is
+    // what pinning exists to prevent.
+    void resetDisplayMapRange();
     trace::core::DisplayMap displayMap() const { return displayMap_; }
     const trace::core::DisplayMapResult& displayMapResult() const { return displayMapResult_; }
     bool displayMapInUse() const { return displayMapInUse_; }
@@ -295,6 +299,7 @@ private:
     // HUD can tell "no mapping was needed" from "the default one ran".
     trace::core::DisplayMap displayMap_ = trace::core::DisplayMap::Gamma22;
     trace::core::DisplayMapResult displayMapResult_{};
+    trace::core::DisplayRange displayMapPin_{};
     bool displayMapInUse_ = false;
     void applyColorTransformToRenderer();
     ViewerPerfStats perfStats_{};

@@ -136,7 +136,7 @@ void measureFloatRange(const VideoFrame& in, float& lo, float& hi, double& fract
 }
 
 bool mapFloatToDisplay(const VideoFrame& in, VideoFrame& out, DisplayMap map,
-                       DisplayMapResult* result) {
+                       DisplayMapResult* result, const DisplayRange* pinned) {
     if (in.isNull() || !in.buffer || !isFloatRgba(in.buffer->layout())) return false;
 
     const int w = in.buffer->width();
@@ -153,6 +153,14 @@ bool mapFloatToDisplay(const VideoFrame& in, VideoFrame& out, DisplayMap map,
 
     float scale = 1.0f, offset = 0.0f;
     if (map == DisplayMap::Normalise) {
+        // THE PINNED RANGE WINS. Measuring per frame makes the mapping itself a
+        // per-frame variable, so the same value maps to a different grey as the
+        // playhead moves; the caller pins the range once per pass and the
+        // measured figures below are then REPORTING only.
+        if (pinned && pinned->valid) {
+            lo = pinned->lo;
+            hi = pinned->hi;
+        }
         const float span = hi - lo;
         // A flat pass would divide by zero and read as pure black. Showing it as
         // mid grey with the measured range beside it says "this is constant"

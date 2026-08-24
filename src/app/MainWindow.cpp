@@ -4565,6 +4565,11 @@ void MainWindow::applyExrPass(int index, const char* reason) {
 
     stillLoader_.setPreferredPass(passes[static_cast<std::size_t>(index)].layer);
     frameCache_.clear();
+    // The new pass gets its own Normalise range, measured from its first frame.
+    // Explicit because two passes can share a mapping -- setDisplayMap() only
+    // drops the pin when the MAPPING changes, and two position passes would
+    // otherwise inherit each other's range.
+    if (viewer_) viewer_->resetDisplayMapRange();
 
     QString error;
     if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
