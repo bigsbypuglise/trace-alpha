@@ -152,6 +152,14 @@ private:
     // every modifier'd action in Trace. A collision that is only hidden by
     // dispatch order is exactly the kind that ships.
     void warnOnShortcutCollisions() const;
+
+    // EXR pass cycling (stage 2 part 2). Both are QActions for the same reason
+    // `C` is: Qt's shortcut map resolves them before the menu bar sees the key,
+    // and a disabled action declines its own shortcut, so [ and ] fall through
+    // harmlessly on media that has no passes.
+    void setupExrPassActions(QMenu* viewMenu);
+    void syncExrPassActions();
+    void cycleExrPass(int delta);
     // Runs the shortcut table for one key event and reveals the transport if it
     // did. Shared by keyPressEvent and the menu bar's event filter.
     bool dispatchShortcutKey(QKeyEvent* event);
@@ -1671,6 +1679,8 @@ private:
     QAction* colorTransformConfigAction_ = nullptr;  // "Color Transform..."
     QAction* loadLutAction_ = nullptr;               // "Load LUT..."
     QAction* resetColorTransformAction_ = nullptr;   // back to raw
+    QAction* prevPassAction_ = nullptr;               // EXR pass cycling, `[`
+    QAction* nextPassAction_ = nullptr;               // EXR pass cycling, `]`
 
     // Persisted so a session's transform survives a restart. A configuration
     // that no longer resolves on reopen falls back to BYPASS, says so once, and

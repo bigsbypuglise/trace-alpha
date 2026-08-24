@@ -2576,6 +2576,14 @@ void MainWindow::setupShortcuts() {
     shortcuts_.addAction(ShortcutGroup::View, actualSizeAction_);
     shortcuts_.addAction(ShortcutGroup::View, zoomInAction_);
     shortcuts_.addAction(ShortcutGroup::View, zoomOutAction_);
+    // EXR/colour stage 2 part 2. Documentation rows: both are QActions, so Qt
+    // owns the dispatch. Placed here rather than beside the Color Transform row
+    // above ON PURPOSE -- `C` and the two pass keys are separate commits so
+    // either can be reverted alone, and two additions on adjacent lines make
+    // `git revert` conflict on whichever goes second (phase 14 paid for this
+    // once already). The zoom rows between them are stable context.
+    shortcuts_.addAction(ShortcutGroup::View, prevPassAction_);
+    shortcuts_.addAction(ShortcutGroup::View, nextPassAction_);
     // Minimize is NOT listed: it has no shortcut, and the table is the KEYBOARD
     // contract. A row with no key in it would be a menu listing -- the same
     // rule that keeps the three shortcut-less view transforms out of it.
@@ -4280,6 +4288,9 @@ void MainWindow::syncMediaDependentActions() {
     // Spec phase 15's four, through the function that also decides their ticks,
     // so "may this run" and "is this the state" are answered in one place.
     syncViewScaleActions();
+    // EXR pass cycling, for the same reason and in the same shape: whether the
+    // keys may run is a property of the pass list, which only EXR media has.
+    syncExrPassActions();
 }
 // COPY CURRENT FRAME (spec phase 14, Edit menu).
 //
@@ -4376,6 +4387,116 @@ void MainWindow::setupColorTransformActions(QMenu* viewMenu) {
     addAction(colorTransformAction_);
     addAction(loadLutAction_);
     addAction(resetColorTransformAction_);
+}
+
+// EXR PASS CYCLING: `[` PREVIOUS, `]` NEXT (stage 2 part 2).
+//
+// Two QActions rather than ShortcutTable rows. `[` and `]` are not letters, so
+// unlike C they could never be claimed by QMenuBar's mnemonic matching -- but
+// the other three reasons for an action all still apply, and one of them is
+// load-bearing here: a DISABLED QAction declines its own shortcut, so on video,
+// audio, a still with one pass, or nothing open at all, these keys fall through
+// and do nothing rather than reaching a handler that has to check and refuse.
+//
+// The cycle WRAPS. It is a cycle; stopping at the ends would make the last pass
+// of a 9-pass file four keystrokes from the first for no reason.
+void MainWindow::setupExrPassActions(QMenu* viewMenu) {
+    prevPassAction_ = new QAction(tr("&Previous Pass"), this);
+    prevPassAction_->setShortcut(QKeySequence(Qt::Key_BracketLeft));
+    connect(prevPassAction_, &QAction::triggered, this, [this]() { cycleExrPass(-1); });
+
+    nextPassAction_ = new QAction(tr("&Next Pass"), this);
+    nextPassAction_->setShortcut(QKeySequence(Qt::Key_BracketRight));
+    connect(nextPassAction_, &QAction::triggered, this, [this]() { cycleExrPass(1); });
+
+    viewMenu->addAction(prevPassAction_);
+    viewMenu->addAction(nextPassAction_);
+
+    // Hoisted onto the window like every other menu action with a shortcut:
+    // since roadmap step 7 the menu bar lives in an auto-hiding strip, and
+    // QShortcutMap declines a shortcut whose only widget is not visible. Ctrl+O
+    // was the one action that missed this and silently did nothing with the
+    // strip hidden; it survived only because a since-fixed reveal bug kept the
+    // strip up most of the time.
+    addAction(prevPassAction_);
+    addAction(nextPassAction_);
+
+    syncExrPassActions();
+}
+
+// Enabled only when there is more than one pass to move between. One pass is
+// not a cycle, and a command that visibly does nothing is the showInfo failure
+// spec phase 2 deleted.
+void MainWindow::syncExrPassActions() {
+    const auto* image = currentImage_.has_value() ? &currentImage_.value() : nullptr;
+    const bool cyclable = image && image->passes.size() > 1;
+    if (prevPassAction_) prevPassAction_->setEnabled(cyclable);
+    if (nextPassAction_) nextPassAction_->setEnabled(cyclable);
+}
+
+// WHAT A PASS CHANGE ACTUALLY IS: a different set of CHANNELS read from the same
+// file, so it is a reload rather than a re-map. Three things follow and all
+// three are already built -- this function is the fourth, which is the whole
+// reason part 2 is a keyboard surface and not a rewrite.
+//
+//   1. StillImageLoader::setPreferredPass() is where the choice lives, and it
+//      lives on the LOADER rather than in a per-frame argument because every
+//      frame of a sequence must read the same pass. Stills and sequences both
+//      go through ImageSequenceFrameSource over &stillLoader_, so one call
+//      covers both.
+//   2. frameCache_ holds decoded frames of the OLD pass and must be dropped.
+//      loadCurrentFrame()'s cache-hit branch already carries the comment "A pass
+//      change clears the cache, so they cannot be stale" -- this is the caller
+//      that makes that true.
+//   3. syncDisplayMapForActivePass() re-chooses the mapping from the new pass's
+//      CLASS, which loadCurrentFrame() already calls on both its branches.
+//
+// The empty layer name round-trips correctly and it is worth saying why, because
+// it looks like it should not. Cycling to the root pass sets the preference to
+// "", which choosePass() reads as "the file decides" rather than as a match --
+// but its first fallback is the root colour group, which is the pass being asked
+// for. The ambiguous case (an empty preference resolving to something that is
+// not index 0) can only arise on a file with NO root pass, and on such a file no
+// pass in the list has an empty layer name, so "" is never what gets set.
+void MainWindow::cycleExrPass(int delta) {
+    if (!currentImage_.has_value()) return;
+    const auto& passes = currentImage_->passes;
+    const int n = static_cast<int>(passes.size());
+    if (n < 2) return;
+
+    const int current = currentImage_->activePass;
+    const int from = (current >= 0 && current < n) ? current : 0;
+    const int to = ((from + delta) % n + n) % n;
+
+    stillLoader_.setPreferredPass(passes[static_cast<std::size_t>(to)].layer);
+    frameCache_.clear();
+
+    QString error;
+    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
+        if (!error.isEmpty()) showTransientMessage(error, 3000);
+        return;
+    }
+
+    // NAMED FROM WHAT WAS LOADED, NEVER FROM WHAT WAS ASKED FOR. If a frame of a
+    // sequence does not carry the requested pass, choosePass() falls back rather
+    // than failing -- so reading the request back here would announce a pass
+    // that is not on screen, which is the one thing this message exists to
+    // prevent.
+    //
+    // The existing transient toast, not a dedicated pass overlay: that overlay
+    // is still on part 2's list. This is the feedback the keyboard surface needs
+    // in order to be testable at all, through machinery ~35 other sites use.
+    const auto* shown = currentImage_->activePassInfo();
+    if (shown) {
+        showTransientMessage(tr("Pass %1/%2: %3")
+                                 .arg(currentImage_->activePass + 1)
+                                 .arg(n)
+                                 .arg(shown->displayName),
+                             1800);
+    }
+
+    syncExrPassActions();
+    refreshHud(delta > 0 ? "next pass" : "previous pass");
 }
 
 // The tick follows the STATE rather than the last click, so a configuration that
@@ -4841,6 +4962,8 @@ void MainWindow::setupMenus() {
     viewMenu->addAction(zoomOutAction_);
     viewMenu->addSeparator();
     setupColorTransformActions(viewMenu);
+    viewMenu->addSeparator();
+    setupExrPassActions(viewMenu);
     viewMenu->addSeparator();
     viewMenu->addAction(toggleHudAction_);
 
@@ -9384,6 +9507,23 @@ void MainWindow::refreshHud(const QString& action) {
     // return because the menu must be honest in the shipping (HUD-hidden)
     // configuration, not only under a harness.
     syncPlaybackSpeedActions();
+
+    // THE PASS KEYS FOLLOW THE LOADED FRAME FROM HERE, FOR THE SAME REASON.
+    //
+    // Whether `[` and `]` may run is a property of currentImage_->passes, and
+    // currentImage_ is written by loadCurrentFrame() -- AFTER openPath() has
+    // already run syncMediaDependentActions(). Gated there alone, the actions
+    // were computed from an empty pass list on every open and nothing ever
+    // re-enabled them: measured through UI Automation on the 9-pass Redshift
+    // file, both menu rows read IsEnabled=False while the HUD read `pass 1/9`
+    // on the same window. That is the speed menu's own bug in a new costume --
+    // state synced at the sites someone remembered rather than at the one place
+    // every path passes through -- and it gets the same answer.
+    //
+    // Above the showHud early return, like the line above it: the menu must be
+    // honest in the shipping HUD-hidden configuration and not only under a
+    // harness. setEnabled is a no-op when nothing changed.
+    syncExrPassActions();
 
     // Hidden means NOT BUILT. Everything below this point formats strings for
     // overlay_, and overlay_ is the widget H just hid -- several hundred bytes of
