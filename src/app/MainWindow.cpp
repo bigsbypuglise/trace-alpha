@@ -4525,10 +4525,26 @@ void MainWindow::restoreColorTransformFromSettings() {
     syncColorTransformActions();
 }
 
+// COPY FRAME COPIES WHAT IS ON SCREEN. Owner decision, 2026-08-24, and a
+// DELIBERATE BEHAVIOUR CHANGE from stage 1, where it copied raw source pixels --
+// with the ARRI LUT active it put flat LogC4 on the clipboard while the screen
+// showed the graded Rec.709 picture. A reviewer copying a frame to send to
+// someone wants the frame they are looking at.
+//
+// It is also the only thing that CAN be copied for an EXR: the source frame
+// there is scene-referred float with no correct 8-bit reading of its own, so
+// "copy the source" has no answer that is not itself a display decision.
+//
+// WHAT DID NOT CHANGE, and it is a different seam rather than an oversight: the
+// USER'S VIEW TRANSFORM (rotate/flip) is still not applied. That lives in the
+// renderer -- ViewerWidget hands it to the backend, which applies it in the
+// vertex shader's texture coordinate or in QPainter's matrix -- so it is
+// downstream of displayFrame_ and was never in this buffer to begin with.
+// Phase 10's decision stands untouched and needed no defending here.
 void MainWindow::copyCurrentFrame() {
     if (!viewer_) return;
 
-    const auto& frame = viewer_->frame();
+    const auto& frame = viewer_->displayedFrame();
     if (frame.isNull()) {
         showTransientMessage(tr("No frame to copy"), 2000);
         return;
@@ -4547,11 +4563,10 @@ void MainWindow::copyCurrentFrame() {
         return;
     }
 
-    // The USER's view transform is deliberately NOT applied. A copy is of the
-    // frame, at the resolution and orientation the file stores it in; rotate
-    // and flip are temporary VIEWING state, which is what phase 10 called them
-    // and what "new media resets transforms" means. Baking a session's rotation
-    // into a copied frame would make the clipboard depend on when it was taken.
+    // The USER's view transform is still deliberately NOT applied -- see the
+    // note above this function. A copy is at the resolution and orientation the
+    // file stores it in; rotate and flip are temporary VIEWING state, which is
+    // what phase 10 called them and what "new media resets transforms" means.
     QGuiApplication::clipboard()->setImage(image);
     showTransientMessage(
         tr("Copied frame %1 (%2 x %3)")

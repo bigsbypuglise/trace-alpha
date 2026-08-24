@@ -67,13 +67,23 @@ public:
 
     // THE DECODED SOURCE FRAME, AND DELIBERATELY NOT THE DISPLAYED ONE.
     //
-    // Copy Current Frame reads this, so it keeps copying source pixels after
-    // the colour transform stage was added -- which is the assessment's item 6
-    // ("if the transform is applied into that buffer, Copy Frame silently
-    // becomes 'copies the transformed image'") answered structurally rather
-    // than by remembering. The transformed buffer never enters frame_; it is
-    // handed straight to the renderer and held only as displayFrame_.
+    // The transformed buffer never enters frame_; it is handed straight to the
+    // renderer and held as displayFrame_. Keeping the two apart is what makes
+    // "which pixels does a given consumer want" an answerable question rather
+    // than a coincidence -- see displayedFrame() below for the other answer.
     const trace::core::VideoFrame& frame() const { return frame_; }
+
+    // WHAT IS ACTUALLY ON SCREEN: the transformed or mapped buffer when there
+    // is one, the source when there is not.
+    //
+    // Copy Current Frame reads THIS as of stage 2, by owner decision, and that
+    // is a deliberate behaviour change from stage 1 -- a reviewer copying a
+    // frame to send to someone wants what they are looking at. It is also the
+    // only thing that can be copied at all for an EXR, whose source frame is
+    // scene-referred float with no correct 8-bit reading of its own.
+    const trace::core::VideoFrame& displayedFrame() const {
+        return displayFrame_.isNull() ? frame_ : displayFrame_;
+    }
 
     // THE DISPLAY TRANSFORM STAGE. Non-owning: MainWindow owns the state
     // because the menu, the persistence and the HUD all live there, and the

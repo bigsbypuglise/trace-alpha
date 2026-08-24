@@ -121,8 +121,13 @@ public:
     // display actually imposes it, instead of at the start.
     //
     // SOURCE PIXELS ARE NEVER MODIFIED. `in`'s buffer is read-only here, which
-    // is what keeps Copy Frame copying the source and what makes the whole stage
-    // a display stage rather than a decode stage.
+    // is what makes the whole stage a display stage rather than a decode stage
+    // -- and it is not merely tidy: that buffer is very likely still referenced
+    // by the frame cache and by the decoder's recycling pool.
+    //
+    // (Until stage 2 this was also what kept Copy Frame copying the SOURCE. It
+    // no longer is: Copy Frame reads the displayed buffer now, by owner
+    // decision. The read-only property stands on its own reason.)
     bool apply(const VideoFrame& in, VideoFrame& out) const;
 
 private:
