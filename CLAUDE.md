@@ -987,16 +987,101 @@ the panel regression is the gate on merging and the merge stays the owner's**.
   perfect agreement rather than as no measurement at all. **Check the timestamp
   of any harness output you did not just watch being written.**
 
+**EXR/COLOUR STAGE 2 PART 2, THE KEYBOARD SURFACE, IS BUILT AND MEASURED
+(2026-08-24, physical panel 5120x1440 @ 239.999Hz). Record
+`docs/exr-stage2-keyboard-surface.md` — read it before touching any shortcut.**
+Commits `560b5ea` (the collision checker) · `c1047cc` (`C`) · `bac8755`
+(`[` and `]`) · `3938223` (harness) · `f1ec025` (code motion), on branch
+`exr-stage0-dependencies`, **NOT merged — the merge stays the owner's.** The
+pass overlay, the View-menu pass list and `duplicateOf` are still NOT built.
+
+- **ALL THREE KEYS ARE QActions, AND THAT IS THE WHOLE ANSWER TO Ctrl+C.**
+  `ShortcutTable::dispatch()` matches on the key and IGNORES MODIFIERS — its own
+  header says so — so a bare-`C` table row would also fire on Ctrl+C, safe only
+  while Qt's shortcut map consumed Ctrl+C first. On a QAction the two are
+  distinct sequences Qt resolves properly, so the collision **cannot exist**
+  rather than being masked. Three properties come free: Qt runs an action's
+  shortcut BEFORE `QMenuBar::keyPressEvent` sees the key (the reason bare `H`
+  was never reproducible in the 2026-08-21 bare-letter bug while the table rows
+  `F`/`S`/`E`/`T` were); a DISABLED QAction declines its own shortcut, so `[`
+  and `]` fall through on media with no passes; and the menu row, the key and
+  the accessible name are one action.
+- **`warnOnShortcutCollisions()` IS NEW AND IT EARNED ITSELF ON ITS FIRST RUN,
+  ON A PRE-EXISTING FAULT.** It reports two classes — identical sequences, and a
+  bare table row whose key is the key half of a modifier'd QAction shortcut —
+  and printed **bare `L` (the forward shuttle) against `Ctrl+L` (Rotate Left)**,
+  which predates all of this work. **Measured harmless**: Ctrl+L reads
+  `speed 0.00x | Rotate Left`, so the rotation ran and no shuttle started.
+  Binding `C`, `[` and `]` added NO new line, which is the design working — and
+  the checker is not silent in general, since it still reports the `L` row.
+- **THE ENABLE STATE WAS THE BUG, AND IT IS THE SPEED MENU'S BUG AGAIN.** Gated
+  only in `syncMediaDependentActions()`, the pass actions were computed from an
+  EMPTY pass list on every open, because `openPath()` runs that before
+  `loadCurrentFrame()` writes `currentImage_`, and nothing re-ran it. **Measured
+  through UI Automation rather than judged from a screenshot** (phase 8's
+  menu-icon luminance accused a correct build that way): both rows
+  `IsEnabled=False` on the 9-pass Redshift file while the same window's HUD read
+  `pass 1/9`. Synced from `refreshHud()` now, beside `syncPlaybackSpeedActions()`
+  and for its reason, ABOVE the `showHud` early return so the shipping
+  HUD-hidden configuration is covered.
+- **THE TEXT-FIELD GUARD HOLDS FOR ALL THREE, AND IT TOOK TWO LEGS TO PROVE.**
+  **Go to Frame is a `QInputDialog` SPIN BOX** whose validator rejects letters —
+  that leg shows the keys did not act and nothing more, and run without a LUT a
+  leaking `c` would have been invisible. **Go to Timecode is the real
+  `QLineEdit`** and is the leg that matters, because `C` is ENABLED on video: run
+  with a LUT so a leak would be a 96%-of-the-picture event, the field reads
+  **`c[]hjkltefsm`** and the picture moved **0%**, against **99.946%** for the
+  same key with no dialog open. It needs media that HAS source timecode (the
+  ProRes 4444 clip); an EXR sequence carries none.
+- **`C` IS READABLE ON AN EXR AFTER ALL, and the first reading of this was
+  wrong.** The video HUD's `xform` field is built inside the video branch and an
+  EXR sequence never reaches it — but the EXR media line reports the stage
+  through the **`map`** field: **`map OCIO`** when the transform is on,
+  **`map Gamma 2.2 [0.0029..2.5195, 52.1% >1]`** when bypassed. No HUD change was
+  needed and none was made. What is still true: that line does not print the
+  LUT's NAME and cannot separate "none" from "bypass" — one line, with the
+  overlay.
+- **Measured, `scripts/measure/passkeys.ps1`, seven legs, all PASS**: ten `]`
+  presses all advance · the list returns to the opening pass after **exactly 9**
+  on a 9-pass file · `[` undoes `]` (media line byte-identical) · menu-bar focus
+  `popups 0->0` on all three keys with the brackets still running · `[`/`]`
+  move the picture **0%** on video · `C` toggles **95.8%** and returns to **0%**
+  from the starting state · Ctrl+C still copies and leaves the picture at 0%.
+  **`barekeys.ps1` still PASS**, so the pre-existing letter surface is
+  unregressed.
+- **THREE HARNESS FAULTS, EACH OF WHICH REPORTED A WORKING BUILD AS BROKEN.**
+  **SendKeys RESERVES `[` and `]`** and swallows them unescaped — nine of ten
+  presses read as no-ops on a build where all ten worked. The HUD band was a
+  fixed offset that fitted video and sat ~300px above an EXR sequence's two-line
+  HUD. And the band then included the transport line, which prints
+  `refreshHud()`'s own action label (`Open file`, `next pass`, `previous pass`),
+  so identical passes compared as DIFFERENT — **the harness was reading its own
+  stimulus.** `Same`/`Moved` are now two thresholds with a gap (measured
+  populations 0.000–0.086% and 10–96%); a reading between them FAILS rather than
+  being rounded toward the expected answer.
+- **Regression at HEAD, flat**: `scrubbar.ps1` full pool **PASS — 22 files, 88
+  legs, `delta 0` throughout** (4.9 min warm; `kf-land` non-zero on exactly the
+  two recorded long-GOP rows and 0 on every ProRes row) · 4K H.264 cadence x2
+  **100.0/100.0%** (`0 of 119`, `drop 0`, `rephase 0`, `tick-late 0`) · 4444 x2
+  **99.8/99.8%** (`0 of 260`) · all three selftests green ·
+  `verify_trace_assets --strict` at **33 embedded files** · `barekeys.ps1` PASS.
+  **The shipping-path cost is one `currentImage_` check and two `setEnabled`
+  no-ops per `refreshHud()`.**
+- **INDEPENDENTLY REVERTABLE, CHECKED RATHER THAN ASSERTED, AND THE FIRST
+  ATTEMPT FAILED.** The pass declarations went in directly beneath
+  `warnOnShortcutCollisions()`, putting two separately-revertable commits on
+  ADJACENT LINES — `git revert` conflicts on whichever lands second because git
+  can only see that they touch, which is the trap phase 14 paid for with Loop
+  and Copy Current Frame. `f1ec025` moves them into the colour-transform group,
+  **proven pure code motion** (the two headers are identical as a sorted
+  multiset of non-comment lines); all three then revert cleanly and each
+  reverted tree builds.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
-1. **`[` and `]` pass cycling, and the `C` bypass binding — DECIDED BY THE OWNER
-   (2026-08-24) AND NOT BUILT.** They are to be decided and tested **together as
-   one keyboard surface, not one at a time**. Both must be checked against phase
-   7's text-field guard (Qt's `ShortcutOverride` through `QLineEdit`, which covers
-   PRINTABLE keys only) and against `barekeys.ps1`'s menu-bar-focus case. **Note
-   the asymmetry: `[` and `]` are not letters, so the `QMenuBar` mnemonic path
-   cannot claim them while the `QLineEdit` guard does apply — and `C` is the other
-   way round.** Test both, reason neither.
+1. **The keyboard surface is DONE — see the block above.** `[`, `]` and `C` are
+   built, measured together and regression-clean. What remains of part 2 is the
+   list below.
 2. **The transient pass overlay** naming the current pass on screen.
 3. **The full pass list in the View menu.**
 4. **`ExrPass::duplicateOf` IS DECLARED AND NEVER FILLED.** Root RGB and a named
@@ -4993,10 +5078,12 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    changed to copy what is on screen -- record
    `docs/exr-stage2-float-buffer.md`.** It also found and fixed a bug that
    SHIPPED IN STAGE 0: **EXR display had red and blue transposed**.
-   **THE NEXT SESSION STARTS AT STAGE 2 PART 2** -- `[` and `]` pass cycling, the
-   `C` bypass binding (owner-decided, unbuilt), the transient pass overlay, the
-   View-menu pass list, and the root-versus-Beauty duplicate label -- and the
-   "WHAT STAGE 2 PART 2 STILL OWES" list above is its starting point. **CHECK THE
+   **STAGE 2 PART 2's KEYBOARD SURFACE IS DONE (2026-08-24): `[`, `]` and `C`
+   are built, measured together and regression-clean at the panel -- record
+   `docs/exr-stage2-keyboard-surface.md`.** What remains of part 2 is the
+   transient pass overlay, the View-menu pass list and the root-versus-Beauty
+   duplicate label; the "WHAT STAGE 2 PART 2 STILL OWES" list above is the
+   starting point. **CHECK THE
    DISPLAY FIRST: the last session ran over Parsec and the panel itself was at
    5120x1440 @ 59Hz, not 239.999Hz, so nothing recorded there is a panel
    baseline and THE FULL PANEL REGRESSION IS THE MERGE GATE.** Stages 3-5 (the
@@ -5213,6 +5300,15 @@ DELIVERY), `handler` (WORK), `sizemove`, and the audio deltas across the gap.
 because the HUD is unreadable for a transient fault -- it freezes along with
 everything else -- and because `stalls`/`hitch` are DRAG-scoped and read
 `0 of 0` during playback. Harness `scripts/measure/tickstall.ps1`.
+
+**Keyboard, EXR/colour (2026-08-24, stage 2 part 2)**: **`[`** previous EXR pass,
+**`]`** next EXR pass (wrapping; disabled and inert on media with no pass list),
+**`C`** Color Transform bypass. All three are **QActions, never `ShortcutTable`
+rows** -- the table's dispatcher ignores modifiers, so a bare-`C` row would also
+fire on Ctrl+C. `warnOnShortcutCollisions()` prints that class at startup and
+already reports one PRE-EXISTING instance (bare `L` against `Ctrl+L`, measured
+harmless). Harness `scripts/measure/passkeys.ps1`; record
+`docs/exr-stage2-keyboard-surface.md`.
 
 **Tuning knobs**, all defaulting to shipped behaviour: `TRACE_ASYNC_SCRUB=0`
 (back to the synchronous walk), `TRACE_SCRUB_WALK_MS` / `TRACE_SCRUB_REARM_MS`
