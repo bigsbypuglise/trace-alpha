@@ -1350,8 +1350,10 @@ instruction nothing was optimised once the figure came in.
 - **REVERTABILITY IS A STACK, NOT FOUR SIBLINGS, AND THE DEPENDENCIES ARE REAL.**
   `0841201` and `84a9f3f` revert alone; `d16a98e` and `0e7d7c6` do not, because
   the dialog cannot exist without the enumerators and `0841201` edits the code
-  the dialog added. **Reverting the three in order is clean and the reverted tree
-  builds** — checked, not assumed; the same shape as stage 2's grouper pair.
+  the dialog added. **The order, so nobody re-derives it: `0841201` → `d16a98e`
+  → `0e7d7c6`, newest first.** That is clean and **the reverted tree builds** —
+  checked, not assumed; the same shape as stage 2's grouper pair. `84a9f3f` is
+  the harness and is independent of all three.
 - **TWO HARNESS TRAPS WORTH CARRYING.** `Focus-Window` must read
   `GetForegroundWindow()` BACK — without it `Alt+V` went to the harness's own
   terminal and the run reported the dialog missing on a build where it opens.
