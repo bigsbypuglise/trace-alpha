@@ -104,11 +104,18 @@ there is one entry point rather than a branch on the string's shape; and
 | Redshift `config.ocio` | **ACEScg** | `Raw` |
 | `ocio://default` | **ACEScg** | `ACES2065-1` |
 
-Stage 0 recorded the first row. **The second is new and is the worse of the
-two**: `ACES2065-1` really is scene-linear, so a picture built on it looks
-entirely plausible and is simply wrong in its primaries -- wrong saturation with
-correct-looking contrast -- where `Raw` at least looks obviously flat. Every API
-call succeeds either way. Nothing but this rule separates them.
+Stage 0 recorded the first row. **The second row is new, and IT IS THE DANGEROUS
+ONE, precisely because it is plausible.** `ACES2065-1` really is a scene-linear
+space, so a picture built on it looks entirely convincing and is simply wrong in
+its PRIMARIES -- wrong saturation with correct-looking contrast, which a reviewer
+would read as a grade rather than as a fault. `Raw` at least looks obviously
+flat and gets noticed. **Every API call succeeds either way, and nothing but this
+rule separates them** -- which is why the default is the ROLE, in the dialog, in
+`setConfig()` and in the selftest alike.
+
+**IF YOU ARE STARTING COLD, THIS IS THE ONE RULE TO CARRY OUT OF THIS DOCUMENT.**
+Never default an input colour space from `getColorSpaceFromFilepath()`, on any
+config, for any file type.
 
 ### The dialog
 
@@ -128,10 +135,14 @@ config **and where it came from**; OK/Cancel.
   would look as though it had worked.
 - Real Qt widgets, so it is screen-reader reachable by construction.
 
-**THE TRANSFORM IS APPLIED ON OK, NOT LIVE, AND THAT IS AN OWNER DECISION LEFT
-OPEN RATHER THAN A DEFAULT TAKEN QUIETLY.** Live preview would recompile an OCIO
-processor on every combo change and, on video, issue a decoder Step re-request
-from inside a modal dialog's event loop. Nothing in the design forecloses it.
+**THE TRANSFORM IS APPLIED ON OK, NOT LIVE. OWNER DECISION, 2026-08-24, SETTLED
+-- NOT AN OPEN QUESTION AND NOT A DEFAULT TO BE IMPROVED ON.** Live preview would
+recompile an OCIO processor on every combo change and, on video, issue a decoder
+Step re-request from inside a modal dialog's event loop. **The owner declined to
+spend that hazard on a comfort feature, on the grounds that the
+see-it/don't-see-it comparison is already served by the `C` bypass rather than by
+this dialog.** The reopen condition is stated and is his alone: revisit only if
+it annoys him in real use.
 
 ### Which config is in force, on screen
 
@@ -270,6 +281,18 @@ without the enumerators `0e7d7c6` introduces, and `0841201` edits the very code
 builds** -- checked, not assumed -- which is the same shape stage 2 recorded for
 the grouper pair (`bb159db` is a PREREQUISITE, not a sibling).
 
+**THE ORDER, SPELLED OUT, so nobody has to re-derive it from the table:**
+
+```
+git revert --no-commit 0841201   # resolved config + TRACE_COLOR_VIEW
+git revert --no-commit d16a98e   # the dialog
+git revert --no-commit 0e7d7c6   # config discovery + the two selftest assertions
+```
+
+`84a9f3f` is the harness and is independent of all three -- revert it whenever,
+or leave it. Taking `0841201` out ALONE is also clean and builds, and is the
+right move if the only thing wanted back is the pre-`TRACE_COLOR_VIEW` state.
+
 ---
 
 ## WHAT IS OPEN, AND IT IS THE OWNER'S
@@ -287,7 +310,23 @@ begun. The decision the measurement forces:
   OCIO builds a GPU shader from the same processor. Whether that is worth pulling
   forward is the owner's call and was not taken here.
 
-Two smaller things recorded and not built: **live preview** in the dialog, and a
-**Look** control (the `Config::look` field is compiled and reachable, exactly as
-`DisplayView` was before this stage; the brief named four controls and this is
-the fifth).
+**AND WHAT IS NOT OPEN, because a cold reader will otherwise go looking for it:**
+
+- **STAGE 4, CRYPTOMATTE, IS CUT BY THE OWNER (2026-08-24). CUT, NOT DEFERRED.**
+  He tested it and ruled that showing the cryptomatte PIXELS is all that was ever
+  wanted. The grouper classifies `Crypto*` as `Data`, so it displays through
+  `map Raw` -- raw numeric IDs with no view transform over them -- and it cycles
+  with `[` and `]` like any other pass. There is no manifest reading, no
+  rank-pair modelling and no ID picking, and **none of that is outstanding
+  work.** Do not list it as unfinished business and do not pick it up as such.
+- **Stage 2 is closed.** `[`, `]`, `C`, the pass overlay, the View pass list and
+  `duplicateOf` are all built and measured.
+
+**TWO THINGS ARE SETTLED RATHER THAN OUTSTANDING (owner, 2026-08-24), and both
+are recorded here so a later session does not read them as gaps:**
+
+- **Live preview: DECLINED.** See above. The dialog stays apply-on-OK.
+- **A Look control: DECLINED.** Nothing in the asset set uses a Look, and
+  `Config::look` is compiled and reachable -- **the same position
+  `Kind::DisplayView` itself was in before this stage**, which the owner named as
+  the right amount of readiness. Do not build it speculatively.

@@ -32,11 +32,19 @@ namespace trace::app {
 // wrong-but-plausible one -- and 'ACES2065-1' is the plausible kind, since it
 // really is scene-linear and merely has the wrong primaries.
 //
-// THE TRANSFORM IS APPLIED ON OK, NOT LIVE. Deliberate and recorded rather than
-// assumed to be preferable: every combo change would otherwise recompile an OCIO
-// processor and, on video, issue a decoder Step re-request from inside a modal
-// dialog's event loop. Live preview is an owner decision, not a default to be
-// taken quietly. Nothing here forecloses it.
+// THE TRANSFORM IS APPLIED ON OK, NOT LIVE. OWNER DECISION, 2026-08-24, SETTLED
+// -- do not "improve" this into a live preview. Every combo change would
+// otherwise recompile an OCIO processor and, on video, issue a decoder Step
+// re-request from inside a modal dialog's event loop; the owner declined to
+// spend that hazard on a comfort feature, on the stated grounds that the
+// see-it/don't-see-it comparison is already served by the `C` bypass rather than
+// by this dialog. The reopen condition is his own use annoying him, and nothing
+// else.
+//
+// NO LOOK CONTROL, for the same session's second decision. `Config::look` is
+// compiled and reachable and is deliberately left that way -- the same position
+// Kind::DisplayView itself was in before stage 3, which the owner named as the
+// right amount of readiness. Nothing in the asset set uses a Look.
 class ColorTransformDialog : public QDialog {
     Q_OBJECT
 public:

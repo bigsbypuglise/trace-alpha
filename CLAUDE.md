@@ -1320,10 +1320,15 @@ instruction nothing was optimised once the figure came in.
   that ignored the saved transform entirely. The toast is OpenColorIO's own text.
   Persistence goes through ONE function and stores the config string **RESOLVED**,
   so a saved transform cannot change meaning because `$OCIO` moved.
-- **APPLIED ON OK, NOT LIVE, AND THAT IS AN OWNER DECISION LEFT OPEN** rather
-  than a default taken quietly: live preview would recompile an OCIO processor
-  per combo change and, on video, issue a decoder Step re-request from inside a
-  modal dialog's event loop. A **Look** control is likewise recorded and unbuilt.
+- **TWO OWNER DECISIONS, BOTH SETTLED 2026-08-24 AND NEITHER OPEN. Do not
+  re-propose either.** **Apply-on-OK STANDS**: live preview would recompile an
+  OCIO processor per combo change and, on video, issue a decoder Step re-request
+  from inside a modal dialog's event loop, and the owner declined to spend that
+  hazard on a comfort feature -- **the A/B is served by the `C` bypass, not by
+  the dialog**. Reopen only if it annoys him in real use. **No LOOK control**:
+  nothing in the asset set uses one, and `Config::look` stays compiled and
+  reachable, which is **the same position `Kind::DisplayView` was in before this
+  stage** and is the right amount of readiness.
 - **`--ocio-selftest` GAINS TWO ASSERTIONS, BUILT BEFORE THE DIALOG.** Exit 26:
   the resolved default must carry **more than one** colour space and at least one
   display — the count is what separates a real config from the disabled raw one,
