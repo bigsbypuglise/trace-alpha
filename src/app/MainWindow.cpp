@@ -4882,6 +4882,33 @@ void MainWindow::restoreColorTransformFromSettings() {
     // that moved, and a config that was deleted or lives on a mount that is not
     // there today.
     trace::core::ColorTransform::Config cfg;
+    // TRACE_COLOR_VIEW=<config>[|<input>|<display>|<view>] configures a
+    // DISPLAY/VIEW transform at startup and enables it, overriding the persisted
+    // state and writing nothing back.
+    //
+    // IT EXISTS FOR THE REASON TRACE_COLOR_LUT DOES, and the reason is a
+    // measurement one rather than a convenience. Every figure in this repo is
+    // taken by launching the binary and reading the HUD; the only other way into
+    // this stage is a MODAL DIALOG, and driving one with synthetic input is
+    // precisely the class of harness this project has been burned by. It is also
+    // the A/B -- one binary, the knob set or not -- which is a better control
+    // than two builds.
+    //
+    // The three optional fields default from the config itself: the scene_linear
+    // ROLE for the input, and the config's own default display and view. So the
+    // short form is a complete instruction, and it cannot smuggle in a
+    // getColorSpaceFromFilepath() answer by omission.
+    const QByteArray envView = qgetenv("TRACE_COLOR_VIEW");
+    if (!envView.isEmpty()) {
+        const QStringList parts = QString::fromLocal8Bit(envView).split(QLatin1Char('|'));
+        kind = QStringLiteral("displayview");
+        wantEnabled = true;
+        st.setValue(QLatin1String(kColorConfigKey), parts.value(0));
+        st.setValue(QLatin1String(kColorInputKey), parts.value(1));
+        st.setValue(QLatin1String(kColorDisplayKey), parts.value(2));
+        st.setValue(QLatin1String(kColorViewKey), parts.value(3));
+    }
+
     if (kind == QLatin1String("lut")) {
         cfg.kind = trace::core::ColorTransform::Kind::Lut;
         cfg.lutPath = st.value(QLatin1String(kColorTransformLutKey)).toString();

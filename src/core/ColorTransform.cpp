@@ -403,6 +403,15 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
         // the guarantee the header makes.
         ConfigSource resolvedSource = ConfigSource::None;
         QString resolvedLabel;
+        // THE STORED CONFIGURATION IS WHAT WAS RESOLVED, NOT WHAT WAS ASKED FOR.
+        // Same rule as configLabel_ and the same reason: an empty display or
+        // view is filled in from the config's own defaults a few lines below,
+        // and if config_ kept the empty strings then description() -- and the
+        // dialog reopening -- would report a blank where the processor is using
+        // a real display and view. Caught by the HUD reading
+        // `map OCIO built-in ocio://default / /` on a transform that was
+        // demonstrably working.
+        Config resolvedConfig = config;
 
         if (config.kind == Kind::Lut) {
             const QFileInfo fi(config.lutPath);
@@ -460,6 +469,10 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
             std::string view = config.view.toStdString();
             if (view.empty() && cfg->getDefaultView(display.c_str()))
                 view = cfg->getDefaultView(display.c_str());
+
+            resolvedConfig.inputSpace = QString::fromStdString(input);
+            resolvedConfig.display = QString::fromStdString(display);
+            resolvedConfig.view = QString::fromStdString(view);
 
             auto dvt = OCIO::DisplayViewTransform::Create();
             dvt->setSrc(input.c_str());
@@ -522,7 +535,7 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
                 "OpenColorIO produced no float CPU processor; EXR sources will "
                 "show their default display mapping.");
         }
-        config_ = config;
+        config_ = resolvedConfig;
         configSource_ = resolvedSource;
         configLabel_ = resolvedLabel;
         return true;
