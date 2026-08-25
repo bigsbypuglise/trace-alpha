@@ -4,6 +4,7 @@
 
 #include <QFileInfo>
 
+#include <algorithm>
 #include <atomic>
 #include <cstddef>
 #include <vector>
@@ -69,12 +70,288 @@ bool ColorTransform::hasFloatProcessor() const {
 void ColorTransform::reset() {
     config_ = Config{};
     enabled_ = false;
+    configSource_ = ConfigSource::None;
+    configLabel_.clear();
 #ifdef TRACE_WITH_OCIO
     if (impl_) {
         impl_->cpu.reset();
         impl_->cpuFloat.reset();
     }
 #endif
+}
+
+// ---- Config discovery -------------------------------------------------------
+//
+// THREE SOURCES, ONE RESOLVER, AND EVERY CALLER GOES THROUGH IT. The dialog's
+// combo boxes, setConfig() and the selftest all resolve a config the same way,
+// so "which config is in force" cannot mean one thing in the enumeration and
+// another in the compile -- the choke-point property applyColorTransformToRenderer
+// has on the display side.
+//
+//   an explicit file        -> CreateFromFile(path)        source File
+//   an "ocio://..." URI     -> CreateFromFile(uri)         source Builtin
+//   nothing, $OCIO set      -> CreateFromFile($OCIO)       source Env
+//   nothing, $OCIO unset    -> CreateFromFile(default URI) source Builtin
+//
+// MEASURED: CreateFromFile takes a builtin URI as happily as a path, so there is
+// ONE entry point rather than a branch on whether the string looks like a URI.
+//
+// AND THE ONE THAT MATTERS: Config::CreateFromEnv() is NOT used, anywhere.
+// With $OCIO unset it neither throws nor returns null -- it returns a "Color
+// management disabled" RAW config carrying ONE colour space and ONE display, and
+// says so only on stderr, which no GUI shows. Stage 1's DisplayView branch
+// called it whenever configPath was empty, so an empty path would have compiled
+// against that raw config and produced a transform that looks loaded and does
+// nothing. That is precisely the identity-versus-working failure the selftest's
+// moved-pixel assertion exists to catch, and it is why $OCIO is consulted only
+// when it is actually set.
+
+namespace {
+
+#ifdef TRACE_WITH_OCIO
+// The URI for the built-in fallback. `ocio://default` is resolved by the Config
+// factory; the registry has no getDefaultBuiltinConfigName(), so this cannot be
+// looked up and is carried literally.
+constexpr const char* kDefaultBuiltinUri = "ocio://default";
+#endif
+
+} // namespace
+
+QList<ColorTransform::BuiltinConfig> ColorTransform::builtinConfigs() {
+    QList<BuiltinConfig> out;
+#ifdef TRACE_WITH_OCIO
+    try {
+        const auto& reg = OCIO::BuiltinConfigRegistry::Get();
+        const std::size_t n = reg.getNumBuiltinConfigs();
+        for (std::size_t i = 0; i < n; ++i) {
+            BuiltinConfig b;
+            const char* name = reg.getBuiltinConfigName(i);
+            const char* ui = reg.getBuiltinConfigUIName(i);
+            if (!name || !*name) continue;
+            b.uri = QStringLiteral("ocio://") + QString::fromUtf8(name);
+            b.label = (ui && *ui) ? QString::fromUtf8(ui) : b.uri;
+            b.recommended = reg.isBuiltinConfigRecommended(i);
+            out.push_back(b);
+        }
+    } catch (const std::exception&) {
+        // An empty list is a real answer: the dialog then offers only Browse
+        // and whatever $OCIO gives, rather than showing entries that cannot load.
+    }
+#endif
+    // Recommended first, otherwise registry order. Measured on this build: two
+    // of eight are flagged recommended, both the v4.0.0/ACES v2.0 pair.
+    std::stable_sort(out.begin(), out.end(),
+                     [](const BuiltinConfig& a, const BuiltinConfig& b) {
+                         return a.recommended && !b.recommended;
+                     });
+    return out;
+}
+
+QString ColorTransform::defaultConfigString(ConfigSource* source) {
+#ifdef TRACE_WITH_OCIO
+    const QByteArray env = qgetenv("OCIO");
+    if (!env.isEmpty()) {
+        if (source) *source = ConfigSource::Env;
+        return QString::fromLocal8Bit(env);
+    }
+    if (source) *source = ConfigSource::Builtin;
+    return QString::fromLatin1(kDefaultBuiltinUri);
+#else
+    if (source) *source = ConfigSource::None;
+    return QString();
+#endif
+}
+
+#ifdef TRACE_WITH_OCIO
+namespace {
+
+// Resolve a config string to a loaded config, reporting where it came from.
+// `error` carries OCIO's own message on failure -- measured text for a missing
+// file is "Error could not read '<path>' OCIO profile." -- rather than one
+// invented here, so what the dialog shows is what the library said.
+OCIO::ConstConfigRcPtr resolveConfig(const QString& configString,
+                                     ColorTransform::ConfigSource* source,
+                                     QString* label, QString& error) {
+    ColorTransform::ConfigSource src = ColorTransform::ConfigSource::File;
+    QString s = configString;
+    if (s.isEmpty()) {
+        s = ColorTransform::defaultConfigString(&src);
+    } else if (s.startsWith(QLatin1String("ocio://"))) {
+        src = ColorTransform::ConfigSource::Builtin;
+    }
+    if (s.isEmpty()) {
+        error = QStringLiteral("No OpenColorIO config is available.");
+        return {};
+    }
+    try {
+        auto cfg = OCIO::Config::CreateFromFile(s.toStdString().c_str());
+        if (!cfg) {
+            error = QStringLiteral("The config loaded as null: %1").arg(s);
+            return {};
+        }
+        if (source) *source = src;
+        if (label) {
+            switch (src) {
+                case ColorTransform::ConfigSource::Builtin:
+                    *label = QStringLiteral("built-in %1").arg(s);
+                    break;
+                case ColorTransform::ConfigSource::Env:
+                    *label = QStringLiteral("$OCIO %1").arg(QFileInfo(s).fileName());
+                    break;
+                default:
+                    *label = QFileInfo(s).fileName();
+                    break;
+            }
+        }
+        return cfg;
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+        return {};
+    }
+}
+
+} // namespace
+#endif
+
+QStringList ColorTransform::colorSpaces(const QString& configString, QString& error) {
+    error.clear();
+    QStringList out;
+#ifdef TRACE_WITH_OCIO
+    auto cfg = resolveConfig(configString, nullptr, nullptr, error);
+    if (!cfg) return out;
+    try {
+        const int n = cfg->getNumColorSpaces();
+        for (int i = 0; i < n; ++i) {
+            const char* name = cfg->getColorSpaceNameByIndex(i);
+            if (name && *name) out << QString::fromUtf8(name);
+        }
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+    }
+#else
+    error = QStringLiteral("This build was compiled without OpenColorIO.");
+    Q_UNUSED(configString);
+#endif
+    return out;
+}
+
+QStringList ColorTransform::displays(const QString& configString, QString& error) {
+    error.clear();
+    QStringList out;
+#ifdef TRACE_WITH_OCIO
+    auto cfg = resolveConfig(configString, nullptr, nullptr, error);
+    if (!cfg) return out;
+    try {
+        const int n = cfg->getNumDisplays();
+        for (int i = 0; i < n; ++i) {
+            const char* name = cfg->getDisplay(i);
+            if (name && *name) out << QString::fromUtf8(name);
+        }
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+    }
+#else
+    error = QStringLiteral("This build was compiled without OpenColorIO.");
+    Q_UNUSED(configString);
+#endif
+    return out;
+}
+
+QStringList ColorTransform::views(const QString& configString, const QString& display,
+                                  QString& error) {
+    error.clear();
+    QStringList out;
+#ifdef TRACE_WITH_OCIO
+    auto cfg = resolveConfig(configString, nullptr, nullptr, error);
+    if (!cfg) return out;
+    try {
+        const std::string d = display.toStdString();
+        const int n = cfg->getNumViews(d.c_str());
+        for (int i = 0; i < n; ++i) {
+            const char* name = cfg->getView(d.c_str(), i);
+            if (name && *name) out << QString::fromUtf8(name);
+        }
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+    }
+#else
+    error = QStringLiteral("This build was compiled without OpenColorIO.");
+    Q_UNUSED(configString);
+    Q_UNUSED(display);
+#endif
+    return out;
+}
+
+// THE INPUT DEFAULT, AND IT IS THE scene_linear ROLE. Never
+// getColorSpaceFromFilepath(): measured on BOTH configs in the asset set, the
+// file rules give a DIFFERENT answer from the role, and both wrong answers are
+// the plausible kind.
+//
+//   Redshift config.ocio :  role ACEScg   file rules 'Raw'
+//   ocio://default       :  role ACEScg   file rules 'ACES2065-1'
+//
+// 'Raw' shows as a flat, un-tone-mapped picture. 'ACES2065-1' is the harder one
+// -- it IS scene-linear, so the picture looks plausible and is simply wrong in
+// its primaries, i.e. wrong saturation with correct-looking contrast. Neither
+// call fails, so nothing but this rule separates them.
+QString ColorTransform::sceneLinearSpace(const QString& configString, QString& error) {
+    error.clear();
+#ifdef TRACE_WITH_OCIO
+    auto cfg = resolveConfig(configString, nullptr, nullptr, error);
+    if (!cfg) return QString();
+    try {
+        const char* role = cfg->getCanonicalName(OCIO::ROLE_SCENE_LINEAR);
+        if (role && *role) return QString::fromUtf8(role);
+        error = QStringLiteral(
+            "The config states no scene_linear role, so there is no safe "
+            "default input colour space.");
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+    }
+#else
+    error = QStringLiteral("This build was compiled without OpenColorIO.");
+    Q_UNUSED(configString);
+#endif
+    return QString();
+}
+
+QString ColorTransform::defaultDisplay(const QString& configString, QString& error) {
+    error.clear();
+#ifdef TRACE_WITH_OCIO
+    auto cfg = resolveConfig(configString, nullptr, nullptr, error);
+    if (!cfg) return QString();
+    try {
+        const char* d = cfg->getDefaultDisplay();
+        if (d && *d) return QString::fromUtf8(d);
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+    }
+#else
+    error = QStringLiteral("This build was compiled without OpenColorIO.");
+    Q_UNUSED(configString);
+#endif
+    return QString();
+}
+
+QString ColorTransform::defaultView(const QString& configString, const QString& display,
+                                    QString& error) {
+    error.clear();
+#ifdef TRACE_WITH_OCIO
+    auto cfg = resolveConfig(configString, nullptr, nullptr, error);
+    if (!cfg) return QString();
+    try {
+        const std::string d = display.toStdString();
+        const char* v = cfg->getDefaultView(d.c_str());
+        if (v && *v) return QString::fromUtf8(v);
+    } catch (const std::exception& e) {
+        error = QString::fromUtf8(e.what());
+    }
+#else
+    error = QStringLiteral("This build was compiled without OpenColorIO.");
+    Q_UNUSED(configString);
+    Q_UNUSED(display);
+#endif
+    return QString();
 }
 
 QString ColorTransform::description() const {
@@ -92,6 +369,8 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
 
     if (config.kind == Kind::None) {
         config_ = config;
+        configSource_ = ConfigSource::None;
+        configLabel_.clear();
 #ifdef TRACE_WITH_OCIO
         if (impl_) {
             impl_->cpu.reset();
@@ -109,6 +388,12 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
 #else
     try {
         OCIO::ConstProcessorRcPtr processor;
+        // Filled in by the DisplayView branch from what the resolver actually
+        // loaded, and published only on success -- so a failed setConfig leaves
+        // the previous configuration AND its reported source in force, which is
+        // the guarantee the header makes.
+        ConfigSource resolvedSource = ConfigSource::None;
+        QString resolvedLabel;
 
         if (config.kind == Kind::Lut) {
             const QFileInfo fi(config.lutPath);
@@ -125,18 +410,30 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
             ft->setInterpolation(OCIO::INTERP_BEST);
             processor = OCIO::Config::CreateRaw()->getProcessor(ft);
         } else {
-            // Kind::DisplayView. No UI reaches this in stage 1; it is compiled
-            // and reachable so the dialog is a call site later.
-            auto cfg = config.configPath.isEmpty()
-                           ? OCIO::Config::CreateFromEnv()
-                           : OCIO::Config::CreateFromFile(
-                                 config.configPath.toStdString().c_str());
+            // Kind::DisplayView -- the dialog's configuration, stage 3.
+            //
+            // Through the SHARED resolver, not Config::CreateFromEnv(). Stage 1
+            // called CreateFromEnv() whenever configPath was empty, and with
+            // $OCIO unset that returns a "Color management disabled" RAW config
+            // -- one colour space, one display, no throw, no null, an info line
+            // on stderr that no GUI shows. An empty path would therefore have
+            // compiled a transform that looks loaded and does nothing.
+            // Measured with scripts/measure/ocioprobe.
+            ColorTransform::ConfigSource src = ConfigSource::None;
+            QString label;
+            auto cfg = resolveConfig(config.configPath, &src, &label, error);
+            if (!cfg) return false;
+            resolvedSource = src;
+            resolvedLabel = label;
 
             // THE INPUT SPACE COMES FROM THE scene_linear ROLE WHEN UNSTATED,
-            // NEVER FROM getColorSpaceFromFilepath(). Measured on the Redshift
-            // config in stage 0: its file rules map any .exr to "Raw", so the
-            // obvious call returns a wrong answer while every API call looks
-            // correct, and the picture comes out flat.
+            // NEVER FROM getColorSpaceFromFilepath(). Measured on BOTH configs
+            // in the asset set, and the file rules disagree with the role on
+            // both: the Redshift config answers 'Raw' for .exr where the role is
+            // ACEScg, and ocio://default answers 'ACES2065-1' where the role is
+            // also ACEScg. The second is the dangerous one -- it IS scene
+            // linear, so the picture looks plausible and is simply wrong in its
+            // primaries, and every API call along the way succeeds.
             std::string input = config.inputSpace.toStdString();
             if (input.empty()) {
                 const char* role = cfg->getCanonicalName(OCIO::ROLE_SCENE_LINEAR);
@@ -217,6 +514,8 @@ bool ColorTransform::setConfig(const Config& config, QString& error) {
                 "show their default display mapping.");
         }
         config_ = config;
+        configSource_ = resolvedSource;
+        configLabel_ = resolvedLabel;
         return true;
     } catch (const std::exception& e) {
         // The PREVIOUS configuration stays in force -- see the header. A LUT

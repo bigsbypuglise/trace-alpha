@@ -261,6 +261,95 @@ int runOcioSelfTest(const QString& file) {
         }
     }
 
+    // ---- STAGE 3: config discovery, and the default the dialog depends on ----
+    //
+    //   6. the built-in registry enumerates, and the default resolves  -> exit 26
+    //   7. scene_linear and the FILE RULES give DIFFERENT answers      -> exit 27
+    //
+    // (6) IS THE CHECK FOR A MEASURED TRAP, NOT A TAUTOLOGY. With $OCIO unset,
+    // OCIO::Config::CreateFromEnv() does not throw and does not return null: it
+    // returns a "Color management disabled" RAW config with ONE colour space and
+    // ONE display, announced only on stderr. Stage 1's DisplayView branch called
+    // it whenever configPath was empty. So the assertion is not "a config
+    // loaded" -- that would pass on the raw config -- it is that the resolved
+    // default carries MORE THAN ONE colour space and at least one display, which
+    // the disabled config cannot.
+    //
+    // (7) ASSERTS A DIFFERENCE RATHER THAN A VALUE, which is what makes it
+    // durable. The whole reason the input space defaults to the scene_linear
+    // ROLE is that getColorSpaceFromFilepath() answers something else and every
+    // API call succeeds either way. Measured: on ocio://default the role is
+    // ACEScg and the file rules say ACES2065-1 -- both scene-linear, so the
+    // wrong one looks plausible and is merely wrong in its primaries. If a
+    // future OCIO ever made the two agree, this fails and says the premise
+    // moved, instead of leaving a comment behind that no longer applies.
+#ifdef TRACE_WITH_OCIO
+    {
+        const auto builtins = trace::core::ColorTransform::builtinConfigs();
+        trace::core::ColorTransform::ConfigSource src =
+            trace::core::ColorTransform::ConfigSource::None;
+        const QString defaultCfg =
+            trace::core::ColorTransform::defaultConfigString(&src);
+
+        QString e1, e2, e3;
+        const QStringList spaces = trace::core::ColorTransform::colorSpaces(QString(), e1);
+        const QStringList disp = trace::core::ColorTransform::displays(QString(), e2);
+        const QString sceneLinear = trace::core::ColorTransform::sceneLinearSpace(QString(), e3);
+
+        out << "trace-ocio: builtins=" << builtins.size()
+            << " default=" << defaultCfg
+            << " source=" << (src == trace::core::ColorTransform::ConfigSource::Env
+                                  ? "env" : "builtin")
+            << " spaces=" << spaces.size()
+            << " displays=" << disp.size()
+            << " scene_linear=" << sceneLinear
+            << Qt::endl;
+        out.flush();
+
+        if (builtins.isEmpty()) {
+            err << "trace-ocio: FAIL - the built-in config registry enumerated "
+                   "nothing, so Trace cannot offer colour management on a machine "
+                   "with no config installed." << Qt::endl;
+            return 26;
+        }
+        if (spaces.size() < 2 || disp.isEmpty() || sceneLinear.isEmpty()) {
+            err << "trace-ocio: FAIL - the resolved default config has "
+                << spaces.size() << " colour space(s) and " << disp.size()
+                << " display(s). One of each is the signature of OCIO's "
+                   "'Color management disabled' raw config, which is what "
+                   "CreateFromEnv() returns when $OCIO is unset." << Qt::endl;
+            return 26;
+        }
+
+        try {
+            auto cfg = OCIO_NAMESPACE::Config::CreateFromFile(
+                defaultCfg.toStdString().c_str());
+            const char* byRule = cfg ? cfg->getColorSpaceFromFilepath("probe.exr") : nullptr;
+            const QString rule = byRule ? QString::fromUtf8(byRule) : QString();
+            out << "trace-ocio: input default: scene_linear='" << sceneLinear
+                << "' file-rule('.exr')='" << rule << "' differ="
+                << (rule != sceneLinear ? 1 : 0) << Qt::endl;
+            out.flush();
+            if (rule.isEmpty()) {
+                err << "trace-ocio: FAIL - getColorSpaceFromFilepath answered "
+                       "nothing, so the comparison that justifies defaulting to "
+                       "the scene_linear role could not be made." << Qt::endl;
+                return 27;
+            }
+            if (rule == sceneLinear) {
+                err << "trace-ocio: FAIL - the file rules and the scene_linear "
+                       "role now AGREE on this config. That is not a defect, but "
+                       "it means the recorded reason for preferring the role no "
+                       "longer holds here and must be re-derived." << Qt::endl;
+                return 27;
+            }
+        } catch (const std::exception& e) {
+            err << "trace-ocio: FAIL - " << QString::fromUtf8(e.what()) << Qt::endl;
+            return 27;
+        }
+    }
+#endif
+
     return 0;
 }
 
