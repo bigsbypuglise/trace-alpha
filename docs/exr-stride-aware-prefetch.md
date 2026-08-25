@@ -1,5 +1,13 @@
 # Stride-aware EXR prefetch: PIZ preserved in full, DWAA most of the way
 
+> **SUPERSEDED ON THE POLICY, 2026-08-25, by `docs/exr-unit-run-prefetch.md`.**
+> The predicate here -- an EMA of the stride within a tolerance of any integer --
+> leaked four predictions per playthrough on the DWAA file and cost `tick-stall`
+> 11/2/0. Narrowing the tolerance to 1.0 specifically did NOT help (still 4, and
+> 1/1/0); a run counter over consecutive unit steps did (still 4, but 0/0/0).
+> **The measurements below stand as the record of the first formulation.**
+
+
 Record of what was measured. 2026-08-24, branch `exr-stage0-dependencies`,
 physical panel **5120x1440 @ 239.999000 Hz**. All three configurations run on
 **one binary**, warm, 3 reps each, `TRACE_SEQ_PROFILE=1` on in every column so

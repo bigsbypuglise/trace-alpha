@@ -1558,6 +1558,50 @@ PERMANENT.** All three configurations on ONE binary, warm, 3 reps each.
   off-thread reads, alpha prefill untouched, no GPU/OCIO work, no transform
   active in any figure.
 
+**THE PREFETCH GATE IS A RUN OF UNIT STRIDES, AND THREE OF FOUR ACCEPTANCE
+CRITERIA ARE MET (2026-08-25, physical panel, mode re-checked). Record
+`docs/exr-unit-run-prefetch.md`; commit `2274f3f`; knob
+`TRACE_SEQ_PREFETCH_STRIDE=1` STILL DEFAULT OFF -- the fixed +-1 window ships.**
+Supersedes the policy half of `docs/exr-stride-aware-prefetch.md`.
+
+- **"CONFIDENTLY 1.0" AS A TOLERANCE AROUND 1.0 DOES NOT DELIVER WHAT THE PHRASE
+  MEANS, AND THAT WAS MEASURED RATHER THAN REASONED.** EMA within +-0.15 of ANY
+  integer issued 4 predictions of 62; narrowing to +-0.15 of **1.0
+  specifically issued 4 of 61 -- no improvement at all**, because a file whose
+  strides alternate 1,2,1,2 has a mean near 1.5 that still wanders inside any
+  tolerance of 1.0 after two unit steps. **"The average is near 1" and "it is
+  stepping one frame at a time" are different claims.** A run of consecutive
+  unit steps cannot leak that way -- one skip resets it -- and it is an int
+  compare where the average was a float one. **The leak COUNT did not change;
+  WHEN the leaks happen did**, which is the whole result: the run gate only
+  predicts inside a genuine unit run, where the guess is likely right.
+- **DWAA: `tick-stall` 24/24/25 (fixed) -> 0/0/0 (run gate)**, matching
+  no-prefetch, against the tolerance formulations' 11/2/0 and 1/1/0. Handler
+  **p50 is already no-prefetch's** (67.2-67.9 vs 66.3-68.0); what is left is the
+  **tail**, max **96.6-97.6ms against 71.5-73.6**. Presented **62.3/62.9/62.4%
+  against no-prefetch's 63.9/63.7/63.3%** -- consistently ~1.1 points short,
+  non-overlapping. Loads/frame **1.07 vs 1.02**; 57 of 61 predictions declined.
+- **PIZ IS IDENTICAL TO THE FIXED WINDOW**: 99.9% x3, cache **HIT 216 / MISS 1**,
+  1.005 loads/frame, **zero declines**, `<0.9x` 0/1/0 (same as fixed), drift
+  -12/-11/-11 vs -12x3, handler max 36.8-37.5 vs 37.8-40.2. The `<0.9x` 6/9/5
+  and -26ms drift that BLANKET REMOVAL cost are absent.
+- **THE RESIDUE IS NOT A GATE BUG: the DWAA file really does produce runs of
+  four consecutive unit steps.** Its stride mix is ~45% unit, so `0.45^4 x 61 ~
+  2.5` runs per playthrough is expected and 4 is what appears; **2 of the 4 were
+  subsequently USED** (`cache HIT 2`). The arithmetic closes -- `prefetch (all)`
+  reads 2.83ms/frame against a 2.42ms accounted difference.
+- **THE LEVER, NOT TURNED: require a longer run.** At `p(unit) ~ 0.45` a run of
+  **8** takes the expected leak to ~0.1 per playthrough while delaying PIZ's
+  first prediction by four frames of 216. Same predicate, one constant. That is
+  how to close the last ~1.1 points if the DWAA class is required exactly.
+- **Exactness structural and unchanged**: gate is on `playTimer_.isActive()`, so
+  stepping and random access keep the legacy window verbatim -- 0% cross-config
+  at frame 7 and back at 0 on both files, negative controls 10.60% / 54.82%.
+- **No configuration makes DWAA hold real time**; `handler>budget` is every
+  frame in all three columns and `read_image` alone is 41.34ms of a 41.67ms
+  budget. **Cache architecture unchanged. No scheduler-accumulator prediction,
+  no off-thread reads, alpha prefill untouched, no GPU/OCIO work.**
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
