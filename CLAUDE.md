@@ -1513,6 +1513,51 @@ SHIPPING BEHAVIOUR IS UNCHANGED. Commits `f8ab018` (knob + cache counters) and
   purely because it now runs once per frame instead of 2.72 times. **No GPU or
   OCIO work started.** Every figure is with no colour transform active.
 
+**STRIDE-AWARE PREFETCH IS PROTOTYPED AND MEASURED: PIZ PRESERVED IN FULL, DWAA
+MOST OF THE WAY (2026-08-24, physical panel). Record
+`docs/exr-stride-aware-prefetch.md`; knob `TRACE_SEQ_PREFETCH_STRIDE=1`,
+DEFAULT OFF, commit `b96f14c`. THE FIXED +-1 WINDOW STILL SHIPS. NOT
+PERMANENT.** All three configurations on ONE binary, warm, 3 reps each.
+
+- **PIZ IS PRESERVED EXACTLY: 99.9% x3, cache HIT 216 / MISS 1, 1.005 loads per
+  frame, ZERO declines, `<0.9x` bucket 0/0/0, drift -13/-11/-13ms.** Identical
+  to the fixed window (99.9% x3, 216/1, `<0.9x` 0/0/1, drift -12/-11/-12), and
+  it removes the `<0.9x` 6/9/5 and drift -26ms that BLANKET REMOVAL cost. The
+  stride reads exactly 1.0 there, so the prediction is issued every tick and is
+  right every tick.
+- **DWAA REACHES MOST OF THE NO-PREFETCH CLASS AND NOT ALL OF IT.** Steady state
+  **62.9%** against no-prefetch's **63.7-64.1%**, loads per frame **1.06 vs
+  1.02**, and the policy correctly **DECLINES 58 of 62** predictions. But the
+  spread is **54.3 / 60.6 / 62.9%** where no-prefetch is flat, and the TAIL IS
+  WORSE: handler max **116-131ms against 80-84ms**, `tick-stall` **11/2/0
+  against 0/0/0**. Fixed +-1 for reference: 29.6/28.4/29.0%, max 188-202,
+  tick-stall 22-24, 2.72 loads/frame.
+- **EVERY DWAA COST ABOVE NO-PREFETCH IS AN ISSUED PREDICTION THAT MISSED** --
+  the four it issued cost 170.1ms between them, **42.5ms each, a full load**,
+  inside a tick that then still has to read the real frame. **REQUIRING THE
+  STRIDE TO BE CONFIDENTLY 1 rather than confidently any integer would collapse
+  it onto no-prefetch for DWAA and leave PIZ identical** -- one predicate, no
+  cache work. **NOT BUILT, NOT MEASURED**; it is the obvious next experiment.
+  Predicting non-unit strides properly would need the prediction to come from
+  the SCHEDULER'S OWN ACCUMULATOR rather than a history average, since the
+  scheduler already knows the next target. Not attempted.
+- **THE REP-TO-REP SPREAD (54.3 -> 60.6 -> 62.9%) IS NOT EXPLAINED and is
+  recorded as such.** Each rep is a fresh process so the EMA warm-up is
+  identical, and the other two columns are flat across their own reps on the
+  same file in the same session -- so it is neither warm-up nor OS file
+  caching. First thing to nail down if this direction continues.
+- **EXACTNESS IS STRUCTURAL, NOT LUCKY: the policy is gated on
+  `playTimer_.isActive()`**, so paused stepping and random access take the
+  legacy +-1 window verbatim -- `prefetchNeighbors()` is reached from seven
+  places and only two are the playback tick. Measured both files, fixed vs
+  stride: **0% differing** at frame 7 and back at 0, negative controls
+  **10.60%** and **54.82%**.
+- **NO CONFIGURATION MAKES DWAA HOLD REAL TIME**; `handler>budget` is every
+  frame in all three columns. `read_image` alone is 41.27ms of a 41.67ms budget.
+- **Cache architecture UNCHANGED** (same `FrameCache{1}`, same radius). No
+  off-thread reads, alpha prefill untouched, no GPU/OCIO work, no transform
+  active in any figure.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
