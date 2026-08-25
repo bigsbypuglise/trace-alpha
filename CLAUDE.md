@@ -1470,6 +1470,49 @@ DEFAULT OFF, commit `96ddab6`. NOTHING WAS OPTIMISED.**
 - **ACES IS A SEPARATE TRACK AND EVERY FIGURE ABOVE IS WITH NO TRANSFORM
   ACTIVE.** LUT free, ACES 1.0 ~ +32ms, ACES 2.0 ~ +92ms.
 
+**THE PREFETCH EXPERIMENT IS MEASURED (2026-08-24, physical panel). Record
+`docs/exr-prefetch-experiment.md`; knob `TRACE_SEQ_PREFETCH=0`, DEFAULT OFF, so
+SHIPPING BEHAVIOUR IS UNCHANGED. Commits `f8ab018` (knob + cache counters) and
+`fe1fb82` (`seqstep.ps1`). NO POLICY IS PERMANENT YET.**
+
+- **DWAA GOES 29% -> 64% OF REAL TIME**, and the decomposition's projection of
+  59.1ms/frame measures **58.82ms** -- within 0.5%. `skip 71/69/70 -> 34/34/34`,
+  handler p50 **149.6-163.1 -> 65.0-67.1ms**, max **189.4-208.2 -> 71.5-73.7ms**,
+  loads per presented frame **2.72 -> 1.02**. **`tick-stall` (>100ms) goes
+  23-24 -> 0**, which is the difference between a file that HITCHES and a file
+  that is merely slow. **`handler>budget` is still every frame in BOTH columns**
+  -- 58.82ms is over the 41.67ms budget, so it presents ~2 frames in 3 rather
+  than 1 in 3, and it still does not hold real time.
+- **THE POLICY CONCLUSION IS NOT "REMOVE THE PREFETCH", AND THE PIZ CONTROL IS
+  WHY.** On the plain PIZ sequence prefetch reads **216 hits against 1 miss
+  (99.5%) at 1.005 loads per frame -- the SAME load count as with it off.** The
+  playhead there advances exactly 1 per present, so the `+1` neighbour is
+  precisely the frame wanted next: it is one NECESSARY load moved a tick
+  earlier, not an extra one. Removing it costs presented **99.8-99.9% ->
+  99.7%**, drift **-13 -> -26ms**, `<0.9x` bucket **0-1 -> 5-9**. Both still
+  hold real time (`skip 0`, `0 of 215`).
+- **THE DEFECT IS THAT THE PREFETCH WINDOW IS A FIXED +-1 WHILE THE PLAYBACK
+  STRIDE IS NOT 1.** PIZ advances 1/present and `+-1` predicts correctly (99.5%
+  hit); DWAA advances ~3.4/present because it is over budget and skipping, so
+  `+-1` predicts wrongly nearly every time (10% hit, 2.72 loads/frame, 59% of
+  the frame wasted). **Letting the window follow the stride would keep PIZ's hit
+  rate AND remove DWAA's waste with no cache redesign -- RECOMMENDED, NOT
+  MEASURED, NOT BUILT.** Blanket removal is what was measured, and it trades a
+  small regression on well-behaved sequences for a large win on struggling ones.
+- **EXACTNESS IS UNCHANGED ON BOTH FILES**, `scripts/measure/seqstep.ps1`, 7
+  steps out and back: cross-config **0% differing** at frame 7 and back at 0, on
+  DWAA and PIZ, with the negative controls (frame 7 vs frame 0 inside one build)
+  firing at **10.60%** and **54.82%**. Indices read off the captures, not
+  inferred: `frame 7 | Frame: 7/96` out, `frame 0 | Frame: 0/96` back, slider
+  correct both ways. **The negative control is listed first deliberately** -- a
+  build showing one frozen frame would score 0% on both cross-config columns.
+- **NEITHER OPTION MAKES DWAA HOLD REAL TIME.** At 58.82ms/frame `read_image`
+  alone is **41.27ms**, 99% of a frame budget by itself. The decomposition's
+  ranking is unchanged: the read has to come off the UI thread or get cheaper.
+- **Alpha prefill was NOT touched** (per instruction); it reads 11.96 -> 4.45ms
+  purely because it now runs once per frame instead of 2.72 times. **No GPU or
+  OCIO work started.** Every figure is with no colour transform active.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
