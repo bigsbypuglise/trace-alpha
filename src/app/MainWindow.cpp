@@ -7127,6 +7127,10 @@ bool MainWindow::openPath(const QString& path) {
 
         if (currentMedia_->kind == MediaKind::ImageSequence) {
             resetSequenceStride();
+            // Before the open's own prefetch, so that legacy load is COUNTED.
+            // A sequence that has been opened and not yet played should read
+            // `legacy 1` rather than 0 -- the window really did run.
+            resetSequencePrefetchCounters();
             prefetchNeighbors();
         }
     }
@@ -7258,6 +7262,7 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
         trace::core::seqprofile::bump(cached.has_value()
                                           ? trace::core::seqprofile::Stage::CacheHit
                                           : trace::core::seqprofile::Stage::CacheMiss);
+        if (cached.has_value()) ++seqCacheHits_; else ++seqCacheMisses_;
         if (cached.has_value()) {
             // The pass list, the active pass and the compression belong to the
             // SEQUENCE, not to the frame, so they are carried across a cache hit
@@ -7489,6 +7494,10 @@ void MainWindow::noteSequenceStride() {
             seqLastPresentedFrame_ = current;
             return;
         }
+        // OBSERVATION ONLY, and placed AFTER the discontinuity guard so a seek
+        // or a loop wrap is never reported as a stride -- the guard above has
+        // already returned, leaving this 0 via resetSequenceStride().
+        seqLastStride_ = static_cast<int>(jump);
         if (jump == 1 || jump == -1) {
             // SIGNED, so reverse playback at 1x predicts backwards with no
             // second branch anywhere.
@@ -7515,6 +7524,118 @@ void MainWindow::resetSequenceStride() {
     seqUnitDir_ = 0;
     seqLastPresentedFrame_ = -1;
     seqStrideSamples_ = 0;
+    seqLastStride_ = 0;
+}
+
+// The HUD's counters, zeroed. SEPARATE from resetSequenceStride() on purpose:
+// that one fires mid-run on any discontinuity, and zeroing the counters there
+// would silently restart the accounting in the middle of the run being read.
+// This is called only at the two run boundaries -- media open, and
+// beginPlaybackTimeline().
+void MainWindow::resetSequencePrefetchCounters() {
+    seqCacheHits_ = 0;
+    seqCacheMisses_ = 0;
+    seqPrefetchIssued_ = 0;
+    seqPrefetchDeclined_ = 0;
+    seqPrefetchLegacy_ = 0;
+    seqPrefetchLoads_ = 0;
+}
+
+// WHICH POLICY IS IN FORCE, AND WHETHER A KNOB SAID SO.
+//
+// Tri-state, for the reason `strip` and `renderer` are: "the default is stride"
+// and "somebody set the knob to 1" behave identically and must not read
+// identically, or a capture cannot tell a deliberate override from a machine
+// that never touched the variable. The ROLLBACK is the case that matters most
+// -- a run taken under TRACE_SEQ_PREFETCH_STRIDE=0 whose HUD said `stride`
+// would be a figure filed against the wrong policy, which is how this project
+// once compared cpu with cpu and called it a cross-backend result.
+//
+// Cached in a static: the environment cannot change under a running process,
+// and refreshHud() is called several times a second.
+static QString seqPrefetchPolicyLabel() {
+    static const QString label = [] {
+        const QByteArray off = qgetenv("TRACE_SEQ_PREFETCH");
+        if (off == "0") return QStringLiteral("off (env)");
+        const QByteArray stride = qgetenv("TRACE_SEQ_PREFETCH_STRIDE");
+        if (stride.isEmpty()) return QStringLiteral("stride");
+        if (stride == "0") return QStringLiteral("legacy (env)");
+        return QStringLiteral("stride (env)");
+    }();
+    return label;
+}
+
+// THE PREFETCH POLICY, READ OFF THE RUNNING BUILD.
+//
+// Until 2026-08-25 the shipping default's state was reachable only through
+// TRACE_SEQ_PROFILE=1 -- a knob whose own contract is that it is off in every
+// shipping path. So the configuration everybody runs was the one configuration
+// that could not be inspected, which is this project's most expensive recurring
+// failure and not a cosmetic gap.
+//
+// HOW TO READ IT, in the order the fields answer questions:
+//
+//   policy        stride | stride (env) | legacy (env) | off (env)
+//   last-stride   how far the playhead moved between the last two PRESENTED
+//                 frames. +1 is a sequence holding its budget. +3 or +4 is the
+//                 scheduler skipping, and is precisely why a fixed +-1 window
+//                 decodes frames that are never shown. 0 means a discontinuity
+//                 (seek, loop wrap) or nothing measured yet.
+//   gate          run N/4 is the predicate itself -- CONSECUTIVE unit strides,
+//                 reset to 0 by a single skip. `warn` below 4 means the warm-up
+//                 has not finished and the legacy window is running whatever
+//                 the run says.
+//   issued/decl   what the gate DID. On the DWAA file expect declines; on PIZ
+//                 and PNG expect issues. `legacy` counts the fixed +-1 window,
+//                 which is warm-up frames, paused stepping, and every frame
+//                 when the rollback is set.
+//   cache         the presented frame only. A prefetch that hits is not counted
+//                 here -- it is counted as a load that never happened.
+//   loads         REAL loader calls / presented frames. This is the cost figure
+//                 and the one the records quote: ~2.9 under the fixed window on
+//                 DWAA against ~1.1 under the gate.
+QString MainWindow::sequencePrefetchHudLine() const {
+    const long long presented = seqCacheHits_ + seqCacheMisses_;
+    const long long loads = seqCacheMisses_ + seqPrefetchLoads_;
+    // THE PERCENT SIGN IS PART OF THE VALUE, NOT THE FORMAT. QString::arg does
+    // not treat "%%" as an escape -- the first capture of this line read
+    // "(0.0%%)" -- and a bare "%" next to a numbered placeholder is worse than
+    // ugly, because "%1" inside it would be substituted.
+    const QString hitPct = presented > 0
+        ? QString::number(100.0 * static_cast<double>(seqCacheHits_)
+                          / static_cast<double>(presented), 'f', 1) + QStringLiteral("%")
+        : QStringLiteral("--");
+    const QString perFrame = presented > 0
+        ? QString::number(static_cast<double>(loads)
+                          / static_cast<double>(presented), 'f', 2)
+        : QStringLiteral("--");
+    // Signed and always explicit, so a reverse run is legible as one rather
+    // than as a missing minus.
+    const QString stride = seqLastStride_ == 0
+        ? QStringLiteral("--")
+        : QString("%1%2").arg(seqLastStride_ > 0 ? "+" : "").arg(seqLastStride_);
+    const QString dir = seqUnitDir_ == 0
+        ? QStringLiteral("--")
+        : QString("%1%2").arg(seqUnitDir_ > 0 ? "+" : "").arg(seqUnitDir_);
+    return QString("seq-prefetch %1 | last-stride %2 | gate run %3/%4 dir %5 warm %6/%7"
+                   " | issued %8 decl %9 legacy %10 | cache hit %11 miss %12 (%13)"
+                   " | loads %14/%15 = %16/frame")
+        .arg(seqPrefetchPolicyLabel())
+        .arg(stride)
+        .arg(seqUnitRun_)
+        .arg(kSeqUnitRunRequired)
+        .arg(dir)
+        .arg(seqStrideSamples_)
+        .arg(kSeqStrideWarmupSamples)
+        .arg(seqPrefetchIssued_)
+        .arg(seqPrefetchDeclined_)
+        .arg(seqPrefetchLegacy_)
+        .arg(seqCacheHits_)
+        .arg(seqCacheMisses_)
+        .arg(hitPct)
+        .arg(loads)
+        .arg(presented)
+        .arg(perFrame);
 }
 
 // Load one frame into the cache, or do nothing if it is already there or out of
@@ -7528,6 +7649,10 @@ void MainWindow::prefetchFrameIntoCache(long long idx) {
     trace::core::LoadedImageInfo info;
     QString error;
     if (!stillLoader_.load(path, info, error)) return;
+    // Here, and not at the decision: the two early returns above mean a
+    // prediction can cost nothing at all, and the HUD must not charge it for
+    // work it did not do.
+    ++seqPrefetchLoads_;
 
     trace::core::CachedFrame cf;
     cf.frameIndex = idx;
@@ -7563,12 +7688,14 @@ void MainWindow::prefetchNeighbors() {
             // sequence is skipping and nothing is decoded speculatively. This
             // is the measured no-prefetch path, reached adaptively.
             trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchDecline);
+            ++seqPrefetchDeclined_;
             return;
         }
         // ONE frame, the one actually likely to be presented next -- not a
         // window. The trailing neighbour is what the fixed policy spent a whole
         // load on whenever the playhead had moved past it.
         trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchIssued);
+        ++seqPrefetchIssued_;
         prefetchFrameIntoCache(current + seqUnitDir_);
         return;
     }
@@ -7578,6 +7705,7 @@ void MainWindow::prefetchNeighbors() {
     // decline, and the difference between frames and declines would otherwise
     // read as the gate firing.
     trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchLegacy);
+    ++seqPrefetchLegacy_;
     const long long neighbors[2] = {current - 1, current + 1};
     for (long long idx : neighbors) prefetchFrameIntoCache(idx);
 }
@@ -8045,6 +8173,13 @@ void MainWindow::beginPlaybackTimeline() {
     audioRepeatedFrames_ = audioSkippedFrames_ = 0;
     playbackDroppedFrames_ = playbackDropTicks_ = maxDropRun_ = 0;
     seqSkippedFrames_ = seqSkipTicks_ = maxSeqSkipRun_ = 0;
+    // The prefetch line takes the SAME run boundary as every cadence counter
+    // above it, so `issued`/`declined` and `presented` are one measurement.
+    // The stride state is deliberately NOT reset here: pausing and resuming
+    // does not change how the sequence behaves, and re-running a warm-up the
+    // file has already earned would cost it two loads a frame to re-learn
+    // what it already knew.
+    resetSequencePrefetchCounters();
 
     lastClockUpdateMark_ = -1;
     lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
@@ -11112,7 +11247,14 @@ void MainWindow::refreshHud(const QString& action) {
                                 /*rateIsNominal=*/true);
             line += "\n" + cadence.presented
                   + "\n" + cadence.sched
-                  + "\n" + cadence.cadence;
+                  + "\n" + cadence.cadence
+                  // Directly under the cadence lines because it is the
+                  // explanation for them: `presented` says the sequence is
+                  // at 62% of real time, and this says what the prefetch
+                  // policy did to get it there. They share a run boundary,
+                  // so the two are one measurement rather than two
+                  // overlapping ones.
+                  + "\n" + sequencePrefetchHudLine();
         } else if (currentImage_.has_value()) {
             const auto& im = *currentImage_;
             // Same one-pass substitution for the same reason: a file name is

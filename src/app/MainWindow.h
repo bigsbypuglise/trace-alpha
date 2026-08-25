@@ -336,6 +336,10 @@ private:
     void prefetchFrameIntoCache(long long frameIndex);
     void noteSequenceStride();
     void resetSequenceStride();
+    void resetSequencePrefetchCounters();
+    // The prefetch policy's own state, for the image-sequence HUD. Const and
+    // pure: it formats members and asks the two knobs, and touches nothing.
+    QString sequencePrefetchHudLine() const;
     void togglePlayPause();
     // Starts a playback run: request mode, audio, clocks and the whole set of
     // cadence/telemetry counters, then the timer. The caller puts playback_ into
@@ -1010,7 +1014,15 @@ private:
     trace::core::StillImageLoader stillLoader_;
     trace::core::FrameCache frameCache_{1};
 
-    // STRIDE-AWARE PREFETCH STATE (TRACE_SEQ_PREFETCH_STRIDE=1, default off).
+    // STRIDE-AWARE PREFETCH STATE. THE POLICY IS THE SHIPPING DEFAULT as of
+    // 2026-08-25, and TRACE_SEQ_PREFETCH_STRIDE=0 is the rollback to the fixed
+    // +-1 window.
+    //
+    // This comment read "TRACE_SEQ_PREFETCH_STRIDE=1, default off" until
+    // 2026-08-25 -- stale from the commit that flipped the default, while the
+    // .cpp beside the knob was correct throughout. Two statements of the same
+    // fact, and the one nobody was reading went wrong; the HUD field below is
+    // the answer to that, because it is read off the running build.
     //
     // How far the playhead actually moved between consecutive PRESENTED frames.
     // On a sequence that holds its budget this is exactly 1 and the +1
@@ -1029,6 +1041,44 @@ private:
     int seqUnitDir_ = 0;
     long long seqLastPresentedFrame_ = -1;
     int seqStrideSamples_ = 0;
+
+    // WHAT THE POLICY IS ACTUALLY DOING, ON THE HUD, IN THE SHIPPING CONFIG.
+    //
+    // These duplicate five seqprofile stages deliberately. seqprofile is off in
+    // every shipping path by design -- it samples clocks and writes a table --
+    // so reading it would report zero on the configuration anyone actually
+    // runs. That is the `stalls 0 of 0` shape: a counter that reads clean
+    // because it was never fed, which hid a 512ms stall here for a dozen runs
+    // and cost two wrong hypotheses.
+    //
+    // They are plain increments with no clock and no allocation, on a path that
+    // already performs a synchronous EXR decode, and they are OBSERVATION ONLY:
+    // nothing below is read by prefetchNeighbors(), so the gate cannot change
+    // behaviour because the HUD is looking at it.
+    //
+    // Zeroed by resetSequencePrefetchCounters(), from media open and from
+    // beginPlaybackTimeline() -- the same boundary the cadence counters take,
+    // so this line and the three cadence lines beside it describe ONE run and
+    // can be compared without asking how long each was accumulating.
+    long long seqCacheHits_ = 0;
+    long long seqCacheMisses_ = 0;
+    long long seqPrefetchIssued_ = 0;
+    long long seqPrefetchDeclined_ = 0;
+    long long seqPrefetchLegacy_ = 0;
+    // REAL loader calls made speculatively -- incremented only after
+    // stillLoader_.load() has actually run and succeeded, never at the
+    // decision. prefetchFrameIntoCache() early-returns when the frame is
+    // already cached, so `issued x 1 + legacy x 2` is an UPPER BOUND on the
+    // work done, and publishing that as "loads per frame" would overstate
+    // the cost of the policy the HUD exists to judge. The presented frame's
+    // own load needs no counter: a cache MISS is exactly that load.
+    long long seqPrefetchLoads_ = 0;
+    // The last jump the gate saw between presented frames, signed. A file
+    // holding its budget reads +1; the DWAA sequence over budget reads +3 or
+    // +4, which is the single number that says WHY a fixed +-1 window was
+    // decoding frames that were never shown. Discontinuities (|jump| > 32) are
+    // not strides and leave this at 0, matching what the gate itself does.
+    int seqLastStride_ = 0;
     trace::core::VideoDecoderFFmpeg videoDecoder_;
     // Declared after the decoder so it is destroyed BEFORE it: the worker holds
     // a pointer to the decoder, and a member destroyed in the other order could
