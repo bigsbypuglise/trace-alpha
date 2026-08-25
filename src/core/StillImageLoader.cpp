@@ -1,7 +1,11 @@
 #include "core/StillImageLoader.h"
 
+#include "core/SeqProfile.h"
+
 #include <algorithm>
 #include <cmath>
+#include <memory>
+#include <optional>
 
 #include <QFileInfo>
 
@@ -186,7 +190,16 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
 #ifdef TRACE_WITH_OIIO
     namespace oiio = OIIO;
 
-    auto in = oiio::ImageInput::open(path.toStdString());
+    namespace prof = ::trace::core::seqprofile;
+    std::unique_ptr<oiio::ImageInput> in;
+    {
+        // REPEATED PER-FRAME OPEN. Every frame of a sequence re-opens the file
+        // and re-reads its header; nothing is carried between frames. Timed
+        // separately because "setup work repeated per frame" is a named
+        // suspect, not because it is assumed to be large.
+        prof::Scope g{prof::Stage::Open};
+        in = oiio::ImageInput::open(path.toStdString());
+    }
     if (!in) {
         error = QString("Failed to open EXR: %1").arg(path);
         return false;
@@ -201,6 +214,9 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
         error = QString("Unsupported EXR dimensions/channels: %1").arg(path);
         return false;
     }
+
+    std::optional<prof::Scope> groupScope;
+    if (prof::enabled()) groupScope.emplace(prof::Stage::Group);
 
     QStringList names;
     names.reserve(nchannels);
@@ -230,6 +246,7 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
         return false;
     }
     const ExrPass& pass = passes[static_cast<std::size_t>(active)];
+    groupScope.reset();
 
     // RGBA FLOAT, SCENE-REFERRED, NOT CLAMPED.
     //
@@ -237,7 +254,11 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
     // colour stage has one descriptor to write against. The 25% that costs
     // against an RGB-only layout buys a single code path through the transform,
     // the display mapping and the frame cache.
-    auto buffer = FrameBuffer::allocate(width, height, PixelLayout::RGBAF32);
+    std::shared_ptr<FrameBuffer> buffer;
+    {
+        prof::Scope g{prof::Stage::Alloc};
+        buffer = FrameBuffer::allocate(width, height, PixelLayout::RGBAF32);
+    }
     if (!buffer) {
         in->close();
         error = QString("Out of memory allocating EXR frame: %1").arg(path);
@@ -270,11 +291,17 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
         if (!hasAlpha) {
             // Pre-fill alpha. The read below advances by a whole 16-byte pixel
             // and writes three floats, so it never touches this.
+            //
+            // Timed separately because it is a FULL PASS over the whole float
+            // buffer (w*h writes, first-touching every page of a 33 MB
+            // allocation at 1080p) to set one component.
+            prof::Scope g{prof::Stage::AlphaFill};
             for (int y = 0; y < height; ++y) {
                 float* row = reinterpret_cast<float*>(base + static_cast<std::size_t>(y) * stride);
                 for (int x = 0; x < width; ++x) row[x * 4 + 3] = 1.0f;
             }
         }
+        prof::Scope g{prof::Stage::Read};
         readOk = in->read_image(0, 0, begin, hasAlpha ? begin + 4 : begin + 3,
                                 oiio::TypeDesc::FLOAT, base,
                                 static_cast<oiio::stride_t>(4 * sizeof(float)),
@@ -287,7 +314,10 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
         std::vector<float> tmp(static_cast<std::size_t>(width) *
                                static_cast<std::size_t>(height) *
                                static_cast<std::size_t>(span));
-        readOk = in->read_image(0, 0, begin, end, oiio::TypeDesc::FLOAT, tmp.data());
+        {
+            prof::Scope g{prof::Stage::Read};
+            readOk = in->read_image(0, 0, begin, end, oiio::TypeDesc::FLOAT, tmp.data());
+        }
         if (readOk) {
             const int ci[4] = {pass.channel[0] - begin, pass.channel[1] - begin,
                                pass.channel[2] - begin,
@@ -314,6 +344,7 @@ bool StillImageLoader::loadExr(const QString& path, LoadedImageInfo& out, QStrin
                     .arg(path, QString::fromStdString(why));
         return false;
     }
+    prof::Scope tailScope{prof::Stage::Tail};
     const QString compression =
         QString::fromStdString(spec.get_string_attribute("compression", ""));
     in->close();

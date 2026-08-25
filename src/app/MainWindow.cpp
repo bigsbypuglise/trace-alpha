@@ -79,6 +79,7 @@
 #include "core/TimeFormat.h"
 #include "core/VideoFrameSource.h"
 #include "core/ImageSequenceFrameSource.h"
+#include "core/SeqProfile.h"
 
 namespace trace::app {
 
@@ -1598,6 +1599,7 @@ MainWindow::MainWindow() {
                     playbackAtEnd_ = true;
                     playbackEndFrame_ = targetFrame;
                 }
+                trace::core::seqprofile::dump("playback reached end");
                 syncPlaybackSpeedActions();
             }
             refreshHud("Play");
@@ -1634,9 +1636,15 @@ MainWindow::MainWindow() {
             }
             syncPlaybackSpeedActions();
             if (!error.isEmpty()) showTransientMessage(error, 2000);
+            trace::core::seqprofile::dump("decoder exhausted");
         } else {
             notePresentedPlaybackFrame(frameDurationMs);
             if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+                // The denominator for the stage profile: one presented sequence
+                // frame. Counted here rather than beside the video path's own
+                // present, so a video run leaves the sequence table empty.
+                trace::core::seqprofile::frameBoundary();
+                trace::core::seqprofile::Scope g{trace::core::seqprofile::Stage::Prefetch};
                 prefetchNeighbors();
             }
         }
@@ -1667,6 +1675,9 @@ MainWindow::MainWindow() {
                 playbackEndFrame_ = targetFrame;
             }
             syncPlaybackSpeedActions();
+            // The end-of-media site ordinary 1x playback actually reaches, and
+            // therefore the one a profiling run lands on.
+            trace::core::seqprofile::dump("playback stopped at end");
         }
         refreshHud(direction > 0 ? "Play" : "Reverse Play");
 

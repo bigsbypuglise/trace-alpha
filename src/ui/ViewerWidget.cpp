@@ -1,5 +1,9 @@
 #include "ui/ViewerWidget.h"
 
+#include "core/SeqProfile.h"
+
+#include <optional>
+
 #include <QDebug>
 #include <QMouseEvent>
 #include <QResizeEvent>
@@ -502,7 +506,11 @@ void ViewerWidget::applyColorTransformToRenderer() {
 
     if (colorTransform_ && colorTransform_->isActive()) {
         trace::core::VideoFrame transformed;
+        std::optional<trace::core::seqprofile::Scope> mapScope;
+        if (trace::core::seqprofile::enabled())
+            mapScope.emplace(trace::core::seqprofile::Stage::Map);
         if (colorTransform_->apply(frame_, transformed)) {
+            mapScope.reset();
             displayFrame_ = std::move(transformed);
             displayMapInUse_ = floatSource;
             // The range is deliberately NOT measured on this branch: it would be
@@ -511,7 +519,10 @@ void ViewerWidget::applyColorTransformToRenderer() {
             // highlights".
             displayMapResult_ = trace::core::DisplayMapResult{};
             displayMapResult_.map = trace::core::DisplayMap::Ocio;
-            renderer_->setFrame(displayFrame_);
+            {
+                trace::core::seqprofile::Scope u{trace::core::seqprofile::Stage::Upload};
+                renderer_->setFrame(displayFrame_);
+            }
             return;
         }
         // apply() declines rather than throws for a layout it cannot take
@@ -524,8 +535,13 @@ void ViewerWidget::applyColorTransformToRenderer() {
     if (floatSource) {
         trace::core::VideoFrame mapped;
         trace::core::DisplayMapResult result;
-        if (trace::core::mapFloatToDisplay(frame_, mapped, displayMap_, &result,
-                                           &displayMapPin_)) {
+        std::optional<trace::core::seqprofile::Scope> mapScope2;
+        if (trace::core::seqprofile::enabled())
+            mapScope2.emplace(trace::core::seqprofile::Stage::Map);
+        const bool mappedOk = trace::core::mapFloatToDisplay(frame_, mapped, displayMap_,
+                                                             &result, &displayMapPin_);
+        mapScope2.reset();
+        if (mappedOk) {
             // FIRST FRAME OF A PASS PINS THE RANGE FOR THE REST OF IT. Only
             // Normalise has a range to pin; the others are already pure
             // functions of the sample.
@@ -537,7 +553,10 @@ void ViewerWidget::applyColorTransformToRenderer() {
             displayFrame_ = std::move(mapped);
             displayMapResult_ = result;
             displayMapInUse_ = true;
-            renderer_->setFrame(displayFrame_);
+            {
+                trace::core::seqprofile::Scope u{trace::core::seqprofile::Stage::Upload};
+                renderer_->setFrame(displayFrame_);
+            }
             return;
         }
         // Nothing here can draw a float frame. Clearing is diagnosable -- the
