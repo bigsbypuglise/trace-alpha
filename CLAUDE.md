@@ -1262,6 +1262,102 @@ and to stop on it.
   before it. Cosmetic, widespread, and fixing it would move every existing HUD
   capture — recorded rather than folded into an instrument commit.
 
+**EXR/COLOUR STAGE 3 STEP 2 IS DONE: THE `Color Transform...` DIALOG SHIPS —
+AND STEP 3'S ANSWER IS A STOP. AN ACES VIEW TRANSFORM DOES NOT HOLD RATE ON AN
+EXR SEQUENCE AND CANNOT BE TUNED INTO BUDGET (2026-08-24, physical panel).**
+Record `docs/exr-stage3-color-transform-dialog.md`; harnesses
+`scripts/measure/colordialog.ps1` and `scripts/measure/ocioprobe`. Commits
+`0e7d7c6` (config discovery) · `d16a98e` (dialog) · `84a9f3f` (harness) ·
+`0841201` (resolved config + `TRACE_COLOR_VIEW`). **NOT merged.** Per the owner's
+instruction nothing was optimised once the figure came in.
+
+- **THE MEASUREMENT, on step 1's sensitive file** (`R2_OP_Stacks_01`, 217
+  frames, 1080p, PIZ): no transform **99.9%** of real time, `skip 0`,
+  `handler>budget 0 of 215` (max 37.8ms) · **ACES 2.0 display transform 36.4%**,
+  `skip 138`, **`handler>budget 79 of 79` (max 129.5ms)** · **a `.cube` LUT
+  100.0%**, `skip 0`, **`0 of 215` (max 28.4ms)**. The multilayer DWAA file goes
+  29.4% → 20.6% but decides nothing: it was already 4.6x over budget.
+- **THE LUT ROW IS THE ISOLATING EXPERIMENT AND IT IS DECISIVE.** Same file,
+  same float path, same parallel bands, same display stage — **and its handler
+  max is LOWER than with no transform at all**, because the OCIO branch skips
+  `measureFloatRange()` and the `Gamma22` threshold search. So the plumbing is
+  free and **the cost is the ACES 2.0 op chain itself, ~92ms per 1080p frame.**
+- **A STAGE 1 PREMISE EXPIRED: 9.3 ns/pixel WAS MEASURED ON A `.cube` LUT AND
+  DOES NOT TRANSFER TO A DISPLAY TRANSFORM.** An ACES 2.0 DisplayViewTransform
+  measures **~45 ns/pixel in parallel bands, five times the recorded rate**, and
+  the LUT row reproduces the old figure on the same file in the same session —
+  both numbers are right and describe different transforms. **Do not quote
+  9.3 ns/pixel for a view transform.** Fifteenth premise expiry.
+- **`OCIO::Config::CreateFromEnv()` IS NOW USED NOWHERE, AND THAT REMOVED A LIVE
+  TRAP IN THE STAGE 1 CODE.** Measured with the new `ocioprobe`: with `$OCIO`
+  unset it neither throws nor returns null — it returns a **"Color management
+  disabled" RAW config with ONE colour space and ONE display**, announced only on
+  stderr. Stage 1's DisplayView branch called it whenever `configPath` was empty,
+  so an empty path would have compiled a transform that looks loaded and does
+  nothing. Discovery is now one resolver over three sources (explicit file /
+  `$OCIO` when actually set / built-in `ocio://`), shared by the dialog, by
+  `setConfig()` and by the selftest.
+- **THE INPUT DEFAULT IS THE `scene_linear` ROLE, AND THE SECOND CONFIG IS THE
+  WORSE CASE.** `ocio://default` answers **`ACES2065-1`** from its file rules
+  where its role is **ACEScg** — and `ACES2065-1` really IS scene-linear, so the
+  picture looks entirely plausible and is merely wrong in its PRIMARIES, where
+  the Redshift config's `Raw` at least looks obviously flat. Every API call
+  succeeds either way.
+- **MEASURED WITH `ocioprobe` RATHER THAN ASSUMED**: 8 built-in configs, 2 flagged
+  recommended · **no `getDefaultBuiltinConfigName()`** on the registry, so
+  `ocio://default` is carried literally · `CreateFromFile` takes a builtin URI as
+  happily as a path, so ONE entry point · **`ocio://default` IS
+  `cg-config-v4.0.0_aces-v2.0_ocio-v2.5`** (25 spaces, 8 displays, same defaults).
+- **THE HUD NAMES THE RESOLVED CONFIG, DISPLAY AND VIEW** —
+  `map OCIO built-in ocio://... / sRGB - Display / ACES 2.0 - SDR 100 nits
+  (Rec.709)`. Stage 2 left it a bare `map OCIO`, and on an EXR the video line's
+  `xform` field is never built, so that line is the only place that can say it.
+  **A defect it caught on its first run**: `setConfig()` stored the config it was
+  ASKED for, so a display/view left empty and filled from the config's defaults
+  reported blanks (`/ /`) on a working transform. It stores what it RESOLVED now.
+- **A MISSING CONFIG FALLS BACK TO BYPASS, SAYS SO ONCE, BLOCKS NOTHING** —
+  measured as a PAIR, because the failing half alone would also pass on a build
+  that ignored the saved transform entirely. The toast is OpenColorIO's own text.
+  Persistence goes through ONE function and stores the config string **RESOLVED**,
+  so a saved transform cannot change meaning because `$OCIO` moved.
+- **APPLIED ON OK, NOT LIVE, AND THAT IS AN OWNER DECISION LEFT OPEN** rather
+  than a default taken quietly: live preview would recompile an OCIO processor
+  per combo change and, on video, issue a decoder Step re-request from inside a
+  modal dialog's event loop. A **Look** control is likewise recorded and unbuilt.
+- **`--ocio-selftest` GAINS TWO ASSERTIONS, BUILT BEFORE THE DIALOG.** Exit 26:
+  the resolved default must carry **more than one** colour space and at least one
+  display — the count is what separates a real config from the disabled raw one,
+  where "a config loaded" would pass. Exit 27: the role and the file rules must
+  **DIFFER** — asserting a difference rather than a value, so a future OCIO making
+  them agree says the premise moved instead of leaving a stale comment. Proven
+  able to fail: `$OCIO` at a missing file exits 26.
+- **`TRACE_COLOR_VIEW=<config>[|<input>|<display>|<view>]`** configures a
+  display/view transform at startup, for `TRACE_COLOR_LUT`'s reason — the only
+  other way in is a modal dialog. **Proven live before any null result from it
+  was trusted.**
+- **Video unmoved against the `2d09d89` control**: 4K H.264 x2 **100.0/100.0%**
+  both, `handler>budget 0 of 119` max 4.4/4.7 against 4.6/4.3 · 4444 x2
+  **99.8/99.8%** both, `0 of 260` max 33.2/33.3 against 34.1/34.4 ·
+  **`scrubbar.ps1` full pool PASS — 22 files, 88 legs, `delta 0` throughout** ·
+  four selftests green · `verify_trace_assets --strict` at 33 embedded files ·
+  the mnemonic and collision checkers print **exactly the four recorded
+  pre-existing lines and no new one**.
+- **REVERTABILITY IS A STACK, NOT FOUR SIBLINGS, AND THE DEPENDENCIES ARE REAL.**
+  `0841201` and `84a9f3f` revert alone; `d16a98e` and `0e7d7c6` do not, because
+  the dialog cannot exist without the enumerators and `0841201` edits the code
+  the dialog added. **Reverting the three in order is clean and the reverted tree
+  builds** — checked, not assumed; the same shape as stage 2's grouper pair.
+- **TWO HARNESS TRAPS WORTH CARRYING.** `Focus-Window` must read
+  `GetForegroundWindow()` BACK — without it `Alt+V` went to the harness's own
+  terminal and the run reported the dialog missing on a build where it opens.
+  And **the guard leg's control has to press `]` TWICE**: pass 1/9 is root and
+  pass 2/9 is `Beauty`, which stage 2 measured as the same render written twice
+  at 0.36% MAD, so ONE press moves to a visually IDENTICAL pass and the control
+  read 0% on a working build. The script said INCONCLUSIVE rather than passing.
+- **THE SHORTCUT GUARD HOLDS FOR THE NEW MODAL WINDOW**, with its negative
+  control: `]` x2 with no dialog moves **100%** of sampled picture pixels; `]`,
+  `]` and `c` with the dialog open move **0%**.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
@@ -5296,9 +5392,16 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    5120x1440 @ 59Hz, not 239.999Hz, so nothing recorded there is a panel
    baseline** -- that panel regression was taken on 2026-08-24 and is recorded in
    `docs/exr-stage2-keyboard-surface.md`. **Stage 4 (Cryptomatte) is CUT BY THE
-   OWNER, not deferred.** Stage 3's DIALOG (config/display/view) is not started,
-   deliberately -- the owner asked for the baseline first -- and stage 5 (the GPU
-   stage) is not started.
+   OWNER, not deferred.** **STAGE 3 IS DONE (2026-08-24): the
+   `Color Transform...` dialog ships -- config, input colour space, display,
+   view, with the resolved config named on screen -- record
+   `docs/exr-stage3-color-transform-dialog.md`. Its MEASUREMENT is a stop: an
+   ACES 2.0 view transform costs ~92ms per 1080p frame on the CPU and takes the
+   217-frame EXR sequence from 99.9% to 36.4% of real time, while a `.cube` LUT
+   on the same file reads 100.0% and is CHEAPER than no transform at all. So the
+   LUT workflow is unaffected and an ACES view transform needs stage 5, the GPU
+   stage -- which is now a live owner question rather than a deferred cost
+   decision.** Stage 5 is not started.
 
 ## Where scrub stands (2026-08-07, second session)
 
@@ -5511,6 +5614,19 @@ DELIVERY), `handler` (WORK), `sizemove`, and the audio deltas across the gap.
 because the HUD is unreadable for a transient fault -- it freezes along with
 everything else -- and because `stalls`/`hitch` are DRAG-scoped and read
 `0 of 0` during playback. Harness `scripts/measure/tickstall.ps1`.
+
+**Colour, EXR/colour stage 3 (2026-08-24)**: **`TRACE_COLOR_VIEW=<config>[|<input>
+|<display>|<view>]`** configures a DISPLAY/VIEW transform at startup and enables
+it, overriding the persisted state and writing nothing back. It exists for
+`TRACE_COLOR_LUT`'s reason -- every figure here is read off the HUD after a
+launch, and the only other way into this stage is a MODAL DIALOG -- and it is
+the A/B: one binary, the knob set or not. The three optional fields default from
+the config (the `scene_linear` ROLE, the config's own default display and view),
+so the short form is complete and cannot smuggle in a
+`getColorSpaceFromFilepath()` answer by omission. **Read the HUD's `map` field
+back rather than trusting the command line**: it names the RESOLVED config,
+display and view. Harnesses `scripts/measure/colordialog.ps1` and
+`scripts/measure/ocioprobe`.
 
 **Keyboard, EXR/colour (2026-08-24, stage 2 part 2)**: **`[`** previous EXR pass,
 **`]`** next EXR pass (wrapping; disabled and inert on media with no pass list),
