@@ -115,10 +115,13 @@ cascade that never converges.
 
 - **No owner hand-test.** Every figure here is a counter; nobody has watched a
   sequence play under this policy.
-- **The policy's state is not on the HUD.** It is readable only through
-  `TRACE_SEQ_PROFILE=1`'s counters. That is a small departure from this
-  project's own rule about knobs whose state cannot be read back off a running
-  build, and is recorded rather than fixed.
+- ~~**The policy's state is not on the HUD.**~~ **CLOSED 2026-08-25** --
+  `seq-prefetch` is the fourth line of the image-sequence HUD, naming the policy
+  (including the rollback, as `legacy (env)`), the stride, the gate's run
+  counter, issued/declined/legacy and cache hit/miss. Record and control
+  measurement: `docs/exr-prefetch-hud.md`. **Note that doc also closes the
+  "unexplained" rep-to-rep spread below as OS file caching -- discard the first
+  pass over a sequence, it reads roughly half the warm rate.**
 - **Three sequences measured** (2 EXR + 1 PNG), forward on all three and reverse
   on both EXR files.
 
