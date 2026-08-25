@@ -1417,6 +1417,59 @@ cost and none is claimed.**
   was the active path. A running daemon is not a session -- but check both, since
   "Parsec off" and "no Parsec display is active" are different claims.
 
+**THE DWAA FRAME IS DECOMPOSED AND THE DOMINANT STAGE IS `read_image` RUNNING
+2.79 TIMES PER PRESENTED FRAME (2026-08-24, physical panel). Record
+`docs/exr-dwaa-stage-decomposition.md`; instrument `TRACE_SEQ_PROFILE=1`,
+DEFAULT OFF, commit `96ddab6`. NOTHING WAS OPTIMISED.**
+
+- **THE ACCOUNTING CLOSES: 144.79ms/frame accounted against a handler p50 of
+  147.2-150.0ms, i.e. 96.5-98.4%.** Per presented frame: **`read_image` 114.95ms
+  (79.4%)** - `alpha prefill` 12.85 (8.9%) - `map+convert` 10.43 (7.2%) -
+  `open+spec` 4.93 (3.4%) - `group/choose` 0.70 - `upload` **0.67** - `loader
+  tail` 0.23 - `buffer alloc` **0.01**. The single-load model closes to 0.15%.
+- **THE AMPLIFIER IS `prefetchNeighbors()`, WHICH DOES TWO SYNCHRONOUS FULL
+  LOADS ON THE UI THREAD INSIDE THE PLAYBACK TICK.** 78 loads for 28 presented
+  frames; **prefetch is 87.30ms/frame, 60.3% of the frame.** The playhead
+  advances ~3.4 frames per present on this file, so the ±1 neighbours it loads
+  are almost never shown -- decoded, cached, evicted unseen. **READ `calls`
+  BESIDE EVERY LOADER TOTAL**: the loader rows run once per LOAD, and dividing
+  by the frame count is exactly how ~35ms of measured read became a ~190ms
+  mystery.
+- **REMOVING THE PREFETCH IS THE LARGEST SINGLE LEVER AND IS NOT ENOUGH.**
+  Projected (NOT measured): one load per frame gives 59.1ms accounted, ~29% ->
+  **~41% of real time**, still ~1.4x over budget with `read_image` then 70% of
+  the frame by itself. **There is no single fix.** Ranking: (1) stop
+  prefetching frames the playhead will skip -- a scheduling question, cheapest
+  by far; (2) the read itself, 41.26ms, needs to be off the UI thread or
+  cheaper, i.e. architecture; (3) the alpha prefill, 8.9%, removable without
+  touching decode; (4) everything else is under 4%. **The confirming
+  experiment -- a knob disabling prefetch -- IS NOT BUILT and is the
+  recommended next step.**
+- **BUFFER COPIES, FRAME CONSTRUCTION AND UPLOAD ARE ALL EFFECTIVELY NIL**, which
+  refutes three of the named suspects: `buffer alloc` is **0.01ms** for a 33.2MB
+  RGBAF32 allocation, `loader tail` (the `QFileInfo` stat, compression attribute
+  and struct fill) is 0.08ms, and `upload` is 0.64ms. **Presentation is not in
+  the handler at all** -- the tick calls `update()` and the paint runs later in
+  the event loop.
+- **ONE STAGE THAT WAS NOT ON THE SUSPECT LIST IS THE SECOND-LARGEST TERM:
+  `alpha prefill`, 12.85ms/frame, 8.9%** -- for a 3-channel pass `loadExr`
+  writes opaque alpha across the whole float buffer before the read,
+  first-touching every page of a 33MB allocation to set one component.
+- **A COLD PROFILE RUN IS NOT A PROFILE, AND IT PUT 163ms ON THE ONE STAGE THAT
+  IS PROVABLY NIL.** The first profiled run (fresh build, DWAA evicted by the
+  preceding PIZ runs) read **`upload` 162.99ms/call** with handler max
+  **1929.7ms** at 10.0% of real time; warm, the same binary reads `upload`
+  **0.64ms** at 28.9%. **Reporting that table would have named the GPU upload as
+  the dominant stage and sent the next session into a GPU rewrite.** The first
+  run after a build, or after other media, is not a measurement.
+- **THE INSTRUMENT IS FREE WHEN OFF, MEASURED, AND THAT CONTROL IS WHAT CAUGHT
+  THE COLD RUN.** Knob off x3: **29.0 / 29.4 / 28.7%**, handler max 185.0 /
+  189.2 / 189.8, against the pre-instrumentation control's 28.6 / 29.1 / 29.3%
+  and 186-190. Knob on, warm: **28.9 / 28.7%**, inside that spread. Reverts
+  cleanly and **the reverted tree builds -- checked, not assumed.**
+- **ACES IS A SEPARATE TRACK AND EVERY FIGURE ABOVE IS WITH NO TRANSFORM
+  ACTIVE.** LUT free, ACES 1.0 ~ +32ms, ACES 2.0 ~ +92ms.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
