@@ -333,6 +333,9 @@ private:
     bool loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpeg::RequestMode mode = trace::core::VideoDecoderFFmpeg::RequestMode::Playback);
     QString sequenceFramePath(long long frameIndex) const;
     void prefetchNeighbors();
+    void prefetchFrameIntoCache(long long frameIndex);
+    void noteSequenceStride();
+    void resetSequenceStride();
     void togglePlayPause();
     // Starts a playback run: request mode, audio, clocks and the whole set of
     // cadence/telemetry counters, then the timer. The caller puts playback_ into
@@ -1006,6 +1009,20 @@ private:
     trace::core::ViewState viewState_;
     trace::core::StillImageLoader stillLoader_;
     trace::core::FrameCache frameCache_{1};
+
+    // STRIDE-AWARE PREFETCH STATE (TRACE_SEQ_PREFETCH_STRIDE=1, default off).
+    //
+    // How far the playhead actually moved between consecutive PRESENTED frames.
+    // On a sequence that holds its budget this is exactly 1 and the +1
+    // neighbour is the frame wanted next; on one that is over budget the
+    // scheduler skips and it is not, which is what makes a fixed +-1 window
+    // decode frames that are never shown.
+    //
+    // Reset on media open and on any non-playback move, so a step or a seek can
+    // never be read as a playback stride.
+    double seqStrideEma_ = 0.0;
+    long long seqLastPresentedFrame_ = -1;
+    int seqStrideSamples_ = 0;
     trace::core::VideoDecoderFFmpeg videoDecoder_;
     // Declared after the decoder so it is destroyed BEFORE it: the worker holds
     // a pointer to the decoder, and a member destroyed in the other order could

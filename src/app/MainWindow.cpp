@@ -1644,6 +1644,7 @@ MainWindow::MainWindow() {
                 // frame. Counted here rather than beside the video path's own
                 // present, so a video run leaves the sequence table empty.
                 trace::core::seqprofile::frameBoundary();
+                noteSequenceStride();
                 trace::core::seqprofile::Scope g{trace::core::seqprofile::Stage::Prefetch};
                 prefetchNeighbors();
             }
@@ -7124,7 +7125,10 @@ bool MainWindow::openPath(const QString& path) {
             return false;
         }
 
-        if (currentMedia_->kind == MediaKind::ImageSequence) prefetchNeighbors();
+        if (currentMedia_->kind == MediaKind::ImageSequence) {
+            resetSequenceStride();
+            prefetchNeighbors();
+        }
     }
 
     const auto fps = frameSource_ ? std::max(1.0, frameSource_->fps()) : 24.0;
@@ -7388,33 +7392,120 @@ static bool seqPrefetchEnabled() {
     return on;
 }
 
+// TRACE_SEQ_PREFETCH_STRIDE=1 selects the stride-aware policy. Default OFF, so
+// the fixed +-1 window below is still what ships.
+static bool seqPrefetchStrideAware() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_SEQ_PREFETCH_STRIDE");
+        return !v.isEmpty() && v != "0";
+    }();
+    return on;
+}
+
+// A prediction is acted on only when the observed stride sits this close to a
+// whole frame. It is NOT a tuning dial for aggressiveness -- it is the test for
+// whether an integer prediction exists at all.
+//
+// A sequence holding its budget presents every frame, so the stride is exactly
+// 1.0 and this passes trivially. One that is over budget presents a fraction of
+// its frames, so the stride settles somewhere like 1.4 and there IS no integer
+// next frame to predict: whichever of 1 or 2 is guessed is wrong a large part
+// of the time, and a wrong guess costs a whole synchronous load AND still
+// leaves the real frame to be read. Declining is the cheaper answer, and it is
+// the measured no-prefetch behaviour rather than a third mode.
+static constexpr double kSeqStrideTolerance = 0.15;
+// Below this many samples the stride is not yet established and the legacy
+// window is used, which is what a sequence starting cleanly wants anyway.
+static constexpr int kSeqStrideMinSamples = 4;
+
+void MainWindow::noteSequenceStride() {
+    if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::ImageSequence) return;
+    const long long current = playback_.state().currentFrame;
+    if (seqLastPresentedFrame_ >= 0 && current != seqLastPresentedFrame_) {
+        const long long jump = current - seqLastPresentedFrame_;
+        // A LOOP WRAP OR A SEEK IS NOT A STRIDE. Nothing this large is the
+        // scheduler skipping; feeding it in would poison the average for the
+        // rest of the run, and the prediction it produced would be nonsense.
+        if (jump > 32 || jump < -32) {
+            resetSequenceStride();
+            seqLastPresentedFrame_ = current;
+            return;
+        }
+        const double delta = static_cast<double>(jump);
+        // SIGNED, so reverse playback predicts backwards with no second branch.
+        seqStrideEma_ = (seqStrideSamples_ == 0)
+                            ? delta
+                            : (0.65 * seqStrideEma_ + 0.35 * delta);
+        if (seqStrideSamples_ < 1000) ++seqStrideSamples_;
+    }
+    seqLastPresentedFrame_ = current;
+}
+
+void MainWindow::resetSequenceStride() {
+    seqStrideEma_ = 0.0;
+    seqLastPresentedFrame_ = -1;
+    seqStrideSamples_ = 0;
+}
+
+// Load one frame into the cache, or do nothing if it is already there or out of
+// range. Extracted so the two policies below cannot disagree about what a
+// prefetch IS -- only about which frames to ask for.
+void MainWindow::prefetchFrameIntoCache(long long idx) {
+    const QString path = sequenceFramePath(idx);
+    if (path.isEmpty()) return;
+    if (frameCache_.get(idx).has_value()) return;
+
+    trace::core::LoadedImageInfo info;
+    QString error;
+    if (!stillLoader_.load(path, info, error)) return;
+
+    trace::core::CachedFrame cf;
+    cf.frameIndex = idx;
+    cf.path = info.filePath;
+    cf.frame.buffer = info.buffer;
+    cf.frame.frameIndex = idx;
+    if (!cf.frame.buffer) return;
+    cf.width = info.width;
+    cf.height = info.height;
+    cf.channels = info.channels;
+    frameCache_.put(cf);
+}
+
 void MainWindow::prefetchNeighbors() {
     if (!seqPrefetchEnabled()) return;
     if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::ImageSequence) return;
 
     const long long current = playback_.state().currentFrame;
-    const long long neighbors[2] = {current - 1, current + 1};
 
-    for (long long idx : neighbors) {
-        const QString path = sequenceFramePath(idx);
-        if (path.isEmpty()) continue;
-        if (frameCache_.get(idx).has_value()) continue;
-
-        trace::core::LoadedImageInfo info;
-        QString error;
-        if (!stillLoader_.load(path, info, error)) continue;
-
-        trace::core::CachedFrame cf;
-        cf.frameIndex = idx;
-        cf.path = info.filePath;
-        cf.frame.buffer = info.buffer;
-        cf.frame.frameIndex = idx;
-        if (!cf.frame.buffer) continue;
-        cf.width = info.width;
-        cf.height = info.height;
-        cf.channels = info.channels;
-        frameCache_.put(cf);
+    // THE STRIDE POLICY APPLIES DURING CONTINUOUS PLAYBACK AND NOWHERE ELSE.
+    //
+    // Paused stepping and random access keep the legacy +-1 window verbatim:
+    // there is no playback stride to observe, a step really does want the
+    // frame on either side, and that is what makes "exact paused stepping and
+    // random access are preserved" a property of this branch rather than
+    // something to re-verify at every call site. prefetchNeighbors() is reached
+    // from seven places and only two of them are the playback tick.
+    if (seqPrefetchStrideAware() && playTimer_.isActive()
+        && seqStrideSamples_ >= kSeqStrideMinSamples) {
+        const double nearest = std::round(seqStrideEma_);
+        const bool predictable = std::abs(seqStrideEma_ - nearest) <= kSeqStrideTolerance
+                              && std::abs(nearest) >= 1.0;
+        if (!predictable) {
+            // The playhead is skipping by a non-integer amount: there is no
+            // next frame to predict, so nothing is decoded. This is the
+            // measured no-prefetch path, reached adaptively.
+            trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchDecline);
+            return;
+        }
+        // ONE frame, the one actually likely to be presented next -- not a
+        // window. The trailing neighbour is what the fixed policy spent a whole
+        // load on whenever the playhead had moved past it.
+        prefetchFrameIntoCache(current + static_cast<long long>(nearest));
+        return;
     }
+
+    const long long neighbors[2] = {current - 1, current + 1};
+    for (long long idx : neighbors) prefetchFrameIntoCache(idx);
 }
 
 // The one writer of the volume level (the inline slider, 2026-08-20). Every

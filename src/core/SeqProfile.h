@@ -42,6 +42,7 @@ enum class Stage : int {
     CacheHit,      // FrameCache::get served the frame being presented
     CacheMiss,     // it did not, and the loader ran
     Prefetch,      // prefetchNeighbors() in full, both neighbours
+    PrefetchDecline, // stride-aware: prediction judged unreliable, nothing loaded
     Map,           // mapFloatToDisplay / ColorTransform: mapping + pixel conversion
     Upload,        // renderer_->setFrame: the GPU upload
     Present,       // the repaint the tick asks for
