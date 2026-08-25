@@ -38,6 +38,28 @@ defects, three of them by building an instrument that did not exist.
 
 ---
 
+## The four defects, and how each was found
+
+For someone starting cold: these are the whole of what was WRONG, as distinct
+from what was added.
+
+| # | defect | how it was found | fixed in |
+|---|---|---|---|
+| 1 | A bare channel and a layer of the same name were **merged**, so a file with `Z` and `Z.R/.G/.B` **dropped three channels entirely** — invisible, no error | selftest invariant 1, *"channel 1 appears in no pass"* — not by an expectation, and not reachable by any file in the pool | `bb159db` |
+| 2 | An **alpha-only layer rendered black** — `mask.A` left every colour slot unset: a pass that is present, selectable and invisible | selftest edge case with no expectation table; the invariants alone | `bb159db` |
+| 3 | `duplicateOf` **declared and never filled** since part 1, so the root and `Beauty` showed the same picture under two names with nothing said | read the field, found no writer | `5301e74` |
+| 4 | **`Normalise` auto-ranged per frame**, so the same world position was a different grey depending on the playhead | measured on screen while checking that a pass survives frame stepping: P read `[-44.2500..44.2500]` at frame 0 and `[-39.2500..44.0000]` at frame 96 | `c73aedd` |
+
+Defects 1 and 2 were found by an instrument that did not exist before this
+session, and **neither is reachable by any file in the asset pool** — which is
+the argument for having built it.
+
+**A fifth was found and fixed in passing, by an existing check**:
+`warnOnDuplicateMnemonics()` caught this session's own `&Previous Pass` against
+`EXR &Pass`, both claiming `p` in one menu, on its first run.
+
+---
+
 ## 1. The grouper selftest, and why it had to be synthetic
 
 `Trace.exe --exr-channels-selftest` drives `groupExrChannels()` over **14
@@ -108,7 +130,8 @@ malformed or unusual render produces, and both were silent.
   *n*, and a substring test sends both through a data mapping. Unknown name with
   ≥3 channels → Colour; otherwise → Data.
 - **`Crypto*` is Data**, so its numeric IDs are shown raw rather than through a
-  view transform. Cryptomatte *interpretation* is stage 4 and is not started.
+  view transform. Cryptomatte *interpretation* is **CUT BY THE OWNER** -- see
+  below; showing the pixels is all that was wanted.
 - **Raw names are kept** in `ExrPass::rawNames` and printed on the HUD, so a
   convention we have not met shows up rather than silently finding nothing.
 
@@ -355,42 +378,116 @@ test if the 224 MB ever comes back.
 - `verify_trace_assets --strict --no-pillow` exit 0 at **33 embedded files**.
 - `passkeys.ps1` all seven legs PASS.
 
-**Revertability, checked rather than asserted.** `c73aedd`, `5b7158e` and
-`5301e74` each revert cleanly *and* the reverted tree builds. **`bb159db` does
-not revert alone** — the pass menu reads `ExrPass::ambiguous`, which that commit
-introduces, so it is a genuine prerequisite rather than an adjacency accident.
-Reverting the pair in order (`5b7158e` then `bb159db`) is clean and builds.
+### Revertability, and THE REVERT ORDER FOR THE GROUPER PAIR
+
+Checked rather than asserted — each revert was applied and the resulting tree
+built.
+
+| commit | reverts alone? |
+|---|---|
+| `c73aedd` pinned Normalise range | **yes**, and builds |
+| `5b7158e` pass list + one route | **yes**, and builds |
+| `5301e74` duplicateOf | **yes**, and builds |
+| `bb159db` grouper selftest + fixes | **NO** — see below |
+
+**`bb159db` IS A PREREQUISITE OF `5b7158e` AND CANNOT BE REVERTED ALONE.** The
+pass menu prints `ExrPass::ambiguous`, and that field is introduced by the
+grouper commit, so reverting the grouper while the menu is present fails to
+compile:
+
+```
+MainWindow.cpp(4509): error C2039: 'ambiguous': is not a member of 'trace::core::ExrPass'
+```
+
+This is a genuine semantic dependency, not the adjacent-lines accident this
+project has hit before. **The revert order is:**
+
+```bash
+git revert --no-commit 5b7158e && git revert --no-commit bb159db
+```
+
+Verified: both reverts apply cleanly in that order and the resulting tree
+builds. Reverting `bb159db` first does not.
 
 ---
 
-## What remains before Cryptomatte and EXR playback optimisation
+## Cryptomatte is CUT BY THE OWNER
 
-**Before Cryptomatte (stage 4):**
+**Owner ruling, 2026-08-24, after testing it: showing the cryptomatte pixels is
+all that was ever wanted from it.** This is CUT, not deferred. There is no
+outstanding Cryptomatte work and stage 4 must not be listed as unfinished
+business.
 
-1. **Cryptomatte is currently `Data` + `map Raw` by design** — its channels are
-   numeric IDs shown raw, never through a view transform. Interpretation needs
-   the manifest from the header (`cryptomatte/<hash>/manifest`), which nothing
-   reads yet.
-2. **The rank-pair convention is not modelled.** Real Cryptomatte writes
-   `CryptoMaterial00.R/.G/.B/.A` as *(id, coverage)* pairs, not colour. The
-   grouper currently groups those as an ordinary RGBA layer, which is the right
-   *neutral* answer but not the right *interpreted* one.
-3. **The pool has no real Cryptomatte to test against** — this file's
-   `Cryptomatte.red/.green/.blue` is a 3-channel preview, not a ranked set. Test
-   material is needed before any interpretation is written.
+What ships is what was asked for: the grouper classifies `Crypto*` as `Data`, so
+it displays through `map Raw` — raw numeric IDs with no view transform over them,
+which is the correct neutral answer — and it cycles with `[` and `]` like any
+other pass. Measured: `pass 3/9 Cryptomatte data [Cryptomatte.red,
+Cryptomatte.green,Cryptomatte.blue] | map Raw [0.0870..0.6592, 0.0% >1]`.
 
-**Before EXR playback optimisation:**
+*Kept in one paragraph only in case the owner reopens it:* interpretation would
+need the header manifest (`cryptomatte/<hash>/manifest`) read and parsed; the
+rank-pair convention modelled, since real Cryptomatte writes
+`CryptoMaterial00.R/.G/.B/.A` as *(id, coverage)* pairs rather than colour, so
+the grouper's current RGBA grouping is neutral-correct but uninterpreted; a
+matte-extraction path from a picked ID; and **real ranked test material, which
+the asset pool does not contain** — this file's three `Cryptomatte.*` channels
+are a preview, not a ranked set.
 
-4. **The float frame is the cost, not the read.** 33.2 MB per 1080p frame and a
-   3-frame window; 8K would want 1.6 GB. **Bound the window cache by BYTES rather
-   than frame count** before any 4K/8K EXR arrives.
-5. **The sequence path exposes no cadence counters** — no `drop`, no `rephase`,
-   no presented-rate figure — so *no EXR playback rate has ever been measured* in
-   this project. That instrument has to exist before anything is optimised, or
-   the result cannot be judged.
-6. **Half the per-pass read cost is fixed overhead** (35 ms for 3 channels
-   against 63 ms for 27). A prefetch that overlaps it is the obvious lever and is
-   unmeasured.
-7. **`measureFloatRange()` still scans every frame** for the HUD's clipping
-   figure, even where the mapping no longer needs it. Cheap at 1080p, and the
-   first thing to make optional if EXR playback is ever tight.
+---
+
+## THE EXR CADENCE GAP: the named prerequisite for stage 3
+
+**No EXR playback rate has ever been measured in this project.**
+
+`ImageSequenceFrameSource` exposes **no cadence counters at all** — no
+`presented`, no `drop`, no `rephase`, no `handler>budget`, no long-gap histogram.
+Every EXR figure recorded anywhere in this repo is memory, read cost, channel
+correctness or pass behaviour. **Not one is a playback-rate figure.**
+
+The consequence is the sentence that matters:
+
+> **"EXR playback is fine" and "EXR playback has never been measured" are
+> indistinguishable from where this project stands.**
+
+So no claim about EXR playback smoothness is currently founded — *including a
+favourable one*. Part 1's "sequence playback is unchanged" was careful to say the
+sequence path exposes no counters and to claim no rate; that caution is still the
+correct position, and it is why this gap is recorded as a prerequisite rather
+than as a task someone might skip.
+
+**This is not an optimisation item.** It is the instrument that must exist
+before:
+
+- **stage 3**, the `Color Transform...` config/display/view dialog — which puts a
+  per-pixel OCIO transform on the EXR path, and there is currently no way to say
+  what that costs during sequence playback;
+- any EXR playback work at all, including the byte-bounded window cache;
+- judging whether any future change to the float path cost anything.
+
+**What building it means**: giving the image-sequence tick the same counters the
+video path has had since GATE E, so a sequence run reports presented rate against
+real time, dropped frames and per-frame handler cost. **Until then, do not accept
+or report an EXR smoothness claim in either direction.**
+
+---
+
+## Everything else outstanding
+
+- **The window cache must be bounded by BYTES rather than frame count** before
+  any 4K or 8K EXR arrives: 8K would want **1.6 GB** for a radius-1 window.
+- **Roughly half the per-pass read is fixed overhead** — 35 ms for 3 channels
+  against 63 ms for all 27 — so a prefetch that overlaps it is the obvious lever,
+  and it is unmeasured.
+- **`measureFloatRange()` still scans every frame** for the HUD's clipping
+  figure, even where the mapping no longer needs it since the range was pinned.
+  Cheap at 1080p; the first thing to make optional if EXR playback is ever tight.
+- **The loader's fast path needs contiguous R,G,B(,A) channels**, which is what
+  OIIO presents for every pass in the pool. A file whose layer channels are
+  *scattered* falls to the general path, which reads the whole **span** between
+  first and last channel — for a pass with one channel near each end, that is the
+  whole file again. Not reachable by any file here; it is the case to test if the
+  224 MB ever comes back.
+- **`R2_OP_Stacks_01_00000.exr` carries `framesPerSecond = 24/1` and
+  `smpte:TimeCode = 00:00:00:00`** in its header and Trace reads neither. Image
+  sequences still get the nominal 24 fps and no source timecode. Recorded, not
+  built; note it would interact with spec phase 7's `hasSourceTimecode_` gate.

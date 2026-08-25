@@ -1081,8 +1081,8 @@ pass overlay, the View-menu pass list and `duplicateOf` are still NOT built.
 Record `docs/exr-stage2-pass-model.md` — read it before touching the grouper,
 the pass list or a display mapping.** Commits `bb159db` (grouper selftest + two
 fixes) · `5301e74` (duplicateOf) · `5b7158e` (pass list + one route) · `c73aedd`
-(pinned Normalise range). **NOT merged.** Cryptomatte interpretation is NOT
-started.
+(pinned Normalise range). **NOT merged.** Cryptomatte interpretation is **CUT
+BY THE OWNER**, not pending.
 
 - **MOST OF THE BRIEF'S PRIORITY LIST WAS ALREADY BUILT, AND THE 224 MB PREMISE
   HAS EXPIRED.** Channel enumeration, the three-convention grouper, raw-name
@@ -1149,22 +1149,47 @@ started.
   pass menu reads `ExrPass::ambiguous`, which the grouper commit introduces — a
   genuine dependency rather than an adjacency accident. Reverting the pair in
   order is clean and builds; checked, not assumed.
-- **STILL NOT STARTED, and what each needs first.** Cryptomatte (stage 4) needs
-  the header manifest read, the **rank-pair convention** modelled
-  (`CryptoMaterial00.R/.G/.B/.A` is *(id, coverage)*, not colour — the grouper's
-  current neutral RGBA answer is right but uninterpreted), and **real test
-  material, which the pool does not have.** EXR playback optimisation needs the
-  **window cache bounded by BYTES** (8K would want 1.6 GB) and, before anything
-  else, **a cadence instrument for the sequence path — no EXR playback rate has
-  ever been measured in this project.**
+- **CRYPTOMATTE IS CUT BY THE OWNER (2026-08-24). NOT DEFERRED — CUT.** The owner
+  tested it and ruled that **showing the cryptomatte pixels is all that was ever
+  wanted from it**. There is no manifest reading, no rank-pair modelling and no ID
+  picking, and **none of that is outstanding work.** What ships is what was asked
+  for: the grouper classifies `Crypto*` as `Data`, so it is displayed through
+  `map Raw` — raw numeric IDs with no view transform over them — and it cycles
+  with `[` and `]` like any other pass. **Do not list stage 4 as unfinished
+  business, and do not pick it up as such.**
+  *Kept only in case the owner reopens it:* interpretation would need the header
+  manifest (`cryptomatte/<hash>/manifest`) read, the rank-pair convention modelled
+  (`CryptoMaterial00.R/.G/.B/.A` is *(id, coverage)* rather than colour, so the
+  grouper's neutral RGBA answer is correct but uninterpreted), and **real ranked
+  test material, which the asset pool does not contain** — this file's
+  `Cryptomatte.red/.green/.blue` is a 3-channel preview, not a ranked set.
+- **NO EXR PLAYBACK RATE HAS EVER BEEN MEASURED IN THIS PROJECT, AND THAT IS THE
+  NAMED PREREQUISITE FOR STAGE 3.** The image-sequence path exposes **no cadence
+  counters at all** — no `presented`, no `drop`, no `rephase`, no
+  `handler>budget`, no long-gap histogram. Every EXR figure ever recorded here is
+  memory, read cost or correctness; **not one is a playback-rate figure.**
+  The consequence is the sentence to carry: **"EXR playback is fine" and "EXR
+  playback has never been measured" are indistinguishable from where this project
+  stands**, so any claim about it — good or bad — is currently unfounded. This is
+  not a nice-to-have and it is not an optimisation task: it is the instrument
+  that has to exist before stage 3's dialog, before any EXR playback work, and
+  before anyone can judge whether a change to the float path cost anything.
+  Building it means giving `ImageSequenceFrameSource`'s tick the same counters the
+  video path has had since GATE E. **Until it exists, do not accept or report any
+  EXR smoothness claim, including a favourable one.**
+- **EXR playback optimisation, when the instrument exists**: the window cache must
+  be **bounded by BYTES rather than frame count** (8K EXR would want 1.6 GB before
+  anything else), roughly **half the per-pass read is fixed overhead** (35 ms for
+  3 channels against 63 ms for 27), and `measureFloatRange()` still scans every
+  frame for the HUD's clipping figure even where the mapping no longer needs it.
 
 ### WHAT STAGE 2 PART 2 STILL OWES
 
-1. **The keyboard surface and the pass model are DONE — see the two blocks
-   above.** Everything the part-2 list named is built: `[`, `]`, `C`, the pass
-   overlay, the View pass list and `duplicateOf`. What is left of stage 2 is
-   Cryptomatte interpretation (stage 4) and the EXR playback work, both listed
-   at the end of `docs/exr-stage2-pass-model.md`.
+1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
+   `C`, the pass overlay, the View pass list and `duplicateOf` are all built and
+   measured. **Cryptomatte (stage 4) is CUT BY THE OWNER, not deferred.** The one
+   thing the EXR phase still owes before stage 3 is the **sequence-path cadence
+   instrument** — see the block above; it is a prerequisite, not an optimisation.
 2. **The transient pass overlay** naming the current pass on screen.
 3. **The full pass list in the View menu.**
 4. **`ExrPass::duplicateOf` IS DECLARED AND NEVER FILLED.** Root RGB and a named
@@ -1199,9 +1224,12 @@ tree, in dev and CI; EXR opens as a still and as a 217-frame sequence with no co
 change beyond the build; one OCIO-backed display transform, LUT-first, with the
 whole View menu, bypass, persistence and a real `--ocio-selftest` in CI.
 
-**What is NOT started, and must not be begun without reading the carry-forward
-below:** stage 2 (multilayer/AOV cycling), stage 3 (the `Color Transform...`
-config/display/view dialog), stage 4 (Cryptomatte), stage 5 (the GPU stage).
+**SUPERSEDED 2026-08-24 — read the stage 2 blocks above for what is actually
+open.** Stage 2 is DONE. **Stage 4 (Cryptomatte) is CUT BY THE OWNER, not
+deferred.** What is not started is stage 3 (the `Color Transform...`
+config/display/view dialog) and stage 5 (the GPU stage) — and **stage 3 has a
+named prerequisite: the sequence path has no cadence counters, so no EXR playback
+rate has ever been measured.**
 
 ### STAGE 2 CARRY-FORWARD — the starting point, measured in stage 0, not to be re-derived
 
@@ -5171,14 +5199,19 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    -- record `docs/exr-stage2-keyboard-surface.md`) AND the multilayer pass
    model (grouper selftest, duplicateOf, the View pass list, the pass overlay,
    and the pinned Normalise range -- record `docs/exr-stage2-pass-model.md`).**
-   Both are regression-clean at the panel. What is left of the EXR phase is
-   Cryptomatte (stage 4), the config/display/view dialog (stage 3), the GPU
-   stage (5), and EXR playback optimisation -- whose prerequisites are listed at
-   the end of the pass-model record. **CHECK THE
+   Both are regression-clean at the panel. **STAGE 2 IS CLOSED and STAGE 4
+   (Cryptomatte) IS CUT BY THE OWNER -- not deferred, and not to be picked up as
+   unfinished business.** What is left of the EXR phase is stage 3 (the
+   config/display/view dialog) and stage 5 (the GPU stage). **Stage 3's named
+   prerequisite is a cadence instrument for the image-sequence path: it exposes
+   no counters, so NO EXR PLAYBACK RATE HAS EVER BEEN MEASURED HERE, and "fine"
+   is indistinguishable from "unmeasured".** **CHECK THE
    DISPLAY FIRST: the last session ran over Parsec and the panel itself was at
    5120x1440 @ 59Hz, not 239.999Hz, so nothing recorded there is a panel
-   baseline and THE FULL PANEL REGRESSION IS THE MERGE GATE.** Stages 3-5 (the
-   config/display/view dialog, Cryptomatte, the GPU stage) are NOT started.
+   baseline** -- that panel regression was taken on 2026-08-24 and is recorded in
+   `docs/exr-stage2-keyboard-surface.md`. **Stage 4 (Cryptomatte) is CUT BY THE
+   OWNER, not deferred.** Stage 3 (the config/display/view dialog) and stage 5
+   (the GPU stage) are not started.
 
 ## Where scrub stands (2026-08-07, second session)
 

@@ -1,5 +1,12 @@
 # Stage 1: the OCIO / Color Transform foundation
 
+> **SUPERSEDED IN PART, 2026-08-24.** This is the stage 1 record and its "not
+> started" list describes 2026-08-23, not today. Stage 2 is DONE (records
+> `docs/exr-stage2-float-buffer.md`, `docs/exr-stage2-keyboard-surface.md`,
+> `docs/exr-stage2-pass-model.md`) and **Cryptomatte is CUT BY THE OWNER, not
+> deferred**. Everything below about the colour transform itself still stands.
+
+
 Record of stage 1 (2026-08-23). Stage 0 is `docs/exr-stage0-dependencies.md`; the
 assessment both implement is `docs/exr-ocio-plan.md`.
 
