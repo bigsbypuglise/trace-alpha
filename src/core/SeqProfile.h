@@ -39,7 +39,8 @@ enum class Stage : int {
     Tail,          // compression attribute, QFileInfo, close, struct fill
 
     // --- inside the playback tick, once per presented frame ---
-    CacheLookup,   // FrameCache::get for the frame being presented
+    CacheHit,      // FrameCache::get served the frame being presented
+    CacheMiss,     // it did not, and the loader ran
     Prefetch,      // prefetchNeighbors() in full, both neighbours
     Map,           // mapFloatToDisplay / ColorTransform: mapping + pixel conversion
     Upload,        // renderer_->setFrame: the GPU upload

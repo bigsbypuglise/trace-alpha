@@ -48,7 +48,8 @@ const char* stageName(Stage s) {
         case Stage::AlphaFill:   return "alpha prefill";
         case Stage::Read:        return "read_image";
         case Stage::Tail:        return "loader tail";
-        case Stage::CacheLookup: return "cache lookup";
+        case Stage::CacheHit:    return "cache HIT";
+        case Stage::CacheMiss:   return "cache MISS";
         case Stage::Prefetch:    return "prefetch (all)";
         case Stage::Map:         return "map+convert";
         case Stage::Upload:      return "upload";

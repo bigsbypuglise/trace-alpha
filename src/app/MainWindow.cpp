@@ -7250,7 +7250,11 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
 
     if (currentMedia_->kind == MediaKind::ImageSequence) {
         frameCache_.setWindowCenter(frameIndex);
-        if (const auto cached = frameCache_.get(frameIndex); cached.has_value()) {
+        const auto cached = frameCache_.get(frameIndex);
+        trace::core::seqprofile::bump(cached.has_value()
+                                          ? trace::core::seqprofile::Stage::CacheHit
+                                          : trace::core::seqprofile::Stage::CacheMiss);
+        if (cached.has_value()) {
             // The pass list, the active pass and the compression belong to the
             // SEQUENCE, not to the frame, so they are carried across a cache hit
             // rather than rebuilt from the cache entry (which does not hold
@@ -7368,7 +7372,24 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     return true;
 }
 
+// TRACE_SEQ_PREFETCH=0 DISABLES THIS ENTIRELY. Default is on, i.e. unchanged.
+//
+// A DIAGNOSTIC KNOB, NOT A POLICY. The 2026-08-24 stage decomposition measured
+// this function at 87.30ms of a 144.79ms frame on the 27-channel DWAA sequence
+// -- 60.3% -- because it performs two SYNCHRONOUS full loads on the UI thread
+// for frames at +-1 while the playhead is advancing ~3.4 frames per present, so
+// the neighbours are decoded, cached and evicted unshown. This knob exists to
+// turn that projection into a measurement before any policy is changed.
+static bool seqPrefetchEnabled() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_SEQ_PREFETCH");
+        return v.isEmpty() || v != "0";
+    }();
+    return on;
+}
+
 void MainWindow::prefetchNeighbors() {
+    if (!seqPrefetchEnabled()) return;
     if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::ImageSequence) return;
 
     const long long current = playback_.state().currentFrame;
