@@ -1020,7 +1020,13 @@ private:
     //
     // Reset on media open and on any non-playback move, so a step or a seek can
     // never be read as a playback stride.
-    double seqStrideEma_ = 0.0;
+    // CONSECUTIVE unit strides, not an average of strides. An average near 1
+    // is not the same claim: on a file whose strides alternate 1,2,1,2 the mean
+    // sits around 1.5 but wanders inside any tolerance of 1.0 after a couple of
+    // unit steps, and each prediction it then issues costs a whole synchronous
+    // load. A run counter cannot do that -- one skip resets it.
+    int seqUnitRun_ = 0;
+    int seqUnitDir_ = 0;
     long long seqLastPresentedFrame_ = -1;
     int seqStrideSamples_ = 0;
     trace::core::VideoDecoderFFmpeg videoDecoder_;

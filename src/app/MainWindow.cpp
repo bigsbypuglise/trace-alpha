@@ -7402,20 +7402,31 @@ static bool seqPrefetchStrideAware() {
     return on;
 }
 
-// A prediction is acted on only when the observed stride sits this close to a
-// whole frame. It is NOT a tuning dial for aggressiveness -- it is the test for
-// whether an integer prediction exists at all.
+// A prediction is issued only when the sequence has just presented this many
+// CONSECUTIVE single-frame steps. It is the whole predicate, and the counter
+// shape is load-bearing rather than incidental.
 //
-// A sequence holding its budget presents every frame, so the stride is exactly
-// 1.0 and this passes trivially. One that is over budget presents a fraction of
-// its frames, so the stride settles somewhere like 1.4 and there IS no integer
-// next frame to predict: whichever of 1 or 2 is guessed is wrong a large part
-// of the time, and a wrong guess costs a whole synchronous load AND still
-// leaves the real frame to be read. Declining is the cheaper answer, and it is
-// the measured no-prefetch behaviour rather than a third mode.
-static constexpr double kSeqStrideTolerance = 0.15;
-// Below this many samples the stride is not yet established and the legacy
-// window is used, which is what a sequence starting cleanly wants anyway.
+// TWO EARLIER FORMULATIONS WERE MEASURED AND BOTH LEAKED PREDICTIONS. An EMA
+// of the stride within +-0.15 of any integer issued 4 of 62 on the DWAA file;
+// narrowing that to +-0.15 of 1.0 specifically issued 4 of 61 -- no better,
+// because a file whose strides alternate 1,2,1,2 has a mean near 1.5 that
+// still wanders inside any tolerance of 1.0 after a couple of unit steps.
+// "The average is near 1" and "it is stepping one frame at a time" are
+// different claims, and only the second is the one worth acting on.
+//
+// A run counter cannot leak that way: one skip resets it to zero. It also
+// costs nothing an average did not -- an int compare against an int.
+//
+// Each leaked prediction is a WHOLE synchronous load (~42ms) inside a tick that
+// is already over budget and still has to read the real frame, which is why
+// four of them were the entire remaining gap to simply not prefetching:
+// handler max 99-116ms against 84-90ms, tick-stall 1/1/0 against 0/0/0.
+//
+// Below this many samples nothing is established yet and the legacy +-1 window
+// is used, which is what a sequence starting cleanly wants anyway.
+//
+// Reverse playback at 1x runs the counter with dir -1 and predicts backwards,
+// with no second branch and no sign handling anywhere else.
 static constexpr int kSeqStrideMinSamples = 4;
 
 void MainWindow::noteSequenceStride() {
@@ -7424,25 +7435,37 @@ void MainWindow::noteSequenceStride() {
     if (seqLastPresentedFrame_ >= 0 && current != seqLastPresentedFrame_) {
         const long long jump = current - seqLastPresentedFrame_;
         // A LOOP WRAP OR A SEEK IS NOT A STRIDE. Nothing this large is the
-        // scheduler skipping; feeding it in would poison the average for the
-        // rest of the run, and the prediction it produced would be nonsense.
+        // scheduler skipping; feeding it in would extend a unit run across a
+        // discontinuity, and the prediction it produced would be nonsense.
         if (jump > 32 || jump < -32) {
             resetSequenceStride();
             seqLastPresentedFrame_ = current;
             return;
         }
-        const double delta = static_cast<double>(jump);
-        // SIGNED, so reverse playback predicts backwards with no second branch.
-        seqStrideEma_ = (seqStrideSamples_ == 0)
-                            ? delta
-                            : (0.65 * seqStrideEma_ + 0.35 * delta);
+        if (jump == 1 || jump == -1) {
+            // SIGNED, so reverse playback at 1x predicts backwards with no
+            // second branch anywhere.
+            const int dir = (jump > 0) ? 1 : -1;
+            if (dir == seqUnitDir_) {
+                if (seqUnitRun_ < 1000) ++seqUnitRun_;
+            } else {
+                seqUnitDir_ = dir;
+                seqUnitRun_ = 1;
+            }
+        } else {
+            // One skip ends the run. This is the whole predicate: a sequence
+            // that skipped even once recently is not advancing a frame per
+            // present, whatever its average says.
+            seqUnitRun_ = 0;
+        }
         if (seqStrideSamples_ < 1000) ++seqStrideSamples_;
     }
     seqLastPresentedFrame_ = current;
 }
 
 void MainWindow::resetSequenceStride() {
-    seqStrideEma_ = 0.0;
+    seqUnitRun_ = 0;
+    seqUnitDir_ = 0;
     seqLastPresentedFrame_ = -1;
     seqStrideSamples_ = 0;
 }
@@ -7487,20 +7510,18 @@ void MainWindow::prefetchNeighbors() {
     // from seven places and only two of them are the playback tick.
     if (seqPrefetchStrideAware() && playTimer_.isActive()
         && seqStrideSamples_ >= kSeqStrideMinSamples) {
-        const double nearest = std::round(seqStrideEma_);
-        const bool predictable = std::abs(seqStrideEma_ - nearest) <= kSeqStrideTolerance
-                              && std::abs(nearest) >= 1.0;
+        const bool predictable = seqUnitRun_ >= kSeqStrideMinSamples && seqUnitDir_ != 0;
         if (!predictable) {
-            // The playhead is skipping by a non-integer amount: there is no
-            // next frame to predict, so nothing is decoded. This is the
-            // measured no-prefetch path, reached adaptively.
+            // The playhead is not advancing one frame per present, so this
+            // sequence is skipping and nothing is decoded speculatively. This
+            // is the measured no-prefetch path, reached adaptively.
             trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchDecline);
             return;
         }
         // ONE frame, the one actually likely to be presented next -- not a
         // window. The trailing neighbour is what the fixed policy spent a whole
         // load on whenever the playhead had moved past it.
-        prefetchFrameIntoCache(current + static_cast<long long>(nearest));
+        prefetchFrameIntoCache(current + seqUnitDir_);
         return;
     }
 
