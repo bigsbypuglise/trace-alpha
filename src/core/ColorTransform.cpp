@@ -359,7 +359,16 @@ QString ColorTransform::description() const {
         case Kind::None: return QString();
         case Kind::Lut: return QFileInfo(config_.lutPath).fileName();
         case Kind::DisplayView:
-            return QStringLiteral("%1 / %2").arg(config_.display, config_.view);
+            // THE CONFIG IS PART OF THE ANSWER, not context to be looked up
+            // elsewhere. "sRGB - Display / ACES 2.0 - SDR 100 nits (Rec.709)"
+            // is a different picture depending on which config defined those
+            // names, and the requirement is that the one in force is on screen.
+            // configLabel_ is what the resolver actually loaded, so this cannot
+            // name a config the processor was not built from.
+            return configLabel_.isEmpty()
+                       ? QStringLiteral("%1 / %2").arg(config_.display, config_.view)
+                       : QStringLiteral("%1 / %2 / %3")
+                             .arg(configLabel_, config_.display, config_.view);
     }
     return QString();
 }

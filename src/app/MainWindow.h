@@ -1718,6 +1718,14 @@ private:
     static constexpr const char* kColorTransformEnabledKey = "color/transformEnabled";
     static constexpr const char* kColorTransformKindKey    = "color/transformKind";
     static constexpr const char* kColorTransformLutKey     = "color/lutPath";
+    // Kind::DisplayView, stage 3. The config string is stored RESOLVED -- a
+    // concrete file path or an ocio:// URI, never empty meaning "the default" --
+    // so a saved transform cannot change meaning because $OCIO was set or unset
+    // between sessions.
+    static constexpr const char* kColorConfigKey  = "color/configPath";
+    static constexpr const char* kColorInputKey   = "color/inputSpace";
+    static constexpr const char* kColorDisplayKey = "color/display";
+    static constexpr const char* kColorViewKey    = "color/view";
 
     void setupColorTransformActions(QMenu* viewMenu);
     void syncColorTransformActions();
@@ -1747,6 +1755,13 @@ private:
     // media. `reason` reaches the HUD.
     void applyColorTransformChange(const char* reason);
     void loadLutFromDialog();
+    // Opens the Color Transform... dialog and applies its result. The same
+    // single stage "Load LUT..." fills in, with a Kind::DisplayView
+    // configuration instead of a Kind::Lut one.
+    void openColorTransformDialog();
+    // Writes a compiled configuration to the settings home. One place, so the
+    // LUT path and the display/view path cannot persist to disagreeing shapes.
+    void persistColorTransform();
     void restoreColorTransformFromSettings();
     void resetColorTransform();
 

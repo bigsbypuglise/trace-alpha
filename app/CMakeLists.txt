@@ -214,6 +214,8 @@ add_executable(Trace WIN32
   ../src/app/RecentFiles.cpp
   ../src/app/MovieInspector.h
   ../src/app/MovieInspector.cpp
+  ../src/app/ColorTransformDialog.h
+  ../src/app/ColorTransformDialog.cpp
   ../src/app/ShortcutsWindow.h
   ../src/app/ShortcutsWindow.cpp
   ../src/app/OverlayAccessibility.h

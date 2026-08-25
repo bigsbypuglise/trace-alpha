@@ -67,6 +67,7 @@
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
 #include "ui/TopChrome.h"
+#include "app/ColorTransformDialog.h"
 #include "app/LucidLinkIntegration.h"
 #include "app/OverlayAccessibility.h"
 #include "app/Settings.h"
@@ -4395,17 +4396,13 @@ void MainWindow::setupColorTransformActions(QMenu* viewMenu) {
         }
     });
 
-    // Present and permanently disabled in stage 1. The dialog is stage 3; the
-    // ROW is here now because the assessment fixed this menu's shape, and a row
-    // that appears later moves every item under it. Disabled rather than hidden
-    // is the same choice the Share menu's LucidLink row already makes: the
-    // command exists, it is not available yet, and saying so is more honest than
-    // pretending the feature has no such idea.
+    // LIVE AS OF STAGE 3. The row was present and permanently disabled from
+    // stage 1 -- deliberately, because the assessment fixed this menu's shape
+    // and a row that appears later moves every item under it. Enabling it is
+    // therefore the whole of that change: no item moved.
     colorTransformConfigAction_ = new QAction(tr("Color Transfor&m..."), this);
-    colorTransformConfigAction_->setEnabled(false);
-    colorTransformConfigAction_->setToolTip(
-        tr("Choosing a config, input colour space, display and view arrives with "
-           "the ACEScg workflow."));
+    connect(colorTransformConfigAction_, &QAction::triggered, this,
+            [this]() { openColorTransformDialog(); });
 
     loadLutAction_ = new QAction(tr("Load L&UT..."), this);
     connect(loadLutAction_, &QAction::triggered, this, [this]() { loadLutFromDialog(); });
@@ -4653,6 +4650,9 @@ void MainWindow::syncColorTransformActions() {
         colorTransformAction_->setEnabled(trace::core::ColorTransform::available());
     }
     if (loadLutAction_) loadLutAction_->setEnabled(trace::core::ColorTransform::available());
+    if (colorTransformConfigAction_) {
+        colorTransformConfigAction_->setEnabled(trace::core::ColorTransform::available());
+    }
     if (resetColorTransformAction_) {
         // Enabled only when there is something to reset -- otherwise it is a
         // command that visibly does nothing, which is the showInfo failure spec
@@ -4743,10 +4743,10 @@ void MainWindow::loadLutFromDialog() {
     const QString warning = error;
 
     colorTransform_.setEnabled(true);
-    trace::app::settings().setValue(QLatin1String(kColorTransformEnabledKey), true);
-    trace::app::settings().setValue(QLatin1String(kColorTransformKindKey),
-                                    QStringLiteral("lut"));
-    trace::app::settings().setValue(QLatin1String(kColorTransformLutKey), path);
+    // Through the one persistence function, which also clears the display/view
+    // keys -- loading a LUT after a display/view transform must not leave the
+    // old config behind to be restored next session.
+    persistColorTransform();
 
     applyColorTransformChange("LUT loaded");
     showTransientMessage(
@@ -4756,16 +4756,94 @@ void MainWindow::loadLutFromDialog() {
         warning.isEmpty() ? 2500 : 5000);
 }
 
+// PERSISTENCE IN ONE PLACE, so a LUT and a display/view configuration cannot be
+// written in disagreeing shapes. Every key the other kind owns is REMOVED rather
+// than left behind: a stale `color/lutPath` beside a `displayview` kind is the
+// sort of thing that restores as the wrong transform a month later.
+void MainWindow::persistColorTransform() {
+    auto& st = trace::app::settings();
+    const auto& cfg = colorTransform_.config();
+    switch (cfg.kind) {
+        case trace::core::ColorTransform::Kind::Lut:
+            st.setValue(QLatin1String(kColorTransformKindKey), QStringLiteral("lut"));
+            st.setValue(QLatin1String(kColorTransformLutKey), cfg.lutPath);
+            st.remove(QLatin1String(kColorConfigKey));
+            st.remove(QLatin1String(kColorInputKey));
+            st.remove(QLatin1String(kColorDisplayKey));
+            st.remove(QLatin1String(kColorViewKey));
+            break;
+        case trace::core::ColorTransform::Kind::DisplayView:
+            st.setValue(QLatin1String(kColorTransformKindKey), QStringLiteral("displayview"));
+            st.setValue(QLatin1String(kColorConfigKey), cfg.configPath);
+            st.setValue(QLatin1String(kColorInputKey), cfg.inputSpace);
+            st.setValue(QLatin1String(kColorDisplayKey), cfg.display);
+            st.setValue(QLatin1String(kColorViewKey), cfg.view);
+            st.remove(QLatin1String(kColorTransformLutKey));
+            break;
+        case trace::core::ColorTransform::Kind::None:
+            st.remove(QLatin1String(kColorTransformKindKey));
+            st.remove(QLatin1String(kColorTransformLutKey));
+            st.remove(QLatin1String(kColorConfigKey));
+            st.remove(QLatin1String(kColorInputKey));
+            st.remove(QLatin1String(kColorDisplayKey));
+            st.remove(QLatin1String(kColorViewKey));
+            break;
+    }
+    st.setValue(QLatin1String(kColorTransformEnabledKey), colorTransform_.enabled());
+}
+
+// THE Color Transform... DIALOG. Stage 1 said this would be a CALL SITE rather
+// than a redesign, because Kind::DisplayView was compiled and reachable from the
+// first commit; this is that call site, and it is the same shape as
+// loadLutFromDialog() immediately above -- set the configuration, and only if it
+// compiled, enable it, persist it and re-deliver the frame.
+//
+// CHOOSING A TRANSFORM ENABLES IT, exactly as loading a LUT does. A user who has
+// picked a config, an input space, a display and a view has asked to see it; a
+// tick box afterwards would be a second step for a decision already made.
+void MainWindow::openColorTransformDialog() {
+    if (!trace::core::ColorTransform::available()) {
+        showTransientMessage(
+            tr("This build was compiled without OpenColorIO."), 3000);
+        return;
+    }
+
+    trace::app::ColorTransformDialog dlg(colorTransform_.config(), this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const auto chosen = dlg.result();
+    QString error;
+    if (!colorTransform_.setConfig(chosen, error)) {
+        // The PREVIOUS configuration is still in force -- setConfig guarantees
+        // it -- so nothing changed but the message.
+        showTransientMessage(
+            error.isEmpty() ? tr("Could not build the colour transform") : error, 4000);
+        syncColorTransformActions();
+        return;
+    }
+    // setConfig can succeed and still report the float processor failing to
+    // build, which is not fatal for video but would show an untransformed EXR
+    // under a HUD claiming the transform is on.
+    const QString warning = error;
+
+    colorTransform_.setEnabled(true);
+    persistColorTransform();
+    applyColorTransformChange("Color transform set");
+    showTransientMessage(
+        warning.isEmpty()
+            ? tr("Colour transform: %1").arg(colorTransform_.description())
+            : warning,
+        warning.isEmpty() ? 3000 : 5000);
+}
+
 // THE RAW/DEFAULT STATE, DEFINED IN ONE PLACE: no transform configured, bypass
 // off. Reset is deliberately not "turn the bypass off" -- that would leave a LUT
 // loaded and invisible, and the next tick of the checkbox would bring back
 // something the user thought they had discarded.
 void MainWindow::resetColorTransform() {
     colorTransform_.reset();
-    auto& st = trace::app::settings();
-    st.remove(QLatin1String(kColorTransformKindKey));
-    st.remove(QLatin1String(kColorTransformLutKey));
-    st.setValue(QLatin1String(kColorTransformEnabledKey), false);
+    // reset() leaves Kind::None, so this clears every key of both kinds.
+    persistColorTransform();
     applyColorTransformChange("Color transform reset");
     showTransientMessage(tr("Colour transform reset"), 2000);
 }
@@ -4796,11 +4874,29 @@ void MainWindow::restoreColorTransformFromSettings() {
                     QString::fromLocal8Bit(envLut));
     }
 
+    // A SAVED TRANSFORM THAT NO LONGER RESOLVES FALLS BACK TO BYPASS, SAYS SO
+    // ONCE, AND BLOCKS NOTHING. That is the requirement in one sentence and it
+    // is why this reports through the transient message and returns, rather than
+    // refusing to finish construction or putting a modal box in front of a user
+    // who was only trying to open a file. It covers both kinds equally: a LUT
+    // that moved, and a config that was deleted or lives on a mount that is not
+    // there today.
+    trace::core::ColorTransform::Config cfg;
     if (kind == QLatin1String("lut")) {
-        const QString path = st.value(QLatin1String(kColorTransformLutKey)).toString();
-        trace::core::ColorTransform::Config cfg;
         cfg.kind = trace::core::ColorTransform::Kind::Lut;
-        cfg.lutPath = path;
+        cfg.lutPath = st.value(QLatin1String(kColorTransformLutKey)).toString();
+    } else if (kind == QLatin1String("displayview")) {
+        cfg.kind = trace::core::ColorTransform::Kind::DisplayView;
+        // The stored config string is concrete -- a path or an ocio:// URI --
+        // so this restores what was chosen rather than re-resolving $OCIO and
+        // possibly compiling a different config under the same saved settings.
+        cfg.configPath = st.value(QLatin1String(kColorConfigKey)).toString();
+        cfg.inputSpace = st.value(QLatin1String(kColorInputKey)).toString();
+        cfg.display = st.value(QLatin1String(kColorDisplayKey)).toString();
+        cfg.view = st.value(QLatin1String(kColorViewKey)).toString();
+    }
+
+    if (cfg.kind != trace::core::ColorTransform::Kind::None) {
         QString error;
         if (!colorTransform_.setConfig(cfg, error)) {
             colorTransform_.reset();
@@ -10873,7 +10969,15 @@ QString MainWindow::displayMapHudText() const {
     if (!viewer_ || !viewer_->displayMapInUse()) return QString();
     const auto& dm = viewer_->displayMapResult();
     QString out = QStringLiteral(" | map %1").arg(trace::core::displayMapName(dm.map));
-    if (dm.map != trace::core::DisplayMap::Ocio) {
+    if (dm.map == trace::core::DisplayMap::Ocio) {
+        // WHICH CONFIG, DISPLAY AND VIEW ARE IN FORCE, on the EXR line. Stage 2
+        // left this reading a bare `map OCIO`, which says the stage is running
+        // and nothing about what it is doing -- and on an EXR the video line's
+        // `xform` field is never built, so this is the only place that can say
+        // it. description() reports the RESOLVED config, not the requested one.
+        const QString what = colorTransform_.description();
+        if (!what.isEmpty()) out += QStringLiteral(" %1").arg(what);
+    } else {
         out += QStringLiteral(" [%1..%2, %3")
                    .arg(QString::number(dm.inputLo, 'f', 4))
                    .arg(QString::number(dm.inputHi, 'f', 4))
