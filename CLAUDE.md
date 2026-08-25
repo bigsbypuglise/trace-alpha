@@ -1365,6 +1365,58 @@ instruction nothing was optimised once the figure came in.
   control: `]` x2 with no dialog moves **100%** of sampled picture pixels; `]`,
   `]` and `c` with the dialog open move **0%**.
 
+**EXR PLAYBACK IS MEASURED ACROSS PASSES AND ACROSS ACES VERSIONS (2026-08-24,
+second session, physical panel 5120x1440 @ 239.999Hz). Record
+`docs/exr-stage3-pass-cadence.md`. NO PRODUCT CODE CHANGED -- the only edit is
+`seqcadence.ps1` gaining a `-PassAdvance` leg, so there is no new instrument
+cost and none is claimed.**
+
+- **THE SESSION'S BRIEF SAID EXR PLAYBACK HAD NEVER BEEN MEASURED. IT HAD BEEN,
+  THE SAME DAY** -- stage 3 step 1 took the baseline and step 2 took the
+  transform. **Sixteenth premise expiry, third from this project's own recent
+  session.** Both legs were RE-RUN today rather than quoted and **both reproduce
+  to the digit**: PIZ 99.9 / 99.8% with `skip 0` and `0 of 215`; DWAA 28.6 /
+  29.1 / 29.3% with `skip 68-70`. The cold first rep reads 98.0% on PIZ -- the
+  recorded cold-sweep lesson again; quote the warm reps.
+- **THE ACES VERSION IS THE VARIABLE, AND THIS IS THE NEW RESULT.** The record's
+  36.4% is **ACES 2.0** from `ocio://default`. The asset set's own
+  `config.ocio` at display `sRGB`, view **`ACES 1.0 SDR-video`** -- identical
+  plumbing, same float path, same parallel bands -- reads **68.7-71.0% of real
+  time** on the same file with the same-session control at 99.9%. Added handler
+  cost against that control: **a `.cube` LUT is CHEAPER than no transform**,
+  **ACES 1.0 ~ +32ms**, **ACES 2.0 ~ +92ms**. **Do not quote "~92ms" as the cost
+  of an ACES view transform** -- it is the cost of ACES 2.0. Neither ACES version
+  holds 24fps.
+- **PASS SELECTION IS FLAT AND THAT NARROWS THE OPEN ~5x DISCREPANCY.** Passes 1
+  (root, read 35.35ms), 6 (P, Normalise, 34.96ms) and 9 (SpecularLighting,
+  **45.41ms**) all present at **28.1-29.4%** -- and pass 9's own three reps span
+  28.1-29.1%, so the between-pass difference is smaller than the within-pass
+  variance. Passes 1 and 9 differ by ~10ms of read, **a 29% difference, and none
+  of it reaches the handler**. So the ~150ms of the DWAA file's ~190ms handler
+  that is NOT the channel read is **invariant to which channels are read** -- a
+  fixed per-frame cost. **An EXR playback pass must look for it somewhere other
+  than the channel-reading path.** Pass 6 also confirms the pinned `Normalise`
+  range holding across reps.
+- **THE PASS HARNESS WAS PROVEN ABLE TO FAIL FIRST, AND THE FAILURE MODE IS THIS
+  SESSION'S OWN CONCLUSION** -- a run whose keypress went nowhere reports every
+  pass with identical figures, which reads exactly as "the pass makes no
+  difference". Three controls: PIZ (one pass, action disabled) **band 0%**; DWAA
+  + unbound key `z` **0%**; DWAA + `]` **2.157%**, pass 2/9 Beauty confirmed on
+  the capture. Both zeros printed `picture ... -> advancing` in the same run, so
+  they are the pass not changing rather than a dead app. Two thresholds with a
+  gap (0.50 / 2.00); a reading between them fails as inconclusive.
+- **`passkeys.ps1` IS STALE AND WILL MISREAD -- reported, NOT fixed.** Its
+  `Grab-Hud` takes the LAST HUD line as the media line; since `8271ff2` the
+  sequence HUD appends **three cadence lines after** it. That script was
+  validated before that commit. Re-validate before quoting its verdicts.
+- **A RECORDED TRAP IS NARROWER THAN WRITTEN: a single unescaped `]` per
+  `SendWait` IS delivered.** The "brackets are silently swallowed" observation
+  came from a ten-press leg, i.e. repeated brackets in one string. Escape them
+  anyway; but an unescaped bracket is **not** a usable negative control.
+- **`parsecd` was RUNNING with no virtual display mode set**, and the 4090's panel
+  was the active path. A running daemon is not a session -- but check both, since
+  "Parsec off" and "no Parsec display is active" are different claims.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
