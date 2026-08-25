@@ -1195,11 +1195,22 @@ MainWindow::MainWindow() {
         }
 
         const bool isVideo = currentMedia_.has_value() && currentMedia_->kind == MediaKind::VideoFile;
+        const bool isSequence = currentMedia_.has_value()
+                             && currentMedia_->kind == MediaKind::ImageSequence;
+
+        // A MEASUREMENT gate, deliberately NOT the same expression as `isVideo`
+        // above, which is a BEHAVIOUR gate. Keeping them separate is the whole
+        // point of this instrument: the sequence path is being given the video
+        // path's counters and NOT the video path's policies, so a baseline taken
+        // now measures the sequence path as it already is rather than as this
+        // change made it. `isVideo` still decides the accumulator gate and the
+        // real-time drop below and is untouched.
+        const bool measureCadence = isVideo || isSequence;
 
         // Timer jitter: how far this tick landed from the requested interval.
         // Sampled before any presentation gating so it measures the scheduler
         // itself rather than the decision made from it.
-        if (isVideo) {
+        if (measureCadence) {
             if (!schedulerTickClock_.isValid()) {
                 schedulerTickClock_.start();
             } else {
@@ -1294,12 +1305,7 @@ MainWindow::MainWindow() {
             // landed. The old expression measured the accumulator's surplus,
             // which under a deadline schedule is not an error term at all --
             // so the control keeps the old one and only the control.
-            lastPresentLatencyMs_ = deadlineScheduleEnabled()
-                ? presentSlotLatencyMs_
-                : playbackAccumulatorMs_ - frameDurationMs;
-            ++presentSamples_;
-            avgPresentLatencyMs_ += (lastPresentLatencyMs_ - avgPresentLatencyMs_) / static_cast<double>(presentSamples_);
-            maxPresentLatencyMs_ = std::max(maxPresentLatencyMs_, lastPresentLatencyMs_);
+            notePresentLatency(frameDurationMs);
 
             // One frame per presentation unless the source cannot sustain its
             // native rate, in which case MEDIA TIME is held real-time and picture
@@ -1318,6 +1324,38 @@ MainWindow::MainWindow() {
             if (playbackAccumulatorMs_ > maxBacklogMs) playbackAccumulatorMs_ = maxBacklogMs;
             if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
         } else {
+            // The same present-latency instrument the video branch above uses,
+            // through the same function rather than a second copy of the
+            // arithmetic -- the reason notePresentedPlaybackFrame() was
+            // extracted, and the same failure avoided: a second copy that
+            // silently stops matching. It is called here rather than hoisted
+            // above the branch because the video branch's call site sits AFTER
+            // an early return (the control path's accumulator gate) that this
+            // branch does not have, and moving that return is a BEHAVIOUR
+            // change this instrument must not make.
+            notePresentLatency(frameDurationMs);
+
+            // WHAT THE SEQUENCE PATH DOES THAT THE VIDEO PATH COUNTS AND IT DID
+            // NOT. `steps` is floor(accumulator / period) with a floor of 1, so
+            // a sequence that cannot load a frame inside its budget banks the
+            // shortfall and the NEXT tick asks for a target two or more frames
+            // on -- frames that are never loaded and never presented. That is
+            // the same outcome the video path calls `drop`, reached by a
+            // different mechanism: the video path drops DELIBERATELY through
+            // realtimeDropSteps() and holds media time on the clock, while this
+            // is the shared accumulator catching up on its own.
+            //
+            // It is counted SEPARATELY and named `skip` rather than `drop` for
+            // exactly that reason. Calling them the same thing would claim the
+            // owner's 2026-08-13 real-time-drop policy is running on a path
+            // where realtimeDropSteps() is never called.
+            if (steps > 1) {
+                const long long skipped = static_cast<long long>(steps) - 1;
+                seqSkippedFrames_ += skipped;
+                ++seqSkipTicks_;
+                maxSeqSkipRun_ = std::max(maxSeqSkipRun_, skipped);
+            }
+
             playbackAccumulatorMs_ -= steps * frameDurationMs;
             if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
         }
@@ -7686,6 +7724,7 @@ void MainWindow::beginPlaybackTimeline() {
     lastAvSyncMs_ = maxAvSyncMs_ = 0.0;
     audioRepeatedFrames_ = audioSkippedFrames_ = 0;
     playbackDroppedFrames_ = playbackDropTicks_ = maxDropRun_ = 0;
+    seqSkippedFrames_ = seqSkipTicks_ = maxSeqSkipRun_ = 0;
 
     lastClockUpdateMark_ = -1;
     lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
@@ -8088,6 +8127,24 @@ bool MainWindow::presentQueuedShuttleFrame() {
     // Refill behind the frame just consumed.
     pumpShuttleQueue();
     return true;
+}
+
+// How far past its armed deadline this presentation landed. Extracted from the
+// playback tick for the same reason as notePresentedPlaybackFrame() below: the
+// video branch and the image-sequence branch must be measured by ONE instrument
+// rather than by two copies that can drift apart.
+//
+// The control path (TRACE_DEADLINE_SCHED=0) keeps the OLD expression and only
+// the control, because under a deadline schedule the accumulator's surplus is
+// not an error term at all.
+void MainWindow::notePresentLatency(double frameDurationMs) {
+    lastPresentLatencyMs_ = deadlineScheduleEnabled()
+        ? presentSlotLatencyMs_
+        : playbackAccumulatorMs_ - frameDurationMs;
+    ++presentSamples_;
+    avgPresentLatencyMs_ +=
+        (lastPresentLatencyMs_ - avgPresentLatencyMs_) / static_cast<double>(presentSamples_);
+    maxPresentLatencyMs_ = std::max(maxPresentLatencyMs_, lastPresentLatencyMs_);
 }
 
 // Present accounting for one presented frame. Extracted from the playback tick
@@ -9585,6 +9642,212 @@ void MainWindow::openMediaPath(const QString& path) {
     openPath(fi.absoluteFilePath());
 }
 
+// THE CADENCE INSTRUMENT, and it is ONE instrument for every timed media kind.
+//
+// These three lines were built inside the VideoFile branch of refreshHud() and
+// nowhere else, so an image sequence -- which runs the SAME playback tick, the
+// SAME GATE E deadline scheduler and the SAME notePresentedPlaybackFrame() --
+// accumulated every one of these counters and displayed none of them. The
+// consequence was precise and is the whole reason this exists: "EXR playback is
+// fine" and "EXR playback has never been measured" were indistinguishable, which
+// is the failure `stalls 0 of 0` produced on the title-bar stall for a dozen
+// harness runs before anyone read its denominator.
+//
+// EXTRACTED RATHER THAN COPIED. A second copy for sequences would be a second
+// instrument to keep in agreement, and this file already records twice what that
+// costs -- notePresentedPlaybackFrame() and beginPlaybackTimeline() were both
+// extracted for exactly it. The ONLY parameters are the rate and whether that
+// rate is Trace's own assumption; everything else is a member and is media-kind
+// independent by construction.
+MainWindow::CadenceHudLines MainWindow::cadenceHudLines(double rateFps,
+                                                        bool rateIsNominal) const {
+    CadenceHudLines out;
+    // Presented rate from the wall clock: the only number that says
+    // whether playback actually held real time.
+    const double elapsedS = playbackRunElapsedS_;
+    const bool rateValid = elapsedS > 0.5 && playbackFramesPresented_ > 0;
+    const double presentedFps = rateValid
+        ? static_cast<double>(playbackFramesPresented_) / elapsedS
+        : 0.0;
+    const double realTimePct = (rateValid && rateFps > 0.0)
+        ? 100.0 * presentedFps / rateFps
+        : 0.0;
+
+    // Real-time frame dropping, made visible (owner requirement,
+    // 2026-08-13). Reads `drop 0` on every source that keeps up, so a
+    // non-zero value is itself the statement that the source could not
+    // sustain its native rate -- and `media` beside it is the check that
+    // the drop did its job: media time covered against wall time, which
+    // must read ~100% whenever `real time` reads below it. The two
+    // together are the whole contract: `real time` is how much PICTURE
+    // arrived, `media` is whether the MOVIE stayed on the clock.
+    const double mediaCoveredS = (rateFps > 0.0)
+        ? static_cast<double>(playbackFramesPresented_ + playbackDroppedFrames_
+                              + seqSkippedFrames_) / rateFps
+        : 0.0;
+    const double mediaPct = rateValid && elapsedS > 0.0
+        ? 100.0 * mediaCoveredS / elapsedS
+        : 0.0;
+    // ONE shape, TWO vocabularies, and the distinction is deliberate.
+    //
+    // `drop` is the owner's 2026-08-13 real-time drop: a DELIBERATE policy that
+    // holds media time on the clock, and it runs on the video branch only.
+    // `skip` is what the image-sequence branch's shared accumulator does when a
+    // frame misses its budget -- the same visible outcome reached by a different
+    // mechanism, on a path where realtimeDropSteps() is never called at all.
+    //
+    // Printing both as `drop` would claim a policy is running where it is not,
+    // which is the class of dishonesty the Movie Inspector's origin tags and the
+    // colour line's `(inferred)` marker exist to prevent. `media` means the same
+    // thing on both: media time covered against wall time, which must read ~100%
+    // whenever `real time` reads below it.
+    const QString dropField = rateIsNominal
+        ? QString(" | skip %1 (ticks %2 max %3, media %4%%)")
+              .arg(seqSkippedFrames_)
+              .arg(seqSkipTicks_)
+              .arg(maxSeqSkipRun_)
+              .arg(QString::number(mediaPct, 'f', 1))
+        : QString(" | drop %1 (ticks %2 max %3, media %4%%)")
+              .arg(playbackDroppedFrames_)
+              .arg(playbackDropTicks_)
+              .arg(maxDropRun_)
+              .arg(QString::number(mediaPct, 'f', 1));
+
+    // "fps nominal" on the image-sequence branch, and that word is load-bearing.
+    // A sequence has NO container frame rate: ImageSequenceFrameSource::fps()
+    // returns the 24.0 Trace synthesises, and fpsRational() returns false for it.
+    // So the denominator of "% of real time" is a Trace assumption, and printing
+    // it bare would claim a source rate the file does not state -- the exact
+    // thing spec phase 7 forbids for timecode, applied to frame rate.
+    // (R2_OP_Stacks_01_00000.exr does carry framesPerSecond = 24/1 in its header
+    // and Trace does not read it. Recorded, not built.)
+    const QString rateUnit = rateIsNominal ? QStringLiteral(" fps nominal")
+                                           : QStringLiteral(" fps");
+    // NUMBERED SO THE ONE TEXT FIELD GOES IN LAST. dropField is the only
+    // argument here that is itself a string carrying per-cent signs, and
+    // QString::arg rescans what an earlier arg() inserted -- the trap this file
+    // already paid for when `icecream_passes%04d.exr` had its `%04` substituted
+    // with a channel count. Nothing dropField can contain is a placeholder
+    // today, so this is a guard rather than a fix, and it costs a renumber.
+    out.presented = rateValid
+        ? QString("presented %1 / %2%6 (%3%% real time) | frames %4 | elapsed %5s%7")
+              .arg(QString::number(presentedFps, 'f', 2))
+              .arg(QString::number(rateFps, 'f', 2))
+              .arg(QString::number(realTimePct, 'f', 1))
+              .arg(playbackFramesPresented_)
+              .arg(QString::number(elapsedS, 'f', 2))
+              .arg(rateUnit)
+              .arg(dropField)
+        : QString("presented -- / %1%2 | frames %3")
+              .arg(QString::number(rateFps, 'f', 2))
+              .arg(rateUnit)
+              .arg(playbackFramesPresented_);
+
+    // `tick` is the delay the LAST wake was armed for, not a fixed
+    // interval: GATE E re-arms per frame against an absolute deadline,
+    // so at 24fps it alternates 41/42 and that alternation is the fix
+    // working. A tick pinned at one value means the timeline is not
+    // established -- no rational, or media that never started a run.
+    // `jitter` is wake-to-wake interval against the true frame period,
+    // which is what it always meant -- before GATE E the armed interval
+    // WAS the period, so the figures stay comparable with section 23.4.
+    // It is deliberately not measured against the armed interval any
+    // more; see the computation for why that read 34ms on a schedule
+    // that was within 1.8ms of its deadline.
+    // `rephase` counts slots abandoned because a handler overran, which
+    // is cost overrun (cause B) and is not something GATE E fixes.
+    // `tick-late` and `tick-stall` count DELIVERY failures: ticks that
+    // arrived so late a whole frame opportunity went unused, and ticks
+    // that arrived so late the picture visibly stopped. Everything else
+    // on this line and the next measures what the tick DID; these count
+    // the times it was not called at all, which is a fault no cost
+    // counter can see -- on the title-bar stall the handler max was
+    // 0.77ms against a period max of 512ms.
+    //
+    // They exist because the smooth line's `stalls`/`hitch` are
+    // DRAG-scoped: both sample sites are inside the scrub path, so with
+    // no drag in progress they have no samples and read `0 of 0`, which
+    // was read as a clean result across a dozen harness runs of exactly
+    // this gesture. `sizemove` is the subset delivered while the modal
+    // move/size loop owned the pump, with its own max beside it --
+    // non-zero on a caption press and zero on an ordinary overrun,
+    // which is the attribution a bare count cannot make.
+    out.sched = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | rephase %8 | drift %9ms | ticks %10 | presents %11"
+                               " | tick-late %12 of %13 (>%14x) | tick-stall %15 (>%16ms) | sizemove %17 max %18ms")
+        .arg(schedulerIntervalMs_)
+        .arg(QString::number(lastTickJitterMs_, 'f', 2))
+        .arg(QString::number(avgTickJitterMs_, 'f', 2))
+        .arg(QString::number(maxTickJitterMs_, 'f', 2))
+        .arg(QString::number(lastPresentLatencyMs_, 'f', 2))
+        .arg(QString::number(avgPresentLatencyMs_, 'f', 2))
+        .arg(QString::number(maxPresentLatencyMs_, 'f', 2))
+        .arg(presentRephaseCount_)
+        .arg(QString::number(lastDriftMs_, 'f', 1))
+        .arg(schedulerTicks_)
+        .arg(presentSamples_)
+        .arg(tickLate_)
+        .arg(cycleSamples_)
+        .arg(QString::number(kTickLateFactor, 'f', 1))
+        .arg(tickStalls_)
+        .arg(QString::number(kTickStallMs, 'f', 0))
+        .arg(tickStallsInSizeMove_)
+        .arg(QString::number(maxPeriodInSizeMoveMs_, 'f', 1));
+
+    // Cadence distribution. The rate above averages and reads 98-99%
+    // whether the fault is the tick beat or per-frame cost overrun, so
+    // this is the line that says which. Percentiles come from a sorted
+    // copy -- a 10s run is ~240 samples, so exact beats approximate.
+    out.cadence = QStringLiteral("cadence | no samples yet");
+    if (!cadenceGapsMs_.empty()) {
+        std::vector<double> g = cadenceGapsMs_;
+        std::sort(g.begin(), g.end());
+        const auto pct = [&g](double p) {
+            const std::size_t i = std::min(g.size() - 1,
+                static_cast<std::size_t>(p * static_cast<double>(g.size() - 1) + 0.5));
+            return g[i];
+        };
+        const double budget = tickFrameDurationMs_ > 0.0 ? tickFrameDurationMs_ : 41.667;
+        // Buckets as multiples of the frame budget. A regular beat piles
+        // up in [1.5,2.5) and nowhere else; ragged overrun smears.
+        int b[5] = {0, 0, 0, 0, 0};
+        for (double v : g) {
+            const double r = v / budget;
+            if (r < 0.9) ++b[0];
+            else if (r < 1.1) ++b[1];
+            else if (r < 1.5) ++b[2];
+            else if (r < 2.5) ++b[3];
+            else ++b[4];
+        }
+        // Spacing between long frames: regular means a beat, scattered
+        // means overrun. Reported as min/median/max so one outlier
+        // cannot make a ragged run look periodic.
+        QString spacing = QStringLiteral("--");
+        if (cadenceLongAt_.size() >= 2) {
+            std::vector<long long> d;
+            d.reserve(cadenceLongAt_.size() - 1);
+            for (std::size_t i = 1; i < cadenceLongAt_.size(); ++i) {
+                d.push_back(cadenceLongAt_[i] - cadenceLongAt_[i - 1]);
+            }
+            std::sort(d.begin(), d.end());
+            spacing = QString("%1/%2/%3").arg(d.front()).arg(d[d.size() / 2]).arg(d.back());
+        }
+        out.cadence = QString("cadence n%1 | p50 %2 p95 %3 p99 %4 max %5 | <0.9x %6 ~1x %7 1.1-1.5x %8 "
+                      "1.5-2.5x %9 >2.5x %10 | long-gap min/med/max %11 | handler>budget %12 of %13 (max %14)")
+            .arg(g.size())
+            .arg(QString::number(pct(0.50), 'f', 1))
+            .arg(QString::number(pct(0.95), 'f', 1))
+            .arg(QString::number(pct(0.99), 'f', 1))
+            .arg(QString::number(g.back(), 'f', 1))
+            .arg(b[0]).arg(b[1]).arg(b[2]).arg(b[3]).arg(b[4])
+            .arg(spacing)
+            .arg(handlerOverBudget_)
+            .arg(handlerSamples_)
+            .arg(QString::number(maxHandlerMs_, 'f', 1));
+    }
+
+    return out;
+}
+
 void MainWindow::refreshHud(const QString& action) {
     const auto st = playback_.state();
 
@@ -9968,151 +10231,15 @@ void MainWindow::refreshHud(const QString& action) {
                          .arg(perf.threadTypeIsFrame ? "frame" : "slice")
                          .arg(perf.threadCount));
 
-            // Presented rate from the wall clock: the only number that says
-            // whether playback actually held real time.
-            const double elapsedS = playbackRunElapsedS_;
-            const bool rateValid = elapsedS > 0.5 && playbackFramesPresented_ > 0;
-            const double presentedFps = rateValid
-                ? static_cast<double>(playbackFramesPresented_) / elapsedS
-                : 0.0;
-            const double realTimePct = (rateValid && vm.fps > 0.0)
-                ? 100.0 * presentedFps / vm.fps
-                : 0.0;
-
-            // Real-time frame dropping, made visible (owner requirement,
-            // 2026-08-13). Reads `drop 0` on every source that keeps up, so a
-            // non-zero value is itself the statement that the source could not
-            // sustain its native rate -- and `media` beside it is the check that
-            // the drop did its job: media time covered against wall time, which
-            // must read ~100% whenever `real time` reads below it. The two
-            // together are the whole contract: `real time` is how much PICTURE
-            // arrived, `media` is whether the MOVIE stayed on the clock.
-            const double mediaCoveredS = (vm.fps > 0.0)
-                ? static_cast<double>(playbackFramesPresented_ + playbackDroppedFrames_) / vm.fps
-                : 0.0;
-            const double mediaPct = rateValid && elapsedS > 0.0
-                ? 100.0 * mediaCoveredS / elapsedS
-                : 0.0;
-            const QString dropField =
-                QString(" | drop %1 (ticks %2 max %3, media %4%%)")
-                    .arg(playbackDroppedFrames_)
-                    .arg(playbackDropTicks_)
-                    .arg(maxDropRun_)
-                    .arg(QString::number(mediaPct, 'f', 1));
-
-            const QString l4 = rateValid
-                ? QString("presented %1 / %2 fps (%3%% real time) | frames %4 | elapsed %5s%6")
-                      .arg(QString::number(presentedFps, 'f', 2))
-                      .arg(QString::number(vm.fps, 'f', 2))
-                      .arg(QString::number(realTimePct, 'f', 1))
-                      .arg(playbackFramesPresented_)
-                      .arg(QString::number(elapsedS, 'f', 2))
-                      .arg(dropField)
-                : QString("presented -- / %1 fps | frames %2")
-                      .arg(QString::number(vm.fps, 'f', 2))
-                      .arg(playbackFramesPresented_);
-
-            // `tick` is the delay the LAST wake was armed for, not a fixed
-            // interval: GATE E re-arms per frame against an absolute deadline,
-            // so at 24fps it alternates 41/42 and that alternation is the fix
-            // working. A tick pinned at one value means the timeline is not
-            // established -- no rational, or media that never started a run.
-            // `jitter` is wake-to-wake interval against the true frame period,
-            // which is what it always meant -- before GATE E the armed interval
-            // WAS the period, so the figures stay comparable with section 23.4.
-            // It is deliberately not measured against the armed interval any
-            // more; see the computation for why that read 34ms on a schedule
-            // that was within 1.8ms of its deadline.
-            // `rephase` counts slots abandoned because a handler overran, which
-            // is cost overrun (cause B) and is not something GATE E fixes.
-            // `tick-late` and `tick-stall` count DELIVERY failures: ticks that
-            // arrived so late a whole frame opportunity went unused, and ticks
-            // that arrived so late the picture visibly stopped. Everything else
-            // on this line and the next measures what the tick DID; these count
-            // the times it was not called at all, which is a fault no cost
-            // counter can see -- on the title-bar stall the handler max was
-            // 0.77ms against a period max of 512ms.
-            //
-            // They exist because the smooth line's `stalls`/`hitch` are
-            // DRAG-scoped: both sample sites are inside the scrub path, so with
-            // no drag in progress they have no samples and read `0 of 0`, which
-            // was read as a clean result across a dozen harness runs of exactly
-            // this gesture. `sizemove` is the subset delivered while the modal
-            // move/size loop owned the pump, with its own max beside it --
-            // non-zero on a caption press and zero on an ordinary overrun,
-            // which is the attribution a bare count cannot make.
-            const QString l5 = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | rephase %8 | drift %9ms | ticks %10 | presents %11"
-                                       " | tick-late %12 of %13 (>%14x) | tick-stall %15 (>%16ms) | sizemove %17 max %18ms")
-                .arg(schedulerIntervalMs_)
-                .arg(QString::number(lastTickJitterMs_, 'f', 2))
-                .arg(QString::number(avgTickJitterMs_, 'f', 2))
-                .arg(QString::number(maxTickJitterMs_, 'f', 2))
-                .arg(QString::number(lastPresentLatencyMs_, 'f', 2))
-                .arg(QString::number(avgPresentLatencyMs_, 'f', 2))
-                .arg(QString::number(maxPresentLatencyMs_, 'f', 2))
-                .arg(presentRephaseCount_)
-                .arg(QString::number(lastDriftMs_, 'f', 1))
-                .arg(schedulerTicks_)
-                .arg(presentSamples_)
-                .arg(tickLate_)
-                .arg(cycleSamples_)
-                .arg(QString::number(kTickLateFactor, 'f', 1))
-                .arg(tickStalls_)
-                .arg(QString::number(kTickStallMs, 'f', 0))
-                .arg(tickStallsInSizeMove_)
-                .arg(QString::number(maxPeriodInSizeMoveMs_, 'f', 1));
-
-            // Cadence distribution. The rate above averages and reads 98-99%
-            // whether the fault is the tick beat or per-frame cost overrun, so
-            // this is the line that says which. Percentiles come from a sorted
-            // copy -- a 10s run is ~240 samples, so exact beats approximate.
-            QString l5b = QStringLiteral("cadence | no samples yet");
-            if (!cadenceGapsMs_.empty()) {
-                std::vector<double> g = cadenceGapsMs_;
-                std::sort(g.begin(), g.end());
-                const auto pct = [&g](double p) {
-                    const std::size_t i = std::min(g.size() - 1,
-                        static_cast<std::size_t>(p * static_cast<double>(g.size() - 1) + 0.5));
-                    return g[i];
-                };
-                const double budget = tickFrameDurationMs_ > 0.0 ? tickFrameDurationMs_ : 41.667;
-                // Buckets as multiples of the frame budget. A regular beat piles
-                // up in [1.5,2.5) and nowhere else; ragged overrun smears.
-                int b[5] = {0, 0, 0, 0, 0};
-                for (double v : g) {
-                    const double r = v / budget;
-                    if (r < 0.9) ++b[0];
-                    else if (r < 1.1) ++b[1];
-                    else if (r < 1.5) ++b[2];
-                    else if (r < 2.5) ++b[3];
-                    else ++b[4];
-                }
-                // Spacing between long frames: regular means a beat, scattered
-                // means overrun. Reported as min/median/max so one outlier
-                // cannot make a ragged run look periodic.
-                QString spacing = QStringLiteral("--");
-                if (cadenceLongAt_.size() >= 2) {
-                    std::vector<long long> d;
-                    d.reserve(cadenceLongAt_.size() - 1);
-                    for (std::size_t i = 1; i < cadenceLongAt_.size(); ++i) {
-                        d.push_back(cadenceLongAt_[i] - cadenceLongAt_[i - 1]);
-                    }
-                    std::sort(d.begin(), d.end());
-                    spacing = QString("%1/%2/%3").arg(d.front()).arg(d[d.size() / 2]).arg(d.back());
-                }
-                l5b = QString("cadence n%1 | p50 %2 p95 %3 p99 %4 max %5 | <0.9x %6 ~1x %7 1.1-1.5x %8 "
-                              "1.5-2.5x %9 >2.5x %10 | long-gap min/med/max %11 | handler>budget %12 of %13 (max %14)")
-                    .arg(g.size())
-                    .arg(QString::number(pct(0.50), 'f', 1))
-                    .arg(QString::number(pct(0.95), 'f', 1))
-                    .arg(QString::number(pct(0.99), 'f', 1))
-                    .arg(QString::number(g.back(), 'f', 1))
-                    .arg(b[0]).arg(b[1]).arg(b[2]).arg(b[3]).arg(b[4])
-                    .arg(spacing)
-                    .arg(handlerOverBudget_)
-                    .arg(handlerSamples_)
-                    .arg(QString::number(maxHandlerMs_, 'f', 1));
-            }
+            // ONE instrument, shared with the image-sequence branch below.
+            // vm.fps rather than frameSource_->fps() so this line stays byte
+            // identical to every cadence figure already recorded against it --
+            // the two differ only by a max(1.0, ...) clamp no real file reaches.
+            const CadenceHudLines cadence =
+                cadenceHudLines(vm.fps, /*rateIsNominal=*/false);
+            const QString& l4 = cadence.presented;
+            const QString& l5 = cadence.sched;
+            const QString& l5b = cadence.cadence;
 
             // Span-based rate: N presented frames cover N-1 intervals, so this
             // excludes both startup before frame 1 and any end-of-stream hold.
@@ -10652,6 +10779,20 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
                 .arg(elapsed)
                 .arg(QString::fromStdString(seq.pattern), exr);
+
+            // THE CADENCE INSTRUMENT REACHES THIS MEDIA CLASS. Same three lines
+            // as the video branch, from the same function, so a sequence figure
+            // and a video figure are the same measurement and can be compared.
+            //
+            // The rate is the SOURCE's, flagged nominal -- see cadenceHudLines.
+            // It is appended rather than interleaved so the media line stays
+            // first and every existing sequence-line capture keeps its geometry.
+            const CadenceHudLines cadence =
+                cadenceHudLines(frameSource_ ? frameSource_->fps() : kAudioNominalFps,
+                                /*rateIsNominal=*/true);
+            line += "\n" + cadence.presented
+                  + "\n" + cadence.sched
+                  + "\n" + cadence.cadence;
         } else if (currentImage_.has_value()) {
             const auto& im = *currentImage_;
             // Same one-pass substitution for the same reason: a file name is

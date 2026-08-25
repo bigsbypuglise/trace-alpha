@@ -503,6 +503,26 @@ private:
     // and the reverse shuttle so both are measured by one instrument.
     void notePresentedPlaybackFrame(double frameDurationMs);
 
+    // How far past its armed deadline a presentation landed. Shared by the video
+    // branch and the image-sequence branch of the playback tick, for the same
+    // one-instrument reason as the line above.
+    void notePresentLatency(double frameDurationMs);
+
+    // The three cadence HUD lines, built once for every timed media kind.
+    //
+    // Until 2026-08-24 these were built inline inside refreshHud()'s VideoFile
+    // branch, so an image sequence accumulated every counter on them and showed
+    // none -- which made "EXR playback is fine" and "EXR playback has never been
+    // measured" the same observation. `rateIsNominal` is true when the rate is
+    // Trace's own 24.0 assumption rather than a container's, and the line says
+    // so; see the definition for why that word is not decoration.
+    struct CadenceHudLines {
+        QString presented;
+        QString sched;
+        QString cadence;
+    };
+    CadenceHudLines cadenceHudLines(double rateFps, bool rateIsNominal) const;
+
     // The whole of what a shuttle press does, in the one order that works.
     //
     // Extracted at spec phase 3, BEFORE phases 4 and 5 add the Rewind and
@@ -1064,6 +1084,21 @@ private:
     long long playbackDroppedFrames_ = 0;
     long long playbackDropTicks_ = 0;
     long long maxDropRun_ = 0;
+
+    // The image-sequence path's equivalent, counted SEPARATELY because it is a
+    // different mechanism reaching the same outcome.
+    //
+    // realtimeDropSteps() is never called on that branch. What happens there is
+    // that `steps` is floor(accumulator / period) with a floor of 1, so a frame
+    // that misses its budget banks the shortfall and the next tick's target is
+    // two or more frames on -- frames never loaded and never presented. Sharing
+    // `playbackDroppedFrames_` would claim the owner's 2026-08-13 real-time-drop
+    // policy is running on a path where it is not, so the HUD says `skip` there
+    // and `drop` on the video branch. All three read 0 on a sequence that keeps
+    // up, exactly as the drop trio does on a video that keeps up.
+    long long seqSkippedFrames_ = 0;
+    long long seqSkipTicks_ = 0;
+    long long maxSeqSkipRun_ = 0;
     // Reference interval for the jitter metric: the deadline the wake was armed
     // for, so jitter measures the scheduler against its own intent rather than
     // against a nominal rate. Still an int for the HUD's benefit.
