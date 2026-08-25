@@ -1,61 +1,92 @@
-## Trace v0.3.0-beta.7
+## Trace v0.3.0-beta.8
 
-**A dependency release. Nothing in the app changed on purpose — that is the point.** Trace now
-builds on the current Qt and the current FFmpeg, and for the first time the build you download
-uses the same toolchain as the build the timing was measured on. No feature was added, no
-behaviour was intentionally altered, and the playback and scrub engines are untouched.
+**A diagnostic release. No shipping behaviour changed on purpose.** This build closes out the
+investigation into the title-bar freeze report with a real answer — not a fix, an answer — and
+adds two file-based instruments for chasing it (or anything like it) in the field. Nothing about
+playback, scrubbing, or audio was touched.
 
 Windows, portable ZIP, x64. Unzip anywhere and run `Trace.exe`. There is no installer by design.
 
-### What actually changed
+### The title-bar freeze: diagnosed, and it is not fixable without a much bigger change
 
-| | before | now |
-|---|---|---|
-| Qt (in this ZIP) | 6.7.2 | **6.11.2** |
-| Qt (on the dev box) | 6.10.2 | **6.11.2** |
-| FFmpeg | 8.1.2 | **9.0.1** |
+Pressing and holding the real Windows title bar freezes the whole app — picture, HUD, audio,
+everything — for about half a second before the window starts moving. This is now fully
+understood:
 
-### Why the Qt version mattered more than it sounds
+**It is Windows itself, not Trace.** During the freeze the UI thread retrieves **no message of
+any kind** — not input, not a timer, nothing. It happens *before* the window-move operation
+even begins, so nothing inside that operation can be the cause. It reproduces identically on
+three different Qt versions and with audio disabled entirely, which rules out both Qt and the
+audio backend. The only thing that measurably works is intercepting the title-bar press and
+starting the move ourselves — which moves the exact same freeze to a different Windows code
+path and changes nothing.
 
-Every previous release ran a **different audio clock** than the build its timing was tuned on.
-Qt rewrote its Windows audio sink in 6.9.1, changing what two of the values Trace uses as the
-playback master clock actually mean — and the shipped ZIP was pinned below that line while
-development ran above it. That gap is now closed in the only way that closes it: both are
-6.11.2.
+**The only real fix would mean reimplementing the title bar by hand** — capture, hit-testing,
+window positioning, and never handing the click back to Windows. That also means reimplementing
+Snap, Aero Shake, edge magnetism, and multi-monitor drag behaviour ourselves, which is exactly
+the tradeoff that was declined when the frameless-window idea was closed earlier — Trace keeps
+the native title bar on purpose, for those. So this is closed as **understood, not fixed**, and
+is not going to change without reopening that decision.
 
-If you have ever felt that audio timing behaved differently in a downloaded build than
-described, this is the release where that stops being possible.
+**What does work correctly**: when the freeze ends, audio and picture resume in sync — the
+device was handed one buffer and then nothing for the whole freeze, and video follows the audio
+clock rather than wall time, so playback picks back up 2–3 frames later, not twelve. That part
+was already correct; it just took this investigation to confirm it.
 
-### The window-drag audio dropout is NOT fixed, and now we know it is not a Qt problem
+### Two new diagnostics, both default off and free when off
 
-Holding the title bar still for a moment silences audio for about half a second. **It is
-unchanged in this release and we are not claiming otherwise.**
+Two file-based logs were added for chasing this and any future stall like it — file-based
+because the dev HUD freezes right along with everything else during the fault, so it can't be
+read at the moment that matters.
 
-What this release does buy is the elimination of a suspect. The fault has now been measured on
-Qt 6.7.2, 6.10.2 and 6.11.2 and it is **the same on all three** — same size, same signature,
-once per press rather than for as long as you hold. It is also not the renderer and not the
-empty-state animation. And it is not really an audio bug: the whole application pauses for that
-half second, audio is just the only part you can hear it in.
+| env var | what it does |
+|---|---|
+| `TRACE_TICK_LOG=1` | writes one line per late playback tick to `%TEMP%\trace_tickstall.txt`, including audio counters that can see through a frozen UI thread |
+| `TRACE_MSG_LOG=1` | writes a full Windows message-pump timeline to `%TEMP%\trace_msglog.txt`, so a stall shows up as a gap in the timeline rather than a guess |
 
-The cause is still unattributed. It is the next thing to look at, and it is deliberately not
-being guessed at.
+Both are off by default and measured to cost nothing when off — confirmed against a control
+build with hashed-identical DLLs, on both playback and with audio-mastered clips. Not something
+you'd normally turn on; here in case a stall is ever worth chasing down again.
 
-### What was checked before shipping this
+### Two experimental knobs, still default off, useful if you're testing something specific
 
-Because a dependency swap can break things quietly, the regression was run against a control
-build of the same code on the old toolchain:
+Neither of these is new in this build, but neither has been called out plainly before. Both
+default off; neither is recommended for normal use yet.
 
-- Decoded pixels are **bit-identical** between FFmpeg 8.1.2 and 9.0.1 across seven files,
-  including 12-bit 4:4:4 with alpha, 10-bit ProRes and 10-bit HEVC.
-- Full-pool scrub: **22 files, 88 gestures, every landing exact.**
-- Playback cadence, including audio-mastered playback, flat.
-- Every transport control, the menus, the accessibility tree, the empty state and the
-  window chrome all retested on the new Qt.
-- Decode throughput on large ProRes is unchanged to within measurement noise.
+- **`TRACE_IO_READAHEAD=1`** — read-ahead buffering for remote storage (LucidLink and similar).
+  It's correctness-verified — pixel-identical output against the plain path across forward and
+  backward scrubbing — but it has **not been validated against a real remote mount**. Every
+  performance figure behind it so far is a relative, synthetic on/off comparison on local media
+  with an injected fake network delay, not a real cold LucidLink read. If you try it on a real
+  `V:\` file, what I'd want to know is whether it visibly helps or hurts — not a number, a feel.
+- **`TRACE_PLAYBACK_QUEUE=2`** — decodes up to N frames ahead of playback on a background
+  worker instead of one at a time on the UI thread. Worth roughly +10% throughput on very heavy
+  material (the 8K ProRes 4444 XQ plate). Depth 2 is the minimum that does anything; depth 1 is
+  measured *worse* than off. Does nothing noticeable on ordinary 4K/1080p media, which already
+  keeps up without it.
+
+### Known and unchanged
+
+- **8K ProRes 4444 XQ does not reach real-time playback**, and this is understood rather than
+  an open bug: best measured is **13.64 fps (56.9% of real time)** at full quality with every
+  frame shown, decode-bound at the CPU's own ceiling for that codec. No further work is planned
+  here — a faster decoder or GPU decode would be needed, and GPU decode is explicitly out of
+  scope. `TRACE_RT_DROP=0` is available if you want to compare against the frame-dropping
+  fallback, but that fallback is not the answer and is not going to become the default.
+- **A small window-position drift on multi-monitor setups with different display scaling**:
+  going fullscreen and back (Escape) on a secondary monitor running at 150% scaling can land
+  the window about 7 pixels higher than where it started. Size is unaffected — this is a small
+  position nudge, not the framing bug to watch for. Known, not yet patched.
+- 10-bit output is still deliberately not in this build — it needs a confirmed 10-bit display
+  and a defined HDR/colour-management workflow before it's worth building, neither of which is
+  in place yet.
+- EXR does not open: this build does not include OpenImageIO.
+- HDR/PQ material gets the right colour matrix but no tonemap.
+- Audio during scrubbing, reverse playback, and off-speed (J/L) playback is deliberately silent.
 
 ### Rollback knobs for this release
 
-Unchanged from beta.6 — the same ones still apply.
+Unchanged from beta.7 — the same ones still apply.
 
 | knob | effect |
 |---|---|
@@ -64,19 +95,6 @@ Unchanged from beta.6 — the same ones still apply.
 | `TRACE_FS_MAG_FILTER=0` | fullscreen magnification back to the sharp sampler |
 | `TRACE_MARK_ANIM=0` | empty-state mark held still |
 | `TRACE_SCRUB_PAINT_GATE=0` | the beta.3 scrub paint gate off |
-
-### Known and unchanged
-
-- **The title-bar audio dropout, above.** Unchanged, understood better, not fixed.
-- Multi-monitor setups with **different display scaling** were not re-tested on this Qt — Qt
-  6.11 changed how that is handled and the test hardware is not currently connected. If you run
-  two monitors at different scaling percentages and the window comes off a move the wrong
-  shape, that is worth reporting.
-- 8K ProRes 4444 XQ does not reach real time on this decoder and is a closed investigation, not
-  a regression.
-- EXR does not open: OpenImageIO is not in this build.
-- HDR/PQ material gets the right matrix but no tonemap.
-- Audio during scrubbing, reverse and off-speed playback is deliberately silent.
 
 ### If something is wrong
 
