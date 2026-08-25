@@ -7392,12 +7392,30 @@ static bool seqPrefetchEnabled() {
     return on;
 }
 
-// TRACE_SEQ_PREFETCH_STRIDE=1 selects the stride-aware policy. Default OFF, so
-// the fixed +-1 window below is still what ships.
+// THE STRIDE-AWARE POLICY IS THE DEFAULT AS OF 2026-08-25.
+// TRACE_SEQ_PREFETCH_STRIDE=0 is the rollback to the fixed +-1 window.
+//
+// Measured on three sequences, forward and reverse, against the fixed window:
+//   DWAA 27ch  forward 28.7-29.2% -> 62.2-63.1%   reverse 28.3% -> 61.1%
+//   PIZ  3ch   forward 99.9%      -> 99.9%        reverse 84.2% -> 90.2%
+//   PNG  3ch   forward 100.0%     -> 100.0%       (unchanged)
+// Exactness is structural rather than tested-and-hoped: the policy is gated on
+// playTimer_.isActive(), so paused stepping and random access take the legacy
+// window verbatim, and every cross-config picture comparison read 0%.
+//
+// REVERSE IMPROVES ON BOTH FILES, which is the counter being SIGNED doing real
+// work rather than merely compiling: the fixed window prefetches both
+// neighbours, and in reverse the +1 is the frame just left, so half of its
+// loads were pure waste. PIZ reverse skip 34 -> 21, DWAA reverse tick-stall
+// 26 -> 2.
+//
+// KNOWN AND ACCEPTED: DWAA stays ~1-2 points behind switching prefetch off
+// entirely (63.3-64.1%), because the five-frame warm-up still uses the legacy
+// +-1 window. That is measured, attributed, and deliberately NOT optimised here.
 static bool seqPrefetchStrideAware() {
     static const bool on = [] {
         const QByteArray v = qgetenv("TRACE_SEQ_PREFETCH_STRIDE");
-        return !v.isEmpty() && v != "0";
+        return v.isEmpty() || v != "0";
     }();
     return on;
 }

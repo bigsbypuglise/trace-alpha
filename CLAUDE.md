@@ -1654,6 +1654,53 @@ ATTRIBUTION IN THE PREVIOUS RECORD (2026-08-25, physical panel). Record
   gap to close if this ships; and **no owner hand-test** -- every figure is a
   counter and nobody has watched it play.
 
+**THE STRIDE-AWARE PREFETCH GATE IS THE SHIPPING DEFAULT AS OF 2026-08-25, AND
+REVERSE PLAYBACK IS VALIDATED. Record `docs/exr-prefetch-shipped.md`; harness
+`scripts/measure/seqreverse.ps1`. `TRACE_SEQ_PREFETCH_STRIDE=0` IS THE ROLLBACK
+to the fixed +-1 window.** Closes the EXR prefetch session.
+
+- **WHAT SHIPS, measured forward AND reverse against the fixed window:**
+
+  | | forward fixed | forward shipped | reverse fixed | reverse shipped |
+  |---|---|---|---|---|
+  | **DWAA 27ch** | 28.7-29.2% | **62.2-63.1%** | 28.3% | **61.1%** |
+  | **PIZ 3ch** | 99.9% | **99.9%** | 84.2% | **90.2%** |
+  | **PNG 3ch** | 100.0% | **100.0%** | -- | -- |
+
+- **REVERSE IMPROVES ON BOTH FILES, AND THAT IS THE SIGNED COUNTER DOING REAL
+  WORK RATHER THAN MERELY COMPILING.** The fixed window prefetches BOTH
+  neighbours, and in reverse the `+1` is the frame just left -- half its loads
+  were pure waste. PIZ reverse `skip 34 -> 21`, `handler>budget 34 of 181 -> 20
+  of 194`; DWAA reverse **`tick-stall 26 -> 2`**, frames **28 -> 60**, loads per
+  presented frame **2.89 -> 1.13**. **This is why PIZ, which gains nothing
+  going forward, gains 6 points going backward.**
+- **EXACTNESS AFTER A REVERSE RUN IS INTACT**: stop, then +3/-3. Cross-config
+  **0% differing** on the frame stopped on, after +3, and back -- both files --
+  with negative controls at **47.54%** and **8.84%**. Exactness is STRUCTURAL:
+  the policy is gated on `playTimer_.isActive()`, so paused stepping and random
+  access take the legacy window verbatim.
+- **THE FLIP WAS VERIFIED FROM THE COUNTERS IN BOTH DIRECTIONS**, never from the
+  command line: default (no knob) reads **62 frames, DECLINED 58, LEGACY 5,
+  59.79ms/frame**; `TRACE_SEQ_PREFETCH_STRIDE=0` reads **28 frames, LEGACY 29 on
+  every frame, 144.63ms/frame**.
+- **KNOWN CAVEAT, RECORDED AND DELIBERATELY NOT FIXED: DWAA stays ~1-2 points
+  behind turning prefetch OFF entirely** (63.3-64.1%) with a higher handler tail
+  (max ~100-122ms against ~74-75). **All of it is the FIVE-FRAME WARM-UP WINDOW,
+  which still uses legacy +-1** -- two loads per frame before the gate has
+  samples. Measured and attributed, not suspected. **Do not optimise the warm-up
+  in passing**: it costs PIZ early cache misses, and the gate-8 result proved
+  that starving the cache early on a file with ~4ms of headroom starts a skip
+  cascade that never converges.
+- **TWO SMALLER GAPS, NAMED: no owner hand-test** (every figure is a counter;
+  nobody has watched it play), and **the policy's state is NOT on the HUD** --
+  readable only through `TRACE_SEQ_PROFILE=1`. That is a departure from this
+  file's own rule about knobs whose state cannot be read back off a running
+  build, recorded rather than fixed.
+- **NOT PURSUED, BY INSTRUCTION: gate 8 (REFUTED, see the block above),
+  scheduler-accumulator prediction, off-thread EXR reads, alpha-prefill
+  optimisation, GPU/OCIO work.** Cache architecture, radius and put/get are
+  unchanged throughout the whole session.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
