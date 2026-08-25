@@ -1,5 +1,16 @@
 # Unit-run gated prefetch: three of four acceptance criteria met
 
+> **ONE CLAIM HERE IS WRONG AND IS CORRECTED IN
+> `docs/exr-unit-run-8-refuted.md` (2026-08-25).** This document attributes four
+> leaked predictions per DWAA playthrough to the file producing runs of four unit
+> steps (`0.45^4 x 61 ~ 2.5`). **The gate never fired on that file at all.** The
+> four were WARM-UP frames falling through to the legacy +-1 window, counted as
+> "not declined" because the stride branch is never entered during warm-up. A
+> `prefetch ISSUED` counter now measures it directly: 0 on DWAA, 212 on PIZ.
+> Everything else here -- the cadence tables, the PIZ result, the exactness --
+> stands.
+
+
 Record of what was measured. 2026-08-25, branch `exr-stage0-dependencies`,
 physical panel **5120x1440 @ 239.999000 Hz** (re-checked before measuring; same
 mode as the 2026-08-24 runs, `parsecd` daemon up with no virtual display

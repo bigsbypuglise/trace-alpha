@@ -1602,6 +1602,58 @@ Supersedes the policy half of `docs/exr-stride-aware-prefetch.md`.
   budget. **Cache architecture unchanged. No scheduler-accumulator prediction,
   no off-thread reads, alpha prefill untouched, no GPU/OCIO work.**
 
+**RAISING THE PREFETCH RUN GATE 4 -> 8 IS REFUTED, AND IT CORRECTED A WRONG
+ATTRIBUTION IN THE PREVIOUS RECORD (2026-08-25, physical panel). Record
+`docs/exr-unit-run-8-refuted.md`; commit `4cfeb25`; gate back at 4;
+`TRACE_SEQ_PREFETCH_STRIDE=1` STILL DEFAULT OFF.**
+
+- **8 FAILS ON THE FILE IT WAS SUPPOSED TO LEAVE ALONE. PIZ 99.9% -> 98.9 /
+  96.6 / 93.4%**, skip 0 -> 2/7/14, cache **HIT 216/1 -> 72/131**. The
+  degradation is MONOTONE across reps, which is the signature of a feedback
+  loop rather than noise. **DWAA changed NOTHING** (62.4-63.7 against gate 4's
+  62.2-63.1).
+- **THE MECHANISM: THE WARM-UP WINDOW IS WHAT PRIMES THE CACHE.** With warm-up
+  4 and gate 4 there is no hole -- the legacy window keeps the next frame
+  resident and the gate opens into a steady state where the presented frame is
+  already a hit, one load per tick. Widening the gate leaves four frames in
+  which nothing is prefetched, the cache drains, and the gate then opens onto a
+  **MISS plus a prefetch -- two loads** -- which on a file whose handler already
+  sits at 38-40ms of a 41.67ms budget misses the deadline, skips, **resets the
+  run**, and falls back to declining. It never converges. **This constant is
+  not a free dial.**
+- **THE CORRECTION, AND IT INVALIDATES A CLAIM IN
+  `docs/exr-unit-run-prefetch.md`:** that record attributes four leaked
+  predictions per DWAA playthrough to genuine runs of four unit steps
+  (`0.45^4 x 61 ~ 2.5`). **THE GATE NEVER FIRED ON THAT FILE AT ALL.** The four
+  were WARM-UP frames falling through to the legacy +-1 window, counted as "not
+  declined" because the stride branch is never ENTERED during warm-up. New
+  `prefetch ISSUED` / `LEGACY+-1` counters measure it: **DWAA ISSUED 0,
+  DECLINED 57, LEGACY 5** at BOTH gate settings; **PIZ ISSUED 212, DECLINED 0**;
+  **PNG ISSUED 163, DECLINED 0**. **A count derived by subtracting two other
+  counts is not a measurement of the thing you think it is.**
+- **SO THE RESIDUAL DWAA GAP IS THE FIVE-FRAME WARM-UP WINDOW, not leaked
+  predictions**, and run length cannot touch it -- which is exactly why 8
+  changed nothing there. Closing it is a separate one-line experiment (decline
+  during warm-up when stride-aware is on) and is **UNMEASURED**; it would cost
+  PIZ a handful of early cache misses.
+- **A THIRD SEQUENCE WAS ADDED because two files is not a population**:
+  `6_Image_Sequence\PNG_SEQ` (168 frames, PNG, a different loader on the same
+  playback path) reads **100.0%, skip 0, 0 of 166, tick-stall 0, cache HIT
+  167/1** on fixed AND on gate 4 -- identical. **Note `SeqProfile` instruments
+  `loadExr` specifically, so ACCOUNTED and the loader rows read 0 on a non-EXR
+  sequence**; the cache and prefetch counters live in MainWindow and are valid.
+- **`tick-stall` ON DWAA IS 0-1, NOT A ROBUST 0.** The previous record's 0/0/0
+  was a favourable sample; today reads 1/1/1 at gate 4 and 1/1/0 at gate 8.
+  Said plainly because an acceptance criterion asked for 0.
+- **RECOMMENDATION ON SHIPPING (gate 4): YES, WITH THREE CAVEATS STATED.** For:
+  DWAA **28.7-29.2% -> 62.2-63.1%**, PIZ identical, PNG identical, exactness
+  structural, cache untouched. Against: DWAA still ~1-2 points and ~25ms of
+  handler tail short of prefetch-off (the warm-up window); **REVERSE PLAYBACK IS
+  HANDLED BY CONSTRUCTION AND WAS NEVER MEASURED** -- the counter is signed and
+  predicts backwards at -1, but no reverse run was timed, and that is the first
+  gap to close if this ships; and **no owner hand-test** -- every figure is a
+  counter and nobody has watched it play.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
