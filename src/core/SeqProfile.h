@@ -43,6 +43,8 @@ enum class Stage : int {
     CacheMiss,     // it did not, and the loader ran
     Prefetch,      // prefetchNeighbors() in full, both neighbours
     PrefetchDecline, // stride-aware: prediction judged unreliable, nothing loaded
+    PrefetchIssued,  // stride-aware: a prediction was actually acted on
+    PrefetchLegacy,  // the fixed +-1 window ran (warm-up, or the knob is off)
     Map,           // mapFloatToDisplay / ColorTransform: mapping + pixel conversion
     Upload,        // renderer_->setFrame: the GPU upload
     Present,       // the repaint the tick asks for

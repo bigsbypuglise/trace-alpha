@@ -7422,12 +7422,41 @@ static bool seqPrefetchStrideAware() {
 // four of them were the entire remaining gap to simply not prefetching:
 // handler max 99-116ms against 84-90ms, tick-stall 1/1/0 against 0/0/0.
 //
-// Below this many samples nothing is established yet and the legacy +-1 window
-// is used, which is what a sequence starting cleanly wants anyway.
+// TWO SEPARATE CONSTANTS, AND CONFLATING THEM COSTS THE WRONG FILE.
+//
+// kSeqStrideWarmupSamples is "nothing is established yet, use the legacy +-1
+// window" -- a sequence starting cleanly wants exactly that, and on a file
+// holding its budget those frames are correct prefetches rather than waste.
+//
+// kSeqUnitRunRequired is the confidence test itself. Raising it makes the gate
+// stricter; raising the WARM-UP instead would extend the legacy two-load window
+// on a file that is already over budget, which is ~48ms of extra work per frame
+// on exactly the file the gate exists to protect. They were one constant while
+// both wanted 4 and the difference did not show; they are not the same question.
+//
+// 4, AND 8 WAS MEASURED AND IS WORSE ON BOTH FILES. The reason is a coupling
+// that is not obvious from the predicate alone: the warm-up window is what
+// PRIMES the cache, so the gate opens into a steady state where the frame being
+// presented is already a hit and the tick pays one load. Widening the gap
+// between warm-up and gate leaves frames in which nothing is prefetched, the
+// cache drains, and when the gate finally opens a tick pays a MISS plus a
+// prefetch -- two loads -- which on a file with ~4ms of headroom is enough to
+// miss the budget, skip, and reset the run. It then never converges: PIZ fell
+// 99.9% -> 98.9/96.6/93.4% across three reps, degrading monotonically, with
+// cache hits 216 of 217 -> 72 of 203.
+//
+// On the DWAA file 8 changed nothing at all, because the gate never fires there
+// at either setting -- measured, `prefetch ISSUED` is 0 and every branch entry
+// declines. Its whole prefetch cost is the warm-up window, which the run length
+// does not touch.
+//
+// So this constant is not a free dial: raising it degrades the file it cannot
+// help while destabilising the file it was protecting.
 //
 // Reverse playback at 1x runs the counter with dir -1 and predicts backwards,
 // with no second branch and no sign handling anywhere else.
-static constexpr int kSeqStrideMinSamples = 4;
+static constexpr int kSeqStrideWarmupSamples = 4;
+static constexpr int kSeqUnitRunRequired = 4;
 
 void MainWindow::noteSequenceStride() {
     if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::ImageSequence) return;
@@ -7509,8 +7538,8 @@ void MainWindow::prefetchNeighbors() {
     // something to re-verify at every call site. prefetchNeighbors() is reached
     // from seven places and only two of them are the playback tick.
     if (seqPrefetchStrideAware() && playTimer_.isActive()
-        && seqStrideSamples_ >= kSeqStrideMinSamples) {
-        const bool predictable = seqUnitRun_ >= kSeqStrideMinSamples && seqUnitDir_ != 0;
+        && seqStrideSamples_ >= kSeqStrideWarmupSamples) {
+        const bool predictable = seqUnitRun_ >= kSeqUnitRunRequired && seqUnitDir_ != 0;
         if (!predictable) {
             // The playhead is not advancing one frame per present, so this
             // sequence is skipping and nothing is decoded speculatively. This
@@ -7521,10 +7550,16 @@ void MainWindow::prefetchNeighbors() {
         // ONE frame, the one actually likely to be presented next -- not a
         // window. The trailing neighbour is what the fixed policy spent a whole
         // load on whenever the playhead had moved past it.
+        trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchIssued);
         prefetchFrameIntoCache(current + seqUnitDir_);
         return;
     }
 
+    // Counted so a warm-up frame cannot be mistaken for a leaked prediction:
+    // during warm-up the stride branch is not entered at all, so it records no
+    // decline, and the difference between frames and declines would otherwise
+    // read as the gate firing.
+    trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchLegacy);
     const long long neighbors[2] = {current - 1, current + 1};
     for (long long idx : neighbors) prefetchFrameIntoCache(idx);
 }

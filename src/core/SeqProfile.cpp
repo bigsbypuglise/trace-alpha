@@ -52,6 +52,8 @@ const char* stageName(Stage s) {
         case Stage::CacheMiss:   return "cache MISS";
         case Stage::Prefetch:    return "prefetch (all)";
         case Stage::PrefetchDecline: return "prefetch DECLINED";
+        case Stage::PrefetchIssued:  return "prefetch ISSUED";
+        case Stage::PrefetchLegacy:  return "prefetch LEGACY+-1";
         case Stage::Map:         return "map+convert";
         case Stage::Upload:      return "upload";
         case Stage::Present:     return "present";
@@ -134,7 +136,8 @@ void dump(const char* tag) {
         // Prefetch is the SUM of its own inner loader stages, so counting it in
         // the total would double-count every neighbour load. It is reported as
         // a cross-check on the loader rows, not as a term beside them.
-        if (s != Stage::Prefetch && s != Stage::PrefetchDecline) accounted += b.totalMs;
+        if (s != Stage::Prefetch && s != Stage::PrefetchDecline
+            && s != Stage::PrefetchIssued && s != Stage::PrefetchLegacy) accounted += b.totalMs;
         out << QStringLiteral("%1 %2 %3 %4 %5\n")
                    .arg(QString::fromLatin1(stageName(s)), -16)
                    .arg(b.totalMs, 10, 'f', 1)
