@@ -1163,33 +1163,114 @@ BY THE OWNER**, not pending.
   grouper's neutral RGBA answer is correct but uninterpreted), and **real ranked
   test material, which the asset pool does not contain** — this file's
   `Cryptomatte.red/.green/.blue` is a 3-channel preview, not a ranked set.
-- **NO EXR PLAYBACK RATE HAS EVER BEEN MEASURED IN THIS PROJECT, AND THAT IS THE
-  NAMED PREREQUISITE FOR STAGE 3.** The image-sequence path exposes **no cadence
-  counters at all** — no `presented`, no `drop`, no `rephase`, no
-  `handler>budget`, no long-gap histogram. Every EXR figure ever recorded here is
-  memory, read cost or correctness; **not one is a playback-rate figure.**
-  The consequence is the sentence to carry: **"EXR playback is fine" and "EXR
-  playback has never been measured" are indistinguishable from where this project
-  stands**, so any claim about it — good or bad — is currently unfounded. This is
-  not a nice-to-have and it is not an optimisation task: it is the instrument
-  that has to exist before stage 3's dialog, before any EXR playback work, and
-  before anyone can judge whether a change to the float path cost anything.
-  Building it means giving `ImageSequenceFrameSource`'s tick the same counters the
-  video path has had since GATE E. **Until it exists, do not accept or report any
-  EXR smoothness claim, including a favourable one.**
+- **~~NO EXR PLAYBACK RATE HAS EVER BEEN MEASURED IN THIS PROJECT~~ — BUILT AND
+  MEASURED 2026-08-24; the instrument exists and the baseline is taken. See the
+  STAGE 3 STEP 1 block below for the figures; what follows is the record of the
+  gap.** The image-sequence path was said to expose **no cadence counters at
+  all**. It was narrower than that and the correction matters: the sequence path
+  runs the SAME tick, the SAME GATE E scheduler and the SAME
+  `notePresentedPlaybackFrame()`, so the counters were being **accumulated** and
+  `refreshHud()` simply built the three cadence lines inside its VideoFile branch
+  and nowhere else. **Measured and never shown** — the `stalls 0 of 0` shape
+  again. The consequence stood exactly as written: **"EXR playback is fine" and
+  "EXR playback has never been measured" were indistinguishable**, and one
+  favourable claim did leak in on that basis (see the premise-expiry note below).
 - **EXR playback optimisation, when the instrument exists**: the window cache must
   be **bounded by BYTES rather than frame count** (8K EXR would want 1.6 GB before
   anything else), roughly **half the per-pass read is fixed overhead** (35 ms for
   3 channels against 63 ms for 27), and `measureFloatRange()` still scans every
   frame for the HUD's clipping figure even where the mapping no longer needs it.
 
+**EXR/COLOUR STAGE 3 STEP 1 IS DONE (2026-08-24): THE IMAGE-SEQUENCE CADENCE
+INSTRUMENT IS BUILT AND THE FIRST EXR PLAYBACK RATE IN THIS PROJECT'S HISTORY IS
+MEASURED, AT THE PANEL.** Record `docs/exr-stage3-cadence-instrument.md`; harness
+`scripts/measure/seqcadence.ps1`. Commits `8271ff2` (instrument) · `f48bf7d`
+(harness) · `c6b2372` (record), all three independently revertable and the
+reverted tree builds — checked one at a time, not asserted. **NOT merged. The
+Color Transform dialog is NOT started** — the owner asked for the baseline first
+and to stop on it.
+
+- **THE TWO EXR SEQUENCES ARE AT OPPOSITE ENDS AND "EXR PLAYBACK" IS NOT ONE
+  THING.** `R2_OP_Stacks_01` (217 frames, 1920x1080, 3ch, PIZ) reads
+  **`presented 23.97 / 24.00 fps nominal (99.9% real time)`, `skip 0`,
+  `handler>budget 0 of 215` (max 37.4 / 36.6ms), `rephase 0`, `tick-late 0`,
+  buckets `~1x 214`, drift −13ms** — a clean run by every standard the video path
+  is held to. `MultlayerAces` (97 frames, 1920x1080, 27ch, DWAA) reads
+  **28.8–29.2% of real time** across three warm reps, `handler>budget 28 of 28`
+  at **max ~190ms against a 41.67ms budget**, every gap in the `>2.5x` bucket.
+- **THE DWAA FILE HOLDS THE CLOCK BY SKIPPING, AND THAT IS THE WHOLE POINT OF THE
+  NEW `skip` FIELD.** It plays 97 frames of media in ~4.1s — on the clock,
+  `media 97.7–99.4%` — **by showing 29 of them and skipping 68.** `media` and
+  `real time` are different questions and both are true; quoting the first alone
+  is the mistake the instrument exists to prevent.
+- **A PREMISE EXPIRED, AND IT WAS WRITTEN TWO DAYS EARLIER BY THIS PROJECT.**
+  `docs/exr-stage2-float-buffer.md` recorded that the DWAA sequence "reaches
+  frame 61 and 63 in 2.5s … Both keep real time at 1080p, because prefetching
+  hides the decode." **The playhead advances by SKIPPING**, so 24.4 index/s is
+  `media`, not `presented`: measured today the index advances ~23/s while
+  pictures arrive at **6.9/s**. The observation was right, the conclusion drawn
+  from it was a statement about the clock read as one about the picture. That
+  same doc says "no rate figure is claimed" one sentence later. **Fourteenth
+  premise expiry, second from a recent session of this project's own.**
+- **`skip` IS NOT `drop` AND MUST NOT BE RENAMED TO IT.** `realtimeDropSteps()`
+  is never called on the sequence branch; what happens there is the shared
+  accumulator's `floor(acc/period)` advancing the target past frames that are
+  never loaded. Same visible outcome, different mechanism, and calling both
+  `drop` would claim the owner's 2026-08-13 real-time-drop policy is running on a
+  path where it is not. Likewise **`fps nominal`**: `fpsRational()` returns false
+  for a sequence and `fps()` is Trace's own 24.0, so the denominator of "% of
+  real time" is an assumption and the line says so.
+- **ONE INSTRUMENT, NOT TWO.** `cadenceHudLines()` and `notePresentLatency()` are
+  extracted and called from both branches — the reason
+  `notePresentedPlaybackFrame()` and `beginPlaybackTimeline()` were extracted
+  before them. **`measureCadence` is deliberately a separate expression from
+  `isVideo`**: a measurement gate beside a behaviour gate, so the accumulator
+  gate and the real-time drop are untouched and the baseline measures the
+  sequence path as it already is rather than as this change made it.
+- **THE PIZ FILE IS THE SENSITIVE TEST FOR STAGE 3, NOT THE DWAA ONE, AND THE
+  MARGIN IS THIN.** The DWAA file is already 4.6x over budget with
+  `handler>budget 28 of 28`, so adding a transform there measures the skip
+  mechanism rather than the transform. The PIZ file has **~4.3ms of headroom**
+  (handler max 37.4 of 41.67) against an OCIO CPU stage measured at 9.3 ns/px —
+  ~3–4ms at 1080p in parallel bands. **Two things push the other way and are why
+  it must be measured**: the OCIO branch in `ViewerWidget` **skips
+  `measureFloatRange()` entirely** and replaces the `Gamma22` mapping, both
+  full-frame passes. The net could be near zero or negative; nobody knows.
+- **AN OPEN DISCREPANCY, STATED AS ONE AND NOT GUESSED AT: the DWAA file's
+  ~190ms handler is ~5x its own standalone read.** `exrprobe --read` measured its
+  root RGB pass at **37.98ms**, against the PIZ file's *whole handler* of 37.4ms.
+  Nothing measured here explains the gap. It is the first thing an EXR playback
+  pass has to account for, and it is not this step's job.
+- **Video unmoved, against a control built from `2d09d89`** with DLL payloads
+  made byte-identical by hash and the two binaries **proven distinct by their own
+  strings** (`" fps nominal"` present in one, absent in the other): 4K H.264
+  cadence x2 **100.0/100.0%** against **99.9/100.0%**, `handler>budget 0 of 119`
+  max 4.3/4.4 against 4.5/4.4 · 4444 x2 **99.8/99.8%** both, `0 of 260` max
+  33.0/33.0 against 33.6/33.4 · **`scrubbar.ps1` full pool PASS — 22 files, 88
+  legs, `delta 0` throughout** · all four selftests green on both, the shape
+  selftest identical row for row. **The sequence path's BEHAVIOUR has its own
+  control**: both binaries read **`Frame: 124/216 | Seconds: 5.167`** to the
+  frame, and the control's HUD carries no cadence lines at all.
+- **`--window-shape-selftest` reads `1212x682 bound work` for 16:9 on this
+  display, not the recorded `1280x720 bound cap` — IDENTICAL ON THE CONTROL**, so
+  it is this box's work area and not a regression. Its own `OK - 11 shapes x 4
+  scale factors` is what the record asserts.
+- **A PRE-EXISTING HUD DEFECT FOUND IN PASSING AND NOT FIXED: `%%` renders
+  literally.** `QString::arg` does not collapse `%%` the way `printf` does, so
+  `(100.0%% real time)`, `hit 0.0%%` and three `io … seq %%` fields all print a
+  double sign. Confirmed on lines this change never touched, in a capture taken
+  before it. Cosmetic, widespread, and fixing it would move every existing HUD
+  capture — recorded rather than folded into an instrument commit.
+
 ### WHAT STAGE 2 PART 2 STILL OWES
 
 1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
    `C`, the pass overlay, the View pass list and `duplicateOf` are all built and
-   measured. **Cryptomatte (stage 4) is CUT BY THE OWNER, not deferred.** The one
-   thing the EXR phase still owes before stage 3 is the **sequence-path cadence
-   instrument** — see the block above; it is a prerequisite, not an optimisation.
+   measured. **Cryptomatte (stage 4) is CUT BY THE OWNER, not deferred.**
+   ~~The one thing the EXR phase still owes before stage 3 is the sequence-path
+   cadence instrument~~ — **BUILT AND MEASURED 2026-08-24 as stage 3 step 1; the
+   baseline is taken and `seqcadence.ps1` is the harness. Nothing is outstanding
+   before stage 3's dialog.**
 2. **The transient pass overlay** naming the current pass on screen.
 3. **The full pass list in the View menu.**
 4. **`ExrPass::duplicateOf` IS DECLARED AND NEVER FILLED.** Root RGB and a named
@@ -5203,15 +5284,21 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    (Cryptomatte) IS CUT BY THE OWNER -- not deferred, and not to be picked up as
    unfinished business.** What is left of the EXR phase is stage 3 (the
    config/display/view dialog) and stage 5 (the GPU stage). **Stage 3's named
-   prerequisite is a cadence instrument for the image-sequence path: it exposes
-   no counters, so NO EXR PLAYBACK RATE HAS EVER BEEN MEASURED HERE, and "fine"
-   is indistinguishable from "unmeasured".** **CHECK THE
-   DISPLAY FIRST: the last session ran over Parsec and the panel itself was at
+   prerequisite was a cadence instrument for the image-sequence path -- **BUILT
+   AND MEASURED 2026-08-24 as STAGE 3 STEP 1** (`seqcadence.ps1`, record
+   `docs/exr-stage3-cadence-instrument.md`). The first EXR playback rates in this
+   project: **the 217-frame PIZ sequence 99.9% of real time with `skip 0` and
+   `handler>budget 0 of 215`; the 27-channel DWAA sequence 28.8-29.2%, holding
+   the clock by SKIPPING 68 of 97 frames.** The PIZ file, not the DWAA one, is
+   the sensitive test for the dialog -- ~4.3ms of headroom against a transform of
+   the same order.** **CHECK THE
+   DISPLAY FIRST: a recent session ran over Parsec and the panel itself was at
    5120x1440 @ 59Hz, not 239.999Hz, so nothing recorded there is a panel
    baseline** -- that panel regression was taken on 2026-08-24 and is recorded in
    `docs/exr-stage2-keyboard-surface.md`. **Stage 4 (Cryptomatte) is CUT BY THE
-   OWNER, not deferred.** Stage 3 (the config/display/view dialog) and stage 5
-   (the GPU stage) are not started.
+   OWNER, not deferred.** Stage 3's DIALOG (config/display/view) is not started,
+   deliberately -- the owner asked for the baseline first -- and stage 5 (the GPU
+   stage) is not started.
 
 ## Where scrub stands (2026-08-07, second session)
 
