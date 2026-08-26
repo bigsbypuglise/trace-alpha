@@ -1722,10 +1722,12 @@ to the fixed +-1 window.** Closes the EXR prefetch session.
   optimisation, GPU/OCIO work.** Cache architecture, radius and put/get are
   unchanged throughout the whole session.
 
-**WHERE EXR PLAYBACK GOES NEXT -- RECORDED, NOT DECIDED (2026-08-25). THE
-DECISION IS THE OWNER'S AND THE HAND-TEST HAS NOT HAPPENED YET.** This is a
-view written down so it is not re-derived from scratch; it is not an
-instruction, and nothing below is scheduled or started.
+**WHERE EXR PLAYBACK GOES NEXT -- RECORDED, NOT DECIDED (2026-08-25).
+SUPERSEDED ON ITS CENTRAL QUESTION THE SAME DAY: THE HAND-TEST HAPPENED AND THE
+OWNER CHOSE OPTION (1) -- see the block immediately below.** The three options
+and the reasoning behind them are retained because the arithmetic is still the
+arithmetic; what expired is the sentence saying the decision was open. Nothing
+here is scheduled or started.
 
 - **THE ONE NUMBER THAT DECIDES THIS PHASE: A FULL EXR LOAD ON THE 27-CHANNEL
   DWAA FILE MEASURES ~42.5ms, SYNCHRONOUS ON THE UI THREAD, AGAINST A 41.67ms
@@ -1766,6 +1768,92 @@ instruction, and nothing below is scheduled or started.
   **If the hand-test finds ~15fps unusable on a 27-channel working file, (3)
   stops being schedulable and becomes urgent.** That is the judgement the
   counters cannot make.
+
+**THE OWNER HAND-TESTED THE PREFETCH DEFAULT AND RULED ~15 fps ON THE
+27-CHANNEL DWAA WORKING FILE *USABLE FOR REVIEW* (2026-08-25). THE FULL PANEL
+REGRESSION IS DONE AND FLAT. NO PRODUCT CODE CHANGED.** Record
+`docs/exr-panel-regression-260825.md`; user-facing wording ready to paste in
+`docs/exr-release-notes.md`. Still **NOT merged and no release cut** -- both are
+the owner's.
+
+- **THE VERDICT, AT ITS STATED WIDTH.** What is accepted is **this file class,
+  at this rate, for review** -- the owner's stated grounds being that heavy
+  multilayer EXR is often hard to play back in real time without caching.
+  **It is NOT a claim that the file reaches real time; it misses by about a
+  third**, and the release notes are required to say both halves. **The DWAA
+  file is explicitly not a blocker for the EXR milestone**, so **off-thread EXR
+  reads are a future optimisation rather than urgent work** -- the conditional
+  in the block above ("if the hand-test finds ~15fps unusable ... (3) becomes
+  urgent") resolved the other way. Not started.
+- **THE LIMIT IS WRITTEN DOWN IN TWO PLACES AND NEITHER IS A RELEASE BODY.**
+  `docs/release-notes-alpha.md` carries the durable known-gaps entry with its
+  number, per that document's own rule. `docs/exr-release-notes.md` carries the
+  paste-ready user-facing text. **`docs/release-body.md` was deliberately NOT
+  edited**: it always describes the CURRENT tag, `main` is at
+  **`v0.3.0-beta.8`** whose published notes correctly say *"EXR does not open"*,
+  and writing EXR into it would make a shipped release claim a feature it does
+  not contain. **This branch's copy of that file is beta.7, one release behind
+  `main`** -- take `main`'s copy as the base for the next one.
+- **THE REGRESSION, PHYSICAL PANEL 5120x1440 @ 239.999Hz, FLAT.**
+  `scrubbar.ps1` full pool **PASS -- 22 files, 88 legs, `delta 0` throughout**
+  (a single distinct `delta` value across all 88; `kf_land` non-zero on exactly
+  the two recorded long-GOP rows, Universe leg 2 and WeLo leg 2, and 0 on the
+  other 86) - 4K H.264 cadence x2 **100.0/100.0%** (`0 of 119`, `drop 0`,
+  `rephase 0`, `tick-late 0`, all 119 gaps `~1x`) - 4444 x2 **99.8/99.8%**
+  (`0 of 260`) - 4444 `-SnapRelease` **`target 261 shown 261 delta 0`**
+  full-res planar (**GATE C intact**), `release 21.0ms`, `hitch 0`, `land 0` -
+  **five** selftests green including `--renderer-selftest=cpu` -
+  `verify_trace_assets --strict` at **33 embedded files**, and **proven able to
+  fail** by a planted stray file before its pass was accepted.
+- **EXR SEQUENCE PLAYBACK, WARM (discard rep 1 -- it is the OS file cache).**
+  DWAA 27ch **63.6 / 63.6 / 65.1 / 64.4%** = **15.3-15.6 fps** across four warm
+  reps (cold rep 1 read 59.6%) - PIZ 3ch **99.9% on all four reps**, `skip 0`,
+  `handler>budget 0 of 215`, **`cache hit 216 miss 0 (100.0%)`** - PNG
+  **100.0% on all three**, `cache hit 167 miss 0`. **`loads 1.02-1.03/frame` on
+  DWAA against a floor of 1.00 is the figure that closes the scheduling
+  question** -- the policy is within 3% of asking for nothing speculative, so
+  no gating change can reach 24fps and only the read itself can.
+- **THE CPU ESCAPE HATCH IS HEALTHY ON THE EXR FLOAT PATH**: PIZ on
+  `TRACE_RENDERER=cpu` reads **99.9, 96.6, 99.9, 99.9, 99.9%** over five reps;
+  the single dip did not reproduce and is inside that path's own recorded
+  variance.
+- **EXACTNESS UNCHANGED AND STRUCTURAL**, shipping default against
+  `TRACE_SEQ_PREFETCH_STRIDE=0`: stepping +7/-7 **0% / 0%** on both EXR files
+  (negative controls **10.4796%** -- the recorded figure to four decimals -- and
+  **55.1105%**); reverse then stop/+3/-3 **0% / 0% / 0%** on both (negative
+  controls **47.89%** and **8.7407%**). **Every negative control fired**, so
+  each 0% is a comparison that could have seen a moved picture.
+- **REVERSE, AS AN A/B WITH EACH LEG'S CONFIG READ OFF ITS OWN HUD**
+  (`legacy (env)` against `stride (env)`, `dir -1`): DWAA **27.6% -> 61.0%**,
+  `tick-stall` **25 -> 4**, loads/frame **2.89 -> 1.10**; PIZ **73.6% -> 99.9%**,
+  `skip` **56 -> 0**, cache hit **64.4% -> 99.5%**. **ONE DISCREPANCY STATED AS
+  ONE: the record has PIZ reverse at 84.2% -> 90.2% and this session measures
+  73.6% -> 99.9%** -- differing from the record in OPPOSITE directions, so the
+  gain is larger here. Attributed to file-cache warmth (four forward passes
+  preceded it) and not proven; no cache-drop control was run.
+- **`seqreverse.ps1`'s DEFAULTS WENT STALE THE MOMENT THEY WERE WRITTEN, AND
+  ARE FIXED.** The script was **created by `81f66b1`, the same commit that made
+  stride the default**, and `seqPrefetchStrideAware()` reads the knob as
+  "empty **OR** != 0" -- so an unset knob is **stride ON**. Its `EnvA` (profile
+  only, labelled `fixed`) and `EnvB` (profile + `STRIDE=1`, labelled `gate4`)
+  were **the same configuration under two labels**; a default run would have
+  compared stride against itself and reported the columns identical, which reads
+  exactly like "the policy makes no difference". **The recorded reverse figures
+  are SAFE** -- their `ISSUED/DECLINED` columns read `--` against `110/81`, so
+  that run passed explicit env. A guard now throws when both legs resolve to the
+  same configuration. **Its first version compared knob TEXT and let
+  absent-vs-`=1` through**; it resolves the knob now, and is proven to fire on
+  all three identical-config forms. **Never rely on an unset knob to mean a
+  non-default.**
+- **TWO INSTRUMENT TRAPS RE-PAID.** **`strings` IS BROKEN IN THIS GIT BASH** --
+  zero lines from a 1.1MB PE file, so every marker search "found" nothing,
+  which reads exactly like a build missing its features; use `grep -a` on the
+  raw binary and **prove the search finds a known marker first**. And **a
+  concurrent Trace launch voided a full-pool sweep**: `scrubsweep.ps1` got null
+  output from a `--scrub-selftest` and threw on `Split` at file 14/22, passing
+  22/22 when re-run serialized. `seqcadence.ps1` ends with
+  `Stop-Process -Name Trace -Force`, so **measurement runs must be serialized**
+  and a mid-sweep harness crash is contention until proven otherwise.
 
 ### WHAT STAGE 2 PART 2 STILL OWES
 
