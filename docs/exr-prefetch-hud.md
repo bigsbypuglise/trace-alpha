@@ -157,11 +157,22 @@ against a 41.67ms budget, so the read alone is the whole budget.
 
 ## STILL OPEN
 
-- **No owner hand-test.** Unchanged by this commit -- the HUD is what makes one
-  worth doing, not a substitute for it.
+- ~~**No owner hand-test.**~~ **DONE 2026-08-25, AND THE VERDICT IS USABLE.**
+  The owner ran the procedure below and ruled that **~15 fps on the 27-channel
+  multilayer DWAA working file is usable for review**, on the stated grounds
+  that this is a difficult file class that is often hard to play back in real
+  time without caching. **It is explicitly NOT a blocker for the EXR
+  milestone.** Read that at its stated width: what was accepted is *this file
+  class at this rate for review*. It is **not** a statement that the file plays
+  in real time -- it does not, by about a third -- and the release notes are
+  required to say both halves (`docs/exr-release-notes.md`).
 - The warm-up window still uses the legacy `+-1` behaviour, worth the recorded
   1-2 points on DWAA. Deliberately not optimised.
-- Cosmetic, PRE-EXISTING and not this commit's: several HUD fields print a
+- ~~Cosmetic, PRE-EXISTING and not this commit's: several HUD fields print a
   doubled percent (`56.9%%`, `media 98.5%%`, `wasted 98%%`) because
-  `QString::arg` does not treat `%%` as an escape. The new line avoids it by
-  folding the sign into the value.
+  `QString::arg` does not treat `%%` as an escape.~~ **FIXED in `7369c29`, the
+  commit immediately after this record was written** -- every affected format
+  string now carries a single `%`. Verified at HEAD: the only `%%` left in
+  `MainWindow.cpp` and `src/core/*.cpp` are inside comments explaining the trap.
+  The new line still folds the sign into the value, which is why it never had
+  the bug.

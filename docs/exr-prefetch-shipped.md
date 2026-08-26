@@ -113,8 +113,13 @@ cascade that never converges.
 
 ## OTHER OPEN GAPS, NAMED
 
-- **No owner hand-test.** Every figure here is a counter; nobody has watched a
-  sequence play under this policy.
+- ~~**No owner hand-test.**~~ **CLOSED 2026-08-25: the owner watched it play and
+  ruled ~15 fps on the 27-channel DWAA working file USABLE for review**, and
+  explicitly not a blocker for the EXR milestone. The counters are no longer the
+  only evidence. The limit itself is unchanged and is now a documented,
+  accepted one rather than an open question -- see
+  `docs/exr-release-notes.md` and the known-gaps entry in
+  `docs/release-notes-alpha.md`.
 - ~~**The policy's state is not on the HUD.**~~ **CLOSED 2026-08-25** --
   `seq-prefetch` is the fourth line of the image-sequence HUD, naming the policy
   (including the rollback, as `legacy (env)`), the stride, the gate's run
