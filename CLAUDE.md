@@ -5688,14 +5688,21 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   in the step status and different in that line, which is the reason to read the output rather
   than the tick.
 
-  **THE RELEASE STAGE IS NOT IN THE VERSION NUMBER, AND IT LIVES IN THREE PLACES.** CMake's
+  **THE RELEASE STAGE IS NOT IN THE VERSION NUMBER, AND IT LIVES IN FOUR PLACES — THIS
+  ENTRY SAID THREE UNTIL 2026-08-25 AND SO DID CMakeLists' OWN COMMENT.** CMake's
   `VERSION` field cannot hold a prerelease suffix, so `project(Trace VERSION 0.2.0)` covers both
-  the alpha and the beta of this line and the *word* is what distinguishes them. It is a literal
-  in `src/app/MainWindow.cpp` three times: `buildIdentity()`'s `Trace %1 (beta)`, the About
-  dialog's small print, and the **Report an Issue mail subject**. Missing one leaves the number
-  looking right while the build names the wrong stage in the one place a tester quotes back.
-  **Verify against the built binary, not the source** — reading the compiled strings out of
-  `Trace.exe` is what confirms all three moved and none survived.
+  the alpha and the beta of this line and the *word* is what distinguishes them. The four
+  literals in `src/app/MainWindow.cpp`: `buildIdentity()`'s `Trace %1 (beta)`, the About
+  dialog's small print (**capital `Beta.`, so a lower-case-only search misses it**), the
+  **Report an Issue mail subject**, and — the one the recorded count omitted — the
+  **`--scrub-selftest` report header** (`build: Trace %1 (beta)`), added when that selftest was
+  built in 2026-08-19 and never added to the tally. **That fourth one is inside the block a
+  tester pastes back**, i.e. exactly the place this rule exists to protect. Missing one leaves
+  the number looking right while the build names the wrong stage in the one place a tester
+  quotes back. **Verify against the built binary, not the source** — and note the two
+  encodings differ: `tr()` literals compile to **ASCII/UTF-8** while
+  `QStringLiteral(TRACE_VERSION_STRING)` compiles to **UTF-16LE**, so one search cannot find
+  both and an ASCII-only search for the version number returns zero on a correct build.
 
   **THE PACKAGE IS `trace-windows-x64` AND CARRIES NO RELEASE STAGE (renamed 2026-08-15, after
   the beta shipped as `trace-alpha-*`).** The handoff enumerated it as *five* references in the
