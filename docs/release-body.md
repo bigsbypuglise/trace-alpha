@@ -1,103 +1,111 @@
-## Trace v0.3.0-beta.8
+## Trace v0.4.0-beta.1
 
-**A diagnostic release. No shipping behaviour changed on purpose.** This build closes out the
-investigation into the title-bar freeze report with a real answer — not a fix, an answer — and
-adds two file-based instruments for chasing it (or anything like it) in the field. Nothing about
-playback, scrubbing, or audio was touched.
+**Trace opens EXR now.** Stills and numbered sequences, read as scene-linear float rather than
+flattened to 8 bits on the way in, with OpenColorIO colour management over the top and
+multilayer pass cycling. This is the first release where the minor version moved for what Trace
+can *open* rather than for how it looks.
+
+The playback engine underneath is unchanged and was re-measured flat at the panel before this was
+cut — 22 files, 88 scrub legs, exact frame landing on every one.
 
 Windows, portable ZIP, x64. Unzip anywhere and run `Trace.exe`. There is no installer by design.
+**The download is larger than previous releases** — about 118 MB unpacked against 95 MB — because
+OpenImageIO and OpenColorIO now ship inside it.
 
-### The title-bar freeze: diagnosed, and it is not fixable without a much bigger change
+### EXR, with colour management and multilayer passes
 
-Pressing and holding the real Windows title bar freezes the whole app — picture, HUD, audio,
-everything — for about half a second before the window starts moving. This is now fully
-understood:
+- **EXR stills and sequences open.** Point Trace at a `.exr` or at a numbered sequence folder and
+  it plays, the same as any other media. Values above 1.0 survive into the display stage instead
+  of being clipped on load.
+- **Colour transforms** through OpenColorIO: load a `.cube` LUT, or pick a config, input colour
+  space, display and view from **View ▸ Color Transform…**. **`C`** toggles the transform off and
+  on, so you can A/B against the raw image without reopening anything.
+- **Multilayer passes.** **`[`** and **`]`** cycle the passes in a multilayer EXR, and
+  **View ▸ EXR Pass** lists them by name. Beauty, position, normal, depth and data passes each get
+  an appropriate on-screen mapping, and the HUD always says which mapping is in force and what
+  range it measured — normalising the picture to make it visible is allowed, doing it silently is
+  not.
 
-**It is Windows itself, not Trace.** During the freeze the UI thread retrieves **no message of
-any kind** — not input, not a timer, nothing. It happens *before* the window-move operation
-even begins, so nothing inside that operation can be the cause. It reproduces identically on
-three different Qt versions and with audio disabled entirely, which rules out both Qt and the
-audio backend. The only thing that measurably works is intercepting the title-bar press and
-starting the move ourselves — which moves the exact same freeze to a different Windows code
-path and changes nothing.
+### ⚠️ Copy Current Frame now copies what is on screen
 
-**The only real fix would mean reimplementing the title bar by hand** — capture, hit-testing,
-window positioning, and never handing the click back to Windows. That also means reimplementing
-Snap, Aero Shake, edge magnetism, and multi-monitor drag behaviour ourselves, which is exactly
-the tradeoff that was declined when the frameless-window idea was closed earlier — Trace keeps
-the native title bar on purpose, for those. So this is closed as **understood, not fixed**, and
-is not going to change without reopening that decision.
+**This is a deliberate change to existing behaviour, and it affects video as well as EXR.**
 
-**What does work correctly**: when the freeze ends, audio and picture resume in sync — the
-device was handed one buffer and then nothing for the whole freeze, and video follows the audio
-clock rather than wall time, so playback picks back up 2–3 frames later, not twelve. That part
-was already correct; it just took this investigation to confirm it.
+`Ctrl+C` used to put the raw source pixels on the clipboard. It now puts **the image you are
+looking at**. With a LUT or view transform active you get the graded picture, not the flat log
+source.
 
-### Two new diagnostics, both default off and free when off
-
-Two file-based logs were added for chasing this and any future stall like it — file-based
-because the dev HUD freezes right along with everything else during the fault, so it can't be
-read at the moment that matters.
-
-| env var | what it does |
-|---|---|
-| `TRACE_TICK_LOG=1` | writes one line per late playback tick to `%TEMP%\trace_tickstall.txt`, including audio counters that can see through a frozen UI thread |
-| `TRACE_MSG_LOG=1` | writes a full Windows message-pump timeline to `%TEMP%\trace_msglog.txt`, so a stall shows up as a gap in the timeline rather than a guess |
-
-Both are off by default and measured to cost nothing when off — confirmed against a control
-build with hashed-identical DLLs, on both playback and with audio-mastered clips. Not something
-you'd normally turn on; here in case a stall is ever worth chasing down again.
-
-### Two experimental knobs, still default off, useful if you're testing something specific
-
-Neither of these is new in this build, but neither has been called out plainly before. Both
-default off; neither is recommended for normal use yet.
-
-- **`TRACE_IO_READAHEAD=1`** — read-ahead buffering for remote storage (LucidLink and similar).
-  It's correctness-verified — pixel-identical output against the plain path across forward and
-  backward scrubbing — but it has **not been validated against a real remote mount**. Every
-  performance figure behind it so far is a relative, synthetic on/off comparison on local media
-  with an injected fake network delay, not a real cold LucidLink read. If you try it on a real
-  `V:\` file, what I'd want to know is whether it visibly helps or hurts — not a number, a feel.
-- **`TRACE_PLAYBACK_QUEUE=2`** — decodes up to N frames ahead of playback on a background
-  worker instead of one at a time on the UI thread. Worth roughly +10% throughput on very heavy
-  material (the 8K ProRes 4444 XQ plate). Depth 2 is the minimum that does anything; depth 1 is
-  measured *worse* than off. Does nothing noticeable on ordinary 4K/1080p media, which already
-  keeps up without it.
+If you have been using Copy Frame to grab untouched source pixels, that is what changed. It was
+changed on purpose: it is the only correct answer for EXR, whose source frame is scene-referred
+float with no single right 8-bit reading, and for video it is almost always what someone copying
+a frame to send to a colleague actually wants. The rotate/flip view transform is still *not*
+applied — that part is unchanged.
 
 ### Known and unchanged
 
-- **8K ProRes 4444 XQ does not reach real-time playback**, and this is understood rather than
-  an open bug: best measured is **13.64 fps (56.9% of real time)** at full quality with every
-  frame shown, decode-bound at the CPU's own ceiling for that codec. No further work is planned
-  here — a faster decoder or GPU decode would be needed, and GPU decode is explicitly out of
-  scope. `TRACE_RT_DROP=0` is available if you want to compare against the frame-dropping
-  fallback, but that fallback is not the answer and is not going to become the default.
-- **A small window-position drift on multi-monitor setups with different display scaling**:
-  going fullscreen and back (Escape) on a secondary monitor running at 150% scaling can land
-  the window about 7 pixels higher than where it started. Size is unaffected — this is a small
-  position nudge, not the framing bug to watch for. Known, not yet patched.
-- 10-bit output is still deliberately not in this build — it needs a confirmed 10-bit display
-  and a defined HDR/colour-management workflow before it's worth building, neither of which is
-  in place yet.
-- EXR does not open: this build does not include OpenImageIO.
+- **Heavy multilayer EXR sequences do not play at full real time.** A 27-channel multilayer DWAA
+  sequence at 1920×1080 plays at roughly **15 frames per second — about two-thirds of real time**
+  (measured 63.6–65.1% of 24fps across four warm passes on the test system). **This is considered
+  acceptable for review on this difficult file class, and it is not full real-time playback.**
+  The limit is the file rather than anything schedulable: reading a single frame of that file
+  takes about as long as the entire frame budget at 24fps, so the read alone is the whole budget
+  before a pixel is drawn. Trace already issues almost exactly one read per frame shown, so there
+  is no speculative work left to remove. If your work is heavy multilayer EXR at speed, know this
+  going in.
+- **Single-layer EXR and PNG sequences are unaffected and hold real time** — measured 99.9% and
+  100.0% respectively, with no frames skipped.
+- **The first play of any EXR sequence is roughly half speed** while Windows fills its file cache.
+  Press Home and play it again; the second pass is the real figure. This is the operating system,
+  not Trace.
+- **8K ProRes 4444 XQ does not reach real-time playback**, and this is understood rather than an
+  open bug: best measured is **13.64 fps (56.9% of real time)** at full quality with every frame
+  shown, decode-bound at the CPU's own ceiling for that codec. No further work is planned here —
+  a faster decoder or GPU decode would be needed, and GPU decode is explicitly out of scope.
+  `TRACE_RT_DROP=0` is available if you want to compare against the frame-dropping fallback, but
+  that fallback is not the answer and is not going to become the default.
+- **Very high-bitrate media will not stream cold from LucidLink.** Cold remote delivery measured
+  around 600–800 Mbps, so a multi-gigabit-per-second plate cannot play at real time from a cold
+  cache no matter how it is buffered. Once the file is warm it plays at whatever the local CPU can
+  do. Ordinary 4K ProRes 422/HQ review material is the case that works.
+- **A small window-position drift on multi-monitor setups with different display scaling**: going
+  fullscreen and back (Escape) on a secondary monitor running at 150% scaling can land the window
+  about 7 pixels higher than where it started. Size is unaffected — this is a small position
+  nudge, not the framing bug to watch for. Known, not yet patched. **Real mixed-monitor DPI beyond
+  100%/150% remains unvalidated** — other scale factors, three or more displays, and changing a
+  monitor's scaling while Trace is running have not been tested on hardware.
+- **The title-bar freeze from beta.8 is unchanged and is closed as understood, not fixed.**
+  Pressing and holding the real Windows title bar freezes the app for about half a second before
+  the window starts moving. It is Windows itself — the UI thread receives no message of any kind
+  during it, and it happens before the window-move operation begins. Fixing it would mean
+  reimplementing the title bar by hand, and Snap, Aero Shake and multi-monitor drag with it.
+- 10-bit output is still deliberately not in this build — it needs a confirmed 10-bit display and
+  a defined HDR/colour-management workflow before it's worth building, neither of which is in
+  place yet.
 - HDR/PQ material gets the right colour matrix but no tonemap.
 - Audio during scrubbing, reverse playback, and off-speed (J/L) playback is deliberately silent.
 
 ### Rollback knobs for this release
 
-Unchanged from beta.7 — the same ones still apply.
-
 | knob | effect |
 |---|---|
+| `TRACE_SEQ_PREFETCH_STRIDE=0` | image-sequence prefetch back to the fixed one-frame-either-side window, if the new policy ever misbehaves |
 | `TRACE_RENDERER=cpu` | the software renderer — first thing to try if the picture looks wrong |
 | `TRACE_VOLUME_SLIDER=0` | mute-only button, no slider, no stored level |
 | `TRACE_FS_MAG_FILTER=0` | fullscreen magnification back to the sharp sampler |
 | `TRACE_MARK_ANIM=0` | empty-state mark held still |
 | `TRACE_SCRUB_PAINT_GATE=0` | the beta.3 scrub paint gate off |
 
+### Other knobs, if you are testing something specific
+
+| knob | effect |
+|---|---|
+| `TRACE_COLOR_LUT=<path>` | load a LUT at startup without going through the dialog |
+| `TRACE_COLOR_VIEW=<config>` | configure a display/view transform at startup; optionally `<config>\|<input>\|<display>\|<view>` |
+| `TRACE_IO_READAHEAD=1` | read-ahead buffering for remote storage. Correctness-verified — pixel-identical output against the plain path — but **not validated against a real remote mount**. If you try it on a real `V:\` file, the useful report is whether it visibly helps or hurts: a feel, not a number. |
+| `TRACE_PLAYBACK_QUEUE=2` | decode up to N frames ahead on a background worker. Worth roughly +10% on very heavy material (the 8K plate). Depth 2 is the minimum that does anything; depth 1 is measured *worse* than off. Does nothing noticeable on ordinary 4K/1080p media. |
+
 ### If something is wrong
 
 Help ▸ Report an Issue opens a pre-filled mail with the build identity in it. Press `H` to show
 the diagnostics HUD and include a screenshot of it — nearly every question about playback,
-scrubbing or audio is answered by that one line of text.
+scrubbing or audio is answered by that one line of text. On an EXR sequence the HUD also names
+the colour mapping in force, the active pass and the prefetch policy.
