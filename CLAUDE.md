@@ -1691,15 +1691,81 @@ to the fixed +-1 window.** Closes the EXR prefetch session.
   in passing**: it costs PIZ early cache misses, and the gate-8 result proved
   that starving the cache early on a file with ~4ms of headroom starts a skip
   cascade that never converges.
-- **TWO SMALLER GAPS, NAMED: no owner hand-test** (every figure is a counter;
-  nobody has watched it play), and **the policy's state is NOT on the HUD** --
-  readable only through `TRACE_SEQ_PROFILE=1`. That is a departure from this
-  file's own rule about knobs whose state cannot be read back off a running
-  build, recorded rather than fixed.
+- ~~**TWO SMALLER GAPS, NAMED**~~ **ONE REMAINS. The policy's state IS ON THE
+  HUD as of 2026-08-25** (`docs/exr-prefetch-hud.md`): the image-sequence HUD's
+  fourth line is `seq-prefetch`, naming the policy -- **including the rollback,
+  which prints `legacy (env)`** -- the last stride, the gate's run counter,
+  issued/declined/legacy and cache hit/miss, with `loads N/M = X/frame` counting
+  REAL loader calls rather than decisions. Cost measured against a control built
+  from `81f66b1`: DWAA warm **control 65.5/64.5/65.5% against HEAD
+  64.8/65.4/64.4%**, and in the SHIPPING config it is structurally zero because
+  `refreshHud()` returns above every line it builds when the HUD is hidden.
+  **The owner hand-test is still outstanding and is the open gap** -- every
+  figure here is a counter and nobody has watched it play. Launchers for it are
+  in `_handtest_260825/` (untracked).
+- **DISCARD THE FIRST PASS OVER ANY EXR SEQUENCE. The "unexplained" rep-to-rep
+  spread is the OS FILE CACHE** (2026-08-25). `docs/exr-stride-aware-prefetch.md`
+  recorded DWAA's 54.3 -> 60.6 -> 62.9% as *"NOT explained ... the first thing to
+  nail down"* and ruled out caching because the A and B columns were flat. Six
+  consecutive passes, identical binary and config, show both EXR files climbing
+  monotonically to a plateau matching the record: **DWAA 37.6 (fully cold) ->
+  56.9 -> 63.1 -> 63.7 -> 65.5 -> 64.5 -> 65.5%**, **PIZ 76.5 -> 87.4 -> 99.9 ->
+  99.9%**. The sizes fit -- **3.3 GB and 1.6 GB of frames against 128 GB of RAM**
+  -- and each rep is a fresh process, so it is not process warm-up. The earlier
+  ruling-out is consistent rather than wrong: those columns were measured later
+  in an already-warm session. **A cold first pass reads roughly HALF the warm
+  rate, which looks exactly like a serious regression.** No deliberate
+  cache-drop control was run, so this is a strong attribution across two
+  independent files, not a proof.
 - **NOT PURSUED, BY INSTRUCTION: gate 8 (REFUTED, see the block above),
   scheduler-accumulator prediction, off-thread EXR reads, alpha-prefill
   optimisation, GPU/OCIO work.** Cache architecture, radius and put/get are
   unchanged throughout the whole session.
+
+**WHERE EXR PLAYBACK GOES NEXT -- RECORDED, NOT DECIDED (2026-08-25). THE
+DECISION IS THE OWNER'S AND THE HAND-TEST HAS NOT HAPPENED YET.** This is a
+view written down so it is not re-derived from scratch; it is not an
+instruction, and nothing below is scheduled or started.
+
+- **THE ONE NUMBER THAT DECIDES THIS PHASE: A FULL EXR LOAD ON THE 27-CHANNEL
+  DWAA FILE MEASURES ~42.5ms, SYNCHRONOUS ON THE UI THREAD, AGAINST A 41.67ms
+  FRAME BUDGET AT 24fps.** The shipped policy already runs at **1.02 loads per
+  presented frame** -- within 2% of the floor of 1.00, which is one load for the
+  frame being shown and nothing speculative. **So the read alone is the whole
+  budget, before mapping, upload or present.** Those add the rest of the
+  measured ~60ms accounted per frame, which is why the file sits at ~62-65% of
+  real time. **No scheduling, gating or prefetch change can reach 24fps from
+  here, because the policy is already at the floor of what it can ask for.**
+  Only moving the read off the UI thread can.
+- **THE WARM-UP FIX IS RULED OUT, FOR TWO REASONS AND NOT ONE.** It is worth
+  **1-2 points** on DWAA. **(a) That sits inside the file's own warm rep-to-rep
+  noise floor of 64.4-65.5%** -- it buys less than the measurement can resolve.
+  **(b) The risk is measured rather than theoretical**: the gate-8 result proved
+  that starving the cache early on a file with ~4ms of headroom starts a **skip
+  cascade that never converges**, and declining during warm-up is the same
+  mechanism, so it would cost PIZ -- the control file -- early cache misses.
+  Paying real risk on the control file for a gain below the noise floor is a bad
+  trade in both directions at once.
+- **OFF-THREAD EXR READS IS THE REAL LEVER, AND IT GETS
+  MEASURE-THEN-PROPOSE-THEN-BUILD RATHER THAN A TAIL-END ADD-ON. The reason is a
+  scar this project already has**: checkpoint 2 stage one on the video path
+  returned **+10% against a predicted +22%**, because **conversion rides with
+  decode** (`convertCurrentFrame` is called from inside `decodeFrameAt`, so
+  moving decode to a worker moves conversion with it) and **the two overlapped
+  stages then contend** -- `sws` +24%, `upload` +91%. The EXR path has the same
+  shape: `loadExr` reads, allocates, alpha-fills and returns a converted buffer
+  in one call, so "move the read off the thread" is not one stage, and the
+  arithmetic has to be done on the real decomposition
+  (`docs/exr-dwaa-stage-decomposition.md`) before anything is built. **Building
+  against the wrong arithmetic produces a correct implementation that measures
+  as a failure**, which is exactly what stage one did.
+- **THE THREE OPTIONS AS THEY STAND, for the owner to choose between after the
+  hand-test:** (1) accept ~62-65%, document the limit honestly in the release
+  notes and merge; (2) the warm-up fix -- **recommended against, above**;
+  (3) off-thread EXR reads, as its own phase with its own measurement pass.
+  **If the hand-test finds ~15fps unusable on a 27-channel working file, (3)
+  stops being schedulable and becomes urgent.** That is the judgement the
+  counters cannot make.
 
 ### WHAT STAGE 2 PART 2 STILL OWES
 
@@ -5745,6 +5811,22 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    LUT workflow is unaffected and an ACES view transform needs stage 5, the GPU
    stage -- which is now a live owner question rather than a deferred cost
    decision.** Stage 5 is not started.
+   **THE PREFETCH WORK IS DONE AND SHIPS ON (2026-08-25): the stride-aware gate
+   took DWAA from ~29% to ~62-65% of real time forward and 28.3% -> 61.1%
+   reverse, PIZ 84.2% -> 90.2% reverse, with `TRACE_SEQ_PREFETCH_STRIDE=0` as
+   the rollback and the policy's whole state now on the HUD's `seq-prefetch`
+   line.** **THE SINGLE NUMBER THAT DECIDES WHAT COMES NEXT: A FULL EXR LOAD ON
+   THE 27-CHANNEL DWAA FILE IS ~42.5ms, SYNCHRONOUS ON THE UI THREAD, AGAINST A
+   41.67ms FRAME BUDGET -- and the shipped policy already runs at 1.02 loads per
+   presented frame, within 2% of the floor. The read IS the budget, so no
+   prefetch or scheduling change can reach 24fps and only OFF-THREAD EXR READS
+   can.** The warm-up fix is recorded as ruled out (its 1-2 points sit inside the
+   file's own 64.4-65.5% noise floor, and gate 8 measured the skip cascade that
+   starving the cache early causes). **All of it is RECORDED, NOT DECIDED -- the
+   owner has not hand-tested it and the choice is theirs**; the reasoning, the
+   decode-queue scar that argues for measure-then-propose-then-build, and the
+   three options are in the stride-aware prefetch section above and in
+   `docs/exr-prefetch-hud.md`.
 
 ## Where scrub stands (2026-08-07, second session)
 
