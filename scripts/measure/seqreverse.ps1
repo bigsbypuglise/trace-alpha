@@ -18,11 +18,48 @@ param(
     [int]$Seconds = 12,
     [int]$Steps = 3,
     [string]$OutDir = "$env:TEMP\trace_seqreverse",
-    [string[]]$EnvA = @("TRACE_SEQ_PROFILE=1"),
+    # THESE DEFAULTS WENT STALE THE MOMENT THEY WERE WRITTEN, and the fix is
+    # recorded here so the next reader does not re-derive it. This script was
+    # CREATED BY 81f66b1 -- the same commit that made the stride policy the
+    # SHIPPING DEFAULT. seqPrefetchStrideAware() reads the knob as
+    # "empty OR != 0", so at HEAD an unset knob is STRIDE ON, not the fixed
+    # window. The original EnvA (profile only) and EnvB (profile + STRIDE=1)
+    # are therefore THE SAME CONFIGURATION under the labels "fixed" and
+    # "gate4", and a run with the defaults would compare stride against itself
+    # and report the two as identical -- which reads exactly like "the policy
+    # makes no difference".
+    #
+    # A is now the ROLLBACK explicitly. Never rely on an unset knob to mean a
+    # non-default: name the configuration you want.
+    [string[]]$EnvA = @("TRACE_SEQ_PROFILE=1", "TRACE_SEQ_PREFETCH_STRIDE=0"),
     [string[]]$EnvB = @("TRACE_SEQ_PROFILE=1", "TRACE_SEQ_PREFETCH_STRIDE=1"),
-    [string]$LabelA = "fixed",
-    [string]$LabelB = "gate4"
+    [string]$LabelA = "fixed (STRIDE=0)",
+    [string]$LabelB = "shipped (stride)"
 )
+
+# THE GUARD THIS SCRIPT DID NOT HAVE. Two legs that resolve to the same
+# configuration cannot produce a comparison, and the failure is silent: both
+# columns simply agree. Compare the knob sets rather than the labels, because
+# it was the LABELS that were wrong.
+# RESOLVE the knob, never compare its text. seqPrefetchStrideAware() is
+# "empty OR != 0", so an ABSENT knob and "=1" are the SAME configuration while
+# being different strings -- the first version of this guard compared strings,
+# let exactly that pair through, and had to be corrected.
+function StrideOn([string[]]$e) {
+    $v = $null
+    foreach ($kv in $e) {
+        if ($kv -match '^\s*TRACE_SEQ_PREFETCH_STRIDE\s*=\s*(.*)$') { $v = $Matches[1].Trim() }
+    }
+    return ($null -eq $v -or $v -ne '0')   # absent or non-zero => stride ON
+}
+if ((StrideOn $EnvA) -eq (StrideOn $EnvB)) {
+    $state = if (StrideOn $EnvA) { 'stride ON' } else { 'fixed +-1' }
+    throw ("seqreverse: EnvA and EnvB both resolve to $state, so this run would compare a " +
+           "configuration against ITSELF and report the two columns as identical. An ABSENT " +
+           "TRACE_SEQ_PREFETCH_STRIDE means STRIDE ON since 81f66b1 -- it is not the fixed " +
+           "window. Name the rollback explicitly: " +
+           "-EnvA 'TRACE_SEQ_PROFILE=1','TRACE_SEQ_PREFETCH_STRIDE=0'")
+}
 
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName System.Windows.Forms
