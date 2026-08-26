@@ -10157,12 +10157,12 @@ MainWindow::CadenceHudLines MainWindow::cadenceHudLines(double rateFps,
     // thing on both: media time covered against wall time, which must read ~100%
     // whenever `real time` reads below it.
     const QString dropField = rateIsNominal
-        ? QString(" | skip %1 (ticks %2 max %3, media %4%%)")
+        ? QString(" | skip %1 (ticks %2 max %3, media %4%)")
               .arg(seqSkippedFrames_)
               .arg(seqSkipTicks_)
               .arg(maxSeqSkipRun_)
               .arg(QString::number(mediaPct, 'f', 1))
-        : QString(" | drop %1 (ticks %2 max %3, media %4%%)")
+        : QString(" | drop %1 (ticks %2 max %3, media %4%)")
               .arg(playbackDroppedFrames_)
               .arg(playbackDropTicks_)
               .arg(maxDropRun_)
@@ -10185,7 +10185,7 @@ MainWindow::CadenceHudLines MainWindow::cadenceHudLines(double rateFps,
     // with a channel count. Nothing dropField can contain is a placeholder
     // today, so this is a guard rather than a fix, and it costs a renumber.
     out.presented = rateValid
-        ? QString("presented %1 / %2%6 (%3%% real time) | frames %4 | elapsed %5s%7")
+        ? QString("presented %1 / %2%6 (%3% real time) | frames %4 | elapsed %5s%7")
               .arg(QString::number(presentedFps, 'f', 2))
               .arg(QString::number(rateFps, 'f', 2))
               .arg(QString::number(realTimePct, 'f', 1))
@@ -10659,7 +10659,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(drawPerf.avgUploadMs, 'f', 2))
                 .arg(drawPerf.textureCreates);
 
-            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6%% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | thr %20")
+            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | thr %20")
                 .arg(perf.lastConvertCalls)
                 .arg(perf.lastCtxRebuilds)
                 .arg(perf.lastImageWasShared ? "yes" : "no")
@@ -10790,7 +10790,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(supersededResults_);
 
             auto ioLine = [](const char* tag, const trace::core::IoPhaseStats& s) {
-                return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6%% "
+                return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6% "
                                "| seek %7 | lat %8/%9ms | %10 Mbps | stall %11 (%12ms)")
                     .arg(tag)
                     .arg(s.reads)
@@ -10880,7 +10880,7 @@ void MainWindow::refreshHud(const QString& action) {
             // Capacity is the count that fits at the size currently stored, so
             // it rises as a 4K drag fills the cache with half-res previews.
             // The MB pair is the real rule; the count is derived from it.
-            const QString l8 = QString("cache FIFO | %1/%2 (%3/%9 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
+            const QString l8 = QString("cache FIFO | %1/%2 (%3/%9 MB) | hit %4% (%5/%6) | ins %7 evict %8")
                 .arg(perf.cacheOccupancy)
                 .arg(perf.cacheCapacity)
                 .arg(QString::number(static_cast<double>(perf.cacheBytes) / (1024.0 * 1024.0), 'f', 1))
@@ -10954,7 +10954,7 @@ void MainWindow::refreshHud(const QString& action) {
             // was read as a clean result across a dozen title-bar harness runs
             // whose own `period max` said 512ms. The playback-side answer is
             // `tick-late`/`tick-stall` on the period line above.
-            const QString l7b = QString("smooth/drag | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | gated %11 | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
+            const QString l7b = QString("smooth/drag | gap %1/%2/%3ms (last/avg/max) | wasted %4% (%5) | gated %11 | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
                 .arg(QString::number(scrubPaintGapLastMs_, 'f', 1))
                 .arg(QString::number(gapAvg, 'f', 1))
                 .arg(QString::number(scrubPaintGapMaxMs_, 'f', 1))
@@ -11127,7 +11127,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(scrubWorker_.maxBatchDecoded())
                 .arg(scrubKfLandings_);
 
-            const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3%% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
+            const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
                 .arg(QString::number(scrubPointerFps_, 'f', 1))
                 .arg(QString::number(scrubDecodeFps_, 'f', 1))
                 .arg(QString::number(lagRatio * 100.0, 'f', 0))

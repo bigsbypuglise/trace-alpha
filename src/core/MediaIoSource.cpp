@@ -560,8 +560,8 @@ void MediaIoSource::close() {
         const auto& sk = impl_->stats[static_cast<int>(IoPhase::Seek)];
         ioLogLine(QString(
             "readahead=%1 injectKbps=%2 injectDelayMs=%3 capMB=%4 | "
-            "play rd=%5 MB=%6 seq=%7%% hits=%8 rebases=%9 seeks=%10 stall=%11 avgLat=%12ms activeMs=%13 | "
-            "seek rd=%14 MB=%15 seq=%16%% hits=%17 rebases=%18 seeks=%19 stall=%20 avgLat=%21ms")
+            "play rd=%5 MB=%6 seq=%7% hits=%8 rebases=%9 seeks=%10 stall=%11 avgLat=%12ms activeMs=%13 | "
+            "seek rd=%14 MB=%15 seq=%16% hits=%17 rebases=%18 seeks=%19 stall=%20 avgLat=%21ms")
             .arg(impl_->readAheadEnabled ? "1" : "0")
             .arg(impl_->injectBytesPerSec > 0 ? (impl_->injectBytesPerSec * 8) / 1000 : 0)
             .arg(impl_->injectDelayUs / 1000)
