@@ -857,6 +857,1377 @@ planar=1`, `11 shapes x 4 scale factors`, `--scrub-selftest`) ·
   already records for `overlay.ps1`, not a rendering difference, and §20.3's
   150% case is owner-accepted since GATE B. Not investigated further.
 
+**EXR/COLOUR STAGE 2 PART 1 IS DONE (2026-08-24): A FLOAT DISPLAY BUFFER ON THE
+EXR PATH, AND ONLY THERE.** Record `docs/exr-stage2-float-buffer.md` — read it
+before touching the EXR path. Commits `28cca98` (float), `2da029e` (Copy Frame),
+`f31bf57` (record), on branch `exr-stage0-dependencies`, **pushed, NOT merged —
+the panel regression is the gate on merging and the merge stays the owner's**.
+**PART 2 IS NOT STARTED**; what it owes is listed at the end of this block.
+
+- **CHECK THE DISPLAY BEFORE MEASURING ANYTHING, AND DO NOT SKIP IT.** This
+  session ran **over Parsec, on a 1920x1080 @ 59.999Hz virtual display**
+  (`parsecd` running, `QueryDisplayConfig` naming that as the active path) — and
+  **the 4090's own panel read 5120x1440 @ 59Hz, NOT 239.999Hz**. So the panel was
+  in a different mode from every recorded figure in this file, as well as being
+  behind a remote session. **Neither the Parsec display nor a 59Hz panel is the
+  configuration the records were taken on.** `scripts/measure/refresh.ps1` is the
+  check and it takes seconds; run `Get-CimInstance Win32_VideoController` beside
+  it, because `refresh.ps1` reports the ACTIVE path and will happily describe the
+  virtual display without ever saying the panel changed underneath it. **No
+  absolute figure in `docs/exr-stage2-float-buffer.md` is a panel baseline** —
+  that doc says so at the top, and it is why THE FULL PANEL REGRESSION IS
+  OUTSTANDING and is the merge gate.
+- **WHERE FLOAT STOPS IS THE WHOLE SAFETY ARGUMENT, and the renderers were not
+  touched at all.** `PixelLayout::RGBAF32` runs from `loadExr` to the display
+  stage in `ViewerWidget::setFrame` and no further; the stage emits BGRA8, which
+  is what both backends already present. Neither backend CAN draw a float frame —
+  `qtFormatFor(RGBAF32)` returns `Format_Invalid` so `toQImage()` is null, and the
+  D3D11 `setFrame` takes planar or BGRA8 and clears otherwise — and
+  `applyColorTransformToRenderer()` is the SINGLE function that hands a frame to a
+  backend. So "the measured present path is unchanged" is a property of one choke
+  point rather than a convention observed at call sites. **What it buys: the clip
+  to 8 bits now happens at the END of the chain instead of inside `loadExr` before
+  OCIO ever sees the pixels. What it does NOT buy: more than 8 bits OUT.** 10-bit
+  output and HDR are unmoved and still behind their own two external gates.
+- **THE JUSTIFICATION IS A NUMBER, NOT A PRINCIPLE: 48% of red, 42% of green and
+  66% of blue samples in the Redshift beauty pass exceed 1.0**, and `loadExr`
+  clipped every one of them. Range 0.0029..2.5195. Measured with the new
+  `scripts/measure/exrprobe` (channel order, per-channel ranges, channel-against-
+  channel comparison, read cost) — a standalone probe against the same pinned
+  OIIO, because the grouper had to be written against the order **OIIO presents**
+  rather than against EXR's alphabetical storage order.
+- **THE EXR DISPLAY HAD RED AND BLUE TRANSPOSED, ON EVERY EXR, AND IT SHIPPED IN
+  STAGE 0.** `loadExr` filled a `QImage::Format_RGBA8888` — memory order R,G,B,A —
+  by writing `qRgba()` through a `QRgb*`, and `qRgba()` packs `0xAARRGGBB`, which
+  on little-endian is **B,G,R,A in memory**. Blue landed in the red slot. It
+  survived stage 0 and stage 1 because the file it was developed against is a
+  near-neutral cream ice-cream render, where the swap looks almost right.
+  **THE PROOF METHOD MATTERS AS MUCH AS THE BUG, because the same test certifies
+  the replacement**: against a control built from `34b039c`, the new picture
+  differs from the control on **50.50%** of sampled pixels as captured, and on
+  **0 of 829,184 pixels at max channel delta 0** with the control's red and blue
+  swapped. An exact zero under exactly one channel permutation IS the diagnosis —
+  **and that same zero is what proves the rewritten gamma path is BIT-EXACT
+  against the old `powf` one**, which is otherwise a separate claim needing a
+  separate test. Sample pixel: new `(153,140,119)`, control `(119,140,153)`.
+  *(The first run of that comparison read 0.11% at max delta 116; the offenders
+  were all at x < 16, i.e. Windows 11's invisible resize border inside
+  `GetWindowRect` — the recorded `transitions.ps1` trap arriving in a new harness.
+  Exclude the first and last 16 columns of any window-capture diff.)*
+- **A SEQUENCE PATTERN IS PRINTF-SHAPED AND `QString::arg` READ IT AS ITS OWN
+  PLACEHOLDERS.** `icecream_passes%04d.exr` printed as `icecream_passes27d.exr` —
+  `%04` substituted with the channel count. Pre-existing, and visible on the
+  control. Both media HUD lines put their text fields in **last, together, through
+  the multi-arg overload**, which substitutes in ONE pass and never rescans what
+  it inserted; that also covers a file name containing a percent sign. **Any HUD
+  line carrying user text needs the same shape.**
+- **THE HUD's `ch:` FIELD MEANS THE SOURCE NOW** (stage 0 carry-forward item 5,
+  closed): it read `4` on a 3-channel EXR because the frame-handoff path
+  hard-coded the display buffer's channel count, and the loader knew the answer
+  all along with no way to ask it. The media line also carries the compression
+  (**`dwaa (lossy)`** — said out loud so nobody debugs a compression artefact as a
+  Trace bug), the active pass with its **raw channel names**, and the display
+  mapping with its measured range and fraction above 1.0.
+- **`ColorTransform` HAS TWO CPU PROCESSORS FOR ONE TRANSFORM.** `uint8 -> uint8`
+  is the video path, **unchanged byte for byte**; `f32 -> uint8` is the EXR path.
+  A float processor that fails to build is not fatal (video still works) but
+  `hasFloatProcessor()` is what the EXR path asks, so it cannot show an
+  untransformed picture while the HUD claims the transform is ON.
+- **THE MAPPING IS CHOSEN PER PASS CLASS AND NEVER PER PASS NAME**, and which one
+  is in force is ALWAYS on screen with the range it measured — normalising is
+  allowed, doing it quietly is not. `src/core/DisplayMapping.*`: `Gamma22` colour,
+  `Normalise` position/depth, `SignedUnit` normals, `Raw` data. Classification is
+  **exact name matches against small closed sets, never `contains()`** —
+  "Specular" contains a *p* and "Reflections" contains an *n*, and a substring
+  test sends both through a data mapping. The gamma conversion is a **binary
+  search over 255 OUTPUT thresholds**, not `powf` per sample (~124ms at 1080p,
+  three frame budgets) and not a table on the INPUT (the curve is near-vertical at
+  the bottom: the linear values separating output levels 0, 1 and 2 all sit below
+  1.5e-5, which a 16-bit input table cannot resolve — exactly the deep shadow
+  detail a scene-linear render is being reviewed for).
+- **MEMORY: a float frame is `w x h x 16`, and `FrameCache` is a WINDOW cache of
+  radius 1, so at most three.** 1080p **33.2 MB** (99.5 MB cached) · 4K
+  **132.7 MB** (398 MB) · **8K 530.8 MB (1.59 GB)**. **The 4K and 8K rows are
+  ARITHMETIC** — there is no 4K or 8K EXR in the asset set, and
+  `12_8K_ProRes4444` is a ProRes plate on the untouched video path. **If 8K EXR
+  ever arrives, bound that window cache by BYTES rather than by frame count.**
+  Measured at 1080p on the 27-channel file: **peak working set 523.3 -> 339.6 MB**
+  (the 224 MB whole-file read is gone), resident **+55 MB**.
+- **READING ONE PASS COSTS ABOUT HALF THE TIME AND A NINTH OF THE MEMORY, not a
+  ninth of the time** — DWAA decodes in blocks and there is fixed overhead. All 27
+  channels **75.40ms / 213.6 MB**; the root RGB pass **37.98ms / 23.7 MB**; `P`
+  **41.40ms / 23.7 MB**. **Sequence playback is UNCHANGED and that is the honest
+  reading**: both builds keep real time at 1080p because prefetch hides the
+  decode, so the channel-reading fix shows up as PEAK MEMORY, not frame rate, on
+  this material. The sequence path exposes no cadence counters and no rate figure
+  is claimed.
+- **REGRESSION AGAINST A CONTROL BUILT FROM `34b039c`** — DLL sets made
+  byte-identical by hash, the two binaries proven distinct **by their own
+  strings** rather than by a hash alone. **Parsec-class display, so this is an A/B
+  and NOT a set of baselines**: 4K H.264 cadence x2 each **100.0/100.0% on both**,
+  `drop 0`, `rephase 0`, buckets `~1x 119`, handler 1.88/1.77 new against
+  1.81/1.80 control · 4444 x2 each **99.8% on all four**, handler 18.97/19.10 new
+  against 19.56/19.61 control (the `<0.9x` bucket reads 2/1 against 1/1, inside
+  that file's recorded 1-10 span — do not chase it) · **`scrubbar.ps1` full pool
+  PASS — 22 files, 88 legs, `delta 0` throughout** · 4444 `-SnapRelease`
+  **`target 261 shown 261 delta 0`** on both with `dst YUV444P12 planar`
+  (**GATE C intact**), release 21.0 new / 21.7 control, `hitch 0`, `land 0`,
+  `kf-land 0` · all four selftests green · `verify_trace_assets --strict` at
+  **33 embedded files**.
+- **ALL THREE COMMITS ARE INDEPENDENTLY REVERTABLE, CHECKED RATHER THAN ASSUMED**:
+  each reverts cleanly AND the reverted tree builds, tested one at a time. The
+  Copy Frame commit is separable on purpose — it is the one behaviour change a
+  tester might want taken back on its own — which is why its edits are
+  deliberately NON-ADJACENT to the float commit's in every file they share.
+- **A HARNESS LESSON, AND IT PRODUCED THE FLATTERING ANSWER.** `scrub.ps1`
+  performs the GESTURE ONLY and captures nothing; the capture is a separate
+  `capture.ps1` call. Reading `%TEMP%\scrub-4444-snap-hud.png` after running it
+  returned a file from **five days earlier**, so a control and a candidate
+  "measured" byte-identical figures including `release 21.9ms` — which reads as
+  perfect agreement rather than as no measurement at all. **Check the timestamp
+  of any harness output you did not just watch being written.**
+
+**EXR/COLOUR STAGE 2 PART 2, THE KEYBOARD SURFACE, IS BUILT AND MEASURED
+(2026-08-24, physical panel 5120x1440 @ 239.999Hz). Record
+`docs/exr-stage2-keyboard-surface.md` — read it before touching any shortcut.**
+Commits `560b5ea` (the collision checker) · `c1047cc` (`C`) · `bac8755`
+(`[` and `]`) · `3938223` (harness) · `f1ec025` (code motion), on branch
+`exr-stage0-dependencies`, **NOT merged — the merge stays the owner's.** The
+pass overlay, the View-menu pass list and `duplicateOf` are still NOT built.
+
+- **ALL THREE KEYS ARE QActions, AND THAT IS THE WHOLE ANSWER TO Ctrl+C.**
+  `ShortcutTable::dispatch()` matches on the key and IGNORES MODIFIERS — its own
+  header says so — so a bare-`C` table row would also fire on Ctrl+C, safe only
+  while Qt's shortcut map consumed Ctrl+C first. On a QAction the two are
+  distinct sequences Qt resolves properly, so the collision **cannot exist**
+  rather than being masked. Three properties come free: Qt runs an action's
+  shortcut BEFORE `QMenuBar::keyPressEvent` sees the key (the reason bare `H`
+  was never reproducible in the 2026-08-21 bare-letter bug while the table rows
+  `F`/`S`/`E`/`T` were); a DISABLED QAction declines its own shortcut, so `[`
+  and `]` fall through on media with no passes; and the menu row, the key and
+  the accessible name are one action.
+- **`warnOnShortcutCollisions()` IS NEW AND IT EARNED ITSELF ON ITS FIRST RUN,
+  ON A PRE-EXISTING FAULT.** It reports two classes — identical sequences, and a
+  bare table row whose key is the key half of a modifier'd QAction shortcut —
+  and printed **bare `L` (the forward shuttle) against `Ctrl+L` (Rotate Left)**,
+  which predates all of this work. **Measured harmless**: Ctrl+L reads
+  `speed 0.00x | Rotate Left`, so the rotation ran and no shuttle started.
+  Binding `C`, `[` and `]` added NO new line, which is the design working — and
+  the checker is not silent in general, since it still reports the `L` row.
+- **THE ENABLE STATE WAS THE BUG, AND IT IS THE SPEED MENU'S BUG AGAIN.** Gated
+  only in `syncMediaDependentActions()`, the pass actions were computed from an
+  EMPTY pass list on every open, because `openPath()` runs that before
+  `loadCurrentFrame()` writes `currentImage_`, and nothing re-ran it. **Measured
+  through UI Automation rather than judged from a screenshot** (phase 8's
+  menu-icon luminance accused a correct build that way): both rows
+  `IsEnabled=False` on the 9-pass Redshift file while the same window's HUD read
+  `pass 1/9`. Synced from `refreshHud()` now, beside `syncPlaybackSpeedActions()`
+  and for its reason, ABOVE the `showHud` early return so the shipping
+  HUD-hidden configuration is covered.
+- **THE TEXT-FIELD GUARD HOLDS FOR ALL THREE, AND IT TOOK TWO LEGS TO PROVE.**
+  **Go to Frame is a `QInputDialog` SPIN BOX** whose validator rejects letters —
+  that leg shows the keys did not act and nothing more, and run without a LUT a
+  leaking `c` would have been invisible. **Go to Timecode is the real
+  `QLineEdit`** and is the leg that matters, because `C` is ENABLED on video: run
+  with a LUT so a leak would be a 96%-of-the-picture event, the field reads
+  **`c[]hjkltefsm`** and the picture moved **0%**, against **99.946%** for the
+  same key with no dialog open. It needs media that HAS source timecode (the
+  ProRes 4444 clip); an EXR sequence carries none.
+- **`C` IS READABLE ON AN EXR AFTER ALL, and the first reading of this was
+  wrong.** The video HUD's `xform` field is built inside the video branch and an
+  EXR sequence never reaches it — but the EXR media line reports the stage
+  through the **`map`** field: **`map OCIO`** when the transform is on,
+  **`map Gamma 2.2 [0.0029..2.5195, 52.1% >1]`** when bypassed. No HUD change was
+  needed and none was made. What is still true: that line does not print the
+  LUT's NAME and cannot separate "none" from "bypass" — one line, with the
+  overlay.
+- **Measured, `scripts/measure/passkeys.ps1`, seven legs, all PASS**: ten `]`
+  presses all advance · the list returns to the opening pass after **exactly 9**
+  on a 9-pass file · `[` undoes `]` (media line byte-identical) · menu-bar focus
+  `popups 0->0` on all three keys with the brackets still running · `[`/`]`
+  move the picture **0%** on video · `C` toggles **95.8%** and returns to **0%**
+  from the starting state · Ctrl+C still copies and leaves the picture at 0%.
+  **`barekeys.ps1` still PASS**, so the pre-existing letter surface is
+  unregressed.
+- **THREE HARNESS FAULTS, EACH OF WHICH REPORTED A WORKING BUILD AS BROKEN.**
+  **SendKeys RESERVES `[` and `]`** and swallows them unescaped — nine of ten
+  presses read as no-ops on a build where all ten worked. The HUD band was a
+  fixed offset that fitted video and sat ~300px above an EXR sequence's two-line
+  HUD. And the band then included the transport line, which prints
+  `refreshHud()`'s own action label (`Open file`, `next pass`, `previous pass`),
+  so identical passes compared as DIFFERENT — **the harness was reading its own
+  stimulus.** `Same`/`Moved` are now two thresholds with a gap (measured
+  populations 0.000–0.086% and 10–96%); a reading between them FAILS rather than
+  being rounded toward the expected answer.
+- **Regression at HEAD, flat**: `scrubbar.ps1` full pool **PASS — 22 files, 88
+  legs, `delta 0` throughout** (4.9 min warm; `kf-land` non-zero on exactly the
+  two recorded long-GOP rows and 0 on every ProRes row) · 4K H.264 cadence x2
+  **100.0/100.0%** (`0 of 119`, `drop 0`, `rephase 0`, `tick-late 0`) · 4444 x2
+  **99.8/99.8%** (`0 of 260`) · all three selftests green ·
+  `verify_trace_assets --strict` at **33 embedded files** · `barekeys.ps1` PASS.
+  **The shipping-path cost is one `currentImage_` check and two `setEnabled`
+  no-ops per `refreshHud()`.**
+- **INDEPENDENTLY REVERTABLE, CHECKED RATHER THAN ASSERTED, AND THE FIRST
+  ATTEMPT FAILED.** The pass declarations went in directly beneath
+  `warnOnShortcutCollisions()`, putting two separately-revertable commits on
+  ADJACENT LINES — `git revert` conflicts on whichever lands second because git
+  can only see that they touch, which is the trap phase 14 paid for with Loop
+  and Copy Current Frame. `f1ec025` moves them into the colour-transform group,
+  **proven pure code motion** (the two headers are identical as a sorted
+  multiset of non-comment lines); all three then revert cleanly and each
+  reverted tree builds.
+
+**THE MULTILAYER PASS MODEL IS BUILT AND MEASURED (2026-08-24, physical panel).
+Record `docs/exr-stage2-pass-model.md` — read it before touching the grouper,
+the pass list or a display mapping.** Commits `bb159db` (grouper selftest + two
+fixes) · `5301e74` (duplicateOf) · `5b7158e` (pass list + one route) · `c73aedd`
+(pinned Normalise range). **NOT merged.** Cryptomatte interpretation is **CUT
+BY THE OWNER**, not pending.
+
+- **MOST OF THE BRIEF'S PRIORITY LIST WAS ALREADY BUILT, AND THE 224 MB PREMISE
+  HAS EXPIRED.** Channel enumeration, the three-convention grouper, raw-name
+  preservation, the stable ordered list, name-based alpha, per-pass rendering and
+  the `[`/`]` wiring were all done in parts 1 and 2. **`loadExr` has read only
+  the active pass's span since part 1** — measured **23.7 MB per pass against
+  213.6 MB for all 27 channels** — so "do not optimise the ~224 MB allocation
+  yet" is answered by it already being gone. What was genuinely unbuilt: the View
+  pass list, `duplicateOf`, and any test of the grouper at all.
+- **`--exr-channels-selftest` IS THE FOURTH SELFTEST: 14 channel layouts, pure
+  logic, CI-safe.** It exists because **the asset set has only TWO of the three
+  recorded conventions** — every EXR in the pool is either `R G B` or Redshift's
+  `.red/.green/.blue`, *including that file's own `Cryptomatte`*, and the
+  upper-case-with-alpha form stage 0 recorded has **no file here**. The
+  convention that cannot be tested against real media is exactly the one that
+  needs a test. Five invariants run on every case, the load-bearing one being
+  **a component slot must hold a channel whose OWN NAME ends in that component**
+  — resolution by identity, never by position. **Proven able to fail twice.**
+- **TWO SILENT DEFECTS IT FOUND, neither reachable by any file in the pool.**
+  A bare channel and a layer of the same name were MERGED, so a file carrying `Z`
+  and `Z.R/.G/.B` **dropped three channels entirely** with no error. And an
+  **alpha-only layer rendered BLACK** — `mask.A` left every colour slot unset, a
+  pass that is present, selectable and invisible. A component slot still keeps
+  the FIRST claimant, but the loser is now RECORDED in `ExrPass::ambiguous`
+  instead of vanishing.
+- **`duplicateOf` IS FILLED AND IT IS MEASURED FROM PIXELS.** Bit-equality finds
+  nothing — the root and `Beauty` copies are compressed INDEPENDENTLY with lossy
+  DWAA, so only 5-7% of pixels match — so it is a **relative mean absolute
+  difference over a 24-scanline band**, tolerance 2%, with the figure carried to
+  the HUD: **`pass 2/9 Beauty ... = (root) (0.36%)`**, which is part 1's own
+  independently measured MAD from a different direction. **No false positives on
+  the other seven**, including three dark passes a naive absolute test would have
+  matched. Two passes that are BOTH empty are deliberately not called duplicates.
+  One read covers every pass and is cached on the channel names, so a 97-frame
+  sequence pays it once.
+- **`View > EXR Pass` LISTS THE PASSES, AND `applyExrPass()` IS THE ONE ROUTE.**
+  `[`, `]` and every menu row go through it, so the reload, the cache clear, the
+  overlay and the tick cannot disagree — and both the tick and the overlay name
+  the **LOADED** pass, never the requested one, because `choosePass()` falls back.
+  Rebuilt only when the pass LIST changes (keyed on the joined display names), or
+  it would be recreated several times a second from `refreshHud()`. Rows carry no
+  mnemonics: a pass name is file data. The overlay is the **existing composited
+  toast** by choice, not a second mechanism — `Pass 7/9: Reflections (colour)`.
+- **THE PASS MODEL EXPOSED A REAL DEFECT: `Normalise` WAS AUTO-RANGING PER
+  FRAME**, which is exactly what the owner's stage-5 ruling forbids. Measured on
+  the P pass: **frame 0 `[-44.2500..44.2500]` against frame 96
+  `[-39.2500..44.0000]`** — the same world position a different grey depending on
+  the playhead. The range is measured from a pass's FIRST frame and **pinned**;
+  after, frames 0, 1 and 96 all read `[-44.2500..44.2500]`. The `>1` fraction
+  still tracks each frame because that is REPORTING, not mapping. It is also the
+  stage-5 prerequisite: a whole-frame reduction cannot become a shader without a
+  separate pass, two pinned scalars are two uniforms. **The pin is per PASS** —
+  `setDisplayMap()` drops it only when the MAPPING changes (it runs every frame),
+  and `applyExrPass()` clears it explicitly because two position passes share one
+  mapping.
+- **Regression flat**: `scrubbar.ps1` full pool **PASS — 22 files, 88 legs,
+  `delta 0`** · 4K H.264 cadence x2 **100.0/100.0%** (`0 of 119`) · 4444 x2
+  **99.8/99.8%** (`0 of 260`) · **four** selftests green · `passkeys.ps1` all
+  seven legs PASS · assets 33. **Working set 246.6 MB / peak 351.7 MB** on the
+  27-channel file against part 1's recorded 254.9 / 339.6 — flat. Both EXR
+  sequences play to their last frame, and **pass selection survives frame
+  stepping** (`pass 6/9 P` at frames 0, 1, 4 and 96).
+- **REVERTABILITY: three of four revert alone; `bb159db` is a PREREQUISITE.** The
+  pass menu reads `ExrPass::ambiguous`, which the grouper commit introduces — a
+  genuine dependency rather than an adjacency accident. Reverting the pair in
+  order is clean and builds; checked, not assumed.
+- **CRYPTOMATTE IS CUT BY THE OWNER (2026-08-24). NOT DEFERRED — CUT.** The owner
+  tested it and ruled that **showing the cryptomatte pixels is all that was ever
+  wanted from it**. There is no manifest reading, no rank-pair modelling and no ID
+  picking, and **none of that is outstanding work.** What ships is what was asked
+  for: the grouper classifies `Crypto*` as `Data`, so it is displayed through
+  `map Raw` — raw numeric IDs with no view transform over them — and it cycles
+  with `[` and `]` like any other pass. **Do not list stage 4 as unfinished
+  business, and do not pick it up as such.**
+  *Kept only in case the owner reopens it:* interpretation would need the header
+  manifest (`cryptomatte/<hash>/manifest`) read, the rank-pair convention modelled
+  (`CryptoMaterial00.R/.G/.B/.A` is *(id, coverage)* rather than colour, so the
+  grouper's neutral RGBA answer is correct but uninterpreted), and **real ranked
+  test material, which the asset pool does not contain** — this file's
+  `Cryptomatte.red/.green/.blue` is a 3-channel preview, not a ranked set.
+- **~~NO EXR PLAYBACK RATE HAS EVER BEEN MEASURED IN THIS PROJECT~~ — BUILT AND
+  MEASURED 2026-08-24; the instrument exists and the baseline is taken. See the
+  STAGE 3 STEP 1 block below for the figures; what follows is the record of the
+  gap.** The image-sequence path was said to expose **no cadence counters at
+  all**. It was narrower than that and the correction matters: the sequence path
+  runs the SAME tick, the SAME GATE E scheduler and the SAME
+  `notePresentedPlaybackFrame()`, so the counters were being **accumulated** and
+  `refreshHud()` simply built the three cadence lines inside its VideoFile branch
+  and nowhere else. **Measured and never shown** — the `stalls 0 of 0` shape
+  again. The consequence stood exactly as written: **"EXR playback is fine" and
+  "EXR playback has never been measured" were indistinguishable**, and one
+  favourable claim did leak in on that basis (see the premise-expiry note below).
+- **EXR playback optimisation, when the instrument exists**: the window cache must
+  be **bounded by BYTES rather than frame count** (8K EXR would want 1.6 GB before
+  anything else), roughly **half the per-pass read is fixed overhead** (35 ms for
+  3 channels against 63 ms for 27), and `measureFloatRange()` still scans every
+  frame for the HUD's clipping figure even where the mapping no longer needs it.
+
+**EXR/COLOUR STAGE 3 STEP 1 IS DONE (2026-08-24): THE IMAGE-SEQUENCE CADENCE
+INSTRUMENT IS BUILT AND THE FIRST EXR PLAYBACK RATE IN THIS PROJECT'S HISTORY IS
+MEASURED, AT THE PANEL.** Record `docs/exr-stage3-cadence-instrument.md`; harness
+`scripts/measure/seqcadence.ps1`. Commits `8271ff2` (instrument) · `f48bf7d`
+(harness) · `c6b2372` (record), all three independently revertable and the
+reverted tree builds — checked one at a time, not asserted. **NOT merged. The
+Color Transform dialog is NOT started** — the owner asked for the baseline first
+and to stop on it.
+
+- **THE TWO EXR SEQUENCES ARE AT OPPOSITE ENDS AND "EXR PLAYBACK" IS NOT ONE
+  THING.** `R2_OP_Stacks_01` (217 frames, 1920x1080, 3ch, PIZ) reads
+  **`presented 23.97 / 24.00 fps nominal (99.9% real time)`, `skip 0`,
+  `handler>budget 0 of 215` (max 37.4 / 36.6ms), `rephase 0`, `tick-late 0`,
+  buckets `~1x 214`, drift −13ms** — a clean run by every standard the video path
+  is held to. `MultlayerAces` (97 frames, 1920x1080, 27ch, DWAA) reads
+  **28.8–29.2% of real time** across three warm reps, `handler>budget 28 of 28`
+  at **max ~190ms against a 41.67ms budget**, every gap in the `>2.5x` bucket.
+- **THE DWAA FILE HOLDS THE CLOCK BY SKIPPING, AND THAT IS THE WHOLE POINT OF THE
+  NEW `skip` FIELD.** It plays 97 frames of media in ~4.1s — on the clock,
+  `media 97.7–99.4%` — **by showing 29 of them and skipping 68.** `media` and
+  `real time` are different questions and both are true; quoting the first alone
+  is the mistake the instrument exists to prevent.
+- **A PREMISE EXPIRED, AND IT WAS WRITTEN TWO DAYS EARLIER BY THIS PROJECT.**
+  `docs/exr-stage2-float-buffer.md` recorded that the DWAA sequence "reaches
+  frame 61 and 63 in 2.5s … Both keep real time at 1080p, because prefetching
+  hides the decode." **The playhead advances by SKIPPING**, so 24.4 index/s is
+  `media`, not `presented`: measured today the index advances ~23/s while
+  pictures arrive at **6.9/s**. The observation was right, the conclusion drawn
+  from it was a statement about the clock read as one about the picture. That
+  same doc says "no rate figure is claimed" one sentence later. **Fourteenth
+  premise expiry, second from a recent session of this project's own.**
+- **`skip` IS NOT `drop` AND MUST NOT BE RENAMED TO IT.** `realtimeDropSteps()`
+  is never called on the sequence branch; what happens there is the shared
+  accumulator's `floor(acc/period)` advancing the target past frames that are
+  never loaded. Same visible outcome, different mechanism, and calling both
+  `drop` would claim the owner's 2026-08-13 real-time-drop policy is running on a
+  path where it is not. Likewise **`fps nominal`**: `fpsRational()` returns false
+  for a sequence and `fps()` is Trace's own 24.0, so the denominator of "% of
+  real time" is an assumption and the line says so.
+- **ONE INSTRUMENT, NOT TWO.** `cadenceHudLines()` and `notePresentLatency()` are
+  extracted and called from both branches — the reason
+  `notePresentedPlaybackFrame()` and `beginPlaybackTimeline()` were extracted
+  before them. **`measureCadence` is deliberately a separate expression from
+  `isVideo`**: a measurement gate beside a behaviour gate, so the accumulator
+  gate and the real-time drop are untouched and the baseline measures the
+  sequence path as it already is rather than as this change made it.
+- **THE PIZ FILE IS THE SENSITIVE TEST FOR STAGE 3, NOT THE DWAA ONE, AND THE
+  MARGIN IS THIN.** The DWAA file is already 4.6x over budget with
+  `handler>budget 28 of 28`, so adding a transform there measures the skip
+  mechanism rather than the transform. The PIZ file has **~4.3ms of headroom**
+  (handler max 37.4 of 41.67) against an OCIO CPU stage measured at 9.3 ns/px —
+  ~3–4ms at 1080p in parallel bands. **Two things push the other way and are why
+  it must be measured**: the OCIO branch in `ViewerWidget` **skips
+  `measureFloatRange()` entirely** and replaces the `Gamma22` mapping, both
+  full-frame passes. The net could be near zero or negative; nobody knows.
+- **AN OPEN DISCREPANCY, STATED AS ONE AND NOT GUESSED AT: the DWAA file's
+  ~190ms handler is ~5x its own standalone read.** `exrprobe --read` measured its
+  root RGB pass at **37.98ms**, against the PIZ file's *whole handler* of 37.4ms.
+  Nothing measured here explains the gap. It is the first thing an EXR playback
+  pass has to account for, and it is not this step's job.
+- **Video unmoved, against a control built from `2d09d89`** with DLL payloads
+  made byte-identical by hash and the two binaries **proven distinct by their own
+  strings** (`" fps nominal"` present in one, absent in the other): 4K H.264
+  cadence x2 **100.0/100.0%** against **99.9/100.0%**, `handler>budget 0 of 119`
+  max 4.3/4.4 against 4.5/4.4 · 4444 x2 **99.8/99.8%** both, `0 of 260` max
+  33.0/33.0 against 33.6/33.4 · **`scrubbar.ps1` full pool PASS — 22 files, 88
+  legs, `delta 0` throughout** · all four selftests green on both, the shape
+  selftest identical row for row. **The sequence path's BEHAVIOUR has its own
+  control**: both binaries read **`Frame: 124/216 | Seconds: 5.167`** to the
+  frame, and the control's HUD carries no cadence lines at all.
+- **`--window-shape-selftest` reads `1212x682 bound work` for 16:9 on this
+  display, not the recorded `1280x720 bound cap` — IDENTICAL ON THE CONTROL**, so
+  it is this box's work area and not a regression. Its own `OK - 11 shapes x 4
+  scale factors` is what the record asserts.
+- **A PRE-EXISTING HUD DEFECT FOUND IN PASSING AND NOT FIXED: `%%` renders
+  literally.** `QString::arg` does not collapse `%%` the way `printf` does, so
+  `(100.0%% real time)`, `hit 0.0%%` and three `io … seq %%` fields all print a
+  double sign. Confirmed on lines this change never touched, in a capture taken
+  before it. Cosmetic, widespread, and fixing it would move every existing HUD
+  capture — recorded rather than folded into an instrument commit.
+
+**EXR/COLOUR STAGE 3 STEP 2 IS DONE: THE `Color Transform...` DIALOG SHIPS —
+AND STEP 3'S ANSWER IS A STOP. AN ACES VIEW TRANSFORM DOES NOT HOLD RATE ON AN
+EXR SEQUENCE AND CANNOT BE TUNED INTO BUDGET (2026-08-24, physical panel).**
+Record `docs/exr-stage3-color-transform-dialog.md`; harnesses
+`scripts/measure/colordialog.ps1` and `scripts/measure/ocioprobe`. Commits
+`0e7d7c6` (config discovery) · `d16a98e` (dialog) · `84a9f3f` (harness) ·
+`0841201` (resolved config + `TRACE_COLOR_VIEW`). **NOT merged.** Per the owner's
+instruction nothing was optimised once the figure came in.
+
+- **THE MEASUREMENT, on step 1's sensitive file** (`R2_OP_Stacks_01`, 217
+  frames, 1080p, PIZ): no transform **99.9%** of real time, `skip 0`,
+  `handler>budget 0 of 215` (max 37.8ms) · **ACES 2.0 display transform 36.4%**,
+  `skip 138`, **`handler>budget 79 of 79` (max 129.5ms)** · **a `.cube` LUT
+  100.0%**, `skip 0`, **`0 of 215` (max 28.4ms)**. The multilayer DWAA file goes
+  29.4% → 20.6% but decides nothing: it was already 4.6x over budget.
+- **THE LUT ROW IS THE ISOLATING EXPERIMENT AND IT IS DECISIVE.** Same file,
+  same float path, same parallel bands, same display stage — **and its handler
+  max is LOWER than with no transform at all**, because the OCIO branch skips
+  `measureFloatRange()` and the `Gamma22` threshold search. So the plumbing is
+  free and **the cost is the ACES 2.0 op chain itself, ~92ms per 1080p frame.**
+- **A STAGE 1 PREMISE EXPIRED: 9.3 ns/pixel WAS MEASURED ON A `.cube` LUT AND
+  DOES NOT TRANSFER TO A DISPLAY TRANSFORM.** An ACES 2.0 DisplayViewTransform
+  measures **~45 ns/pixel in parallel bands, five times the recorded rate**, and
+  the LUT row reproduces the old figure on the same file in the same session —
+  both numbers are right and describe different transforms. **Do not quote
+  9.3 ns/pixel for a view transform.** Fifteenth premise expiry.
+- **`OCIO::Config::CreateFromEnv()` IS NOW USED NOWHERE, AND THAT REMOVED A LIVE
+  TRAP IN THE STAGE 1 CODE.** Measured with the new `ocioprobe`: with `$OCIO`
+  unset it neither throws nor returns null — it returns a **"Color management
+  disabled" RAW config with ONE colour space and ONE display**, announced only on
+  stderr. Stage 1's DisplayView branch called it whenever `configPath` was empty,
+  so an empty path would have compiled a transform that looks loaded and does
+  nothing. Discovery is now one resolver over three sources (explicit file /
+  `$OCIO` when actually set / built-in `ocio://`), shared by the dialog, by
+  `setConfig()` and by the selftest.
+- **THE INPUT DEFAULT IS THE `scene_linear` ROLE, AND THE SECOND CONFIG IS THE
+  WORSE CASE.** `ocio://default` answers **`ACES2065-1`** from its file rules
+  where its role is **ACEScg** — and `ACES2065-1` really IS scene-linear, so the
+  picture looks entirely plausible and is merely wrong in its PRIMARIES, where
+  the Redshift config's `Raw` at least looks obviously flat. Every API call
+  succeeds either way.
+- **MEASURED WITH `ocioprobe` RATHER THAN ASSUMED**: 8 built-in configs, 2 flagged
+  recommended · **no `getDefaultBuiltinConfigName()`** on the registry, so
+  `ocio://default` is carried literally · `CreateFromFile` takes a builtin URI as
+  happily as a path, so ONE entry point · **`ocio://default` IS
+  `cg-config-v4.0.0_aces-v2.0_ocio-v2.5`** (25 spaces, 8 displays, same defaults).
+- **THE HUD NAMES THE RESOLVED CONFIG, DISPLAY AND VIEW** —
+  `map OCIO built-in ocio://... / sRGB - Display / ACES 2.0 - SDR 100 nits
+  (Rec.709)`. Stage 2 left it a bare `map OCIO`, and on an EXR the video line's
+  `xform` field is never built, so that line is the only place that can say it.
+  **A defect it caught on its first run**: `setConfig()` stored the config it was
+  ASKED for, so a display/view left empty and filled from the config's defaults
+  reported blanks (`/ /`) on a working transform. It stores what it RESOLVED now.
+- **A MISSING CONFIG FALLS BACK TO BYPASS, SAYS SO ONCE, BLOCKS NOTHING** —
+  measured as a PAIR, because the failing half alone would also pass on a build
+  that ignored the saved transform entirely. The toast is OpenColorIO's own text.
+  Persistence goes through ONE function and stores the config string **RESOLVED**,
+  so a saved transform cannot change meaning because `$OCIO` moved.
+- **TWO OWNER DECISIONS, BOTH SETTLED 2026-08-24 AND NEITHER OPEN. Do not
+  re-propose either.** **Apply-on-OK STANDS**: live preview would recompile an
+  OCIO processor per combo change and, on video, issue a decoder Step re-request
+  from inside a modal dialog's event loop, and the owner declined to spend that
+  hazard on a comfort feature -- **the A/B is served by the `C` bypass, not by
+  the dialog**. Reopen only if it annoys him in real use. **No LOOK control**:
+  nothing in the asset set uses one, and `Config::look` stays compiled and
+  reachable, which is **the same position `Kind::DisplayView` was in before this
+  stage** and is the right amount of readiness.
+- **`--ocio-selftest` GAINS TWO ASSERTIONS, BUILT BEFORE THE DIALOG.** Exit 26:
+  the resolved default must carry **more than one** colour space and at least one
+  display — the count is what separates a real config from the disabled raw one,
+  where "a config loaded" would pass. Exit 27: the role and the file rules must
+  **DIFFER** — asserting a difference rather than a value, so a future OCIO making
+  them agree says the premise moved instead of leaving a stale comment. Proven
+  able to fail: `$OCIO` at a missing file exits 26.
+- **`TRACE_COLOR_VIEW=<config>[|<input>|<display>|<view>]`** configures a
+  display/view transform at startup, for `TRACE_COLOR_LUT`'s reason — the only
+  other way in is a modal dialog. **Proven live before any null result from it
+  was trusted.**
+- **Video unmoved against the `2d09d89` control**: 4K H.264 x2 **100.0/100.0%**
+  both, `handler>budget 0 of 119` max 4.4/4.7 against 4.6/4.3 · 4444 x2
+  **99.8/99.8%** both, `0 of 260` max 33.2/33.3 against 34.1/34.4 ·
+  **`scrubbar.ps1` full pool PASS — 22 files, 88 legs, `delta 0` throughout** ·
+  four selftests green · `verify_trace_assets --strict` at 33 embedded files ·
+  the mnemonic and collision checkers print **exactly the four recorded
+  pre-existing lines and no new one**.
+- **REVERTABILITY IS A STACK, NOT FOUR SIBLINGS, AND THE DEPENDENCIES ARE REAL.**
+  `0841201` and `84a9f3f` revert alone; `d16a98e` and `0e7d7c6` do not, because
+  the dialog cannot exist without the enumerators and `0841201` edits the code
+  the dialog added. **The order, so nobody re-derives it: `0841201` → `d16a98e`
+  → `0e7d7c6`, newest first.** That is clean and **the reverted tree builds** —
+  checked, not assumed; the same shape as stage 2's grouper pair. `84a9f3f` is
+  the harness and is independent of all three.
+- **TWO HARNESS TRAPS WORTH CARRYING.** `Focus-Window` must read
+  `GetForegroundWindow()` BACK — without it `Alt+V` went to the harness's own
+  terminal and the run reported the dialog missing on a build where it opens.
+  And **the guard leg's control has to press `]` TWICE**: pass 1/9 is root and
+  pass 2/9 is `Beauty`, which stage 2 measured as the same render written twice
+  at 0.36% MAD, so ONE press moves to a visually IDENTICAL pass and the control
+  read 0% on a working build. The script said INCONCLUSIVE rather than passing.
+- **THE SHORTCUT GUARD HOLDS FOR THE NEW MODAL WINDOW**, with its negative
+  control: `]` x2 with no dialog moves **100%** of sampled picture pixels; `]`,
+  `]` and `c` with the dialog open move **0%**.
+
+**EXR PLAYBACK IS MEASURED ACROSS PASSES AND ACROSS ACES VERSIONS (2026-08-24,
+second session, physical panel 5120x1440 @ 239.999Hz). Record
+`docs/exr-stage3-pass-cadence.md`. NO PRODUCT CODE CHANGED -- the only edit is
+`seqcadence.ps1` gaining a `-PassAdvance` leg, so there is no new instrument
+cost and none is claimed.**
+
+- **THE SESSION'S BRIEF SAID EXR PLAYBACK HAD NEVER BEEN MEASURED. IT HAD BEEN,
+  THE SAME DAY** -- stage 3 step 1 took the baseline and step 2 took the
+  transform. **Sixteenth premise expiry, third from this project's own recent
+  session.** Both legs were RE-RUN today rather than quoted and **both reproduce
+  to the digit**: PIZ 99.9 / 99.8% with `skip 0` and `0 of 215`; DWAA 28.6 /
+  29.1 / 29.3% with `skip 68-70`. The cold first rep reads 98.0% on PIZ -- the
+  recorded cold-sweep lesson again; quote the warm reps.
+- **THE ACES VERSION IS THE VARIABLE, AND THIS IS THE NEW RESULT.** The record's
+  36.4% is **ACES 2.0** from `ocio://default`. The asset set's own
+  `config.ocio` at display `sRGB`, view **`ACES 1.0 SDR-video`** -- identical
+  plumbing, same float path, same parallel bands -- reads **68.7-71.0% of real
+  time** on the same file with the same-session control at 99.9%. Added handler
+  cost against that control: **a `.cube` LUT is CHEAPER than no transform**,
+  **ACES 1.0 ~ +32ms**, **ACES 2.0 ~ +92ms**. **Do not quote "~92ms" as the cost
+  of an ACES view transform** -- it is the cost of ACES 2.0. Neither ACES version
+  holds 24fps.
+- **PASS SELECTION IS FLAT AND THAT NARROWS THE OPEN ~5x DISCREPANCY.** Passes 1
+  (root, read 35.35ms), 6 (P, Normalise, 34.96ms) and 9 (SpecularLighting,
+  **45.41ms**) all present at **28.1-29.4%** -- and pass 9's own three reps span
+  28.1-29.1%, so the between-pass difference is smaller than the within-pass
+  variance. Passes 1 and 9 differ by ~10ms of read, **a 29% difference, and none
+  of it reaches the handler**. So the ~150ms of the DWAA file's ~190ms handler
+  that is NOT the channel read is **invariant to which channels are read** -- a
+  fixed per-frame cost. **An EXR playback pass must look for it somewhere other
+  than the channel-reading path.** Pass 6 also confirms the pinned `Normalise`
+  range holding across reps.
+- **THE PASS HARNESS WAS PROVEN ABLE TO FAIL FIRST, AND THE FAILURE MODE IS THIS
+  SESSION'S OWN CONCLUSION** -- a run whose keypress went nowhere reports every
+  pass with identical figures, which reads exactly as "the pass makes no
+  difference". Three controls: PIZ (one pass, action disabled) **band 0%**; DWAA
+  + unbound key `z` **0%**; DWAA + `]` **2.157%**, pass 2/9 Beauty confirmed on
+  the capture. Both zeros printed `picture ... -> advancing` in the same run, so
+  they are the pass not changing rather than a dead app. Two thresholds with a
+  gap (0.50 / 2.00); a reading between them fails as inconclusive.
+- **`passkeys.ps1` IS STALE AND WILL MISREAD -- reported, NOT fixed.** Its
+  `Grab-Hud` takes the LAST HUD line as the media line; since `8271ff2` the
+  sequence HUD appends **three cadence lines after** it. That script was
+  validated before that commit. Re-validate before quoting its verdicts.
+- **A RECORDED TRAP IS NARROWER THAN WRITTEN: a single unescaped `]` per
+  `SendWait` IS delivered.** The "brackets are silently swallowed" observation
+  came from a ten-press leg, i.e. repeated brackets in one string. Escape them
+  anyway; but an unescaped bracket is **not** a usable negative control.
+- **`parsecd` was RUNNING with no virtual display mode set**, and the 4090's panel
+  was the active path. A running daemon is not a session -- but check both, since
+  "Parsec off" and "no Parsec display is active" are different claims.
+
+**THE DWAA FRAME IS DECOMPOSED AND THE DOMINANT STAGE IS `read_image` RUNNING
+2.79 TIMES PER PRESENTED FRAME (2026-08-24, physical panel). Record
+`docs/exr-dwaa-stage-decomposition.md`; instrument `TRACE_SEQ_PROFILE=1`,
+DEFAULT OFF, commit `96ddab6`. NOTHING WAS OPTIMISED.**
+
+- **THE ACCOUNTING CLOSES: 144.79ms/frame accounted against a handler p50 of
+  147.2-150.0ms, i.e. 96.5-98.4%.** Per presented frame: **`read_image` 114.95ms
+  (79.4%)** - `alpha prefill` 12.85 (8.9%) - `map+convert` 10.43 (7.2%) -
+  `open+spec` 4.93 (3.4%) - `group/choose` 0.70 - `upload` **0.67** - `loader
+  tail` 0.23 - `buffer alloc` **0.01**. The single-load model closes to 0.15%.
+- **THE AMPLIFIER IS `prefetchNeighbors()`, WHICH DOES TWO SYNCHRONOUS FULL
+  LOADS ON THE UI THREAD INSIDE THE PLAYBACK TICK.** 78 loads for 28 presented
+  frames; **prefetch is 87.30ms/frame, 60.3% of the frame.** The playhead
+  advances ~3.4 frames per present on this file, so the ±1 neighbours it loads
+  are almost never shown -- decoded, cached, evicted unseen. **READ `calls`
+  BESIDE EVERY LOADER TOTAL**: the loader rows run once per LOAD, and dividing
+  by the frame count is exactly how ~35ms of measured read became a ~190ms
+  mystery.
+- **REMOVING THE PREFETCH IS THE LARGEST SINGLE LEVER AND IS NOT ENOUGH.**
+  Projected (NOT measured): one load per frame gives 59.1ms accounted, ~29% ->
+  **~41% of real time**, still ~1.4x over budget with `read_image` then 70% of
+  the frame by itself. **There is no single fix.** Ranking: (1) stop
+  prefetching frames the playhead will skip -- a scheduling question, cheapest
+  by far; (2) the read itself, 41.26ms, needs to be off the UI thread or
+  cheaper, i.e. architecture; (3) the alpha prefill, 8.9%, removable without
+  touching decode; (4) everything else is under 4%. **The confirming
+  experiment -- a knob disabling prefetch -- IS NOT BUILT and is the
+  recommended next step.**
+- **BUFFER COPIES, FRAME CONSTRUCTION AND UPLOAD ARE ALL EFFECTIVELY NIL**, which
+  refutes three of the named suspects: `buffer alloc` is **0.01ms** for a 33.2MB
+  RGBAF32 allocation, `loader tail` (the `QFileInfo` stat, compression attribute
+  and struct fill) is 0.08ms, and `upload` is 0.64ms. **Presentation is not in
+  the handler at all** -- the tick calls `update()` and the paint runs later in
+  the event loop.
+- **ONE STAGE THAT WAS NOT ON THE SUSPECT LIST IS THE SECOND-LARGEST TERM:
+  `alpha prefill`, 12.85ms/frame, 8.9%** -- for a 3-channel pass `loadExr`
+  writes opaque alpha across the whole float buffer before the read,
+  first-touching every page of a 33MB allocation to set one component.
+- **A COLD PROFILE RUN IS NOT A PROFILE, AND IT PUT 163ms ON THE ONE STAGE THAT
+  IS PROVABLY NIL.** The first profiled run (fresh build, DWAA evicted by the
+  preceding PIZ runs) read **`upload` 162.99ms/call** with handler max
+  **1929.7ms** at 10.0% of real time; warm, the same binary reads `upload`
+  **0.64ms** at 28.9%. **Reporting that table would have named the GPU upload as
+  the dominant stage and sent the next session into a GPU rewrite.** The first
+  run after a build, or after other media, is not a measurement.
+- **THE INSTRUMENT IS FREE WHEN OFF, MEASURED, AND THAT CONTROL IS WHAT CAUGHT
+  THE COLD RUN.** Knob off x3: **29.0 / 29.4 / 28.7%**, handler max 185.0 /
+  189.2 / 189.8, against the pre-instrumentation control's 28.6 / 29.1 / 29.3%
+  and 186-190. Knob on, warm: **28.9 / 28.7%**, inside that spread. Reverts
+  cleanly and **the reverted tree builds -- checked, not assumed.**
+- **ACES IS A SEPARATE TRACK AND EVERY FIGURE ABOVE IS WITH NO TRANSFORM
+  ACTIVE.** LUT free, ACES 1.0 ~ +32ms, ACES 2.0 ~ +92ms.
+
+**THE PREFETCH EXPERIMENT IS MEASURED (2026-08-24, physical panel). Record
+`docs/exr-prefetch-experiment.md`; knob `TRACE_SEQ_PREFETCH=0`, DEFAULT OFF, so
+SHIPPING BEHAVIOUR IS UNCHANGED. Commits `f8ab018` (knob + cache counters) and
+`fe1fb82` (`seqstep.ps1`). NO POLICY IS PERMANENT YET.**
+
+- **DWAA GOES 29% -> 64% OF REAL TIME**, and the decomposition's projection of
+  59.1ms/frame measures **58.82ms** -- within 0.5%. `skip 71/69/70 -> 34/34/34`,
+  handler p50 **149.6-163.1 -> 65.0-67.1ms**, max **189.4-208.2 -> 71.5-73.7ms**,
+  loads per presented frame **2.72 -> 1.02**. **`tick-stall` (>100ms) goes
+  23-24 -> 0**, which is the difference between a file that HITCHES and a file
+  that is merely slow. **`handler>budget` is still every frame in BOTH columns**
+  -- 58.82ms is over the 41.67ms budget, so it presents ~2 frames in 3 rather
+  than 1 in 3, and it still does not hold real time.
+- **THE POLICY CONCLUSION IS NOT "REMOVE THE PREFETCH", AND THE PIZ CONTROL IS
+  WHY.** On the plain PIZ sequence prefetch reads **216 hits against 1 miss
+  (99.5%) at 1.005 loads per frame -- the SAME load count as with it off.** The
+  playhead there advances exactly 1 per present, so the `+1` neighbour is
+  precisely the frame wanted next: it is one NECESSARY load moved a tick
+  earlier, not an extra one. Removing it costs presented **99.8-99.9% ->
+  99.7%**, drift **-13 -> -26ms**, `<0.9x` bucket **0-1 -> 5-9**. Both still
+  hold real time (`skip 0`, `0 of 215`).
+- **THE DEFECT IS THAT THE PREFETCH WINDOW IS A FIXED +-1 WHILE THE PLAYBACK
+  STRIDE IS NOT 1.** PIZ advances 1/present and `+-1` predicts correctly (99.5%
+  hit); DWAA advances ~3.4/present because it is over budget and skipping, so
+  `+-1` predicts wrongly nearly every time (10% hit, 2.72 loads/frame, 59% of
+  the frame wasted). **Letting the window follow the stride would keep PIZ's hit
+  rate AND remove DWAA's waste with no cache redesign -- RECOMMENDED, NOT
+  MEASURED, NOT BUILT.** Blanket removal is what was measured, and it trades a
+  small regression on well-behaved sequences for a large win on struggling ones.
+- **EXACTNESS IS UNCHANGED ON BOTH FILES**, `scripts/measure/seqstep.ps1`, 7
+  steps out and back: cross-config **0% differing** at frame 7 and back at 0, on
+  DWAA and PIZ, with the negative controls (frame 7 vs frame 0 inside one build)
+  firing at **10.60%** and **54.82%**. Indices read off the captures, not
+  inferred: `frame 7 | Frame: 7/96` out, `frame 0 | Frame: 0/96` back, slider
+  correct both ways. **The negative control is listed first deliberately** -- a
+  build showing one frozen frame would score 0% on both cross-config columns.
+- **NEITHER OPTION MAKES DWAA HOLD REAL TIME.** At 58.82ms/frame `read_image`
+  alone is **41.27ms**, 99% of a frame budget by itself. The decomposition's
+  ranking is unchanged: the read has to come off the UI thread or get cheaper.
+- **Alpha prefill was NOT touched** (per instruction); it reads 11.96 -> 4.45ms
+  purely because it now runs once per frame instead of 2.72 times. **No GPU or
+  OCIO work started.** Every figure is with no colour transform active.
+
+**STRIDE-AWARE PREFETCH IS PROTOTYPED AND MEASURED: PIZ PRESERVED IN FULL, DWAA
+MOST OF THE WAY (2026-08-24, physical panel). Record
+`docs/exr-stride-aware-prefetch.md`; knob `TRACE_SEQ_PREFETCH_STRIDE=1`,
+DEFAULT OFF, commit `b96f14c`. THE FIXED +-1 WINDOW STILL SHIPS. NOT
+PERMANENT.** All three configurations on ONE binary, warm, 3 reps each.
+
+- **PIZ IS PRESERVED EXACTLY: 99.9% x3, cache HIT 216 / MISS 1, 1.005 loads per
+  frame, ZERO declines, `<0.9x` bucket 0/0/0, drift -13/-11/-13ms.** Identical
+  to the fixed window (99.9% x3, 216/1, `<0.9x` 0/0/1, drift -12/-11/-12), and
+  it removes the `<0.9x` 6/9/5 and drift -26ms that BLANKET REMOVAL cost. The
+  stride reads exactly 1.0 there, so the prediction is issued every tick and is
+  right every tick.
+- **DWAA REACHES MOST OF THE NO-PREFETCH CLASS AND NOT ALL OF IT.** Steady state
+  **62.9%** against no-prefetch's **63.7-64.1%**, loads per frame **1.06 vs
+  1.02**, and the policy correctly **DECLINES 58 of 62** predictions. But the
+  spread is **54.3 / 60.6 / 62.9%** where no-prefetch is flat, and the TAIL IS
+  WORSE: handler max **116-131ms against 80-84ms**, `tick-stall` **11/2/0
+  against 0/0/0**. Fixed +-1 for reference: 29.6/28.4/29.0%, max 188-202,
+  tick-stall 22-24, 2.72 loads/frame.
+- **EVERY DWAA COST ABOVE NO-PREFETCH IS AN ISSUED PREDICTION THAT MISSED** --
+  the four it issued cost 170.1ms between them, **42.5ms each, a full load**,
+  inside a tick that then still has to read the real frame. **REQUIRING THE
+  STRIDE TO BE CONFIDENTLY 1 rather than confidently any integer would collapse
+  it onto no-prefetch for DWAA and leave PIZ identical** -- one predicate, no
+  cache work. **NOT BUILT, NOT MEASURED**; it is the obvious next experiment.
+  Predicting non-unit strides properly would need the prediction to come from
+  the SCHEDULER'S OWN ACCUMULATOR rather than a history average, since the
+  scheduler already knows the next target. Not attempted.
+- **THE REP-TO-REP SPREAD (54.3 -> 60.6 -> 62.9%) IS NOT EXPLAINED and is
+  recorded as such.** Each rep is a fresh process so the EMA warm-up is
+  identical, and the other two columns are flat across their own reps on the
+  same file in the same session -- so it is neither warm-up nor OS file
+  caching. First thing to nail down if this direction continues.
+- **EXACTNESS IS STRUCTURAL, NOT LUCKY: the policy is gated on
+  `playTimer_.isActive()`**, so paused stepping and random access take the
+  legacy +-1 window verbatim -- `prefetchNeighbors()` is reached from seven
+  places and only two are the playback tick. Measured both files, fixed vs
+  stride: **0% differing** at frame 7 and back at 0, negative controls
+  **10.60%** and **54.82%**.
+- **NO CONFIGURATION MAKES DWAA HOLD REAL TIME**; `handler>budget` is every
+  frame in all three columns. `read_image` alone is 41.27ms of a 41.67ms budget.
+- **Cache architecture UNCHANGED** (same `FrameCache{1}`, same radius). No
+  off-thread reads, alpha prefill untouched, no GPU/OCIO work, no transform
+  active in any figure.
+
+**THE PREFETCH GATE IS A RUN OF UNIT STRIDES, AND THREE OF FOUR ACCEPTANCE
+CRITERIA ARE MET (2026-08-25, physical panel, mode re-checked). Record
+`docs/exr-unit-run-prefetch.md`; commit `2274f3f`; knob
+`TRACE_SEQ_PREFETCH_STRIDE=1` STILL DEFAULT OFF -- the fixed +-1 window ships.**
+Supersedes the policy half of `docs/exr-stride-aware-prefetch.md`.
+
+- **"CONFIDENTLY 1.0" AS A TOLERANCE AROUND 1.0 DOES NOT DELIVER WHAT THE PHRASE
+  MEANS, AND THAT WAS MEASURED RATHER THAN REASONED.** EMA within +-0.15 of ANY
+  integer issued 4 predictions of 62; narrowing to +-0.15 of **1.0
+  specifically issued 4 of 61 -- no improvement at all**, because a file whose
+  strides alternate 1,2,1,2 has a mean near 1.5 that still wanders inside any
+  tolerance of 1.0 after two unit steps. **"The average is near 1" and "it is
+  stepping one frame at a time" are different claims.** A run of consecutive
+  unit steps cannot leak that way -- one skip resets it -- and it is an int
+  compare where the average was a float one. **The leak COUNT did not change;
+  WHEN the leaks happen did**, which is the whole result: the run gate only
+  predicts inside a genuine unit run, where the guess is likely right.
+- **DWAA: `tick-stall` 24/24/25 (fixed) -> 0/0/0 (run gate)**, matching
+  no-prefetch, against the tolerance formulations' 11/2/0 and 1/1/0. Handler
+  **p50 is already no-prefetch's** (67.2-67.9 vs 66.3-68.0); what is left is the
+  **tail**, max **96.6-97.6ms against 71.5-73.6**. Presented **62.3/62.9/62.4%
+  against no-prefetch's 63.9/63.7/63.3%** -- consistently ~1.1 points short,
+  non-overlapping. Loads/frame **1.07 vs 1.02**; 57 of 61 predictions declined.
+- **PIZ IS IDENTICAL TO THE FIXED WINDOW**: 99.9% x3, cache **HIT 216 / MISS 1**,
+  1.005 loads/frame, **zero declines**, `<0.9x` 0/1/0 (same as fixed), drift
+  -12/-11/-11 vs -12x3, handler max 36.8-37.5 vs 37.8-40.2. The `<0.9x` 6/9/5
+  and -26ms drift that BLANKET REMOVAL cost are absent.
+- **THE RESIDUE IS NOT A GATE BUG: the DWAA file really does produce runs of
+  four consecutive unit steps.** Its stride mix is ~45% unit, so `0.45^4 x 61 ~
+  2.5` runs per playthrough is expected and 4 is what appears; **2 of the 4 were
+  subsequently USED** (`cache HIT 2`). The arithmetic closes -- `prefetch (all)`
+  reads 2.83ms/frame against a 2.42ms accounted difference.
+- **THE LEVER, NOT TURNED: require a longer run.** At `p(unit) ~ 0.45` a run of
+  **8** takes the expected leak to ~0.1 per playthrough while delaying PIZ's
+  first prediction by four frames of 216. Same predicate, one constant. That is
+  how to close the last ~1.1 points if the DWAA class is required exactly.
+- **Exactness structural and unchanged**: gate is on `playTimer_.isActive()`, so
+  stepping and random access keep the legacy window verbatim -- 0% cross-config
+  at frame 7 and back at 0 on both files, negative controls 10.60% / 54.82%.
+- **No configuration makes DWAA hold real time**; `handler>budget` is every
+  frame in all three columns and `read_image` alone is 41.34ms of a 41.67ms
+  budget. **Cache architecture unchanged. No scheduler-accumulator prediction,
+  no off-thread reads, alpha prefill untouched, no GPU/OCIO work.**
+
+**RAISING THE PREFETCH RUN GATE 4 -> 8 IS REFUTED, AND IT CORRECTED A WRONG
+ATTRIBUTION IN THE PREVIOUS RECORD (2026-08-25, physical panel). Record
+`docs/exr-unit-run-8-refuted.md`; commit `4cfeb25`; gate back at 4;
+`TRACE_SEQ_PREFETCH_STRIDE=1` STILL DEFAULT OFF.**
+
+- **8 FAILS ON THE FILE IT WAS SUPPOSED TO LEAVE ALONE. PIZ 99.9% -> 98.9 /
+  96.6 / 93.4%**, skip 0 -> 2/7/14, cache **HIT 216/1 -> 72/131**. The
+  degradation is MONOTONE across reps, which is the signature of a feedback
+  loop rather than noise. **DWAA changed NOTHING** (62.4-63.7 against gate 4's
+  62.2-63.1).
+- **THE MECHANISM: THE WARM-UP WINDOW IS WHAT PRIMES THE CACHE.** With warm-up
+  4 and gate 4 there is no hole -- the legacy window keeps the next frame
+  resident and the gate opens into a steady state where the presented frame is
+  already a hit, one load per tick. Widening the gate leaves four frames in
+  which nothing is prefetched, the cache drains, and the gate then opens onto a
+  **MISS plus a prefetch -- two loads** -- which on a file whose handler already
+  sits at 38-40ms of a 41.67ms budget misses the deadline, skips, **resets the
+  run**, and falls back to declining. It never converges. **This constant is
+  not a free dial.**
+- **THE CORRECTION, AND IT INVALIDATES A CLAIM IN
+  `docs/exr-unit-run-prefetch.md`:** that record attributes four leaked
+  predictions per DWAA playthrough to genuine runs of four unit steps
+  (`0.45^4 x 61 ~ 2.5`). **THE GATE NEVER FIRED ON THAT FILE AT ALL.** The four
+  were WARM-UP frames falling through to the legacy +-1 window, counted as "not
+  declined" because the stride branch is never ENTERED during warm-up. New
+  `prefetch ISSUED` / `LEGACY+-1` counters measure it: **DWAA ISSUED 0,
+  DECLINED 57, LEGACY 5** at BOTH gate settings; **PIZ ISSUED 212, DECLINED 0**;
+  **PNG ISSUED 163, DECLINED 0**. **A count derived by subtracting two other
+  counts is not a measurement of the thing you think it is.**
+- **SO THE RESIDUAL DWAA GAP IS THE FIVE-FRAME WARM-UP WINDOW, not leaked
+  predictions**, and run length cannot touch it -- which is exactly why 8
+  changed nothing there. Closing it is a separate one-line experiment (decline
+  during warm-up when stride-aware is on) and is **UNMEASURED**; it would cost
+  PIZ a handful of early cache misses.
+- **A THIRD SEQUENCE WAS ADDED because two files is not a population**:
+  `6_Image_Sequence\PNG_SEQ` (168 frames, PNG, a different loader on the same
+  playback path) reads **100.0%, skip 0, 0 of 166, tick-stall 0, cache HIT
+  167/1** on fixed AND on gate 4 -- identical. **Note `SeqProfile` instruments
+  `loadExr` specifically, so ACCOUNTED and the loader rows read 0 on a non-EXR
+  sequence**; the cache and prefetch counters live in MainWindow and are valid.
+- **`tick-stall` ON DWAA IS 0-1, NOT A ROBUST 0.** The previous record's 0/0/0
+  was a favourable sample; today reads 1/1/1 at gate 4 and 1/1/0 at gate 8.
+  Said plainly because an acceptance criterion asked for 0.
+- **RECOMMENDATION ON SHIPPING (gate 4): YES, WITH THREE CAVEATS STATED.** For:
+  DWAA **28.7-29.2% -> 62.2-63.1%**, PIZ identical, PNG identical, exactness
+  structural, cache untouched. Against: DWAA still ~1-2 points and ~25ms of
+  handler tail short of prefetch-off (the warm-up window); **REVERSE PLAYBACK IS
+  HANDLED BY CONSTRUCTION AND WAS NEVER MEASURED** -- the counter is signed and
+  predicts backwards at -1, but no reverse run was timed, and that is the first
+  gap to close if this ships; and **no owner hand-test** -- every figure is a
+  counter and nobody has watched it play.
+
+**THE STRIDE-AWARE PREFETCH GATE IS THE SHIPPING DEFAULT AS OF 2026-08-25, AND
+REVERSE PLAYBACK IS VALIDATED. Record `docs/exr-prefetch-shipped.md`; harness
+`scripts/measure/seqreverse.ps1`. `TRACE_SEQ_PREFETCH_STRIDE=0` IS THE ROLLBACK
+to the fixed +-1 window.** Closes the EXR prefetch session.
+
+- **WHAT SHIPS, measured forward AND reverse against the fixed window:**
+
+  | | forward fixed | forward shipped | reverse fixed | reverse shipped |
+  |---|---|---|---|---|
+  | **DWAA 27ch** | 28.7-29.2% | **62.2-63.1%** | 28.3% | **61.1%** |
+  | **PIZ 3ch** | 99.9% | **99.9%** | 84.2% | **90.2%** |
+  | **PNG 3ch** | 100.0% | **100.0%** | -- | -- |
+
+- **REVERSE IMPROVES ON BOTH FILES, AND THAT IS THE SIGNED COUNTER DOING REAL
+  WORK RATHER THAN MERELY COMPILING.** The fixed window prefetches BOTH
+  neighbours, and in reverse the `+1` is the frame just left -- half its loads
+  were pure waste. PIZ reverse `skip 34 -> 21`, `handler>budget 34 of 181 -> 20
+  of 194`; DWAA reverse **`tick-stall 26 -> 2`**, frames **28 -> 60**, loads per
+  presented frame **2.89 -> 1.13**. **This is why PIZ, which gains nothing
+  going forward, gains 6 points going backward.**
+- **EXACTNESS AFTER A REVERSE RUN IS INTACT**: stop, then +3/-3. Cross-config
+  **0% differing** on the frame stopped on, after +3, and back -- both files --
+  with negative controls at **47.54%** and **8.84%**. Exactness is STRUCTURAL:
+  the policy is gated on `playTimer_.isActive()`, so paused stepping and random
+  access take the legacy window verbatim.
+- **THE FLIP WAS VERIFIED FROM THE COUNTERS IN BOTH DIRECTIONS**, never from the
+  command line: default (no knob) reads **62 frames, DECLINED 58, LEGACY 5,
+  59.79ms/frame**; `TRACE_SEQ_PREFETCH_STRIDE=0` reads **28 frames, LEGACY 29 on
+  every frame, 144.63ms/frame**.
+- **KNOWN CAVEAT, RECORDED AND DELIBERATELY NOT FIXED: DWAA stays ~1-2 points
+  behind turning prefetch OFF entirely** (63.3-64.1%) with a higher handler tail
+  (max ~100-122ms against ~74-75). **All of it is the FIVE-FRAME WARM-UP WINDOW,
+  which still uses legacy +-1** -- two loads per frame before the gate has
+  samples. Measured and attributed, not suspected. **Do not optimise the warm-up
+  in passing**: it costs PIZ early cache misses, and the gate-8 result proved
+  that starving the cache early on a file with ~4ms of headroom starts a skip
+  cascade that never converges.
+- ~~**TWO SMALLER GAPS, NAMED**~~ **ONE REMAINS. The policy's state IS ON THE
+  HUD as of 2026-08-25** (`docs/exr-prefetch-hud.md`): the image-sequence HUD's
+  fourth line is `seq-prefetch`, naming the policy -- **including the rollback,
+  which prints `legacy (env)`** -- the last stride, the gate's run counter,
+  issued/declined/legacy and cache hit/miss, with `loads N/M = X/frame` counting
+  REAL loader calls rather than decisions. Cost measured against a control built
+  from `81f66b1`: DWAA warm **control 65.5/64.5/65.5% against HEAD
+  64.8/65.4/64.4%**, and in the SHIPPING config it is structurally zero because
+  `refreshHud()` returns above every line it builds when the HUD is hidden.
+  **The owner hand-test is still outstanding and is the open gap** -- every
+  figure here is a counter and nobody has watched it play. Launchers for it are
+  in `_handtest_260825/` (untracked).
+- **DISCARD THE FIRST PASS OVER ANY EXR SEQUENCE. The "unexplained" rep-to-rep
+  spread is the OS FILE CACHE** (2026-08-25). `docs/exr-stride-aware-prefetch.md`
+  recorded DWAA's 54.3 -> 60.6 -> 62.9% as *"NOT explained ... the first thing to
+  nail down"* and ruled out caching because the A and B columns were flat. Six
+  consecutive passes, identical binary and config, show both EXR files climbing
+  monotonically to a plateau matching the record: **DWAA 37.6 (fully cold) ->
+  56.9 -> 63.1 -> 63.7 -> 65.5 -> 64.5 -> 65.5%**, **PIZ 76.5 -> 87.4 -> 99.9 ->
+  99.9%**. The sizes fit -- **3.3 GB and 1.6 GB of frames against 128 GB of RAM**
+  -- and each rep is a fresh process, so it is not process warm-up. The earlier
+  ruling-out is consistent rather than wrong: those columns were measured later
+  in an already-warm session. **A cold first pass reads roughly HALF the warm
+  rate, which looks exactly like a serious regression.** No deliberate
+  cache-drop control was run, so this is a strong attribution across two
+  independent files, not a proof.
+- **NOT PURSUED, BY INSTRUCTION: gate 8 (REFUTED, see the block above),
+  scheduler-accumulator prediction, off-thread EXR reads, alpha-prefill
+  optimisation, GPU/OCIO work.** Cache architecture, radius and put/get are
+  unchanged throughout the whole session.
+
+**WHERE EXR PLAYBACK GOES NEXT -- RECORDED, NOT DECIDED (2026-08-25).
+SUPERSEDED ON ITS CENTRAL QUESTION THE SAME DAY: THE HAND-TEST HAPPENED AND THE
+OWNER CHOSE OPTION (1) -- see the block immediately below.** The three options
+and the reasoning behind them are retained because the arithmetic is still the
+arithmetic; what expired is the sentence saying the decision was open. Nothing
+here is scheduled or started.
+
+- **THE ONE NUMBER THAT DECIDES THIS PHASE: A FULL EXR LOAD ON THE 27-CHANNEL
+  DWAA FILE MEASURES ~42.5ms, SYNCHRONOUS ON THE UI THREAD, AGAINST A 41.67ms
+  FRAME BUDGET AT 24fps.** The shipped policy already runs at **1.02 loads per
+  presented frame** -- within 2% of the floor of 1.00, which is one load for the
+  frame being shown and nothing speculative. **So the read alone is the whole
+  budget, before mapping, upload or present.** Those add the rest of the
+  measured ~60ms accounted per frame, which is why the file sits at ~62-65% of
+  real time. **No scheduling, gating or prefetch change can reach 24fps from
+  here, because the policy is already at the floor of what it can ask for.**
+  Only moving the read off the UI thread can.
+- **THE WARM-UP FIX IS RULED OUT, FOR TWO REASONS AND NOT ONE.** It is worth
+  **1-2 points** on DWAA. **(a) That sits inside the file's own warm rep-to-rep
+  noise floor of 64.4-65.5%** -- it buys less than the measurement can resolve.
+  **(b) The risk is measured rather than theoretical**: the gate-8 result proved
+  that starving the cache early on a file with ~4ms of headroom starts a **skip
+  cascade that never converges**, and declining during warm-up is the same
+  mechanism, so it would cost PIZ -- the control file -- early cache misses.
+  Paying real risk on the control file for a gain below the noise floor is a bad
+  trade in both directions at once.
+- **OFF-THREAD EXR READS IS THE REAL LEVER, AND IT GETS
+  MEASURE-THEN-PROPOSE-THEN-BUILD RATHER THAN A TAIL-END ADD-ON. The reason is a
+  scar this project already has**: checkpoint 2 stage one on the video path
+  returned **+10% against a predicted +22%**, because **conversion rides with
+  decode** (`convertCurrentFrame` is called from inside `decodeFrameAt`, so
+  moving decode to a worker moves conversion with it) and **the two overlapped
+  stages then contend** -- `sws` +24%, `upload` +91%. The EXR path has the same
+  shape: `loadExr` reads, allocates, alpha-fills and returns a converted buffer
+  in one call, so "move the read off the thread" is not one stage, and the
+  arithmetic has to be done on the real decomposition
+  (`docs/exr-dwaa-stage-decomposition.md`) before anything is built. **Building
+  against the wrong arithmetic produces a correct implementation that measures
+  as a failure**, which is exactly what stage one did.
+- **THE THREE OPTIONS AS THEY STAND, for the owner to choose between after the
+  hand-test:** (1) accept ~62-65%, document the limit honestly in the release
+  notes and merge; (2) the warm-up fix -- **recommended against, above**;
+  (3) off-thread EXR reads, as its own phase with its own measurement pass.
+  **If the hand-test finds ~15fps unusable on a 27-channel working file, (3)
+  stops being schedulable and becomes urgent.** That is the judgement the
+  counters cannot make.
+
+**THE OWNER HAND-TESTED THE PREFETCH DEFAULT AND RULED ~15 fps ON THE
+27-CHANNEL DWAA WORKING FILE *USABLE FOR REVIEW* (2026-08-25). THE FULL PANEL
+REGRESSION IS DONE AND FLAT. NO PRODUCT CODE CHANGED.** Record
+`docs/exr-panel-regression-260825.md`; user-facing wording ready to paste in
+`docs/exr-release-notes.md`. Still **NOT merged and no release cut** -- both are
+the owner's.
+
+- **THE VERDICT, AT ITS STATED WIDTH.** What is accepted is **this file class,
+  at this rate, for review** -- the owner's stated grounds being that heavy
+  multilayer EXR is often hard to play back in real time without caching.
+  **It is NOT a claim that the file reaches real time; it misses by about a
+  third**, and the release notes are required to say both halves. **The DWAA
+  file is explicitly not a blocker for the EXR milestone**, so **off-thread EXR
+  reads are a future optimisation rather than urgent work** -- the conditional
+  in the block above ("if the hand-test finds ~15fps unusable ... (3) becomes
+  urgent") resolved the other way. Not started.
+- **THE LIMIT IS WRITTEN DOWN IN TWO PLACES AND NEITHER IS A RELEASE BODY.**
+  `docs/release-notes-alpha.md` carries the durable known-gaps entry with its
+  number, per that document's own rule. `docs/exr-release-notes.md` carries the
+  paste-ready user-facing text. **`docs/release-body.md` was deliberately NOT
+  edited**: it always describes the CURRENT tag, `main` is at
+  **`v0.3.0-beta.8`** whose published notes correctly say *"EXR does not open"*,
+  and writing EXR into it would make a shipped release claim a feature it does
+  not contain. **This branch's copy of that file is beta.7, one release behind
+  `main`** -- take `main`'s copy as the base for the next one.
+- **THE REGRESSION, PHYSICAL PANEL 5120x1440 @ 239.999Hz, FLAT.**
+  `scrubbar.ps1` full pool **PASS -- 22 files, 88 legs, `delta 0` throughout**
+  (a single distinct `delta` value across all 88; `kf_land` non-zero on exactly
+  the two recorded long-GOP rows, Universe leg 2 and WeLo leg 2, and 0 on the
+  other 86) - 4K H.264 cadence x2 **100.0/100.0%** (`0 of 119`, `drop 0`,
+  `rephase 0`, `tick-late 0`, all 119 gaps `~1x`) - 4444 x2 **99.8/99.8%**
+  (`0 of 260`) - 4444 `-SnapRelease` **`target 261 shown 261 delta 0`**
+  full-res planar (**GATE C intact**), `release 21.0ms`, `hitch 0`, `land 0` -
+  **five** selftests green including `--renderer-selftest=cpu` -
+  `verify_trace_assets --strict` at **33 embedded files**, and **proven able to
+  fail** by a planted stray file before its pass was accepted.
+- **EXR SEQUENCE PLAYBACK, WARM (discard rep 1 -- it is the OS file cache).**
+  DWAA 27ch **63.6 / 63.6 / 65.1 / 64.4%** = **15.3-15.6 fps** across four warm
+  reps (cold rep 1 read 59.6%) - PIZ 3ch **99.9% on all four reps**, `skip 0`,
+  `handler>budget 0 of 215`, **`cache hit 216 miss 0 (100.0%)`** - PNG
+  **100.0% on all three**, `cache hit 167 miss 0`. **`loads 1.02-1.03/frame` on
+  DWAA against a floor of 1.00 is the figure that closes the scheduling
+  question** -- the policy is within 3% of asking for nothing speculative, so
+  no gating change can reach 24fps and only the read itself can.
+- **THE CPU ESCAPE HATCH IS HEALTHY ON THE EXR FLOAT PATH**: PIZ on
+  `TRACE_RENDERER=cpu` reads **99.9, 96.6, 99.9, 99.9, 99.9%** over five reps;
+  the single dip did not reproduce and is inside that path's own recorded
+  variance.
+- **EXACTNESS UNCHANGED AND STRUCTURAL**, shipping default against
+  `TRACE_SEQ_PREFETCH_STRIDE=0`: stepping +7/-7 **0% / 0%** on both EXR files
+  (negative controls **10.4796%** -- the recorded figure to four decimals -- and
+  **55.1105%**); reverse then stop/+3/-3 **0% / 0% / 0%** on both (negative
+  controls **47.89%** and **8.7407%**). **Every negative control fired**, so
+  each 0% is a comparison that could have seen a moved picture.
+- **REVERSE, AS AN A/B WITH EACH LEG'S CONFIG READ OFF ITS OWN HUD**
+  (`legacy (env)` against `stride (env)`, `dir -1`): DWAA **27.6% -> 61.0%**,
+  `tick-stall` **25 -> 4**, loads/frame **2.89 -> 1.10**; PIZ **73.6% -> 99.9%**,
+  `skip` **56 -> 0**, cache hit **64.4% -> 99.5%**. **ONE DISCREPANCY STATED AS
+  ONE: the record has PIZ reverse at 84.2% -> 90.2% and this session measures
+  73.6% -> 99.9%** -- differing from the record in OPPOSITE directions, so the
+  gain is larger here. Attributed to file-cache warmth (four forward passes
+  preceded it) and not proven; no cache-drop control was run.
+- **`seqreverse.ps1`'s DEFAULTS WENT STALE THE MOMENT THEY WERE WRITTEN, AND
+  ARE FIXED.** The script was **created by `81f66b1`, the same commit that made
+  stride the default**, and `seqPrefetchStrideAware()` reads the knob as
+  "empty **OR** != 0" -- so an unset knob is **stride ON**. Its `EnvA` (profile
+  only, labelled `fixed`) and `EnvB` (profile + `STRIDE=1`, labelled `gate4`)
+  were **the same configuration under two labels**; a default run would have
+  compared stride against itself and reported the columns identical, which reads
+  exactly like "the policy makes no difference". **The recorded reverse figures
+  are SAFE** -- their `ISSUED/DECLINED` columns read `--` against `110/81`, so
+  that run passed explicit env. A guard now throws when both legs resolve to the
+  same configuration. **Its first version compared knob TEXT and let
+  absent-vs-`=1` through**; it resolves the knob now, and is proven to fire on
+  all three identical-config forms. **Never rely on an unset knob to mean a
+  non-default.**
+- **TWO INSTRUMENT TRAPS RE-PAID.** **`strings` IS BROKEN IN THIS GIT BASH** --
+  zero lines from a 1.1MB PE file, so every marker search "found" nothing,
+  which reads exactly like a build missing its features; use `grep -a` on the
+  raw binary and **prove the search finds a known marker first**. And **a
+  concurrent Trace launch voided a full-pool sweep**: `scrubsweep.ps1` got null
+  output from a `--scrub-selftest` and threw on `Split` at file 14/22, passing
+  22/22 when re-run serialized. `seqcadence.ps1` ends with
+  `Stop-Process -Name Trace -Force`, so **measurement runs must be serialized**
+  and a mid-sweep harness crash is contention until proven otherwise.
+
+### WHAT STAGE 2 PART 2 STILL OWES
+
+1. **STAGE 2 IS CLOSED. Nothing on the part-2 list is outstanding**: `[`, `]`,
+   `C`, the pass overlay, the View pass list and `duplicateOf` are all built and
+   measured. **Cryptomatte (stage 4) is CUT BY THE OWNER, not deferred.**
+   ~~The one thing the EXR phase still owes before stage 3 is the sequence-path
+   cadence instrument~~ — **BUILT AND MEASURED 2026-08-24 as stage 3 step 1; the
+   baseline is taken and `seqcadence.ps1` is the harness. Nothing is outstanding
+   before stage 3's dialog.**
+2. **The transient pass overlay** naming the current pass on screen.
+3. **The full pass list in the View menu.**
+4. **`ExrPass::duplicateOf` IS DECLARED AND NEVER FILLED.** Root RGB and a named
+   `Beauty` layer are the same render written twice, and **the difference is
+   COMPRESSION, NOT CONTENT** — measured channel against channel: mean absolute
+   difference 0.0035/0.0028/0.0048 on values whose mean is ~1.0, max
+   0.041/0.029/0.053, only 5-7% of pixels bit-identical, which is exactly what
+   independent DWAA compression of two identical channel sets produces. The
+   mechanism is settled and cheap: read a BAND OF SCANLINES from both channel
+   ranges at open and compare — a few hundred KB rather than a whole frame. **It
+   must land WITH the pass list**: an unfilled field that the HUD would print is
+   exactly the kind of thing that quietly never gets done.
+5. **The full regression AT THE PHYSICAL PANEL. This is the merge gate.**
+
+**ONE THING FOUND IN PASSING AND NOT BUILT:** `R2_OP_Stacks_01_00000.exr` carries
+`framesPerSecond = 24/1` and `smpte:TimeCode = 00:00:00:00` in its header, and
+Trace reads neither — image sequences still get the nominal 24fps and no source
+timecode. Recorded, not built, and note it would interact with spec phase 7's
+`hasSourceTimecode_` gate rather than being a free addition.
+
+**THE EXR + COLOUR PHASE: STAGE 0 AND STAGE 1 ARE BOTH DONE AND STAGE 1 IS
+ACCEPTED BY THE OWNER (2026-08-23). SUPERSEDED ON THE "NEXT SESSION" POINT BY THE
+STAGE 2 PART 1 BLOCK ABOVE — STAGE 2 PART 1 IS BUILT AND THE NEXT SESSION STARTS
+AT PART 2 (pass cycling, the keys, the overlay, the menu list, the duplicate
+label). Everything else here stands.** Assessment `docs/exr-ocio-plan.md`; records
+`docs/exr-stage0-dependencies.md` and `docs/exr-stage1-color-transform.md`. Read
+all three before proposing anything in this area. Everything is on branch
+`exr-stage0-dependencies`, **not merged to `main` — the merge is the owner's**.
+
+**What is DONE:** OpenImageIO 3.1.14.0 + OpenColorIO 2.5.2 from the pinned vcpkg
+tree, in dev and CI; EXR opens as a still and as a 217-frame sequence with no code
+change beyond the build; one OCIO-backed display transform, LUT-first, with the
+whole View menu, bypass, persistence and a real `--ocio-selftest` in CI.
+
+**SUPERSEDED 2026-08-24 — read the stage 2 blocks above for what is actually
+open.** Stage 2 is DONE. **Stage 4 (Cryptomatte) is CUT BY THE OWNER, not
+deferred.** What is not started is stage 3 (the `Color Transform...`
+config/display/view dialog) and stage 5 (the GPU stage) — and **stage 3 has a
+named prerequisite: the sequence path has no cadence counters, so no EXR playback
+rate has ever been measured.**
+
+### STAGE 2 CARRY-FORWARD — the starting point, measured in stage 0, not to be re-derived
+
+**READ THE SUPERSESSION FIRST: items 2, 3, 4 and 5 ARE CLOSED by stage 2 part 1
+(2026-08-24) and are kept as the record of what was found, not as open work.**
+Channel 3 is no longer taken as alpha (2); only the pass being displayed is read,
+so the 224 MB whole-file allocation is gone (3); alpha is no longer pushed through
+the colour gamma (4); and the HUD's `ch:` field means the SOURCE now (5). **Item 1
+is not superseded and is still the thing not to re-derive** — the three naming
+conventions are what the grouper in `src/core/ExrChannels.*` is written against.
+
+1. **THERE ARE THREE CHANNEL-NAMING CONVENTIONS IN THE ASSET SET, NOT TWO**, and a
+   grouper written against any one of them finds nothing in the other two. Read
+   out of the actual headers with OIIO:
+   - **root layer**: `R G B` (and `A` where present)
+   - **named layers, Redshift**: `Beauty.red` / `Beauty.green` / `Beauty.blue` —
+     lower-case words, on every one of the 27-channel file's eight layers
+   - **Cryptomatte**: `CryptoMaterial.R` / `.G` / `.B` / `.A` — **upper-case, and
+     WITH alpha**
+   Group case-insensitively on a suffix set of `{R, red, G, green, B, blue, A,
+   alpha}` and keep the raw channel names for the HUD so a mismatch is visible
+   rather than silent. The assessment predicted two conventions; the third was
+   found by measurement.
+2. **`loadExr` TAKES CHANNEL INDEX 3 AS ALPHA REGARDLESS OF WHAT THAT CHANNEL IS.**
+   On the 27-channel Redshift file channel 3 is `Beauty.red`, so the display
+   buffer's alpha is the beauty pass's red channel. **Invisible today** because the
+   draw path ignores alpha — which is exactly what makes it a trap rather than a
+   bug: it surfaces the moment alpha starts mattering, not where the mistake is.
+3. **`loadExr` READS EVERY CHANNEL OF THE FILE.** `read_image(0, 0, 0, nchannels,
+   FLOAT, ...)` allocates `width x height x nchannels` floats — **~224 MB per frame**
+   on the 27-channel 1920x1080 file, of which 24 MB is used. Correct today and the
+   wrong shape for a 97-frame sequence.
+4. **Alpha is pushed through the same `pow(x, 1/2.2)` as the colour channels** in
+   `loadExr`'s `toDisplay8`, which is wrong in principle (alpha is not
+   display-referred) and invisible for the same reason as (2).
+5. **The dev HUD reads `ch:4` on a 3-channel file.** `MainWindow.cpp:6539`
+   hard-codes `info.channels = 4` on the frame-handoff path — honest about the
+   DISPLAY BUFFER (always RGBA after handoff), misleading as a label. What that
+   field should say is a stage-2 decision, so it was deliberately left alone.
+
+### THREE THINGS DEFERRED, DELIBERATELY, WITH THEIR REASONS
+
+- **THE DISPLAY PATH IS 8-BIT END TO END, AND THAT IS THE ACEScg / GPU-DISPLAY-PATH
+  ISSUE. HALF SUPERSEDED (2026-08-24): the EXR path is FLOAT IN and 8-bit OUT
+  now — the clip happens after OCIO instead of before it. The OUTPUT is still
+  8-bit and a float texture upload is still stage 5's, so everything below about
+  the GPU stage stands; what expired is "a scene-linear EXR is flattened before
+  the stage sees it".** The colour stage is built `BIT_DEPTH_UINT8` in and out because the frame
+  at its seam already is an 8-bit BGRA display buffer — that is what both renderers
+  present. Fine for the display-referred video the LUT workflow was accepted on;
+  **not fine for scene-linear ACEScg**, because an EXR carries values above 1.0 and
+  `loadExr` already flattens to 8-bit with a `pow(1/2.2)` long before the stage sees
+  it. **Full precision needs a float display buffer end to end** — a float
+  `PixelLayout`, both renderers carrying it, and the transform applied in the
+  shader. That is stage 5's problem and it is the reason stage 3's dialog cannot be
+  called "correct ACES" on its own. Recorded rather than half-built.
+- **THE TRANSFORM'S COST ON THE 8K PLATE IS UNMEASURED AND MUST NOT BE ASSUMED.**
+  It was measured at 9.3 ns/pixel single-threaded, linear in pixel count, and
+  parallel row bands took a 4K frame to 13.3ms / 99.7% of real time with `drop 0`.
+  At ~33 Mpx even the parallel stage is of the order of a whole frame budget — and
+  `12_8K_ProRes4444` already fails to reach real time with no colour work at all
+  (best recorded 56.9%). **Do not quote the 4K figure for that file.**
+- **THE `C` SHORTCUT IS UNDECIDED AND IS LEFT SO. SUPERSEDED (owner, 2026-08-24):
+  `C` IS DECIDED — it binds to the Color Transform bypass — and is NOT YET BUILT.
+  It ships with `[` and `]` as one keyboard surface in stage 2 part 2, and the
+  guard requirement below is unchanged and still binding.** `C` is free (only `Ctrl+C` is
+  bound) and the assessment reserves it for the Color Transform bypass, but the
+  stage-1 brief specified the menu only, so nothing was bound. **Binding it needs
+  phase 7's text-field guard checked first** — that guard is Qt's, covers PRINTABLE
+  keys through `QLineEdit`'s `ShortcutOverride`, and every new bare-key shortcut in
+  this project is required to be tested against it rather than assumed safe. Owner
+  decision.
+
+### COPY FRAME REMAINS RAW / SOURCE PIXELS — SUPERSEDED 2026-08-24, READ THIS FIRST
+
+**OWNER DECISION, 2026-08-24: COPY FRAME COPIES WHAT IS ON SCREEN.** It reads
+`ViewerWidget::displayedFrame()` now, so with a LUT active the clipboard holds the
+graded picture rather than the flat source. Measured with its own negative
+control: with no transform loaded the clipboard is IDENTICAL to the old behaviour
+to two decimals (mean RGB 108.93/110.35/113.66), and with the LUT on it reads
+183.95/188.39/194.05. **It is also the only thing that CAN be copied for an EXR**,
+whose source frame is now scene-referred float with no correct 8-bit reading of
+its own. **This is a user-visible behaviour change and belongs in the release
+notes.** Commit `2da029e`, separately revertable.
+
+**THE PARAGRAPHS BELOW ARE THE STAGE 1 RECORD AND NO LONGER DESCRIBE THE
+BEHAVIOUR.** One thing in them DOES still stand and was re-verified rather than
+assumed: **the user's view transform (rotate/flip) is still not applied**, because
+it lives in the RENDERER, downstream of `displayFrame_`, and was never in this
+buffer. Phase 10's decision is untouched.
+
+**Unchanged by stage 1, and verified rather than assumed**: with the ARRI LUT
+active and the vivid Rec.709 picture on screen, `Ctrl+C` put the **flat LogC4
+source** on the clipboard at the full 4608x3164. It also still does not apply the
+user's view transform (rotate/flip), which is the pre-existing phase 10 decision.
+
+**This is structural, not a convention to remember.** `copyCurrentFrame()` reads
+`viewer_->frame()`, and the colour stage runs downstream of that member — the
+transformed buffer never enters it. That is why the stage lives in
+`ViewerWidget::setFrame()` between `frame_` and the renderer and nowhere else.
+
+**It is also the one behaviour worth re-opening deliberately.** A reviewer copying
+a frame to send to someone may well want what they are looking at. Changing it is
+a one-line change at that seam and would have to be said out loud in the release
+notes — which is precisely why it was not changed quietly here.
+
+**EXR/COLOUR STAGE 1 IS DONE (2026-08-23): ONE OCIO-BACKED DISPLAY TRANSFORM,
+LUT-FIRST, WITH A REAL `--ocio-selftest` IN CI.** Record
+`docs/exr-stage1-color-transform.md`; assessment `docs/exr-ocio-plan.md`. **NOT
+started, by instruction: multilayer/AOV cycling, Cryptomatte, EXR channel
+regrouping, the `Color Transform...` dialog, the GPU stage. UNMOVED: the vcpkg
+pin, decode and playback scheduling.**
+
+- **THERE IS ONE STAGE AND A LUT IS A CONFIGURATION OF IT, NOT A SECOND
+  PIPELINE.** `src/core/ColorTransform.{h,cpp}` holds `enabled (bypass)` plus a
+  tagged union — `None | Lut | DisplayView` — and compiles it to a single
+  `OCIO::ConstCPUProcessor`. Nothing downstream of `setConfig()` knows which kind
+  it is. `DisplayView` is **compiled and reachable with no UI**, so the ACES
+  dialog is a call site later rather than a redesign. The two terms are
+  INDEPENDENT: the bypass never touches the configuration, which is what makes
+  re-enabling a bool becoming true rather than a reload.
+- **THE STAGE RUNS IN `ViewerWidget::setFrame()`, BETWEEN `frame_` AND THE
+  RENDERER, AND THAT SEAM IS FORCED BY COPY FRAME.** `copyCurrentFrame()` reads
+  `viewer_->frame()`, so applying into that buffer would silently make Copy Frame
+  copy the TRANSFORMED image — the assessment's item 6. Keeping the transformed
+  buffer downstream of `frame_` answers it structurally rather than by
+  remembering. **Copy Frame still copies RAW/SOURCE pixels: verified, not
+  assumed** — with the ARRI LUT active and the vivid Rec.709 picture on screen,
+  Ctrl+C put the flat LogC4 source on the clipboard at the full 4608x3164.
+- **`syncPlanarOutput()` GAINED ONE TERM AND IT IS THE ONLY ENGINE INTERACTION.**
+  The stage works on BGRA8 and GATE C delivers planar YUV, so planar stands down
+  while the stage is ACTIVE — `allowed && !colorTransform_.isActive() &&
+  rendererAcceptsPlanarYuv()`. **Nothing changes while the transform is off**,
+  which is every existing measurement in this repo.
+- **OCIO's `CPUProcessor::apply` IS SINGLE-THREADED AND THAT WAS THE WHOLE
+  DIFFERENCE BETWEEN UNUSABLE AND SHIPPABLE.** 4K H.264 with a LUT: OFF
+  `handoff 0.76ms` / 100.0% · ON single-threaded **77.28ms / 47.9% of real time,
+  `drop 61`** · ON in **parallel row bands 13.27–14.13ms / 99.7% x2, `drop 0`**.
+  Measured **9.3 ns/pixel and linear in pixel count** (the 4608x3164 Alexa clip
+  read 135.7ms at the same rate). A `ConstCPUProcessor` is immutable once built
+  and safe to apply from several threads at once — what OIIO's own colour path
+  does — so bands are ROW RANGES over one shared processor and a per-pixel
+  transform makes seams impossible. **NOT measured on the 8K plate and must not
+  be assumed to hold there.**
+- **`--ocio-selftest` IS FIVE ASSERTIONS, NOT ONE "DID IT THROW", AND IT IS A CI
+  STEP.** 20 not compiled in · 21 no version · 22 config · 23 processor · **24
+  the transform compiled and LEFT THE PIXEL UNCHANGED** · 25 the optional
+  `=<file>`. **(24) is the one an exception check would miss**: a processor that
+  applies an identity is indistinguishable from a working one by every other
+  signal, and identity is exactly what a mis-resolved colour space produces —
+  stage 0's `getColorSpaceFromFilepath("x.exr") = Raw` is that failure in the
+  wild. **The config is OCIO's OWN BUILT-IN ACES config (`ocio://default`), not a
+  file**, because a runner has no colour configs and a selftest needing one could
+  not run there. Reads `version=2.5.2 input=ACEScg ... rgb 0.18->0.34919 moved=1`.
+  **Proven able to fail**: a missing LUT and a garbage `.cube` both exit 25 with
+  OCIO's own parser error.
+- **THE VIEW MENU IS THE SPEC'S FOUR ITEMS.** `Color Transform` (checkable
+  bypass) · `Color Transfor&m...` (present and DISABLED — stage 3; a row that
+  appears later moves every item under it, the same choice the Share menu's
+  LucidLink row makes) · `Load L&UT...` · `&Reset Color Transform`. **Loading a
+  LUT enables the transform in one action. Reset is not "untick"** — it clears
+  the configuration too, or a LUT would sit loaded and invisible. **ON/OFF NEVER
+  REOPENS MEDIA**: `applyColorTransformChange()` re-syncs planar and re-delivers
+  the frame on screen — for video one exact `Step` re-request (the slider-release
+  landing path, frame-exact by construction), for a still or sequence just a
+  re-run of the stage. Measured through the menu: **ON 187.07 -> bypass 109.88 ->
+  ON again 187.07**, bypass equalling the never-loaded value exactly.
+- **THE FIRST DRAFT'S MNEMONICS COLLIDED AND `warnOnDuplicateMnemonics()` IS WHY
+  THAT DID NOT SHIP.** `Color &Transform...` clashes with `Always on &Top` and
+  `&Load LUT...` with `&Lock Window to Media Aspect Ratio`; they are `M` and `U`
+  now, and the check prints only its three recorded pre-existing lines.
+  **NO KEYBOARD SHORTCUT WAS BOUND** — `C` is free and the assessment reserves it,
+  but the brief specified the menu only and a new bare key needs phase 7's
+  text-field guard checked first. Owner call.
+- **THE STAGE IS 8-BIT IN AND OUT, AND THAT IS A STATED LIMIT FOR THE ACEScg
+  WORK.** The frame at this seam is already an 8-bit BGRA display buffer, so a
+  float pipeline here buys nothing the buffer can carry — but a scene-linear EXR
+  carries values above 1.0, and `loadExr` already flattens to 8-bit with a
+  `pow(1/2.2)` long before this stage sees it. Full precision needs a float
+  display buffer end to end, which is the GPU stage's problem. Recorded rather
+  than half-built.
+- **`TRACE_COLOR_LUT=<path>` loads a LUT at startup and enables the stage**,
+  overriding the persisted state and writing nothing back. It exists because the
+  only other way in is a modal file dialog, and it is also the A/B: one binary,
+  the knob set or not. The HUD's **`xform`** field reads `n/a` / `none` /
+  `bypass <lut>` / `ON <lut>` — `off` and `bypass` are different facts and
+  neither is answerable from the picture.
+- **Regression, physical panel 5120x1440 @ 239.999Hz, transform OFF (the shipping
+  default, confirmed by the real settings file carrying no `color/` keys):**
+  `scrubbar.ps1` full pool **PASS — 22 files, 88 legs, `delta 0` throughout** ·
+  4K H.264 cadence x2 **100.0/100.0%** (`0 of 119`, `drop 0`, `rephase 0`,
+  `tick-late 0`) · 4444 x2 **99.8/99.8%** (`0 of 260`) · 4444 `-SnapRelease`
+  **`target 261 shown 261 delta 0`**, `hitch 0`, and **`dst YUV444P12 planar`,
+  i.e. GATE C intact** · all four selftests green · `verify_trace_assets
+  --strict` at **33 embedded files**.
+  **Transform ON**: engages on still, EXR sequence, H.264, ProRes and the Alexa
+  clip; **both renderers agree** (d3d11 delta 77.19, cpu 77.14); fullscreen keeps
+  it (picture-region luma 185.99 vs windowed 187.18) and Escape restores exactly;
+  stepping returns to the same value; **release stays exact** (`delta 0`,
+  `hitch 0`, `dst RGB32/BGRA`, release 39.1ms against 22.4 off); Reset returns the
+  raw picture.
+- **A HARNESS LESSON: a luma detector has to FIND the picture before it samples
+  it.** The first fullscreen check read 57.21 against a windowed 187.18 and looked
+  like the transform being lost; it was a 1.46:1 picture pillarboxed on a 3.56:1
+  panel putting most of a full-width sample band on black bars. Measuring the
+  picture's own column range gives 185.99. Same class as `emptystate.ps1`'s
+  stage-bound trap. Harness: `scripts/measure/colortransform.ps1`
+  (`matrix`/`toggle`/`renderers`).
+
+**THE EXR + COLOUR PHASE HAS STARTED AND STAGE 0 (DEPENDENCIES) IS DONE (2026-08-23).
+EXR OPENS -- AS A STILL AND AS A 217-FRAME SEQUENCE -- WITH NO CODE CHANGE BEYOND THE
+BUILD.** Assessment `docs/exr-ocio-plan.md`; stage-0 record
+`docs/exr-stage0-dependencies.md`. **Nothing in the Color Transform feature was built
+and the View menu was not touched.** OpenImageIO **3.1.14.0** + OpenColorIO **2.5.2**,
+both from the pinned vcpkg tree, linked in dev and CI.
+
+- **THE PIN DID NOT MOVE, AND THAT IS NOW A SECURITY CONSTRAINT.** OCIO 2.5.2 fixes
+  **CVE-2026-42450**, stack buffer overflows in the `.cube`/`.spi1d`/`.spi3d`/`.lut`
+  parsers affecting all prior 1.x and 2.x -- which is precisely the code path a
+  "load an arbitrary LUT" feature exposes. **The pin must never move backwards.**
+- **COST: cold 5.1 min for 20 packages, warm 7 s** (19 restored from the binary cache
+  in 988 ms). Binary cache 7 -> 27 entries, 64.3 -> 164.9 MB; package 95.4 -> 118.3 MB;
+  Trace's own compile time unchanged; **launch to window flat** (med 936.5 vs the
+  control's 945.4 ms over 7 alternating reps, ~60 ms spread within each set).
+- **CI PASSES `--clean-after-build` AND THAT IS A CACHE-SIZE DECISION WITH A NUMBER.**
+  CI caches the whole vcpkg tree; the OIIO graph leaves `buildtrees` at **3,795 MB**
+  and `packages` at **610 MB** against an `installed/` of 610 MB, so an uncleaned
+  entry is ~6 GB of which ~4.4 GB is rubble -- against GitHub's 10 GB LRU limit, that
+  starts evicting the Qt and ffmin caches, i.e. the exact "green or red depending on
+  whether the cache aged out" scar `VCPKG_PIN` already records. **`viewer` and
+  `ffmpeg` features are deliberately NOT requested** (viewer pulls vcpkg's qtbase
+  6.11.1, a different Qt from the shipped 6.11.2; ffmpeg asks for a different feature
+  set from the pinned one and would rebuild it).
+- **`build/` HAD BEEN LINKING THE WRONG FFmpeg SINCE THE 9.0.1 UPGRADE, AND THE STATUS
+  LINE COULD NOT SAY SO.** Found while establishing the control; **pre-existing, not
+  caused by this change** -- the pre-change binary imports it too. `find_library`
+  writes CACHE entries and returns early when one is set, so a tree first configured
+  without `TRACE_FFMPEG_ROOT` keeps vcpkg's answer forever and adding the flag later
+  changes nothing: the cache read `TRACE_FFMPEG_ROOT=C:/tw_ff9/out` beside
+  `FFMPEG_AVCODEC_LIBRARY=C:/vcpkg/.../debug/lib/avcodec.lib`. Import tables:
+  pre-change **`avcodec-62`** (vcpkg 8.1.2, MSVC) against a fresh tree's
+  **`avcodec-63`** (ffmin 9.0.1, GCC) -- the ~18%-slower-decode toolchain, under a
+  status line saying otherwise. **Fixed both ways**: the cache vars are `unset` before
+  searching when the flag is set, and the line now prints the **RESOLVED** path rather
+  than echoing the request -- the old one printed correctly throughout the fault,
+  because it was a claim that could not fail. Same rule as the HUD's `renderer` /
+  `planar` / `font` / `strip` fields. **Any local figure taken in that tree since the
+  9.0.1 upgrade was taken on 8.1.2.**
+- **`/utf-8` COSTS NOTHING BECAUSE QT ALREADY SETS IT.** fmt's PUBLIC option is
+  *required* rather than cosmetic (`fmt/base.h` static_asserts on it, and OIIO's
+  `imageio.h` reaches it) -- but the CONTROL vcxproj already carries
+  `-Zc:__cplusplus -utf-8` from Qt's mkspec and the new one carries
+  `-Zc:__cplusplus -utf-8 /utf-8`. Same MSVC flag, different prefix: a literal
+  duplicate. (All `src/`+`app/` sources are pure ASCII too, so it was a no-op either
+  way -- but the duplicate finding needs no assumption about future sources.)
+- **BOTH EXR QUESTIONS ARE YES, AND THE SEQUENCE PATH NEVER NEEDED WIRING.** There is
+  **no extension whitelist** on it: `openPath` branches mp4/mov and the audio
+  extensions, and *everything else* falls through to `SequenceParser::detect()`, whose
+  regex matches any suffix; `ImageSequenceFrameSource` then calls
+  `StillImageLoader::load`, which dispatches `.exr` to the pre-existing `loadExr`. An
+  isolated single EXR reads `Still | 1920x1080 | Frame: 0/0`; the 217-frame folder
+  reads `Sequence | Frame: 216/216 | Seconds: 9.000` and **played end to end** (217
+  frames at 24fps is 9.04s), warm, ~1.6 GB in ~9 s. **NOT a cadence claim** -- the
+  sequence path exposes no `drop`/`rephase` counters and cold storage is unmeasured.
+- **THE PLAN'S FILE FINDINGS ARE CONFIRMED FROM THE HEADERS**: `nchannels=3`, `R G B`,
+  `half`, `piz` (and `dwaa` on the Redshift beauty), **`chromaticities` ABSENT**. And
+  finding 1 is now MEASURED rather than predicted: `scene_linear` resolves to
+  **`ACEScg`** (the right default) while `getColorSpaceFromFilepath("x.exr")` returns
+  **`Raw`** (the wrong one, from the config's own file rules).
+- **`TRACE_WITH_OCIO=1` IS CURRENTLY A CLAIM NOTHING IN THE PRODUCT TESTS.** Trace
+  references no OCIO symbol yet, so the linker emits no direct import -- the DLL ships
+  only transitively through OIIO. Proven outside the product with a standalone probe
+  (OCIO 2.5.2 live, the Redshift config loading, and the real ARRI `.cube` applying
+  0.18 -> 0.14753/0.15410/0.15887 through `FileTransform`). **Recommended stage-1
+  entry item: an `--ocio-selftest` beside the renderer and shape selftests**, so CI
+  asserts OCIO initialises rather than merely linking. Not built -- new code path,
+  and this stage was scoped to dependencies.
+- **ONE DISCREPANCY REPORTED, NOT FIXED: the HUD reads `ch:4` on a 3-channel file.**
+  `MainWindow.cpp:6539` hard-codes `info.channels = 4` on the frame-handoff path --
+  honest about the DISPLAY BUFFER (always RGBA after handoff), misleading as a label,
+  and only visibly wrong now that EXR opens. What that field should say is a stage-2
+  decision (the plan wants raw channel names there), so it was left alone.
+- **Regression flat, physical panel 5120x1440 @ 239.999Hz**, against a control built
+  from IDENTICAL SOURCE with `-DCMAKE_DISABLE_FIND_PACKAGE_OpenImageIO=ON
+  -DCMAKE_DISABLE_FIND_PACKAGE_OpenColorIO=ON` -- the two libraries are the only
+  variable, and both binaries were confirmed on `avcodec-63` first:
+  `scrubbar.ps1` full pool **PASS -- 22 files, 88 legs, `delta 0` throughout** (5.0
+  min warm; Jeep, WeLo and Universe all passed) - 4K H.264 cadence x2 each
+  **100.0% on all four reps**, `drop 0`, `rephase 0`, `tick-late 0`, `tick-stall 0`,
+  buckets `~1x 119`, and `handler>budget 0 of 119 (max 4.8 / 4.5)` **identical to the
+  digit on both binaries** - 4444 x2 each **99.8% on all four**, `0 of 260`, handler
+  avg 20.74-20.75 (the `<0.9x` bucket reads 3/4 new vs 1/1 control, inside this file's
+  recorded 1-10 span -- do not chase it) - 4444 `-SnapRelease` **`target 261 shown 261
+  delta 0`** full-res planar, `hitch 0`, `land 0`, release 22.4 vs 22.6ms - all three
+  selftests green on both - `verify_trace_assets --strict` green at **33 embedded
+  files**, unchanged as it must be.
+- **CI IS GREEN, EVERY VERIFICATION STEP READ INDIVIDUALLY** (run `32647950705`,
+  branch `exr-stage0-dependencies`, cold install 37.8 min, Trace build 1.9 min):
+  `derived: 33 embedded files` - `dependency check: all DLLs import only Windows
+  system libraries` - **`Trace: FFmpeg avcodec resolved to .../ffmin/out/lib/
+  avcodec.lib`** (the new resolved-path line working on CI, naming the right tree) -
+  `Trace: OpenImageIO enabled 3.1.14.0` - `Trace: OpenColorIO enabled 2.5.2` -
+  `FFmpeg detected` + `Audio dependencies detected` + **`OpenImageIO + OpenColorIO
+  detected by CMake.`** - **`Package verified: 11 required files present, 118.3 MB
+  total.`** (matching the locally built dist TO THE DIGIT) - **`renderer=d3d11
+  fellback=0 planar=1`** (the HARDWARE path -- the check accepts `d3d11 (warp)` by
+  prefix, so a WARP pass looks identical in the tick and different in that line) -
+  `OK - 11 shapes x 4 scale factors`. OCIO 2.5.2 and OIIO 3.1.14.0 were fetched and
+  built from source ON THE RUNNER, so the versions are confirmed there too.
+  **`--clean-after-build` is demonstrated rather than reasoned: the vcpkg cache
+  upload was 268,812,508 B (256 MB compressed) against a ~6 GB uncleaned tree.**
+  Note the `~453 MB` and `~719 MB` figures in the same log are the Qt and
+  minimal-FFmpeg caches being RESTORED, not this one. **THE WARM PATH IS CONFIRMED
+  TOO** (run `32650343995`, docs-only): `Cache hit for: vcpkg-v4-...` then `Cache
+  restored from key: ...`, **step 6 SKIPPED at 0.0 min**, and the **whole job in
+  3.8 min against ~42 min cold**. So CI pays 37.8 min once and zero build time
+  after -- the same shape as the ffmin cache beside it.
+- **THE CI PACKAGING CHANGE WAS PROVEN ABLE TO FAIL.** A `dist` built with exactly the
+  CI sequence launches with `PATH` reduced to `System32` and reports
+  `renderer=d3d11 fellback=0 planar=1`; renaming `OpenImageIO.dll` away makes the same
+  launch exit **`0xC0000135` (STATUS_DLL_NOT_FOUND)**. Without the DLL copy CI would
+  have shipped an exe that cannot start. The configure-time assertion was likewise
+  negative-controlled against `build-control/CMakeCache.txt`.
+
 **THE INTERFACE PASS WAS THE OPEN PHASE from 2026-08-10 until the above superseded it** — the owner chose it and lifted
 the no-interface rule. Spec in `docs/interface-pass-1-spec.md`, assets in
 `assets/260807 Trace Media Player Icon/`. **Performance still outranks it**: every phase
@@ -3414,6 +4785,12 @@ FFmpeg DLLs are already in `build\app\Release`; `windeployqt` supplies the Qt ru
 - **The artifact is uploaded as a folder, never as a .zip** (Aug 2026): `upload-artifact` always zips its input, so uploading a zip produced a zip-inside-a-zip and Anj's download had no runnable app in it. Release assets are *not* re-zipped, so tags still build a real ZIP.
 - **Green must mean launchable** (Aug 2026): the workflow checks native tool exit codes (`windeployqt` failures used to pass silently), asserts FFmpeg was found at configure time, and verifies `Trace.exe` + Qt DLLs + `platforms/qwindows.dll` + av* DLLs exist before publishing. If a build goes green, the download starts.
 - **CI checks the interface assets against the `.qrc` contract, before the build** (2026-08-15, `3e0c936`): `scripts/verify_trace_assets.py --strict --no-pillow`, second step in the workflow because it needs no toolchain. It catches the class `rcc` cannot — a 25px export named `-24`. Its set is **derived** from `app/resources.qrc` and `app/trace.rc`; see the asset-tree entry above for why that is what made it CI-safe.
+- **CI can assert the EXR channel grouper** (2026-08-24): `Trace.exe
+  --exr-channels-selftest` drives `groupExrChannels()` over 14 synthetic channel
+  layouts and exits 5 on any failure. Pure logic -- no file, no OpenImageIO, no
+  window -- so it runs anywhere the binary does. It exists because the asset set
+  carries only two of the three recorded naming conventions, so the third can
+  only be tested synthetically. **Not yet added to the workflow.**
 - **CI asserts the renderer initializes** (Aug 2026, `b5ad4d2`): `Trace.exe --renderer-selftest=d3d11` builds the viewer, lets it adopt whatever `TRACE_RENDERER` selects, prints `renderer=`/`fellback=`/`planar=` and exits. It runs the real path — `ViewerWidget`'s constructor applies the native-surface contract and calls `initialize()`, which creates the device, the child surface window, the flip-model swapchain, every shader and the render target. **No `show()`**: `initialize()` reaches the HWND through `winId()`, so the check does not need an interactive desktop. The match is a **prefix**, so a runner that falls back to the software rasteriser and renames itself `d3d11 (warp)` still passes. (In the event the first run reported plain `d3d11` — the GitHub runner's device took the hardware path.) **Exit 3 is the selected backend failing to initialize, exit 4 is that backend never having been built** (no `fxc`); the two are separate codes because they are separate faults, and that is also why the expected name is an argument to the exe rather than a grep in the YAML. `planar=1` is asserted too — a failed YUV shader is deliberately non-fatal at runtime (GATE C), which makes it exactly the silent degradation this step exists to catch. **It was printed for one run before being asserted**, because whether the runner's device supplies `ps_4_0` had never been observed and guessing would have turned the first build red on a guess.
 - vcpkg/FFmpeg and Qt are cached; the ~20+ min build only recurs on cache miss (7-day idle expiry). Bump `VCPKG_CACHE_VERSION` in the workflow to force a clean FFmpeg rebuild.
 - **Whether Claude can push depends on which machine the session is on — check, don't assume.** On the **Windows box** (repo at `C:\Users\andre\Documents\Claude_Cowork\Trace_Windows`) github.com **is reachable and Claude can push directly**; verified Aug 2026 by a read-only `git ls-remote` followed by a real push. On the **macOS sandbox** the proxy blocks github.com, so commits are made locally and Anj pushes from `~/Claude/Trace`.
@@ -4477,7 +5854,67 @@ Reverted, uncommitted. Benchmarked on 2160×3840 ProRes 4444 @ 1013 Mbps from Lu
    **What is left is 4K ProRes 4444, and it is decode-bound**: 15.4ms of its 17.7ms/frame is the ProRes decoder itself, so no cache or conversion work can reach it and FFmpeg's ProRes decoder has no `lowres` path. ~56 frames/sec, about 2.3x playback, against the owner's "~4x on a fast drag". The only remaining levers are skipping frames — which the shuttle deliberately never does — or decoding off the UI thread. Treat "4x on 4444" as a product decision to take explicitly rather than a bug to fix.
 
    Reverse *playback* (as opposed to dragging) beyond the cache is still the same underlying problem — H.264 needs GOP-aware backward buffering.
-7. EXR / image-sequence review polish, OCIO display transform (TODO marker in `StillImageLoader.cpp`). **EXR does not open today**: OpenImageIO is not installed in vcpkg and not built in CI, so `TRACE_WITH_OIIO` is undefined in both.
+7. **EXR AND COLOUR MANAGEMENT IS THE OPEN PHASE (2026-08-23). STAGE 0 IS DONE: EXR
+   OPENS.** Assessment `docs/exr-ocio-plan.md`, stage-0 record
+   `docs/exr-stage0-dependencies.md` -- read both before proposing anything here.
+   OpenImageIO **3.1.14.0** and OpenColorIO **2.5.2** are installed from the pinned
+   vcpkg tree and linked in dev and CI, so `TRACE_WITH_OIIO` and `TRACE_WITH_OCIO` are
+   both defined, and a single EXR opens as a still while the 217-frame folder opens and
+   plays as a sequence. **The previous text here -- "EXR does not open today" -- is
+   superseded.** **STAGE 1 IS DONE AND ACCEPTED BY THE OWNER (2026-08-23)**: one
+   OCIO-backed display transform, LUT-first, with `--ocio-selftest` in CI -- record
+   `docs/exr-stage1-color-transform.md`. **STAGE 2 PART 1 IS DONE
+   (2026-08-24): a FLOAT display buffer on the EXR path and only there, the
+   channel grouper, per-pass reading, per-class display mappings, and Copy Frame
+   changed to copy what is on screen -- record
+   `docs/exr-stage2-float-buffer.md`.** It also found and fixed a bug that
+   SHIPPED IN STAGE 0: **EXR display had red and blue transposed**.
+   **STAGE 2 PART 2 IS DONE (2026-08-24): the keyboard surface (`[`, `]`, `C`
+   -- record `docs/exr-stage2-keyboard-surface.md`) AND the multilayer pass
+   model (grouper selftest, duplicateOf, the View pass list, the pass overlay,
+   and the pinned Normalise range -- record `docs/exr-stage2-pass-model.md`).**
+   Both are regression-clean at the panel. **STAGE 2 IS CLOSED and STAGE 4
+   (Cryptomatte) IS CUT BY THE OWNER -- not deferred, and not to be picked up as
+   unfinished business.** What is left of the EXR phase is stage 3 (the
+   config/display/view dialog) and stage 5 (the GPU stage). **Stage 3's named
+   prerequisite was a cadence instrument for the image-sequence path -- **BUILT
+   AND MEASURED 2026-08-24 as STAGE 3 STEP 1** (`seqcadence.ps1`, record
+   `docs/exr-stage3-cadence-instrument.md`). The first EXR playback rates in this
+   project: **the 217-frame PIZ sequence 99.9% of real time with `skip 0` and
+   `handler>budget 0 of 215`; the 27-channel DWAA sequence 28.8-29.2%, holding
+   the clock by SKIPPING 68 of 97 frames.** The PIZ file, not the DWAA one, is
+   the sensitive test for the dialog -- ~4.3ms of headroom against a transform of
+   the same order.** **CHECK THE
+   DISPLAY FIRST: a recent session ran over Parsec and the panel itself was at
+   5120x1440 @ 59Hz, not 239.999Hz, so nothing recorded there is a panel
+   baseline** -- that panel regression was taken on 2026-08-24 and is recorded in
+   `docs/exr-stage2-keyboard-surface.md`. **Stage 4 (Cryptomatte) is CUT BY THE
+   OWNER, not deferred.** **STAGE 3 IS DONE (2026-08-24): the
+   `Color Transform...` dialog ships -- config, input colour space, display,
+   view, with the resolved config named on screen -- record
+   `docs/exr-stage3-color-transform-dialog.md`. Its MEASUREMENT is a stop: an
+   ACES 2.0 view transform costs ~92ms per 1080p frame on the CPU and takes the
+   217-frame EXR sequence from 99.9% to 36.4% of real time, while a `.cube` LUT
+   on the same file reads 100.0% and is CHEAPER than no transform at all. So the
+   LUT workflow is unaffected and an ACES view transform needs stage 5, the GPU
+   stage -- which is now a live owner question rather than a deferred cost
+   decision.** Stage 5 is not started.
+   **THE PREFETCH WORK IS DONE AND SHIPS ON (2026-08-25): the stride-aware gate
+   took DWAA from ~29% to ~62-65% of real time forward and 28.3% -> 61.1%
+   reverse, PIZ 84.2% -> 90.2% reverse, with `TRACE_SEQ_PREFETCH_STRIDE=0` as
+   the rollback and the policy's whole state now on the HUD's `seq-prefetch`
+   line.** **THE SINGLE NUMBER THAT DECIDES WHAT COMES NEXT: A FULL EXR LOAD ON
+   THE 27-CHANNEL DWAA FILE IS ~42.5ms, SYNCHRONOUS ON THE UI THREAD, AGAINST A
+   41.67ms FRAME BUDGET -- and the shipped policy already runs at 1.02 loads per
+   presented frame, within 2% of the floor. The read IS the budget, so no
+   prefetch or scheduling change can reach 24fps and only OFF-THREAD EXR READS
+   can.** The warm-up fix is recorded as ruled out (its 1-2 points sit inside the
+   file's own 64.4-65.5% noise floor, and gate 8 measured the skip cascade that
+   starving the cache early causes). **All of it is RECORDED, NOT DECIDED -- the
+   owner has not hand-tested it and the choice is theirs**; the reasoning, the
+   decode-queue scar that argues for measure-then-propose-then-build, and the
+   three options are in the stride-aware prefetch section above and in
+   `docs/exr-prefetch-hud.md`.
 
 ## Where scrub stands (2026-08-07, second session)
 
@@ -4691,6 +6128,28 @@ because the HUD is unreadable for a transient fault -- it freezes along with
 everything else -- and because `stalls`/`hitch` are DRAG-scoped and read
 `0 of 0` during playback. Harness `scripts/measure/tickstall.ps1`.
 
+**Colour, EXR/colour stage 3 (2026-08-24)**: **`TRACE_COLOR_VIEW=<config>[|<input>
+|<display>|<view>]`** configures a DISPLAY/VIEW transform at startup and enables
+it, overriding the persisted state and writing nothing back. It exists for
+`TRACE_COLOR_LUT`'s reason -- every figure here is read off the HUD after a
+launch, and the only other way into this stage is a MODAL DIALOG -- and it is
+the A/B: one binary, the knob set or not. The three optional fields default from
+the config (the `scene_linear` ROLE, the config's own default display and view),
+so the short form is complete and cannot smuggle in a
+`getColorSpaceFromFilepath()` answer by omission. **Read the HUD's `map` field
+back rather than trusting the command line**: it names the RESOLVED config,
+display and view. Harnesses `scripts/measure/colordialog.ps1` and
+`scripts/measure/ocioprobe`.
+
+**Keyboard, EXR/colour (2026-08-24, stage 2 part 2)**: **`[`** previous EXR pass,
+**`]`** next EXR pass (wrapping; disabled and inert on media with no pass list),
+**`C`** Color Transform bypass. All three are **QActions, never `ShortcutTable`
+rows** -- the table's dispatcher ignores modifiers, so a bare-`C` row would also
+fire on Ctrl+C. `warnOnShortcutCollisions()` prints that class at startup and
+already reports one PRE-EXISTING instance (bare `L` against `Ctrl+L`, measured
+harmless). Harness `scripts/measure/passkeys.ps1`; record
+`docs/exr-stage2-keyboard-surface.md`.
+
 **Tuning knobs**, all defaulting to shipped behaviour: `TRACE_ASYNC_SCRUB=0`
 (back to the synchronous walk), `TRACE_SCRUB_WALK_MS` / `TRACE_SCRUB_REARM_MS`
 (the synchronous walk's budget and re-arm, for the control A/B),
@@ -4844,6 +6303,15 @@ resolved and the `Segoe UI Variable` families **Qt** can see, which are not the 
 It exists because the first build of `src/app/Theme.*` asked for a family Qt does not enumerate,
 `hasFamily()` declined it, and the application ran on Segoe UI looking very nearly right. The
 same value is on the dev HUD as `font`),
+**`TRACE_COLOR_LUT=<path>`** (2026-08-23, stage 1: load a LUT at startup and enable the
+colour transform, OVERRIDING the persisted state and writing nothing back. It exists
+because the only other way into the stage is a modal file dialog, and driving one with
+synthetic input is the class of harness this project has been burned by -- and because
+it is the A/B: one binary, the knob set or not, which is a better control than two
+builds. **Read the HUD's `xform` field rather than the command line**: it prints
+`n/a` / `none` / `bypass <lut>` / `ON <lut>`, and `off` and `bypass` are different
+facts that the picture cannot distinguish. Harness:
+`scripts/measure/colortransform.ps1`),
 **`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second

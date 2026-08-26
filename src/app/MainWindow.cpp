@@ -67,6 +67,7 @@
 #include "ui/TransportOverlay.h"
 #include "ui/TransportBar.h"
 #include "ui/TopChrome.h"
+#include "app/ColorTransformDialog.h"
 #include "app/LucidLinkIntegration.h"
 #include "app/OverlayAccessibility.h"
 #include "app/Settings.h"
@@ -78,6 +79,7 @@
 #include "core/TimeFormat.h"
 #include "core/VideoFrameSource.h"
 #include "core/ImageSequenceFrameSource.h"
+#include "core/SeqProfile.h"
 
 namespace trace::app {
 
@@ -859,6 +861,13 @@ MainWindow::MainWindow() {
     // bare-key command. The second comparison needs the shortcut table, which
     // is why this moved out of the tail of setupMenus().
     warnOnDuplicateMnemonics();
+    warnOnShortcutCollisions();
+
+    // After the menus (the actions exist) and after the viewer (the stage is
+    // pushed to it). A saved LUT that no longer resolves falls back to bypass
+    // and says so once; it never prevents the window being built, which is the
+    // assessment's item 5 read literally.
+    restoreColorTransformFromSettings();
 
     // Open the tick log HERE, at startup, rather than leaving it to the first
     // frame tick. Bound to the tick it would only appear once something played,
@@ -1188,11 +1197,22 @@ MainWindow::MainWindow() {
         }
 
         const bool isVideo = currentMedia_.has_value() && currentMedia_->kind == MediaKind::VideoFile;
+        const bool isSequence = currentMedia_.has_value()
+                             && currentMedia_->kind == MediaKind::ImageSequence;
+
+        // A MEASUREMENT gate, deliberately NOT the same expression as `isVideo`
+        // above, which is a BEHAVIOUR gate. Keeping them separate is the whole
+        // point of this instrument: the sequence path is being given the video
+        // path's counters and NOT the video path's policies, so a baseline taken
+        // now measures the sequence path as it already is rather than as this
+        // change made it. `isVideo` still decides the accumulator gate and the
+        // real-time drop below and is untouched.
+        const bool measureCadence = isVideo || isSequence;
 
         // Timer jitter: how far this tick landed from the requested interval.
         // Sampled before any presentation gating so it measures the scheduler
         // itself rather than the decision made from it.
-        if (isVideo) {
+        if (measureCadence) {
             if (!schedulerTickClock_.isValid()) {
                 schedulerTickClock_.start();
             } else {
@@ -1287,12 +1307,7 @@ MainWindow::MainWindow() {
             // landed. The old expression measured the accumulator's surplus,
             // which under a deadline schedule is not an error term at all --
             // so the control keeps the old one and only the control.
-            lastPresentLatencyMs_ = deadlineScheduleEnabled()
-                ? presentSlotLatencyMs_
-                : playbackAccumulatorMs_ - frameDurationMs;
-            ++presentSamples_;
-            avgPresentLatencyMs_ += (lastPresentLatencyMs_ - avgPresentLatencyMs_) / static_cast<double>(presentSamples_);
-            maxPresentLatencyMs_ = std::max(maxPresentLatencyMs_, lastPresentLatencyMs_);
+            notePresentLatency(frameDurationMs);
 
             // One frame per presentation unless the source cannot sustain its
             // native rate, in which case MEDIA TIME is held real-time and picture
@@ -1311,6 +1326,38 @@ MainWindow::MainWindow() {
             if (playbackAccumulatorMs_ > maxBacklogMs) playbackAccumulatorMs_ = maxBacklogMs;
             if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
         } else {
+            // The same present-latency instrument the video branch above uses,
+            // through the same function rather than a second copy of the
+            // arithmetic -- the reason notePresentedPlaybackFrame() was
+            // extracted, and the same failure avoided: a second copy that
+            // silently stops matching. It is called here rather than hoisted
+            // above the branch because the video branch's call site sits AFTER
+            // an early return (the control path's accumulator gate) that this
+            // branch does not have, and moving that return is a BEHAVIOUR
+            // change this instrument must not make.
+            notePresentLatency(frameDurationMs);
+
+            // WHAT THE SEQUENCE PATH DOES THAT THE VIDEO PATH COUNTS AND IT DID
+            // NOT. `steps` is floor(accumulator / period) with a floor of 1, so
+            // a sequence that cannot load a frame inside its budget banks the
+            // shortfall and the NEXT tick asks for a target two or more frames
+            // on -- frames that are never loaded and never presented. That is
+            // the same outcome the video path calls `drop`, reached by a
+            // different mechanism: the video path drops DELIBERATELY through
+            // realtimeDropSteps() and holds media time on the clock, while this
+            // is the shared accumulator catching up on its own.
+            //
+            // It is counted SEPARATELY and named `skip` rather than `drop` for
+            // exactly that reason. Calling them the same thing would claim the
+            // owner's 2026-08-13 real-time-drop policy is running on a path
+            // where realtimeDropSteps() is never called.
+            if (steps > 1) {
+                const long long skipped = static_cast<long long>(steps) - 1;
+                seqSkippedFrames_ += skipped;
+                ++seqSkipTicks_;
+                maxSeqSkipRun_ = std::max(maxSeqSkipRun_, skipped);
+            }
+
             playbackAccumulatorMs_ -= steps * frameDurationMs;
             if (playbackAccumulatorMs_ < 0.0) playbackAccumulatorMs_ = 0.0;
         }
@@ -1552,6 +1599,7 @@ MainWindow::MainWindow() {
                     playbackAtEnd_ = true;
                     playbackEndFrame_ = targetFrame;
                 }
+                trace::core::seqprofile::dump("playback reached end");
                 syncPlaybackSpeedActions();
             }
             refreshHud("Play");
@@ -1588,9 +1636,16 @@ MainWindow::MainWindow() {
             }
             syncPlaybackSpeedActions();
             if (!error.isEmpty()) showTransientMessage(error, 2000);
+            trace::core::seqprofile::dump("decoder exhausted");
         } else {
             notePresentedPlaybackFrame(frameDurationMs);
             if (currentMedia_.has_value() && currentMedia_->kind == MediaKind::ImageSequence) {
+                // The denominator for the stage profile: one presented sequence
+                // frame. Counted here rather than beside the video path's own
+                // present, so a video run leaves the sequence table empty.
+                trace::core::seqprofile::frameBoundary();
+                noteSequenceStride();
+                trace::core::seqprofile::Scope g{trace::core::seqprofile::Stage::Prefetch};
                 prefetchNeighbors();
             }
         }
@@ -1621,6 +1676,9 @@ MainWindow::MainWindow() {
                 playbackEndFrame_ = targetFrame;
             }
             syncPlaybackSpeedActions();
+            // The end-of-media site ordinary 1x playback actually reaches, and
+            // therefore the one a profiling run lands on.
+            trace::core::seqprofile::dump("playback stopped at end");
         }
         refreshHud(direction > 0 ? "Play" : "Reverse Play");
 
@@ -2546,6 +2604,13 @@ void MainWindow::setupShortcuts() {
     // part keyPressEvent happens to own.
     shortcuts_.addAction(ShortcutGroup::View, inspectorAction_);
 
+    // EXR/colour stage 2. A documentation row, because `C` lives on the action
+    // rather than in this table's dispatched half -- see setupColorTransform-
+    // Actions() for why that is required and not merely tidier. Listed so the
+    // Keyboard Shortcuts window renders the COMPLETE contract, which is the
+    // whole reason the documentation half exists.
+    shortcuts_.addAction(ShortcutGroup::View, colorTransformAction_);
+
     // Spec phase 14, all documentation rows for the same reason as the block
     // above: every one carries a modifier, so Qt dispatches it and the row
     // exists so the Keyboard Shortcuts window this phase renders is the
@@ -2562,6 +2627,14 @@ void MainWindow::setupShortcuts() {
     shortcuts_.addAction(ShortcutGroup::View, actualSizeAction_);
     shortcuts_.addAction(ShortcutGroup::View, zoomInAction_);
     shortcuts_.addAction(ShortcutGroup::View, zoomOutAction_);
+    // EXR/colour stage 2 part 2. Documentation rows: both are QActions, so Qt
+    // owns the dispatch. Placed here rather than beside the Color Transform row
+    // above ON PURPOSE -- `C` and the two pass keys are separate commits so
+    // either can be reverted alone, and two additions on adjacent lines make
+    // `git revert` conflict on whichever goes second (phase 14 paid for this
+    // once already). The zoom rows between them are stable context.
+    shortcuts_.addAction(ShortcutGroup::View, prevPassAction_);
+    shortcuts_.addAction(ShortcutGroup::View, nextPassAction_);
     // Minimize is NOT listed: it has no shortcut, and the table is the KEYBOARD
     // contract. A row with no key in it would be a menu listing -- the same
     // rule that keeps the three shortcut-less view transforms out of it.
@@ -4266,6 +4339,9 @@ void MainWindow::syncMediaDependentActions() {
     // Spec phase 15's four, through the function that also decides their ticks,
     // so "may this run" and "is this the state" are answered in one place.
     syncViewScaleActions();
+    // EXR pass cycling, for the same reason and in the same shape: whether the
+    // keys may run is a property of the pass list, which only EXR media has.
+    syncExrPassActions();
 }
 // COPY CURRENT FRAME (spec phase 14, Edit menu).
 //
@@ -4286,10 +4362,616 @@ void MainWindow::syncMediaDependentActions() {
 //     fidelity is owed to the frame the user stops on, and a copy is a stop.
 //   - No media, no frame: the action is disabled, and this checks anyway,
 //     because a shortcut reaches an action a menu never showed.
+// COLOUR TRANSFORM: FOUR ACTIONS OVER ONE STAGE (stage 1).
+//
+// The whole feature is `enabled + configuration`, and the two are independent.
+// That is what makes the checkbox a BYPASS: turning it off leaves the loaded LUT
+// exactly where it was, so turning it back on is a bool becoming true and the
+// next paint, with nothing recompiled and nothing re-read from disk.
+//
+// There is deliberately no separate LUT pipeline. "Load LUT..." fills in a
+// Kind::Lut configuration and "Color Transform..." will fill in a
+// Kind::DisplayView one; both compile through the same OCIO processor and
+// everything downstream sees only that. Building the LUT path first as its own
+// thing is exactly what the assessment said not to do.
+void MainWindow::setupColorTransformActions(QMenu* viewMenu) {
+    colorTransformAction_ = new QAction(tr("&Color Transform"), this);
+    colorTransformAction_->setCheckable(true);
+    // `C` IS A QAction SHORTCUT, NOT A ShortcutTable ROW, AND THAT IS THE WHOLE
+    // ANSWER TO Ctrl+C (owner decision 2026-08-24; the key was reserved by the
+    // stage-0 assessment and left unbound until it could ship with [ and ] as
+    // one keyboard surface).
+    //
+    // The table's dispatcher ignores modifiers, so a bare-C row there would also
+    // fire on Ctrl+C -- Copy Current Frame -- and would be safe only for as long
+    // as Qt's shortcut map consumed Ctrl+C first. warnOnShortcutCollisions()
+    // prints exactly that class, and it already reports one live instance
+    // (bare L against Ctrl+L). On a QAction, C and Ctrl+C are two distinct
+    // sequences that Qt resolves properly, so the collision cannot exist rather
+    // than being masked.
+    //
+    // It is also what makes the menu-bar-focus case correct for free. Qt runs an
+    // action's shortcut in the shortcut map BEFORE QMenuBar::keyPressEvent sees
+    // the key, which is why bare H was never reproducible in the 2026-08-21
+    // bare-letter bug while F, S, E and T -- table rows, reached by the menu bar
+    // first -- all were.
+    colorTransformAction_->setShortcut(QKeySequence(Qt::Key_C));
+    connect(colorTransformAction_, &QAction::toggled, this, [this](bool on) {
+        colorTransform_.setEnabled(on);
+        trace::app::settings().setValue(QLatin1String(kColorTransformEnabledKey), on);
+        applyColorTransformChange(on ? "Color transform on" : "Color transform off");
+        // Said out loud, because with no configuration loaded the tick moves and
+        // the picture does not -- which would otherwise read as a broken toggle.
+        if (on && !colorTransform_.hasProcessor()) {
+            showTransientMessage(
+                tr("No colour transform loaded - use Load LUT..."), 2500);
+        }
+    });
+
+    // LIVE AS OF STAGE 3. The row was present and permanently disabled from
+    // stage 1 -- deliberately, because the assessment fixed this menu's shape
+    // and a row that appears later moves every item under it. Enabling it is
+    // therefore the whole of that change: no item moved.
+    colorTransformConfigAction_ = new QAction(tr("Color Transfor&m..."), this);
+    connect(colorTransformConfigAction_, &QAction::triggered, this,
+            [this]() { openColorTransformDialog(); });
+
+    loadLutAction_ = new QAction(tr("Load L&UT..."), this);
+    connect(loadLutAction_, &QAction::triggered, this, [this]() { loadLutFromDialog(); });
+
+    resetColorTransformAction_ = new QAction(tr("&Reset Color Transform"), this);
+    connect(resetColorTransformAction_, &QAction::triggered, this,
+            [this]() { resetColorTransform(); });
+
+    viewMenu->addAction(colorTransformAction_);
+    viewMenu->addAction(colorTransformConfigAction_);
+    viewMenu->addAction(loadLutAction_);
+    viewMenu->addAction(resetColorTransformAction_);
+
+    // Hoisted onto the window, like every other menu action with a shortcut:
+    // since roadmap step 7 the menu bar lives in an auto-hiding strip, and
+    // QShortcutMap declines a shortcut whose only widget is not visible.
+    addAction(colorTransformAction_);
+    addAction(loadLutAction_);
+    addAction(resetColorTransformAction_);
+}
+
+// EXR PASS CYCLING: `[` PREVIOUS, `]` NEXT (stage 2 part 2).
+//
+// Two QActions rather than ShortcutTable rows. `[` and `]` are not letters, so
+// unlike C they could never be claimed by QMenuBar's mnemonic matching -- but
+// the other three reasons for an action all still apply, and one of them is
+// load-bearing here: a DISABLED QAction declines its own shortcut, so on video,
+// audio, a still with one pass, or nothing open at all, these keys fall through
+// and do nothing rather than reaching a handler that has to check and refuse.
+//
+// The cycle WRAPS. It is a cycle; stopping at the ends would make the last pass
+// of a 9-pass file four keystrokes from the first for no reason.
+void MainWindow::setupExrPassActions(QMenu* viewMenu) {
+    prevPassAction_ = new QAction(tr("&Previous Pass"), this);
+    prevPassAction_->setShortcut(QKeySequence(Qt::Key_BracketLeft));
+    connect(prevPassAction_, &QAction::triggered, this, [this]() { cycleExrPass(-1); });
+
+    nextPassAction_ = new QAction(tr("&Next Pass"), this);
+    nextPassAction_->setShortcut(QKeySequence(Qt::Key_BracketRight));
+    connect(nextPassAction_, &QAction::triggered, this, [this]() { cycleExrPass(1); });
+
+    viewMenu->addAction(prevPassAction_);
+    viewMenu->addAction(nextPassAction_);
+
+    // THE PASS LIST. A submenu rather than a flat run of rows, because a
+    // multilayer render can carry dozens of AOVs and they would otherwise push
+    // every item below them off the bottom of View.
+    //
+    // It is rebuilt when the LIST changes and never on aboutToShow: identical
+    // cost today, but aboutToShow is the natural home for a later "just check
+    // quickly", and this menu must never touch a file. The rows are drawn from
+    // the pass list the loader already built -- there is no second enumeration.
+    passMenu_ = viewMenu->addMenu(tr("E&XR Pass"));
+    passGroup_ = new QActionGroup(this);
+    passGroup_->setExclusive(true);
+
+    // Hoisted onto the window like every other menu action with a shortcut:
+    // since roadmap step 7 the menu bar lives in an auto-hiding strip, and
+    // QShortcutMap declines a shortcut whose only widget is not visible. Ctrl+O
+    // was the one action that missed this and silently did nothing with the
+    // strip hidden; it survived only because a since-fixed reveal bug kept the
+    // strip up most of the time.
+    addAction(prevPassAction_);
+    addAction(nextPassAction_);
+
+    syncExrPassActions();
+}
+
+// Enabled only when there is more than one pass to move between. One pass is
+// not a cycle, and a command that visibly does nothing is the showInfo failure
+// spec phase 2 deleted.
+void MainWindow::syncExrPassActions() {
+    const auto* image = currentImage_.has_value() ? &currentImage_.value() : nullptr;
+    const bool cyclable = image && image->passes.size() > 1;
+    if (prevPassAction_) prevPassAction_->setEnabled(cyclable);
+    if (nextPassAction_) nextPassAction_->setEnabled(cyclable);
+    rebuildExrPassMenu();
+    if (passMenu_) passMenu_->setEnabled(image && !image->passes.empty());
+
+    // The tick follows the LOADED pass, never the requested one -- same rule as
+    // the overlay message. choosePass() falls back when a frame does not carry
+    // the requested pass, and a menu ticking something that is not on screen is
+    // the disagreement this whole sync exists to prevent.
+    if (passGroup_ && image) {
+        const auto rows = passGroup_->actions();
+        for (int i = 0; i < rows.size(); ++i) {
+            QSignalBlocker block(rows.at(i));
+            rows.at(i)->setChecked(i == image->activePass);
+        }
+    }
+}
+
+// REBUILT ONLY WHEN THE PASS LIST CHANGES. syncExrPassActions() runs from
+// refreshHud(), i.e. after every transport action and every loaded frame, so an
+// unconditional rebuild would destroy and recreate a menu several times a second
+// during playback -- and would do it while the user might have it open.
+//
+// The key is the joined display names plus the count, which is a property of the
+// FILE's channel layout: every frame of a sequence produces the same one, so a
+// 97-frame sequence builds this menu exactly once.
+void MainWindow::rebuildExrPassMenu() {
+    if (!passMenu_ || !passGroup_) return;
+    const auto* image = currentImage_.has_value() ? &currentImage_.value() : nullptr;
+
+    QString key;
+    if (image) {
+        for (const auto& p : image->passes) {
+            key += p.displayName;
+            key += QLatin1Char('\x1f');
+            key += p.duplicateOf;
+            key += QLatin1Char('\x1e');
+        }
+    }
+    if (key == passMenuKey_) return;
+    passMenuKey_ = key;
+
+    for (QAction* old : passGroup_->actions()) {
+        passGroup_->removeAction(old);
+        old->deleteLater();
+    }
+    passMenu_->clear();
+
+    if (!image || image->passes.empty()) {
+        // A row that says why the menu is empty, rather than an empty menu: the
+        // same choice the Share menu's LucidLink row makes.
+        QAction* none = passMenu_->addAction(tr("No EXR passes in this media"));
+        none->setEnabled(false);
+        return;
+    }
+
+    for (int i = 0; i < static_cast<int>(image->passes.size()); ++i) {
+        const auto& p = image->passes[static_cast<std::size_t>(i)];
+        // NAME, CLASS, AND THE DUPLICATE IF THERE IS ONE. The class is on the
+        // row because it decides the display mapping, so a pass that will be
+        // normalised says so before it is chosen rather than after.
+        QString label = QString("%1  -  %2").arg(p.displayName,
+                                                 trace::core::passClassName(p.cls));
+        if (!p.duplicateOf.isEmpty()) label += tr("  =  %1").arg(p.duplicateOf);
+        if (!p.ambiguous.isEmpty())
+            label += tr("  [%n unplaceable channel(s)]", "", p.ambiguous.size());
+        // Mnemonics are NOT assigned: a pass name is file data, and letting it
+        // claim an Alt key would make the menu's keyboard behaviour a property
+        // of whatever a renderer happened to call an AOV.
+        label.replace(QLatin1Char('&'), QLatin1String("&&"));
+
+        QAction* row = passMenu_->addAction(label);
+        row->setCheckable(true);
+        row->setChecked(i == image->activePass);
+        passGroup_->addAction(row);
+        connect(row, &QAction::triggered, this, [this, i]() { applyExrPass(i, "pass menu"); });
+    }
+}
+
+// WHAT A PASS CHANGE ACTUALLY IS: a different set of CHANNELS read from the same
+// file, so it is a reload rather than a re-map. Three things follow and all
+// three are already built -- this function is the fourth, which is the whole
+// reason part 2 is a keyboard surface and not a rewrite.
+//
+//   1. StillImageLoader::setPreferredPass() is where the choice lives, and it
+//      lives on the LOADER rather than in a per-frame argument because every
+//      frame of a sequence must read the same pass. Stills and sequences both
+//      go through ImageSequenceFrameSource over &stillLoader_, so one call
+//      covers both.
+//   2. frameCache_ holds decoded frames of the OLD pass and must be dropped.
+//      loadCurrentFrame()'s cache-hit branch already carries the comment "A pass
+//      change clears the cache, so they cannot be stale" -- this is the caller
+//      that makes that true.
+//   3. syncDisplayMapForActivePass() re-chooses the mapping from the new pass's
+//      CLASS, which loadCurrentFrame() already calls on both its branches.
+//
+// The empty layer name round-trips correctly and it is worth saying why, because
+// it looks like it should not. Cycling to the root pass sets the preference to
+// "", which choosePass() reads as "the file decides" rather than as a match --
+// but its first fallback is the root colour group, which is the pass being asked
+// for. The ambiguous case (an empty preference resolving to something that is
+// not index 0) can only arise on a file with NO root pass, and on such a file no
+// pass in the list has an empty layer name, so "" is never what gets set.
+void MainWindow::cycleExrPass(int delta) {
+    if (!currentImage_.has_value()) return;
+    const int n = static_cast<int>(currentImage_->passes.size());
+    if (n < 2) return;
+    const int current = currentImage_->activePass;
+    const int from = (current >= 0 && current < n) ? current : 0;
+    applyExrPass(((from + delta) % n + n) % n, delta > 0 ? "next pass" : "previous pass");
+}
+
+// THE ONE PLACE A PASS CHANGE HAPPENS. `[`, `]` and every row of the View
+// submenu route through here, so the reload, the cache clear, the overlay and
+// the menu tick cannot disagree about which pass is showing.
+void MainWindow::applyExrPass(int index, const char* reason) {
+    if (!currentImage_.has_value()) return;
+    const auto& passes = currentImage_->passes;
+    const int n = static_cast<int>(passes.size());
+    if (index < 0 || index >= n) return;
+
+    stillLoader_.setPreferredPass(passes[static_cast<std::size_t>(index)].layer);
+    frameCache_.clear();
+    // The new pass gets its own Normalise range, measured from its first frame.
+    // Explicit because two passes can share a mapping -- setDisplayMap() only
+    // drops the pin when the MAPPING changes, and two position passes would
+    // otherwise inherit each other's range.
+    if (viewer_) viewer_->resetDisplayMapRange();
+
+    QString error;
+    if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)) {
+        if (!error.isEmpty()) showTransientMessage(error, 3000);
+        return;
+    }
+
+    // NAMED FROM WHAT WAS LOADED, NEVER FROM WHAT WAS ASKED FOR. If a frame of a
+    // sequence does not carry the requested pass, choosePass() falls back rather
+    // than failing -- so reading the request back here would announce a pass
+    // that is not on screen, which is the one thing this message exists to
+    // prevent.
+    //
+    // THE EXISTING COMPOSITED TOAST IS THE OVERLAY, deliberately, rather than a
+    // second mechanism beside it. It already draws over the picture, outside the
+    // transport's fade, and expires on its own timer -- which is the whole of
+    // what "a small temporary overlay naming the pass" asks for. Building a
+    // second one would be the duplication roadmap step 3 removed from the empty
+    // state, and would give one message two sources of truth.
+    const auto* shown = currentImage_->activePassInfo();
+    if (shown) {
+        QString msg = tr("Pass %1/%2: %3  (%4)")
+                          .arg(currentImage_->activePass + 1)
+                          .arg(n)
+                          .arg(shown->displayName,
+                               trace::core::passClassName(shown->cls));
+        if (!shown->duplicateOf.isEmpty())
+            msg += tr("  - same picture as %1").arg(shown->duplicateOf);
+        showTransientMessage(msg, 1800);
+    }
+
+    syncExrPassActions();
+    refreshHud(reason);
+}
+
+// The tick follows the STATE rather than the last click, so a configuration that
+// failed to load, or one restored from settings that no longer resolves, cannot
+// leave the menu claiming something the stage is not doing.
+void MainWindow::syncColorTransformActions() {
+    if (colorTransformAction_) {
+        QSignalBlocker block(colorTransformAction_);
+        colorTransformAction_->setChecked(colorTransform_.enabled());
+        colorTransformAction_->setEnabled(trace::core::ColorTransform::available());
+    }
+    if (loadLutAction_) loadLutAction_->setEnabled(trace::core::ColorTransform::available());
+    if (colorTransformConfigAction_) {
+        colorTransformConfigAction_->setEnabled(trace::core::ColorTransform::available());
+    }
+    if (resetColorTransformAction_) {
+        // Enabled only when there is something to reset -- otherwise it is a
+        // command that visibly does nothing, which is the showInfo failure spec
+        // phase 2 deleted.
+        resetColorTransformAction_->setEnabled(
+            colorTransform_.hasProcessor() || colorTransform_.enabled());
+    }
+}
+
+// ON/OFF WITHOUT REOPENING MEDIA, which is the requirement this function exists
+// for. Two things have to happen and neither is a reopen:
+//
+//   1. the decoder has to stop handing out planar YUV, because the stage works
+//      on BGRA (see syncPlanarOutput). syncPlanarOutput() already reclaims the
+//      decoder and clears its frame cache, so it is the whole of that half.
+//   2. the frame ALREADY ON SCREEN has to be re-delivered, or a paused picture
+//      would not change until the next transport action.
+//
+// For video that means one exact Step re-request -- the same landing path a
+// slider release uses, so it is frame-exact by construction. For a still or an
+// image sequence the buffer is already BGRA and the stage can simply re-run over
+// it, with no decoder involved at all.
+void MainWindow::applyColorTransformChange(const char* reason) {
+    if (viewer_) viewer_->setColorTransform(&colorTransform_);
+    syncPlanarOutput();
+
+    const bool isVideo = currentMedia_.has_value()
+                         && currentMedia_->kind == MediaKind::VideoFile;
+    if (isVideo && frameSource_) {
+        QString error;
+        // direction 1 (forward), matching every other Step call site. The
+        // target is the frame already on screen so direction cannot change
+        // WHICH frame is fetched -- but 0 is not a value the decoder's
+        // direction heuristics are ever handed elsewhere, and feeding a shared
+        // path a novel value to mean "no movement" is how quiet faults start.
+        prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode::Step,
+                            1, true);
+        if (!loadCurrentFrame(error, trace::core::VideoDecoderFFmpeg::RequestMode::Step)
+            && !error.isEmpty()) {
+            showTransientMessage(error, 3000);
+        }
+    } else if (viewer_) {
+        viewer_->refreshColorTransform();
+    }
+
+    syncColorTransformActions();
+    refreshHud(reason);
+}
+
+// LOADING A LUT ENABLES THE TRANSFORM, in one action, as specified. The two are
+// separate state and this is the one place they are set together: a user who
+// picks a file has asked to see it, and making them then tick a box would be a
+// second step for a decision they already made.
+void MainWindow::loadLutFromDialog() {
+    if (!trace::core::ColorTransform::available()) {
+        showTransientMessage(
+            tr("This build was compiled without OpenColorIO."), 3000);
+        return;
+    }
+
+    // .cube is the format this stage targets. The others come free with OCIO's
+    // FileTransform and are offered because they cost nothing to accept -- but
+    // .cube is the one with a real file behind it in testing, and the filter
+    // lists it first for that reason.
+    const QString path = QFileDialog::getOpenFileName(
+        this, tr("Load LUT"), QString(),
+        tr("LUT files (*.cube *.3dl *.csp *.spi1d *.spi3d *.clf *.ctf);;All files (*)"));
+    if (path.isEmpty()) return;
+
+    trace::core::ColorTransform::Config cfg;
+    cfg.kind = trace::core::ColorTransform::Kind::Lut;
+    cfg.lutPath = path;
+
+    QString error;
+    if (!colorTransform_.setConfig(cfg, error)) {
+        // The PREVIOUS configuration is still in force -- setConfig guarantees
+        // it -- so this really is "nothing changed", and the message is the only
+        // thing that moved.
+        showTransientMessage(error.isEmpty() ? tr("Could not load the LUT") : error, 4000);
+        syncColorTransformActions();
+        return;
+    }
+
+    // setConfig() can succeed and still report something: the float processor
+    // is built beside the 8-bit one and is not fatal if it fails, but a silent
+    // failure would show an untransformed EXR under a HUD saying the transform
+    // is ON.
+    const QString warning = error;
+
+    colorTransform_.setEnabled(true);
+    // Through the one persistence function, which also clears the display/view
+    // keys -- loading a LUT after a display/view transform must not leave the
+    // old config behind to be restored next session.
+    persistColorTransform();
+
+    applyColorTransformChange("LUT loaded");
+    showTransientMessage(
+        warning.isEmpty()
+            ? tr("Loaded LUT %1").arg(QFileInfo(path).fileName())
+            : warning,
+        warning.isEmpty() ? 2500 : 5000);
+}
+
+// PERSISTENCE IN ONE PLACE, so a LUT and a display/view configuration cannot be
+// written in disagreeing shapes. Every key the other kind owns is REMOVED rather
+// than left behind: a stale `color/lutPath` beside a `displayview` kind is the
+// sort of thing that restores as the wrong transform a month later.
+void MainWindow::persistColorTransform() {
+    auto& st = trace::app::settings();
+    const auto& cfg = colorTransform_.config();
+    switch (cfg.kind) {
+        case trace::core::ColorTransform::Kind::Lut:
+            st.setValue(QLatin1String(kColorTransformKindKey), QStringLiteral("lut"));
+            st.setValue(QLatin1String(kColorTransformLutKey), cfg.lutPath);
+            st.remove(QLatin1String(kColorConfigKey));
+            st.remove(QLatin1String(kColorInputKey));
+            st.remove(QLatin1String(kColorDisplayKey));
+            st.remove(QLatin1String(kColorViewKey));
+            break;
+        case trace::core::ColorTransform::Kind::DisplayView:
+            st.setValue(QLatin1String(kColorTransformKindKey), QStringLiteral("displayview"));
+            st.setValue(QLatin1String(kColorConfigKey), cfg.configPath);
+            st.setValue(QLatin1String(kColorInputKey), cfg.inputSpace);
+            st.setValue(QLatin1String(kColorDisplayKey), cfg.display);
+            st.setValue(QLatin1String(kColorViewKey), cfg.view);
+            st.remove(QLatin1String(kColorTransformLutKey));
+            break;
+        case trace::core::ColorTransform::Kind::None:
+            st.remove(QLatin1String(kColorTransformKindKey));
+            st.remove(QLatin1String(kColorTransformLutKey));
+            st.remove(QLatin1String(kColorConfigKey));
+            st.remove(QLatin1String(kColorInputKey));
+            st.remove(QLatin1String(kColorDisplayKey));
+            st.remove(QLatin1String(kColorViewKey));
+            break;
+    }
+    st.setValue(QLatin1String(kColorTransformEnabledKey), colorTransform_.enabled());
+}
+
+// THE Color Transform... DIALOG. Stage 1 said this would be a CALL SITE rather
+// than a redesign, because Kind::DisplayView was compiled and reachable from the
+// first commit; this is that call site, and it is the same shape as
+// loadLutFromDialog() immediately above -- set the configuration, and only if it
+// compiled, enable it, persist it and re-deliver the frame.
+//
+// CHOOSING A TRANSFORM ENABLES IT, exactly as loading a LUT does. A user who has
+// picked a config, an input space, a display and a view has asked to see it; a
+// tick box afterwards would be a second step for a decision already made.
+void MainWindow::openColorTransformDialog() {
+    if (!trace::core::ColorTransform::available()) {
+        showTransientMessage(
+            tr("This build was compiled without OpenColorIO."), 3000);
+        return;
+    }
+
+    trace::app::ColorTransformDialog dlg(colorTransform_.config(), this);
+    if (dlg.exec() != QDialog::Accepted) return;
+
+    const auto chosen = dlg.result();
+    QString error;
+    if (!colorTransform_.setConfig(chosen, error)) {
+        // The PREVIOUS configuration is still in force -- setConfig guarantees
+        // it -- so nothing changed but the message.
+        showTransientMessage(
+            error.isEmpty() ? tr("Could not build the colour transform") : error, 4000);
+        syncColorTransformActions();
+        return;
+    }
+    // setConfig can succeed and still report the float processor failing to
+    // build, which is not fatal for video but would show an untransformed EXR
+    // under a HUD claiming the transform is on.
+    const QString warning = error;
+
+    colorTransform_.setEnabled(true);
+    persistColorTransform();
+    applyColorTransformChange("Color transform set");
+    showTransientMessage(
+        warning.isEmpty()
+            ? tr("Colour transform: %1").arg(colorTransform_.description())
+            : warning,
+        warning.isEmpty() ? 3000 : 5000);
+}
+
+// THE RAW/DEFAULT STATE, DEFINED IN ONE PLACE: no transform configured, bypass
+// off. Reset is deliberately not "turn the bypass off" -- that would leave a LUT
+// loaded and invisible, and the next tick of the checkbox would bring back
+// something the user thought they had discarded.
+void MainWindow::resetColorTransform() {
+    colorTransform_.reset();
+    // reset() leaves Kind::None, so this clears every key of both kinds.
+    persistColorTransform();
+    applyColorTransformChange("Color transform reset");
+    showTransientMessage(tr("Colour transform reset"), 2000);
+}
+
+// Restores the persisted configuration at startup. A LUT that has moved or been
+// deleted must fall back to BYPASS, say so ONCE, and never block anything --
+// which is why this reports through the transient message and returns rather
+// than refusing to finish construction.
+void MainWindow::restoreColorTransformFromSettings() {
+    auto& st = trace::app::settings();
+    QString kind = st.value(QLatin1String(kColorTransformKindKey)).toString();
+    bool wantEnabled = st.value(QLatin1String(kColorTransformEnabledKey), false).toBool();
+
+    // TRACE_COLOR_LUT=<path> loads a LUT at startup and enables the stage,
+    // OVERRIDING the persisted state and writing nothing back.
+    //
+    // It exists because every measurement in this repo is taken by launching the
+    // binary and reading the HUD, and the only other way in is a modal file
+    // dialog -- so without this the transform's cost could only be measured by
+    // driving a dialog with synthetic input, which is exactly the class of
+    // harness this project has been burned by. It is also the A/B: one binary,
+    // the knob set or not, which is a far better control than two builds.
+    const QByteArray envLut = qgetenv("TRACE_COLOR_LUT");
+    if (!envLut.isEmpty()) {
+        kind = QStringLiteral("lut");
+        wantEnabled = true;
+        st.setValue(QLatin1String(kColorTransformLutKey),
+                    QString::fromLocal8Bit(envLut));
+    }
+
+    // A SAVED TRANSFORM THAT NO LONGER RESOLVES FALLS BACK TO BYPASS, SAYS SO
+    // ONCE, AND BLOCKS NOTHING. That is the requirement in one sentence and it
+    // is why this reports through the transient message and returns, rather than
+    // refusing to finish construction or putting a modal box in front of a user
+    // who was only trying to open a file. It covers both kinds equally: a LUT
+    // that moved, and a config that was deleted or lives on a mount that is not
+    // there today.
+    trace::core::ColorTransform::Config cfg;
+    // TRACE_COLOR_VIEW=<config>[|<input>|<display>|<view>] configures a
+    // DISPLAY/VIEW transform at startup and enables it, overriding the persisted
+    // state and writing nothing back.
+    //
+    // IT EXISTS FOR THE REASON TRACE_COLOR_LUT DOES, and the reason is a
+    // measurement one rather than a convenience. Every figure in this repo is
+    // taken by launching the binary and reading the HUD; the only other way into
+    // this stage is a MODAL DIALOG, and driving one with synthetic input is
+    // precisely the class of harness this project has been burned by. It is also
+    // the A/B -- one binary, the knob set or not -- which is a better control
+    // than two builds.
+    //
+    // The three optional fields default from the config itself: the scene_linear
+    // ROLE for the input, and the config's own default display and view. So the
+    // short form is a complete instruction, and it cannot smuggle in a
+    // getColorSpaceFromFilepath() answer by omission.
+    const QByteArray envView = qgetenv("TRACE_COLOR_VIEW");
+    if (!envView.isEmpty()) {
+        const QStringList parts = QString::fromLocal8Bit(envView).split(QLatin1Char('|'));
+        kind = QStringLiteral("displayview");
+        wantEnabled = true;
+        st.setValue(QLatin1String(kColorConfigKey), parts.value(0));
+        st.setValue(QLatin1String(kColorInputKey), parts.value(1));
+        st.setValue(QLatin1String(kColorDisplayKey), parts.value(2));
+        st.setValue(QLatin1String(kColorViewKey), parts.value(3));
+    }
+
+    if (kind == QLatin1String("lut")) {
+        cfg.kind = trace::core::ColorTransform::Kind::Lut;
+        cfg.lutPath = st.value(QLatin1String(kColorTransformLutKey)).toString();
+    } else if (kind == QLatin1String("displayview")) {
+        cfg.kind = trace::core::ColorTransform::Kind::DisplayView;
+        // The stored config string is concrete -- a path or an ocio:// URI --
+        // so this restores what was chosen rather than re-resolving $OCIO and
+        // possibly compiling a different config under the same saved settings.
+        cfg.configPath = st.value(QLatin1String(kColorConfigKey)).toString();
+        cfg.inputSpace = st.value(QLatin1String(kColorInputKey)).toString();
+        cfg.display = st.value(QLatin1String(kColorDisplayKey)).toString();
+        cfg.view = st.value(QLatin1String(kColorViewKey)).toString();
+    }
+
+    if (cfg.kind != trace::core::ColorTransform::Kind::None) {
+        QString error;
+        if (!colorTransform_.setConfig(cfg, error)) {
+            colorTransform_.reset();
+            showTransientMessage(
+                tr("Saved colour transform could not be restored - bypassed. %1")
+                    .arg(error),
+                5000);
+            syncColorTransformActions();
+            return;
+        }
+    }
+    colorTransform_.setEnabled(wantEnabled && colorTransform_.hasProcessor());
+    if (viewer_) viewer_->setColorTransform(&colorTransform_);
+    syncColorTransformActions();
+}
+
+// COPY FRAME COPIES WHAT IS ON SCREEN. Owner decision, 2026-08-24, and a
+// DELIBERATE BEHAVIOUR CHANGE from stage 1, where it copied raw source pixels --
+// with the ARRI LUT active it put flat LogC4 on the clipboard while the screen
+// showed the graded Rec.709 picture. A reviewer copying a frame to send to
+// someone wants the frame they are looking at.
+//
+// It is also the only thing that CAN be copied for an EXR: the source frame
+// there is scene-referred float with no correct 8-bit reading of its own, so
+// "copy the source" has no answer that is not itself a display decision.
+//
+// WHAT DID NOT CHANGE, and it is a different seam rather than an oversight: the
+// USER'S VIEW TRANSFORM (rotate/flip) is still not applied. That lives in the
+// renderer -- ViewerWidget hands it to the backend, which applies it in the
+// vertex shader's texture coordinate or in QPainter's matrix -- so it is
+// downstream of displayFrame_ and was never in this buffer to begin with.
+// Phase 10's decision stands untouched and needed no defending here.
 void MainWindow::copyCurrentFrame() {
     if (!viewer_) return;
 
-    const auto& frame = viewer_->frame();
+    const auto& frame = viewer_->displayedFrame();
     if (frame.isNull()) {
         showTransientMessage(tr("No frame to copy"), 2000);
         return;
@@ -4308,11 +4990,10 @@ void MainWindow::copyCurrentFrame() {
         return;
     }
 
-    // The USER's view transform is deliberately NOT applied. A copy is of the
-    // frame, at the resolution and orientation the file stores it in; rotate
-    // and flip are temporary VIEWING state, which is what phase 10 called them
-    // and what "new media resets transforms" means. Baking a session's rotation
-    // into a copied frame would make the clipboard depend on when it was taken.
+    // The USER's view transform is still deliberately NOT applied -- see the
+    // note above this function. A copy is at the resolution and orientation the
+    // file stores it in; rotate and flip are temporary VIEWING state, which is
+    // what phase 10 called them and what "new media resets transforms" means.
     QGuiApplication::clipboard()->setImage(image);
     showTransientMessage(
         tr("Copied frame %1 (%2 x %3)")
@@ -4559,6 +5240,10 @@ void MainWindow::setupMenus() {
     viewMenu->addAction(zoomInAction_);
     viewMenu->addAction(zoomOutAction_);
     viewMenu->addSeparator();
+    setupColorTransformActions(viewMenu);
+    viewMenu->addSeparator();
+    setupExrPassActions(viewMenu);
+    viewMenu->addSeparator();
     viewMenu->addAction(toggleHudAction_);
 
     // ---- Window -------------------------------------------------------------
@@ -4647,6 +5332,99 @@ void MainWindow::setupMenus() {
 // a corruption; failing the launch over one would be worse than the defect. It
 // goes to stderr through fprintf for the reason TRACE_SHAPE_LOG does: in this
 // GUI-subsystem build Qt's message handler does not reliably reach a console.
+// EVERY BARE KEY THIS WINDOW DISPATCHES ITSELF, CHECKED AGAINST EVERY SHORTCUT
+// QT DISPATCHES FOR IT.
+//
+// ShortcutTable::dispatch() matches on the key and ignores modifiers. That is
+// deliberate and is what the flat switch it replaced did -- but it means a
+// table-dispatched row for `C` fires on Ctrl+C, Shift+C and Alt+C as well, and
+// the ONLY thing standing between that and a real fault is whether Qt's
+// shortcut map consumed the modifier'd combination before keyPressEvent was
+// reached. It does today, for every modifier'd action in Trace. A collision
+// masked by dispatch order is still a collision, and it is the class that ships
+// unnoticed, so it is said out loud here.
+//
+// WHY THIS IS A WARNING AND NOT AN ASSERT: the collision it reports is usually
+// harmless, and one of them is live and expected (Ctrl+L rotates left while a
+// bare L is the forward shuttle). The value is that the NEXT bare key cannot
+// introduce one silently -- which is what happened to the F/E menu mnemonics
+// before warnOnDuplicateMnemonics() grew its second check.
+//
+// It also explains, in code, why the EXR pass keys and the colour-transform
+// bypass are QActions rather than table rows: on a QAction, `C` and `Ctrl+C`
+// are two distinct sequences that Qt's shortcut map resolves properly, so the
+// collision cannot exist rather than being masked.
+void MainWindow::warnOnShortcutCollisions() const {
+    struct Bound {
+        int key = 0;
+        Qt::KeyboardModifiers mods = Qt::NoModifier;
+        QString label;
+        bool dispatchedHere = false;
+    };
+    std::vector<Bound> bound;
+
+    for (const auto& row : shortcuts_.rows()) {
+        QString label = row.label();
+        label.remove(QLatin1Char('&'));
+        const bool here = (row.invoke != nullptr && row.key != Qt::Key_unknown);
+        if (here) {
+            bound.push_back(Bound{static_cast<int>(row.key), Qt::NoModifier, label, true});
+            continue;
+        }
+        for (const QKeySequence& seq : row.keys()) {
+            // Multi-chord sequences have no single key to collide on, and
+            // Trace has none; skipping them keeps the report exact rather
+            // than approximating one.
+            if (seq.count() != 1) continue;
+            const QKeyCombination combo = seq[0];
+            if (combo.key() == Qt::Key_unknown) continue;
+            bound.push_back(Bound{combo.key(), combo.keyboardModifiers(), label, false});
+        }
+    }
+
+    const auto describe = [](const Bound& b) {
+        return QKeySequence(QKeyCombination(b.mods, static_cast<Qt::Key>(b.key)))
+            .toString(QKeySequence::NativeText);
+    };
+
+    for (std::size_t i = 0; i < bound.size(); ++i) {
+        for (std::size_t j = i + 1; j < bound.size(); ++j) {
+            const Bound& a = bound[i];
+            const Bound& b = bound[j];
+            if (a.key != b.key) continue;
+
+            const bool sameCombination = (a.mods == b.mods);
+            if (sameCombination) {
+                fprintf(stderr,
+                        "trace-keys: DUPLICATE SHORTCUT %s -- \"%s\" and \"%s\". "
+                        "Whichever is registered first wins and the other is "
+                        "unreachable.\n",
+                        qPrintable(describe(a)), qPrintable(a.label), qPrintable(b.label));
+                continue;
+            }
+
+            // Different modifiers. Only a problem when one side is a row THIS
+            // window dispatches, because that is the only dispatcher that
+            // ignores modifiers. Two QActions differing by a modifier are two
+            // distinct shortcuts to Qt and are fine.
+            const Bound* bare = a.dispatchedHere ? &a : (b.dispatchedHere ? &b : nullptr);
+            if (!bare) continue;
+            const Bound& other = (bare == &a) ? b : a;
+            if (other.dispatchedHere) continue;
+
+            fprintf(stderr,
+                    "trace-keys: MASKED COLLISION -- \"%s\" is dispatched on bare "
+                    "%s by ShortcutTable, which ignores modifiers, so it would "
+                    "also fire on %s (\"%s\"). Safe only while Qt's shortcut map "
+                    "consumes %s first. Put a new binding on a QAction to avoid "
+                    "this entirely.\n",
+                    qPrintable(bare->label), qPrintable(describe(*bare)),
+                    qPrintable(describe(other)), qPrintable(other.label),
+                    qPrintable(describe(other)));
+        }
+    }
+}
+
 void MainWindow::warnOnDuplicateMnemonics() const {
     const auto scan = [](const QList<QAction*>& actions, const QString& menuName) {
         QHash<QChar, QString> seen;
@@ -5664,7 +6442,19 @@ void MainWindow::syncPlanarOutput() {
     static const bool allowed = qgetenv("TRACE_PLANAR_UPLOAD") != "0";
     // Clears the decoder's frame cache, so it needs the decoder back.
     reclaimDecoder();
-    videoDecoder_.setPlanarOutputEnabled(allowed && viewer_->rendererAcceptsPlanarYuv());
+    // THE COLOUR STAGE NEEDS BGRA, so planar upload stands down while it is
+    // active. This is the one interaction between the two, and it is here rather
+    // than in the colour code because this function is already the single place
+    // that decides the decoder's output layout.
+    //
+    // Note what this costs and when: NOTHING while the transform is off, which
+    // is every existing measurement in this repo -- GATE C's planar path is
+    // untouched. With the transform on, full-resolution frames go back through
+    // swscale to BGRA, which is the pre-GATE-C cost and is the honest price of a
+    // CPU display stage. The GPU stage is what removes it.
+    const bool colorStageNeedsBgra = colorTransform_.isActive();
+    videoDecoder_.setPlanarOutputEnabled(
+        allowed && !colorStageNeedsBgra && viewer_->rendererAcceptsPlanarYuv());
 }
 
 void MainWindow::syncTransportBar() {
@@ -6335,7 +7125,14 @@ bool MainWindow::openPath(const QString& path) {
             return false;
         }
 
-        if (currentMedia_->kind == MediaKind::ImageSequence) prefetchNeighbors();
+        if (currentMedia_->kind == MediaKind::ImageSequence) {
+            resetSequenceStride();
+            // Before the open's own prefetch, so that legacy load is COUNTED.
+            // A sequence that has been opened and not yet played should read
+            // `legacy 1` rather than 0 -- the window really did run.
+            resetSequencePrefetchCounters();
+            prefetchNeighbors();
+        }
     }
 
     const auto fps = frameSource_ ? std::max(1.0, frameSource_->fps()) : 24.0;
@@ -6461,15 +7258,27 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
 
     if (currentMedia_->kind == MediaKind::ImageSequence) {
         frameCache_.setWindowCenter(frameIndex);
-        if (const auto cached = frameCache_.get(frameIndex); cached.has_value()) {
-            trace::core::LoadedImageInfo info;
+        const auto cached = frameCache_.get(frameIndex);
+        trace::core::seqprofile::bump(cached.has_value()
+                                          ? trace::core::seqprofile::Stage::CacheHit
+                                          : trace::core::seqprofile::Stage::CacheMiss);
+        if (cached.has_value()) ++seqCacheHits_; else ++seqCacheMisses_;
+        if (cached.has_value()) {
+            // The pass list, the active pass and the compression belong to the
+            // SEQUENCE, not to the frame, so they are carried across a cache hit
+            // rather than rebuilt from the cache entry (which does not hold
+            // them). A pass change clears the cache, so they cannot be stale.
+            trace::core::LoadedImageInfo info =
+                currentImage_.has_value() ? *currentImage_ : trace::core::LoadedImageInfo{};
             info.filePath = cached->path;
             info.fileName = QFileInfo(cached->path).fileName();
             info.extension = QFileInfo(cached->path).suffix().toLower();
             info.width = cached->width;
             info.height = cached->height;
             info.channels = cached->channels;
+            info.buffer.reset();
             currentImage_ = info;
+            syncDisplayMapForActivePass();
             viewer_->setFrame(cached->frame);
             syncTransportBar();
             return true;
@@ -6531,14 +7340,24 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     handoffTimer.start();
 
     trace::core::LoadedImageInfo info;
+    if (auto* seq = imageSequenceSource()) {
+        // WHAT THE FILE ACTUALLY WAS, from the loader that read it.
+        //
+        // This used to hard-code `channels = 4`, which is the DISPLAY BUFFER's
+        // channel count and was printed on the HUD as though it were the
+        // source's -- so a 3-channel EXR read `ch:4`. The loader knows the
+        // answer; before this there was no way to ask it.
+        info = seq->lastInfo();
+    }
     info.filePath = sourcePath;
     info.fileName = QFileInfo(sourcePath).fileName();
     info.extension = QFileInfo(sourcePath).suffix().toLower();
     info.width = targetFrame->width();
     info.height = targetFrame->height();
-    info.channels = 4;
+    if (info.channels <= 0) info.channels = 4;
 
     currentImage_ = info;
+    syncDisplayMapForActivePass();
     viewer_->setFrame(*targetFrame);
 
     lastFrameHandoffMs_ = static_cast<double>(handoffTimer.nsecsElapsed()) / 1'000'000.0;
@@ -6562,33 +7381,333 @@ bool MainWindow::loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpe
     return true;
 }
 
+// TRACE_SEQ_PREFETCH=0 DISABLES THIS ENTIRELY. Default is on, i.e. unchanged.
+//
+// A DIAGNOSTIC KNOB, NOT A POLICY. The 2026-08-24 stage decomposition measured
+// this function at 87.30ms of a 144.79ms frame on the 27-channel DWAA sequence
+// -- 60.3% -- because it performs two SYNCHRONOUS full loads on the UI thread
+// for frames at +-1 while the playhead is advancing ~3.4 frames per present, so
+// the neighbours are decoded, cached and evicted unshown. This knob exists to
+// turn that projection into a measurement before any policy is changed.
+static bool seqPrefetchEnabled() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_SEQ_PREFETCH");
+        return v.isEmpty() || v != "0";
+    }();
+    return on;
+}
+
+// THE STRIDE-AWARE POLICY IS THE DEFAULT AS OF 2026-08-25.
+// TRACE_SEQ_PREFETCH_STRIDE=0 is the rollback to the fixed +-1 window.
+//
+// Measured on three sequences, forward and reverse, against the fixed window:
+//   DWAA 27ch  forward 28.7-29.2% -> 62.2-63.1%   reverse 28.3% -> 61.1%
+//   PIZ  3ch   forward 99.9%      -> 99.9%        reverse 84.2% -> 90.2%
+//   PNG  3ch   forward 100.0%     -> 100.0%       (unchanged)
+// Exactness is structural rather than tested-and-hoped: the policy is gated on
+// playTimer_.isActive(), so paused stepping and random access take the legacy
+// window verbatim, and every cross-config picture comparison read 0%.
+//
+// REVERSE IMPROVES ON BOTH FILES, which is the counter being SIGNED doing real
+// work rather than merely compiling: the fixed window prefetches both
+// neighbours, and in reverse the +1 is the frame just left, so half of its
+// loads were pure waste. PIZ reverse skip 34 -> 21, DWAA reverse tick-stall
+// 26 -> 2.
+//
+// KNOWN AND ACCEPTED: DWAA stays ~1-2 points behind switching prefetch off
+// entirely (63.3-64.1%), because the five-frame warm-up still uses the legacy
+// +-1 window. That is measured, attributed, and deliberately NOT optimised here.
+static bool seqPrefetchStrideAware() {
+    static const bool on = [] {
+        const QByteArray v = qgetenv("TRACE_SEQ_PREFETCH_STRIDE");
+        return v.isEmpty() || v != "0";
+    }();
+    return on;
+}
+
+// A prediction is issued only when the sequence has just presented this many
+// CONSECUTIVE single-frame steps. It is the whole predicate, and the counter
+// shape is load-bearing rather than incidental.
+//
+// TWO EARLIER FORMULATIONS WERE MEASURED AND BOTH LEAKED PREDICTIONS. An EMA
+// of the stride within +-0.15 of any integer issued 4 of 62 on the DWAA file;
+// narrowing that to +-0.15 of 1.0 specifically issued 4 of 61 -- no better,
+// because a file whose strides alternate 1,2,1,2 has a mean near 1.5 that
+// still wanders inside any tolerance of 1.0 after a couple of unit steps.
+// "The average is near 1" and "it is stepping one frame at a time" are
+// different claims, and only the second is the one worth acting on.
+//
+// A run counter cannot leak that way: one skip resets it to zero. It also
+// costs nothing an average did not -- an int compare against an int.
+//
+// Each leaked prediction is a WHOLE synchronous load (~42ms) inside a tick that
+// is already over budget and still has to read the real frame, which is why
+// four of them were the entire remaining gap to simply not prefetching:
+// handler max 99-116ms against 84-90ms, tick-stall 1/1/0 against 0/0/0.
+//
+// TWO SEPARATE CONSTANTS, AND CONFLATING THEM COSTS THE WRONG FILE.
+//
+// kSeqStrideWarmupSamples is "nothing is established yet, use the legacy +-1
+// window" -- a sequence starting cleanly wants exactly that, and on a file
+// holding its budget those frames are correct prefetches rather than waste.
+//
+// kSeqUnitRunRequired is the confidence test itself. Raising it makes the gate
+// stricter; raising the WARM-UP instead would extend the legacy two-load window
+// on a file that is already over budget, which is ~48ms of extra work per frame
+// on exactly the file the gate exists to protect. They were one constant while
+// both wanted 4 and the difference did not show; they are not the same question.
+//
+// 4, AND 8 WAS MEASURED AND IS WORSE ON BOTH FILES. The reason is a coupling
+// that is not obvious from the predicate alone: the warm-up window is what
+// PRIMES the cache, so the gate opens into a steady state where the frame being
+// presented is already a hit and the tick pays one load. Widening the gap
+// between warm-up and gate leaves frames in which nothing is prefetched, the
+// cache drains, and when the gate finally opens a tick pays a MISS plus a
+// prefetch -- two loads -- which on a file with ~4ms of headroom is enough to
+// miss the budget, skip, and reset the run. It then never converges: PIZ fell
+// 99.9% -> 98.9/96.6/93.4% across three reps, degrading monotonically, with
+// cache hits 216 of 217 -> 72 of 203.
+//
+// On the DWAA file 8 changed nothing at all, because the gate never fires there
+// at either setting -- measured, `prefetch ISSUED` is 0 and every branch entry
+// declines. Its whole prefetch cost is the warm-up window, which the run length
+// does not touch.
+//
+// So this constant is not a free dial: raising it degrades the file it cannot
+// help while destabilising the file it was protecting.
+//
+// Reverse playback at 1x runs the counter with dir -1 and predicts backwards,
+// with no second branch and no sign handling anywhere else.
+static constexpr int kSeqStrideWarmupSamples = 4;
+static constexpr int kSeqUnitRunRequired = 4;
+
+void MainWindow::noteSequenceStride() {
+    if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::ImageSequence) return;
+    const long long current = playback_.state().currentFrame;
+    if (seqLastPresentedFrame_ >= 0 && current != seqLastPresentedFrame_) {
+        const long long jump = current - seqLastPresentedFrame_;
+        // A LOOP WRAP OR A SEEK IS NOT A STRIDE. Nothing this large is the
+        // scheduler skipping; feeding it in would extend a unit run across a
+        // discontinuity, and the prediction it produced would be nonsense.
+        if (jump > 32 || jump < -32) {
+            resetSequenceStride();
+            seqLastPresentedFrame_ = current;
+            return;
+        }
+        // OBSERVATION ONLY, and placed AFTER the discontinuity guard so a seek
+        // or a loop wrap is never reported as a stride -- the guard above has
+        // already returned, leaving this 0 via resetSequenceStride().
+        seqLastStride_ = static_cast<int>(jump);
+        if (jump == 1 || jump == -1) {
+            // SIGNED, so reverse playback at 1x predicts backwards with no
+            // second branch anywhere.
+            const int dir = (jump > 0) ? 1 : -1;
+            if (dir == seqUnitDir_) {
+                if (seqUnitRun_ < 1000) ++seqUnitRun_;
+            } else {
+                seqUnitDir_ = dir;
+                seqUnitRun_ = 1;
+            }
+        } else {
+            // One skip ends the run. This is the whole predicate: a sequence
+            // that skipped even once recently is not advancing a frame per
+            // present, whatever its average says.
+            seqUnitRun_ = 0;
+        }
+        if (seqStrideSamples_ < 1000) ++seqStrideSamples_;
+    }
+    seqLastPresentedFrame_ = current;
+}
+
+void MainWindow::resetSequenceStride() {
+    seqUnitRun_ = 0;
+    seqUnitDir_ = 0;
+    seqLastPresentedFrame_ = -1;
+    seqStrideSamples_ = 0;
+    seqLastStride_ = 0;
+}
+
+// The HUD's counters, zeroed. SEPARATE from resetSequenceStride() on purpose:
+// that one fires mid-run on any discontinuity, and zeroing the counters there
+// would silently restart the accounting in the middle of the run being read.
+// This is called only at the two run boundaries -- media open, and
+// beginPlaybackTimeline().
+void MainWindow::resetSequencePrefetchCounters() {
+    seqCacheHits_ = 0;
+    seqCacheMisses_ = 0;
+    seqPrefetchIssued_ = 0;
+    seqPrefetchDeclined_ = 0;
+    seqPrefetchLegacy_ = 0;
+    seqPrefetchLoads_ = 0;
+}
+
+// WHICH POLICY IS IN FORCE, AND WHETHER A KNOB SAID SO.
+//
+// Tri-state, for the reason `strip` and `renderer` are: "the default is stride"
+// and "somebody set the knob to 1" behave identically and must not read
+// identically, or a capture cannot tell a deliberate override from a machine
+// that never touched the variable. The ROLLBACK is the case that matters most
+// -- a run taken under TRACE_SEQ_PREFETCH_STRIDE=0 whose HUD said `stride`
+// would be a figure filed against the wrong policy, which is how this project
+// once compared cpu with cpu and called it a cross-backend result.
+//
+// Cached in a static: the environment cannot change under a running process,
+// and refreshHud() is called several times a second.
+static QString seqPrefetchPolicyLabel() {
+    static const QString label = [] {
+        const QByteArray off = qgetenv("TRACE_SEQ_PREFETCH");
+        if (off == "0") return QStringLiteral("off (env)");
+        const QByteArray stride = qgetenv("TRACE_SEQ_PREFETCH_STRIDE");
+        if (stride.isEmpty()) return QStringLiteral("stride");
+        if (stride == "0") return QStringLiteral("legacy (env)");
+        return QStringLiteral("stride (env)");
+    }();
+    return label;
+}
+
+// THE PREFETCH POLICY, READ OFF THE RUNNING BUILD.
+//
+// Until 2026-08-25 the shipping default's state was reachable only through
+// TRACE_SEQ_PROFILE=1 -- a knob whose own contract is that it is off in every
+// shipping path. So the configuration everybody runs was the one configuration
+// that could not be inspected, which is this project's most expensive recurring
+// failure and not a cosmetic gap.
+//
+// HOW TO READ IT, in the order the fields answer questions:
+//
+//   policy        stride | stride (env) | legacy (env) | off (env)
+//   last-stride   how far the playhead moved between the last two PRESENTED
+//                 frames. +1 is a sequence holding its budget. +3 or +4 is the
+//                 scheduler skipping, and is precisely why a fixed +-1 window
+//                 decodes frames that are never shown. 0 means a discontinuity
+//                 (seek, loop wrap) or nothing measured yet.
+//   gate          run N/4 is the predicate itself -- CONSECUTIVE unit strides,
+//                 reset to 0 by a single skip. `warn` below 4 means the warm-up
+//                 has not finished and the legacy window is running whatever
+//                 the run says.
+//   issued/decl   what the gate DID. On the DWAA file expect declines; on PIZ
+//                 and PNG expect issues. `legacy` counts the fixed +-1 window,
+//                 which is warm-up frames, paused stepping, and every frame
+//                 when the rollback is set.
+//   cache         the presented frame only. A prefetch that hits is not counted
+//                 here -- it is counted as a load that never happened.
+//   loads         REAL loader calls / presented frames. This is the cost figure
+//                 and the one the records quote: ~2.9 under the fixed window on
+//                 DWAA against ~1.1 under the gate.
+QString MainWindow::sequencePrefetchHudLine() const {
+    const long long presented = seqCacheHits_ + seqCacheMisses_;
+    const long long loads = seqCacheMisses_ + seqPrefetchLoads_;
+    // THE PERCENT SIGN IS PART OF THE VALUE, NOT THE FORMAT. QString::arg does
+    // not treat "%%" as an escape -- the first capture of this line read
+    // "(0.0%%)" -- and a bare "%" next to a numbered placeholder is worse than
+    // ugly, because "%1" inside it would be substituted.
+    const QString hitPct = presented > 0
+        ? QString::number(100.0 * static_cast<double>(seqCacheHits_)
+                          / static_cast<double>(presented), 'f', 1) + QStringLiteral("%")
+        : QStringLiteral("--");
+    const QString perFrame = presented > 0
+        ? QString::number(static_cast<double>(loads)
+                          / static_cast<double>(presented), 'f', 2)
+        : QStringLiteral("--");
+    // Signed and always explicit, so a reverse run is legible as one rather
+    // than as a missing minus.
+    const QString stride = seqLastStride_ == 0
+        ? QStringLiteral("--")
+        : QString("%1%2").arg(seqLastStride_ > 0 ? "+" : "").arg(seqLastStride_);
+    const QString dir = seqUnitDir_ == 0
+        ? QStringLiteral("--")
+        : QString("%1%2").arg(seqUnitDir_ > 0 ? "+" : "").arg(seqUnitDir_);
+    return QString("seq-prefetch %1 | last-stride %2 | gate run %3/%4 dir %5 warm %6/%7"
+                   " | issued %8 decl %9 legacy %10 | cache hit %11 miss %12 (%13)"
+                   " | loads %14/%15 = %16/frame")
+        .arg(seqPrefetchPolicyLabel())
+        .arg(stride)
+        .arg(seqUnitRun_)
+        .arg(kSeqUnitRunRequired)
+        .arg(dir)
+        .arg(seqStrideSamples_)
+        .arg(kSeqStrideWarmupSamples)
+        .arg(seqPrefetchIssued_)
+        .arg(seqPrefetchDeclined_)
+        .arg(seqPrefetchLegacy_)
+        .arg(seqCacheHits_)
+        .arg(seqCacheMisses_)
+        .arg(hitPct)
+        .arg(loads)
+        .arg(presented)
+        .arg(perFrame);
+}
+
+// Load one frame into the cache, or do nothing if it is already there or out of
+// range. Extracted so the two policies below cannot disagree about what a
+// prefetch IS -- only about which frames to ask for.
+void MainWindow::prefetchFrameIntoCache(long long idx) {
+    const QString path = sequenceFramePath(idx);
+    if (path.isEmpty()) return;
+    if (frameCache_.get(idx).has_value()) return;
+
+    trace::core::LoadedImageInfo info;
+    QString error;
+    if (!stillLoader_.load(path, info, error)) return;
+    // Here, and not at the decision: the two early returns above mean a
+    // prediction can cost nothing at all, and the HUD must not charge it for
+    // work it did not do.
+    ++seqPrefetchLoads_;
+
+    trace::core::CachedFrame cf;
+    cf.frameIndex = idx;
+    cf.path = info.filePath;
+    cf.frame.buffer = info.buffer;
+    cf.frame.frameIndex = idx;
+    if (!cf.frame.buffer) return;
+    cf.width = info.width;
+    cf.height = info.height;
+    cf.channels = info.channels;
+    frameCache_.put(cf);
+}
+
 void MainWindow::prefetchNeighbors() {
+    if (!seqPrefetchEnabled()) return;
     if (!currentMedia_.has_value() || currentMedia_->kind != MediaKind::ImageSequence) return;
 
     const long long current = playback_.state().currentFrame;
-    const long long neighbors[2] = {current - 1, current + 1};
 
-    for (long long idx : neighbors) {
-        const QString path = sequenceFramePath(idx);
-        if (path.isEmpty()) continue;
-        if (frameCache_.get(idx).has_value()) continue;
-
-        trace::core::LoadedImageInfo info;
-        QString error;
-        if (!stillLoader_.load(path, info, error)) continue;
-
-        trace::core::CachedFrame cf;
-        cf.frameIndex = idx;
-        cf.path = info.filePath;
-        // `info` is about to go out of scope, so this moves rather than copies.
-        cf.frame.buffer = trace::core::FrameBuffer::adopt(std::move(info.image));
-        cf.frame.frameIndex = idx;
-        if (!cf.frame.buffer) continue;
-        cf.width = info.width;
-        cf.height = info.height;
-        cf.channels = info.channels;
-        frameCache_.put(cf);
+    // THE STRIDE POLICY APPLIES DURING CONTINUOUS PLAYBACK AND NOWHERE ELSE.
+    //
+    // Paused stepping and random access keep the legacy +-1 window verbatim:
+    // there is no playback stride to observe, a step really does want the
+    // frame on either side, and that is what makes "exact paused stepping and
+    // random access are preserved" a property of this branch rather than
+    // something to re-verify at every call site. prefetchNeighbors() is reached
+    // from seven places and only two of them are the playback tick.
+    if (seqPrefetchStrideAware() && playTimer_.isActive()
+        && seqStrideSamples_ >= kSeqStrideWarmupSamples) {
+        const bool predictable = seqUnitRun_ >= kSeqUnitRunRequired && seqUnitDir_ != 0;
+        if (!predictable) {
+            // The playhead is not advancing one frame per present, so this
+            // sequence is skipping and nothing is decoded speculatively. This
+            // is the measured no-prefetch path, reached adaptively.
+            trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchDecline);
+            ++seqPrefetchDeclined_;
+            return;
+        }
+        // ONE frame, the one actually likely to be presented next -- not a
+        // window. The trailing neighbour is what the fixed policy spent a whole
+        // load on whenever the playhead had moved past it.
+        trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchIssued);
+        ++seqPrefetchIssued_;
+        prefetchFrameIntoCache(current + seqUnitDir_);
+        return;
     }
+
+    // Counted so a warm-up frame cannot be mistaken for a leaked prediction:
+    // during warm-up the stride branch is not entered at all, so it records no
+    // decline, and the difference between frames and declines would otherwise
+    // read as the gate firing.
+    trace::core::seqprofile::bump(trace::core::seqprofile::Stage::PrefetchLegacy);
+    ++seqPrefetchLegacy_;
+    const long long neighbors[2] = {current - 1, current + 1};
+    for (long long idx : neighbors) prefetchFrameIntoCache(idx);
 }
 
 // The one writer of the volume level (the inline slider, 2026-08-20). Every
@@ -7053,6 +8172,14 @@ void MainWindow::beginPlaybackTimeline() {
     lastAvSyncMs_ = maxAvSyncMs_ = 0.0;
     audioRepeatedFrames_ = audioSkippedFrames_ = 0;
     playbackDroppedFrames_ = playbackDropTicks_ = maxDropRun_ = 0;
+    seqSkippedFrames_ = seqSkipTicks_ = maxSeqSkipRun_ = 0;
+    // The prefetch line takes the SAME run boundary as every cadence counter
+    // above it, so `issued`/`declined` and `presented` are one measurement.
+    // The stride state is deliberately NOT reset here: pausing and resuming
+    // does not change how the sequence behaves, and re-running a warm-up the
+    // file has already earned would cost it two loads a frame to re-learn
+    // what it already knew.
+    resetSequencePrefetchCounters();
 
     lastClockUpdateMark_ = -1;
     lastClockUpdatesPerTick_ = maxClockUpdatesPerTick_ = 0;
@@ -7455,6 +8582,24 @@ bool MainWindow::presentQueuedShuttleFrame() {
     // Refill behind the frame just consumed.
     pumpShuttleQueue();
     return true;
+}
+
+// How far past its armed deadline this presentation landed. Extracted from the
+// playback tick for the same reason as notePresentedPlaybackFrame() below: the
+// video branch and the image-sequence branch must be measured by ONE instrument
+// rather than by two copies that can drift apart.
+//
+// The control path (TRACE_DEADLINE_SCHED=0) keeps the OLD expression and only
+// the control, because under a deadline schedule the accumulator's surplus is
+// not an error term at all.
+void MainWindow::notePresentLatency(double frameDurationMs) {
+    lastPresentLatencyMs_ = deadlineScheduleEnabled()
+        ? presentSlotLatencyMs_
+        : playbackAccumulatorMs_ - frameDurationMs;
+    ++presentSamples_;
+    avgPresentLatencyMs_ +=
+        (lastPresentLatencyMs_ - avgPresentLatencyMs_) / static_cast<double>(presentSamples_);
+    maxPresentLatencyMs_ = std::max(maxPresentLatencyMs_, lastPresentLatencyMs_);
 }
 
 // Present accounting for one presented frame. Extracted from the playback tick
@@ -8952,6 +10097,212 @@ void MainWindow::openMediaPath(const QString& path) {
     openPath(fi.absoluteFilePath());
 }
 
+// THE CADENCE INSTRUMENT, and it is ONE instrument for every timed media kind.
+//
+// These three lines were built inside the VideoFile branch of refreshHud() and
+// nowhere else, so an image sequence -- which runs the SAME playback tick, the
+// SAME GATE E deadline scheduler and the SAME notePresentedPlaybackFrame() --
+// accumulated every one of these counters and displayed none of them. The
+// consequence was precise and is the whole reason this exists: "EXR playback is
+// fine" and "EXR playback has never been measured" were indistinguishable, which
+// is the failure `stalls 0 of 0` produced on the title-bar stall for a dozen
+// harness runs before anyone read its denominator.
+//
+// EXTRACTED RATHER THAN COPIED. A second copy for sequences would be a second
+// instrument to keep in agreement, and this file already records twice what that
+// costs -- notePresentedPlaybackFrame() and beginPlaybackTimeline() were both
+// extracted for exactly it. The ONLY parameters are the rate and whether that
+// rate is Trace's own assumption; everything else is a member and is media-kind
+// independent by construction.
+MainWindow::CadenceHudLines MainWindow::cadenceHudLines(double rateFps,
+                                                        bool rateIsNominal) const {
+    CadenceHudLines out;
+    // Presented rate from the wall clock: the only number that says
+    // whether playback actually held real time.
+    const double elapsedS = playbackRunElapsedS_;
+    const bool rateValid = elapsedS > 0.5 && playbackFramesPresented_ > 0;
+    const double presentedFps = rateValid
+        ? static_cast<double>(playbackFramesPresented_) / elapsedS
+        : 0.0;
+    const double realTimePct = (rateValid && rateFps > 0.0)
+        ? 100.0 * presentedFps / rateFps
+        : 0.0;
+
+    // Real-time frame dropping, made visible (owner requirement,
+    // 2026-08-13). Reads `drop 0` on every source that keeps up, so a
+    // non-zero value is itself the statement that the source could not
+    // sustain its native rate -- and `media` beside it is the check that
+    // the drop did its job: media time covered against wall time, which
+    // must read ~100% whenever `real time` reads below it. The two
+    // together are the whole contract: `real time` is how much PICTURE
+    // arrived, `media` is whether the MOVIE stayed on the clock.
+    const double mediaCoveredS = (rateFps > 0.0)
+        ? static_cast<double>(playbackFramesPresented_ + playbackDroppedFrames_
+                              + seqSkippedFrames_) / rateFps
+        : 0.0;
+    const double mediaPct = rateValid && elapsedS > 0.0
+        ? 100.0 * mediaCoveredS / elapsedS
+        : 0.0;
+    // ONE shape, TWO vocabularies, and the distinction is deliberate.
+    //
+    // `drop` is the owner's 2026-08-13 real-time drop: a DELIBERATE policy that
+    // holds media time on the clock, and it runs on the video branch only.
+    // `skip` is what the image-sequence branch's shared accumulator does when a
+    // frame misses its budget -- the same visible outcome reached by a different
+    // mechanism, on a path where realtimeDropSteps() is never called at all.
+    //
+    // Printing both as `drop` would claim a policy is running where it is not,
+    // which is the class of dishonesty the Movie Inspector's origin tags and the
+    // colour line's `(inferred)` marker exist to prevent. `media` means the same
+    // thing on both: media time covered against wall time, which must read ~100%
+    // whenever `real time` reads below it.
+    const QString dropField = rateIsNominal
+        ? QString(" | skip %1 (ticks %2 max %3, media %4%)")
+              .arg(seqSkippedFrames_)
+              .arg(seqSkipTicks_)
+              .arg(maxSeqSkipRun_)
+              .arg(QString::number(mediaPct, 'f', 1))
+        : QString(" | drop %1 (ticks %2 max %3, media %4%)")
+              .arg(playbackDroppedFrames_)
+              .arg(playbackDropTicks_)
+              .arg(maxDropRun_)
+              .arg(QString::number(mediaPct, 'f', 1));
+
+    // "fps nominal" on the image-sequence branch, and that word is load-bearing.
+    // A sequence has NO container frame rate: ImageSequenceFrameSource::fps()
+    // returns the 24.0 Trace synthesises, and fpsRational() returns false for it.
+    // So the denominator of "% of real time" is a Trace assumption, and printing
+    // it bare would claim a source rate the file does not state -- the exact
+    // thing spec phase 7 forbids for timecode, applied to frame rate.
+    // (R2_OP_Stacks_01_00000.exr does carry framesPerSecond = 24/1 in its header
+    // and Trace does not read it. Recorded, not built.)
+    const QString rateUnit = rateIsNominal ? QStringLiteral(" fps nominal")
+                                           : QStringLiteral(" fps");
+    // NUMBERED SO THE ONE TEXT FIELD GOES IN LAST. dropField is the only
+    // argument here that is itself a string carrying per-cent signs, and
+    // QString::arg rescans what an earlier arg() inserted -- the trap this file
+    // already paid for when `icecream_passes%04d.exr` had its `%04` substituted
+    // with a channel count. Nothing dropField can contain is a placeholder
+    // today, so this is a guard rather than a fix, and it costs a renumber.
+    out.presented = rateValid
+        ? QString("presented %1 / %2%6 (%3% real time) | frames %4 | elapsed %5s%7")
+              .arg(QString::number(presentedFps, 'f', 2))
+              .arg(QString::number(rateFps, 'f', 2))
+              .arg(QString::number(realTimePct, 'f', 1))
+              .arg(playbackFramesPresented_)
+              .arg(QString::number(elapsedS, 'f', 2))
+              .arg(rateUnit)
+              .arg(dropField)
+        : QString("presented -- / %1%2 | frames %3")
+              .arg(QString::number(rateFps, 'f', 2))
+              .arg(rateUnit)
+              .arg(playbackFramesPresented_);
+
+    // `tick` is the delay the LAST wake was armed for, not a fixed
+    // interval: GATE E re-arms per frame against an absolute deadline,
+    // so at 24fps it alternates 41/42 and that alternation is the fix
+    // working. A tick pinned at one value means the timeline is not
+    // established -- no rational, or media that never started a run.
+    // `jitter` is wake-to-wake interval against the true frame period,
+    // which is what it always meant -- before GATE E the armed interval
+    // WAS the period, so the figures stay comparable with section 23.4.
+    // It is deliberately not measured against the armed interval any
+    // more; see the computation for why that read 34ms on a schedule
+    // that was within 1.8ms of its deadline.
+    // `rephase` counts slots abandoned because a handler overran, which
+    // is cost overrun (cause B) and is not something GATE E fixes.
+    // `tick-late` and `tick-stall` count DELIVERY failures: ticks that
+    // arrived so late a whole frame opportunity went unused, and ticks
+    // that arrived so late the picture visibly stopped. Everything else
+    // on this line and the next measures what the tick DID; these count
+    // the times it was not called at all, which is a fault no cost
+    // counter can see -- on the title-bar stall the handler max was
+    // 0.77ms against a period max of 512ms.
+    //
+    // They exist because the smooth line's `stalls`/`hitch` are
+    // DRAG-scoped: both sample sites are inside the scrub path, so with
+    // no drag in progress they have no samples and read `0 of 0`, which
+    // was read as a clean result across a dozen harness runs of exactly
+    // this gesture. `sizemove` is the subset delivered while the modal
+    // move/size loop owned the pump, with its own max beside it --
+    // non-zero on a caption press and zero on an ordinary overrun,
+    // which is the attribution a bare count cannot make.
+    out.sched = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | rephase %8 | drift %9ms | ticks %10 | presents %11"
+                               " | tick-late %12 of %13 (>%14x) | tick-stall %15 (>%16ms) | sizemove %17 max %18ms")
+        .arg(schedulerIntervalMs_)
+        .arg(QString::number(lastTickJitterMs_, 'f', 2))
+        .arg(QString::number(avgTickJitterMs_, 'f', 2))
+        .arg(QString::number(maxTickJitterMs_, 'f', 2))
+        .arg(QString::number(lastPresentLatencyMs_, 'f', 2))
+        .arg(QString::number(avgPresentLatencyMs_, 'f', 2))
+        .arg(QString::number(maxPresentLatencyMs_, 'f', 2))
+        .arg(presentRephaseCount_)
+        .arg(QString::number(lastDriftMs_, 'f', 1))
+        .arg(schedulerTicks_)
+        .arg(presentSamples_)
+        .arg(tickLate_)
+        .arg(cycleSamples_)
+        .arg(QString::number(kTickLateFactor, 'f', 1))
+        .arg(tickStalls_)
+        .arg(QString::number(kTickStallMs, 'f', 0))
+        .arg(tickStallsInSizeMove_)
+        .arg(QString::number(maxPeriodInSizeMoveMs_, 'f', 1));
+
+    // Cadence distribution. The rate above averages and reads 98-99%
+    // whether the fault is the tick beat or per-frame cost overrun, so
+    // this is the line that says which. Percentiles come from a sorted
+    // copy -- a 10s run is ~240 samples, so exact beats approximate.
+    out.cadence = QStringLiteral("cadence | no samples yet");
+    if (!cadenceGapsMs_.empty()) {
+        std::vector<double> g = cadenceGapsMs_;
+        std::sort(g.begin(), g.end());
+        const auto pct = [&g](double p) {
+            const std::size_t i = std::min(g.size() - 1,
+                static_cast<std::size_t>(p * static_cast<double>(g.size() - 1) + 0.5));
+            return g[i];
+        };
+        const double budget = tickFrameDurationMs_ > 0.0 ? tickFrameDurationMs_ : 41.667;
+        // Buckets as multiples of the frame budget. A regular beat piles
+        // up in [1.5,2.5) and nowhere else; ragged overrun smears.
+        int b[5] = {0, 0, 0, 0, 0};
+        for (double v : g) {
+            const double r = v / budget;
+            if (r < 0.9) ++b[0];
+            else if (r < 1.1) ++b[1];
+            else if (r < 1.5) ++b[2];
+            else if (r < 2.5) ++b[3];
+            else ++b[4];
+        }
+        // Spacing between long frames: regular means a beat, scattered
+        // means overrun. Reported as min/median/max so one outlier
+        // cannot make a ragged run look periodic.
+        QString spacing = QStringLiteral("--");
+        if (cadenceLongAt_.size() >= 2) {
+            std::vector<long long> d;
+            d.reserve(cadenceLongAt_.size() - 1);
+            for (std::size_t i = 1; i < cadenceLongAt_.size(); ++i) {
+                d.push_back(cadenceLongAt_[i] - cadenceLongAt_[i - 1]);
+            }
+            std::sort(d.begin(), d.end());
+            spacing = QString("%1/%2/%3").arg(d.front()).arg(d[d.size() / 2]).arg(d.back());
+        }
+        out.cadence = QString("cadence n%1 | p50 %2 p95 %3 p99 %4 max %5 | <0.9x %6 ~1x %7 1.1-1.5x %8 "
+                      "1.5-2.5x %9 >2.5x %10 | long-gap min/med/max %11 | handler>budget %12 of %13 (max %14)")
+            .arg(g.size())
+            .arg(QString::number(pct(0.50), 'f', 1))
+            .arg(QString::number(pct(0.95), 'f', 1))
+            .arg(QString::number(pct(0.99), 'f', 1))
+            .arg(QString::number(g.back(), 'f', 1))
+            .arg(b[0]).arg(b[1]).arg(b[2]).arg(b[3]).arg(b[4])
+            .arg(spacing)
+            .arg(handlerOverBudget_)
+            .arg(handlerSamples_)
+            .arg(QString::number(maxHandlerMs_, 'f', 1));
+    }
+
+    return out;
+}
+
 void MainWindow::refreshHud(const QString& action) {
     const auto st = playback_.state();
 
@@ -8980,6 +10331,23 @@ void MainWindow::refreshHud(const QString& action) {
     // return because the menu must be honest in the shipping (HUD-hidden)
     // configuration, not only under a harness.
     syncPlaybackSpeedActions();
+
+    // THE PASS KEYS FOLLOW THE LOADED FRAME FROM HERE, FOR THE SAME REASON.
+    //
+    // Whether `[` and `]` may run is a property of currentImage_->passes, and
+    // currentImage_ is written by loadCurrentFrame() -- AFTER openPath() has
+    // already run syncMediaDependentActions(). Gated there alone, the actions
+    // were computed from an empty pass list on every open and nothing ever
+    // re-enabled them: measured through UI Automation on the 9-pass Redshift
+    // file, both menu rows read IsEnabled=False while the HUD read `pass 1/9`
+    // on the same window. That is the speed menu's own bug in a new costume --
+    // state synced at the sites someone remembered rather than at the one place
+    // every path passes through -- and it gets the same answer.
+    //
+    // Above the showHud early return, like the line above it: the menu must be
+    // honest in the shipping HUD-hidden configuration and not only under a
+    // harness. setEnabled is a no-op when nothing changed.
+    syncExrPassActions();
 
     // Hidden means NOT BUILT. Everything below this point formats strings for
     // overlay_, and overlay_ is the widget H just hid -- several hundred bytes of
@@ -9146,7 +10514,30 @@ void MainWindow::refreshHud(const QString& action) {
                                      .arg(QString::number(viewer_->currentScale(), 'f', 2));
                 if (viewer_->canPan()) resampleState += QStringLiteral(" pannable");
             }
-            const QString l0 = QString("color %1%2 %3 range | display %4x%5 %6 | win %7x%8 | renderer %9%10")
+            // THE COLOUR STAGE, NAMED IN EVERY STATE RATHER THAN ONLY WHEN ON.
+            // `off` and `bypass` are different facts -- bypass means a transform
+            // IS loaded and is deliberately not being applied -- and neither is
+            // answerable from the picture, because a transform that silently
+            // failed to engage looks exactly like one that was never loaded.
+            // Same rule as `renderer`, `planar`, `font` and `strip`.
+            QString xform;
+            if (!trace::core::ColorTransform::available()) {
+                xform = QStringLiteral("n/a");
+            } else if (!colorTransform_.hasProcessor()) {
+                xform = QStringLiteral("none");
+            } else if (!colorTransform_.enabled()) {
+                xform = QStringLiteral("bypass %1").arg(colorTransform_.description());
+            } else {
+                xform = QStringLiteral("ON %1").arg(colorTransform_.description());
+            }
+            // AND HOW A FLOAT SOURCE IS BEING MADE VISIBLE. Appended to the same
+            // field because it is the same question -- what happened to the
+            // pixels between the file and the screen -- and because a mapping
+            // that normalises has to say so and say over what range. Absent
+            // entirely for an 8-bit source, which is every video, so no existing
+            // HUD capture changes shape.
+            xform += displayMapHudText();
+            const QString l0 = QString("color %1%2 %3 range | xform %11 | display %4x%5 %6 | win %7x%8 | renderer %9%10")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
                 .arg(perf.srcFullRange ? "full" : "limited")
@@ -9169,6 +10560,7 @@ void MainWindow::refreshHud(const QString& action) {
                 // interesting one.
                 .arg(viewer_->overlayEnabled() ? QStringLiteral(" +overlay")
                                                : QStringLiteral(" +bar"))
+                .arg(xform)
               // Spec phase 12's first experiment, on the line that already
               // carries `win` and `display`, because what it measures is what a
               // change to those two costs.
@@ -9267,7 +10659,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(drawPerf.avgUploadMs, 'f', 2))
                 .arg(drawPerf.textureCreates);
 
-            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6%% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | thr %20")
+            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | thr %20")
                 .arg(perf.lastConvertCalls)
                 .arg(perf.lastCtxRebuilds)
                 .arg(perf.lastImageWasShared ? "yes" : "no")
@@ -9294,151 +10686,15 @@ void MainWindow::refreshHud(const QString& action) {
                          .arg(perf.threadTypeIsFrame ? "frame" : "slice")
                          .arg(perf.threadCount));
 
-            // Presented rate from the wall clock: the only number that says
-            // whether playback actually held real time.
-            const double elapsedS = playbackRunElapsedS_;
-            const bool rateValid = elapsedS > 0.5 && playbackFramesPresented_ > 0;
-            const double presentedFps = rateValid
-                ? static_cast<double>(playbackFramesPresented_) / elapsedS
-                : 0.0;
-            const double realTimePct = (rateValid && vm.fps > 0.0)
-                ? 100.0 * presentedFps / vm.fps
-                : 0.0;
-
-            // Real-time frame dropping, made visible (owner requirement,
-            // 2026-08-13). Reads `drop 0` on every source that keeps up, so a
-            // non-zero value is itself the statement that the source could not
-            // sustain its native rate -- and `media` beside it is the check that
-            // the drop did its job: media time covered against wall time, which
-            // must read ~100% whenever `real time` reads below it. The two
-            // together are the whole contract: `real time` is how much PICTURE
-            // arrived, `media` is whether the MOVIE stayed on the clock.
-            const double mediaCoveredS = (vm.fps > 0.0)
-                ? static_cast<double>(playbackFramesPresented_ + playbackDroppedFrames_) / vm.fps
-                : 0.0;
-            const double mediaPct = rateValid && elapsedS > 0.0
-                ? 100.0 * mediaCoveredS / elapsedS
-                : 0.0;
-            const QString dropField =
-                QString(" | drop %1 (ticks %2 max %3, media %4%%)")
-                    .arg(playbackDroppedFrames_)
-                    .arg(playbackDropTicks_)
-                    .arg(maxDropRun_)
-                    .arg(QString::number(mediaPct, 'f', 1));
-
-            const QString l4 = rateValid
-                ? QString("presented %1 / %2 fps (%3%% real time) | frames %4 | elapsed %5s%6")
-                      .arg(QString::number(presentedFps, 'f', 2))
-                      .arg(QString::number(vm.fps, 'f', 2))
-                      .arg(QString::number(realTimePct, 'f', 1))
-                      .arg(playbackFramesPresented_)
-                      .arg(QString::number(elapsedS, 'f', 2))
-                      .arg(dropField)
-                : QString("presented -- / %1 fps | frames %2")
-                      .arg(QString::number(vm.fps, 'f', 2))
-                      .arg(playbackFramesPresented_);
-
-            // `tick` is the delay the LAST wake was armed for, not a fixed
-            // interval: GATE E re-arms per frame against an absolute deadline,
-            // so at 24fps it alternates 41/42 and that alternation is the fix
-            // working. A tick pinned at one value means the timeline is not
-            // established -- no rational, or media that never started a run.
-            // `jitter` is wake-to-wake interval against the true frame period,
-            // which is what it always meant -- before GATE E the armed interval
-            // WAS the period, so the figures stay comparable with section 23.4.
-            // It is deliberately not measured against the armed interval any
-            // more; see the computation for why that read 34ms on a schedule
-            // that was within 1.8ms of its deadline.
-            // `rephase` counts slots abandoned because a handler overran, which
-            // is cost overrun (cause B) and is not something GATE E fixes.
-            // `tick-late` and `tick-stall` count DELIVERY failures: ticks that
-            // arrived so late a whole frame opportunity went unused, and ticks
-            // that arrived so late the picture visibly stopped. Everything else
-            // on this line and the next measures what the tick DID; these count
-            // the times it was not called at all, which is a fault no cost
-            // counter can see -- on the title-bar stall the handler max was
-            // 0.77ms against a period max of 512ms.
-            //
-            // They exist because the smooth line's `stalls`/`hitch` are
-            // DRAG-scoped: both sample sites are inside the scrub path, so with
-            // no drag in progress they have no samples and read `0 of 0`, which
-            // was read as a clean result across a dozen harness runs of exactly
-            // this gesture. `sizemove` is the subset delivered while the modal
-            // move/size loop owned the pump, with its own max beside it --
-            // non-zero on a caption press and zero on an ordinary overrun,
-            // which is the attribution a bare count cannot make.
-            const QString l5 = QString("sched tick %1ms | jitter %2/%3/%4 (last/avg/max) | present-late %5/%6/%7 | rephase %8 | drift %9ms | ticks %10 | presents %11"
-                                       " | tick-late %12 of %13 (>%14x) | tick-stall %15 (>%16ms) | sizemove %17 max %18ms")
-                .arg(schedulerIntervalMs_)
-                .arg(QString::number(lastTickJitterMs_, 'f', 2))
-                .arg(QString::number(avgTickJitterMs_, 'f', 2))
-                .arg(QString::number(maxTickJitterMs_, 'f', 2))
-                .arg(QString::number(lastPresentLatencyMs_, 'f', 2))
-                .arg(QString::number(avgPresentLatencyMs_, 'f', 2))
-                .arg(QString::number(maxPresentLatencyMs_, 'f', 2))
-                .arg(presentRephaseCount_)
-                .arg(QString::number(lastDriftMs_, 'f', 1))
-                .arg(schedulerTicks_)
-                .arg(presentSamples_)
-                .arg(tickLate_)
-                .arg(cycleSamples_)
-                .arg(QString::number(kTickLateFactor, 'f', 1))
-                .arg(tickStalls_)
-                .arg(QString::number(kTickStallMs, 'f', 0))
-                .arg(tickStallsInSizeMove_)
-                .arg(QString::number(maxPeriodInSizeMoveMs_, 'f', 1));
-
-            // Cadence distribution. The rate above averages and reads 98-99%
-            // whether the fault is the tick beat or per-frame cost overrun, so
-            // this is the line that says which. Percentiles come from a sorted
-            // copy -- a 10s run is ~240 samples, so exact beats approximate.
-            QString l5b = QStringLiteral("cadence | no samples yet");
-            if (!cadenceGapsMs_.empty()) {
-                std::vector<double> g = cadenceGapsMs_;
-                std::sort(g.begin(), g.end());
-                const auto pct = [&g](double p) {
-                    const std::size_t i = std::min(g.size() - 1,
-                        static_cast<std::size_t>(p * static_cast<double>(g.size() - 1) + 0.5));
-                    return g[i];
-                };
-                const double budget = tickFrameDurationMs_ > 0.0 ? tickFrameDurationMs_ : 41.667;
-                // Buckets as multiples of the frame budget. A regular beat piles
-                // up in [1.5,2.5) and nowhere else; ragged overrun smears.
-                int b[5] = {0, 0, 0, 0, 0};
-                for (double v : g) {
-                    const double r = v / budget;
-                    if (r < 0.9) ++b[0];
-                    else if (r < 1.1) ++b[1];
-                    else if (r < 1.5) ++b[2];
-                    else if (r < 2.5) ++b[3];
-                    else ++b[4];
-                }
-                // Spacing between long frames: regular means a beat, scattered
-                // means overrun. Reported as min/median/max so one outlier
-                // cannot make a ragged run look periodic.
-                QString spacing = QStringLiteral("--");
-                if (cadenceLongAt_.size() >= 2) {
-                    std::vector<long long> d;
-                    d.reserve(cadenceLongAt_.size() - 1);
-                    for (std::size_t i = 1; i < cadenceLongAt_.size(); ++i) {
-                        d.push_back(cadenceLongAt_[i] - cadenceLongAt_[i - 1]);
-                    }
-                    std::sort(d.begin(), d.end());
-                    spacing = QString("%1/%2/%3").arg(d.front()).arg(d[d.size() / 2]).arg(d.back());
-                }
-                l5b = QString("cadence n%1 | p50 %2 p95 %3 p99 %4 max %5 | <0.9x %6 ~1x %7 1.1-1.5x %8 "
-                              "1.5-2.5x %9 >2.5x %10 | long-gap min/med/max %11 | handler>budget %12 of %13 (max %14)")
-                    .arg(g.size())
-                    .arg(QString::number(pct(0.50), 'f', 1))
-                    .arg(QString::number(pct(0.95), 'f', 1))
-                    .arg(QString::number(pct(0.99), 'f', 1))
-                    .arg(QString::number(g.back(), 'f', 1))
-                    .arg(b[0]).arg(b[1]).arg(b[2]).arg(b[3]).arg(b[4])
-                    .arg(spacing)
-                    .arg(handlerOverBudget_)
-                    .arg(handlerSamples_)
-                    .arg(QString::number(maxHandlerMs_, 'f', 1));
-            }
+            // ONE instrument, shared with the image-sequence branch below.
+            // vm.fps rather than frameSource_->fps() so this line stays byte
+            // identical to every cadence figure already recorded against it --
+            // the two differ only by a max(1.0, ...) clamp no real file reaches.
+            const CadenceHudLines cadence =
+                cadenceHudLines(vm.fps, /*rateIsNominal=*/false);
+            const QString& l4 = cadence.presented;
+            const QString& l5 = cadence.sched;
+            const QString& l5b = cadence.cadence;
 
             // Span-based rate: N presented frames cover N-1 intervals, so this
             // excludes both startup before frame 1 and any end-of-stream hold.
@@ -9534,7 +10790,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(supersededResults_);
 
             auto ioLine = [](const char* tag, const trace::core::IoPhaseStats& s) {
-                return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6%% "
+                return QString("io %1 | rd %2 | avg %3 KB (min %4 max %5) | seq %6% "
                                "| seek %7 | lat %8/%9ms | %10 Mbps | stall %11 (%12ms)")
                     .arg(tag)
                     .arg(s.reads)
@@ -9624,7 +10880,7 @@ void MainWindow::refreshHud(const QString& action) {
             // Capacity is the count that fits at the size currently stored, so
             // it rises as a 4K drag fills the cache with half-res previews.
             // The MB pair is the real rule; the count is derived from it.
-            const QString l8 = QString("cache FIFO | %1/%2 (%3/%9 MB) | hit %4%% (%5/%6) | ins %7 evict %8")
+            const QString l8 = QString("cache FIFO | %1/%2 (%3/%9 MB) | hit %4% (%5/%6) | ins %7 evict %8")
                 .arg(perf.cacheOccupancy)
                 .arg(perf.cacheCapacity)
                 .arg(QString::number(static_cast<double>(perf.cacheBytes) / (1024.0 * 1024.0), 'f', 1))
@@ -9698,7 +10954,7 @@ void MainWindow::refreshHud(const QString& action) {
             // was read as a clean result across a dozen title-bar harness runs
             // whose own `period max` said 512ms. The playback-side answer is
             // `tick-late`/`tick-stall` on the period line above.
-            const QString l7b = QString("smooth/drag | gap %1/%2/%3ms (last/avg/max) | wasted %4%% (%5) | gated %11 | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
+            const QString l7b = QString("smooth/drag | gap %1/%2/%3ms (last/avg/max) | wasted %4% (%5) | gated %11 | stalls %6 of %7 (>%8ms) | hitch %9 (>%10ms)")
                 .arg(QString::number(scrubPaintGapLastMs_, 'f', 1))
                 .arg(QString::number(gapAvg, 'f', 1))
                 .arg(QString::number(scrubPaintGapMaxMs_, 'f', 1))
@@ -9871,7 +11127,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(scrubWorker_.maxBatchDecoded())
                 .arg(scrubKfLandings_);
 
-            const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3%% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
+            const QString l7e = QString("lag | dir %10 rev %11 | ptr %1 f/s | dec %2 f/s | supply %3% | behind %4/%5f | p2p %6/%7ms | walk max %8f | seeks %9")
                 .arg(QString::number(scrubPointerFps_, 'f', 1))
                 .arg(QString::number(scrubDecodeFps_, 'f', 1))
                 .arg(QString::number(lagRatio * 100.0, 'f', 0))
@@ -9951,31 +11207,66 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(as.silenceBytes);
         } else if (currentMedia_->kind == MediaKind::ImageSequence && currentMedia_->sequence.has_value()) {
             const auto& seq = *currentMedia_->sequence;
+            const QString exr = exrHudSuffix();
             // ZERO-BASED, and against the last valid INDEX rather than the
             // count -- which is what the video line has always printed and what
             // these two did not (spec §2 item 8). `Elapsed:` rather than
             // `Timecode:` because an image sequence has no container timecode
             // at all, so calling this one was the clearest instance of the thing
             // the spec forbids.
-            line = QString("Sequence | %1 | %2x%3 ch:%4 | Frame: %5/%6 | Seconds: %7 | Elapsed: %8")
-                .arg(QString::fromStdString(seq.pattern))
+            // THE TWO TEXT FIELDS GO IN LAST, TOGETHER, THROUGH THE MULTI-ARG
+            // OVERLOAD -- and that is a fix, not a style.
+            //
+            // A sequence pattern is printf-shaped: `icecream_passes%04d.exr`.
+            // QString::arg reads `%04` as its own placeholder 4, so inserting
+            // the pattern first and then calling .arg() six more times replaced
+            // it with the channel count and printed `icecream_passes27d.exr`.
+            // Pre-existing, and invisible until a file was opened whose HUD line
+            // anyone read closely. The multi-arg form substitutes in ONE pass and
+            // never rescans what it inserted, so neither the pattern nor a channel
+            // name containing a percent sign can corrupt the line.
+            line = QString("Sequence | %8 | %1x%2 ch:%3%9 | Frame: %4/%5 | Seconds: %6 | Elapsed: %7")
                 .arg(currentImage_.has_value() ? currentImage_->width : 0)
                 .arg(currentImage_.has_value() ? currentImage_->height : 0)
                 .arg(currentImage_.has_value() ? currentImage_->channels : 0)
                 .arg(st.currentFrame)
                 .arg(seq.frames.empty() ? 0 : seq.frames.size() - 1)
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
-                .arg(elapsed);
+                .arg(elapsed)
+                .arg(QString::fromStdString(seq.pattern), exr);
+
+            // THE CADENCE INSTRUMENT REACHES THIS MEDIA CLASS. Same three lines
+            // as the video branch, from the same function, so a sequence figure
+            // and a video figure are the same measurement and can be compared.
+            //
+            // The rate is the SOURCE's, flagged nominal -- see cadenceHudLines.
+            // It is appended rather than interleaved so the media line stays
+            // first and every existing sequence-line capture keeps its geometry.
+            const CadenceHudLines cadence =
+                cadenceHudLines(frameSource_ ? frameSource_->fps() : kAudioNominalFps,
+                                /*rateIsNominal=*/true);
+            line += "\n" + cadence.presented
+                  + "\n" + cadence.sched
+                  + "\n" + cadence.cadence
+                  // Directly under the cadence lines because it is the
+                  // explanation for them: `presented` says the sequence is
+                  // at 62% of real time, and this says what the prefetch
+                  // policy did to get it there. They share a run boundary,
+                  // so the two are one measurement rather than two
+                  // overlapping ones.
+                  + "\n" + sequencePrefetchHudLine();
         } else if (currentImage_.has_value()) {
             const auto& im = *currentImage_;
-            line = QString("Still | %1 | %2x%3 ch:%4 | Frame: %5/0 | Seconds: %6 | Elapsed: %7")
-                .arg(im.fileName)
+            // Same one-pass substitution for the same reason: a file name is
+            // user text and may contain a percent sign.
+            line = QString("Still | %7 | %1x%2 ch:%3%8 | Frame: %4/0 | Seconds: %5 | Elapsed: %6")
                 .arg(im.width)
                 .arg(im.height)
                 .arg(im.channels)
                 .arg(st.currentFrame)
                 .arg(trace::core::TimeFormat::formatSeconds(sec))
-                .arg(elapsed);
+                .arg(elapsed)
+                .arg(im.fileName, exrHudSuffix());
         }
     }
 
@@ -10023,6 +11314,97 @@ void MainWindow::dropEvent(QDropEvent* event) {
 
 trace::core::VideoFrameSource* MainWindow::videoFrameSource() {
     return dynamic_cast<trace::core::VideoFrameSource*>(frameSource_.get());
+}
+
+// THE PASS, ITS CLASS, AND THE FILE'S OWN CHANNEL NAMES FOR IT.
+//
+// The raw names are printed rather than the tidy ones because they are the one
+// thing that makes a naming convention we have not met VISIBLE instead of
+// silent: three conventions already live in one asset set (`R G B`,
+// `Beauty.red`, `CryptoMaterial.R`), and a grouper written for any one of them
+// finds nothing in the other two while reporting a perfectly healthy-looking
+// plain RGB image.
+// HOW A FLOAT SOURCE IS BEING MADE VISIBLE, in one expression so the HUD's
+// colour line and its media line cannot print different answers.
+//
+// It carries the measured range and the fraction above 1.0 because those are
+// what say whether the picture on screen is the whole picture: the Redshift
+// beauty pass runs to 2.52 and half of it clips under a plain 2.2 gamma, and
+// nothing else on screen would ever say so.
+QString MainWindow::displayMapHudText() const {
+    if (!viewer_ || !viewer_->displayMapInUse()) return QString();
+    const auto& dm = viewer_->displayMapResult();
+    QString out = QStringLiteral(" | map %1").arg(trace::core::displayMapName(dm.map));
+    if (dm.map == trace::core::DisplayMap::Ocio) {
+        // WHICH CONFIG, DISPLAY AND VIEW ARE IN FORCE, on the EXR line. Stage 2
+        // left this reading a bare `map OCIO`, which says the stage is running
+        // and nothing about what it is doing -- and on an EXR the video line's
+        // `xform` field is never built, so this is the only place that can say
+        // it. description() reports the RESOLVED config, not the requested one.
+        const QString what = colorTransform_.description();
+        if (!what.isEmpty()) out += QStringLiteral(" %1").arg(what);
+    } else {
+        out += QStringLiteral(" [%1..%2, %3")
+                   .arg(QString::number(dm.inputLo, 'f', 4))
+                   .arg(QString::number(dm.inputHi, 'f', 4))
+                   .arg(QString::number(dm.fractionAboveOne * 100.0, 'f', 1));
+        // Written outside the format string: "%%" is not a placeholder to
+        // QString::arg and survives into the output as two characters.
+        out += QStringLiteral("% >1]");
+    }
+    return out;
+}
+
+QString MainWindow::exrHudSuffix() const {
+    if (!currentImage_.has_value()) return QString();
+    const auto& im = *currentImage_;
+    if (im.passes.empty()) return QString();
+
+    QString out;
+    if (!im.compression.isEmpty()) {
+        out += QStringLiteral(" %1").arg(im.compression);
+        // DWAA and DWAB are LOSSY by the renderer's own choice. Saying so here
+        // is cheaper than someone debugging a compression artefact as a Trace
+        // bug -- which is exactly what the root-versus-Beauty difference in the
+        // test file turns out to be.
+        if (im.compression.startsWith(QLatin1String("dwa"), Qt::CaseInsensitive))
+            out += QStringLiteral(" (lossy)");
+    }
+    if (const auto* pass = im.activePassInfo()) {
+        out += QStringLiteral(" | pass %1/%2 %3 %4")
+                   .arg(im.activePass + 1)
+                   .arg(static_cast<int>(im.passes.size()))
+                   .arg(pass->displayName)
+                   .arg(trace::core::passClassName(pass->cls));
+        if (!im.activeRawNames.isEmpty())
+            out += QStringLiteral(" [%1]").arg(im.activeRawNames.join(QLatin1Char(',')));
+        if (!pass->duplicateOf.isEmpty())
+            out += QStringLiteral(" = %1").arg(pass->duplicateOf);
+    }
+    // The mapping goes on THIS line as well as on the colour line, because the
+    // colour line is built inside the video branch and an EXR sequence never
+    // reaches it -- so without this the one media class that always has a
+    // mapping in force would be the one class that never reported it.
+    out += displayMapHudText();
+    return out;
+}
+
+trace::core::ImageSequenceFrameSource* MainWindow::imageSequenceSource() {
+    return dynamic_cast<trace::core::ImageSequenceFrameSource*>(frameSource_.get());
+}
+
+// THE MAPPING FOLLOWS THE PASS'S CLASS, NOT ITS NAME.
+//
+// A world-position pass shown through a colour mapping is black or white and
+// nothing else; a beauty pass shown through a per-frame normalise flickers as
+// the brightest pixel moves. So the mapping is chosen from the class the grouper
+// assigned, and which one is in force is always on screen -- normalising is
+// allowed, doing it quietly is not.
+void MainWindow::syncDisplayMapForActivePass() {
+    if (!viewer_) return;
+    const auto* pass = currentImage_.has_value() ? currentImage_->activePassInfo() : nullptr;
+    viewer_->setDisplayMap(pass ? trace::core::defaultMapForClass(pass->cls)
+                                : trace::core::DisplayMap::Gamma22);
 }
 
 void MainWindow::prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction, bool clearQueue) {

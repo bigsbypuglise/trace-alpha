@@ -16,20 +16,24 @@ bool ImageSequenceFrameSource::frameAt(long long frameIndex, VideoFrame& outFram
 
     LoadedImageInfo info;
     if (!loader_->load(path, info, error)) return false;
-
-    // `info` is local and its image is freshly loaded, so this moves rather than
-    // copies: adopt() only has to detach when the caller kept a reference.
-    auto buffer = FrameBuffer::adopt(std::move(info.image));
-    if (!buffer) {
+    if (!info.buffer) {
         error = "Unsupported image format";
         return false;
     }
 
     currentFrame_ = frameIndex;
     outFrame = VideoFrame{};
-    outFrame.buffer = std::move(buffer);
+    outFrame.buffer = info.buffer;
     outFrame.frameIndex = frameIndex;
-    // Stills arrive already in RGB; there is no YUV matrix to record.
+    // Stills arrive already in RGB, or -- for EXR -- in scene-referred float,
+    // which the display stage maps. Neither is YUV, so there is no matrix to
+    // record.
+    //
+    // The whole LoadedImageInfo is kept so the caller can read what the file
+    // actually was: its real channel count, its pass list and its compression.
+    // Before this the frame-handoff path invented `channels = 4` because the
+    // decoded frame was all it had to look at.
+    lastInfo_ = std::move(info);
     return true;
 }
 

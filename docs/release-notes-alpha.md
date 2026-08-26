@@ -54,6 +54,18 @@ tonemap, 10-bit *output* is unsupported (distinct from the high-bit-depth *proce
 work), multi-monitor DPI is validated at 100%/150% only, and cold LucidLink delivery is
 ~600-800 Mbps so multi-Gbps plates will not stream.
 
+**Pending for the EXR milestone (branch `exr-stage0-dependencies`, not yet merged or
+released).** When EXR support ships, the line reading *"EXR does not open"* is replaced by a
+measured gap, not deleted: **a 27-channel multilayer DWAA EXR sequence at 1920x1080 plays at
+roughly 15 fps -- about two-thirds of real time** (63.6-65.1% of 24fps across four warm passes,
+2026-08-25, physical panel). The owner hand-tested this on 2026-08-25 and **ruled it usable for
+review on this file class**, so it ships as an accepted limit rather than as a blocker -- but it
+is a limit and the notes must say so. Single-layer PIZ EXR (99.9%) and PNG (100.0%) sequences
+hold real time. The rollback knob is `TRACE_SEQ_PREFETCH_STRIDE=0`. Ready-to-paste wording is in
+`docs/exr-release-notes.md`. **Do not describe the DWAA figure as real time, and do not drop it
+to a footnote** -- it is the EXR milestone's headline limitation the way 8K ProRes 4444 XQ is the
+video path's.
+
 **A gap that has been measured must be stated as measured, with the number.** `v0.2.0-alpha.1`
 listed mixed-monitor DPI as unvalidated, which was true and was the named reason that release
 was not a beta; closing it on hardware is what promoted this one. The 8K entry replaces it as

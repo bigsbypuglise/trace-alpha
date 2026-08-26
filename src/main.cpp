@@ -13,6 +13,12 @@
 #include "app/MainWindow.h"
 #include "app/Theme.h"
 #include "app/WindowShape.h"
+#include "core/ColorTransform.h"
+#include "core/ExrChannels.h"
+#ifdef TRACE_WITH_OCIO
+#include <OpenColorIO/OpenColorIO.h>
+#endif
+
 #include "ui/ViewerWidget.h"
 
 namespace {
@@ -107,6 +113,508 @@ int runRendererSelfTest(const QString& expected) {
         return 4;
     }
     return 0;
+}
+
+// `Trace.exe --ocio-selftest[=<file>]`: prove that THIS BINARY links and
+// executes OpenColorIO, not merely that CI managed to build the library.
+//
+// Stage 0 shipped OCIO on the link line and nothing referenced it, so the
+// linker emitted no direct import and `TRACE_WITH_OCIO=1` was a claim nothing
+// tested -- the same silent-degradation class as a renderer that quietly falls
+// back, which is what --renderer-selftest exists for. This is that check for
+// the colour stage, and it is deliberately five separate assertions rather than
+// one "did it throw", because each can fail on its own and they fail for
+// different reasons:
+//
+//   1. the library is compiled in at all      -> exit 20
+//   2. its runtime version can be read        -> exit 21
+//   3. a KNOWN config loads                   -> exit 22
+//   4. a processor and CPU processor compile  -> exit 23
+//   5. the transform actually MOVES A PIXEL   -> exit 24
+//
+// (5) is the one that matters and the one an "it did not throw" check would
+// miss. A processor that compiles and then applies an identity is
+// indistinguishable from a working one by every other signal here, and identity
+// is exactly what a mis-resolved colour space produces -- the stage-0 measurement
+// of getColorSpaceFromFilepath() returning "Raw" for .exr is that failure in the
+// wild. So the pixel is compared before and after and the test fails if nothing
+// changed.
+//
+// THE CONFIG IS OCIO'S OWN BUILT-IN ACES CONFIG, not a file on disk. A CI runner
+// has no colour configs and no test assets, and a selftest that needs one could
+// not run there -- which is the whole point of adding it to CI. `ocio://default`
+// is compiled into the library, so this command works anywhere the binary does.
+// An optional `=<file>` additionally loads a real config or LUT, for a machine
+// that has one.
+int runOcioSelfTest(const QString& file) {
+    QTextStream out(stdout);
+    QTextStream err(stderr);
+
+    if (!trace::core::ColorTransform::available()) {
+        err << "trace-ocio: FAIL - this build was compiled without OpenColorIO."
+            << Qt::endl;
+        return 20;
+    }
+
+    const QString version = trace::core::ColorTransform::ocioVersion();
+    if (version.isEmpty()) {
+        err << "trace-ocio: FAIL - OpenColorIO reported no version." << Qt::endl;
+        return 21;
+    }
+
+#ifdef TRACE_WITH_OCIO
+    std::string display, view, input;
+    try {
+        auto cfg = OCIO_NAMESPACE::Config::CreateFromBuiltinConfig("ocio://default");
+        if (!cfg) {
+            err << "trace-ocio: FAIL - the built-in config loaded as null." << Qt::endl;
+            return 22;
+        }
+        // scene_linear rather than the file rules -- the stage-0 finding, applied
+        // here so the selftest exercises the same decision the product makes.
+        const char* role = cfg->getCanonicalName(OCIO_NAMESPACE::ROLE_SCENE_LINEAR);
+        input = (role && *role) ? role : "";
+        display = cfg->getDefaultDisplay() ? cfg->getDefaultDisplay() : "";
+        view = (!display.empty() && cfg->getDefaultView(display.c_str()))
+                   ? cfg->getDefaultView(display.c_str()) : "";
+        if (input.empty() || display.empty() || view.empty()) {
+            err << "trace-ocio: FAIL - built-in config states no scene_linear "
+                   "role or no default display/view." << Qt::endl;
+            return 22;
+        }
+
+        auto dvt = OCIO_NAMESPACE::DisplayViewTransform::Create();
+        dvt->setSrc(input.c_str());
+        dvt->setDisplay(display.c_str());
+        dvt->setView(view.c_str());
+
+        auto proc = cfg->getProcessor(dvt);
+        if (!proc) {
+            err << "trace-ocio: FAIL - no processor from the display/view transform."
+                << Qt::endl;
+            return 23;
+        }
+        auto cpu = proc->getDefaultCPUProcessor();
+        if (!cpu) {
+            err << "trace-ocio: FAIL - no CPU processor." << Qt::endl;
+            return 23;
+        }
+
+        // 18% scene-linear grey through an ACES display transform must not come
+        // back as 18% linear. Executed, not assumed.
+        float px[3] = {0.18f, 0.18f, 0.18f};
+        const float before[3] = {px[0], px[1], px[2]};
+        cpu->applyRGB(px);
+        const bool moved = (px[0] != before[0]) || (px[1] != before[1]) || (px[2] != before[2]);
+
+        out << "trace-ocio: version=" << version
+            << " config=ocio://default"
+            << " input=" << QString::fromStdString(input)
+            << " display=" << QString::fromStdString(display)
+            << " view=" << QString::fromStdString(view)
+            << " rgb 0.18->" << QString::number(px[0], 'f', 5)
+            << "," << QString::number(px[1], 'f', 5)
+            << "," << QString::number(px[2], 'f', 5)
+            << " moved=" << (moved ? 1 : 0)
+            << Qt::endl;
+        out.flush();
+
+        if (!moved) {
+            err << "trace-ocio: FAIL - the transform compiled but left the pixel "
+                   "unchanged, which is indistinguishable from no transform at all."
+                << Qt::endl;
+            return 24;
+        }
+    } catch (const std::exception& e) {
+        err << "trace-ocio: FAIL - " << QString::fromUtf8(e.what()) << Qt::endl;
+        return 22;
+    }
+#endif
+
+    // Optional second half: a real file, when one is named. Goes through the
+    // PRODUCT's own ColorTransform rather than a second copy of the logic, so a
+    // pass here is a statement about the shipping stage.
+    if (!file.isEmpty()) {
+        trace::core::ColorTransform ct;
+        trace::core::ColorTransform::Config cfg;
+        cfg.kind = file.endsWith(QStringLiteral(".ocio"), Qt::CaseInsensitive)
+                       ? trace::core::ColorTransform::Kind::DisplayView
+                       : trace::core::ColorTransform::Kind::Lut;
+        if (cfg.kind == trace::core::ColorTransform::Kind::Lut) cfg.lutPath = file;
+        else cfg.configPath = file;
+
+        QString error;
+        if (!ct.setConfig(cfg, error)) {
+            err << "trace-ocio: FAIL - " << error << Qt::endl;
+            return 25;
+        }
+        ct.setEnabled(true);
+        out << "trace-ocio: file=" << file
+            << " kind=" << (cfg.kind == trace::core::ColorTransform::Kind::Lut ? "lut" : "displayview")
+            << " active=" << (ct.isActive() ? 1 : 0)
+            << Qt::endl;
+        out.flush();
+        if (!ct.isActive()) {
+            err << "trace-ocio: FAIL - the configuration compiled but the stage "
+                   "is not active." << Qt::endl;
+            return 25;
+        }
+    }
+
+    // ---- STAGE 3: config discovery, and the default the dialog depends on ----
+    //
+    //   6. the built-in registry enumerates, and the default resolves  -> exit 26
+    //   7. scene_linear and the FILE RULES give DIFFERENT answers      -> exit 27
+    //
+    // (6) IS THE CHECK FOR A MEASURED TRAP, NOT A TAUTOLOGY. With $OCIO unset,
+    // OCIO::Config::CreateFromEnv() does not throw and does not return null: it
+    // returns a "Color management disabled" RAW config with ONE colour space and
+    // ONE display, announced only on stderr. Stage 1's DisplayView branch called
+    // it whenever configPath was empty. So the assertion is not "a config
+    // loaded" -- that would pass on the raw config -- it is that the resolved
+    // default carries MORE THAN ONE colour space and at least one display, which
+    // the disabled config cannot.
+    //
+    // (7) ASSERTS A DIFFERENCE RATHER THAN A VALUE, which is what makes it
+    // durable. The whole reason the input space defaults to the scene_linear
+    // ROLE is that getColorSpaceFromFilepath() answers something else and every
+    // API call succeeds either way. Measured: on ocio://default the role is
+    // ACEScg and the file rules say ACES2065-1 -- both scene-linear, so the
+    // wrong one looks plausible and is merely wrong in its primaries. If a
+    // future OCIO ever made the two agree, this fails and says the premise
+    // moved, instead of leaving a comment behind that no longer applies.
+#ifdef TRACE_WITH_OCIO
+    {
+        const auto builtins = trace::core::ColorTransform::builtinConfigs();
+        trace::core::ColorTransform::ConfigSource src =
+            trace::core::ColorTransform::ConfigSource::None;
+        const QString defaultCfg =
+            trace::core::ColorTransform::defaultConfigString(&src);
+
+        QString e1, e2, e3;
+        const QStringList spaces = trace::core::ColorTransform::colorSpaces(QString(), e1);
+        const QStringList disp = trace::core::ColorTransform::displays(QString(), e2);
+        const QString sceneLinear = trace::core::ColorTransform::sceneLinearSpace(QString(), e3);
+
+        out << "trace-ocio: builtins=" << builtins.size()
+            << " default=" << defaultCfg
+            << " source=" << (src == trace::core::ColorTransform::ConfigSource::Env
+                                  ? "env" : "builtin")
+            << " spaces=" << spaces.size()
+            << " displays=" << disp.size()
+            << " scene_linear=" << sceneLinear
+            << Qt::endl;
+        out.flush();
+
+        if (builtins.isEmpty()) {
+            err << "trace-ocio: FAIL - the built-in config registry enumerated "
+                   "nothing, so Trace cannot offer colour management on a machine "
+                   "with no config installed." << Qt::endl;
+            return 26;
+        }
+        if (spaces.size() < 2 || disp.isEmpty() || sceneLinear.isEmpty()) {
+            err << "trace-ocio: FAIL - the resolved default config has "
+                << spaces.size() << " colour space(s) and " << disp.size()
+                << " display(s). One of each is the signature of OCIO's "
+                   "'Color management disabled' raw config, which is what "
+                   "CreateFromEnv() returns when $OCIO is unset." << Qt::endl;
+            return 26;
+        }
+
+        try {
+            auto cfg = OCIO_NAMESPACE::Config::CreateFromFile(
+                defaultCfg.toStdString().c_str());
+            const char* byRule = cfg ? cfg->getColorSpaceFromFilepath("probe.exr") : nullptr;
+            const QString rule = byRule ? QString::fromUtf8(byRule) : QString();
+            out << "trace-ocio: input default: scene_linear='" << sceneLinear
+                << "' file-rule('.exr')='" << rule << "' differ="
+                << (rule != sceneLinear ? 1 : 0) << Qt::endl;
+            out.flush();
+            if (rule.isEmpty()) {
+                err << "trace-ocio: FAIL - getColorSpaceFromFilepath answered "
+                       "nothing, so the comparison that justifies defaulting to "
+                       "the scene_linear role could not be made." << Qt::endl;
+                return 27;
+            }
+            if (rule == sceneLinear) {
+                err << "trace-ocio: FAIL - the file rules and the scene_linear "
+                       "role now AGREE on this config. That is not a defect, but "
+                       "it means the recorded reason for preferring the role no "
+                       "longer holds here and must be re-derived." << Qt::endl;
+                return 27;
+            }
+        } catch (const std::exception& e) {
+            err << "trace-ocio: FAIL - " << QString::fromUtf8(e.what()) << Qt::endl;
+            return 27;
+        }
+    }
+#endif
+
+    return 0;
+}
+
+// `Trace.exe --exr-channels-selftest`: drive the EXR channel grouper over a
+// table of synthetic channel lists, print every pass it produces, and fail on
+// anything that does not hold.
+//
+// IT EXISTS BECAUSE THE ASSET SET CONTAINS ONLY TWO OF THE THREE RECORDED
+// NAMING CONVENTIONS. Measured with OpenImageIO over every EXR in the pool: the
+// root layer spells its components `R G B`, and every Redshift AOV -- including
+// that file's own Cryptomatte -- spells them `Beauty.red` / `.green` / `.blue`.
+// The third convention, upper-case with alpha (`CryptoMaterial.R/.G/.B/.A`), is
+// recorded in CLAUDE.md from stage 0 and has NO FILE HERE to exercise it. A
+// grouper written against any one convention finds nothing in the other two, so
+// the one that cannot be tested against real media is precisely the one that
+// needs a test, and a synthetic channel list is the only way to write it.
+//
+// It is pure logic over a QStringList: no file, no OpenImageIO, no window. That
+// is what lets it run in CI beside the shape and OCIO selftests, and it is also
+// the honest limit of what it proves -- that the RULES are right, not that any
+// particular file decodes. The file half is covered by opening real media.
+//
+// THE ASSERTIONS ARE PROPERTIES FIRST AND EXPECTATIONS SECOND. Five invariants
+// are checked on every case, including ones with no expectation table, because
+// they are the things whose violation is silent:
+//
+//   1. every channel index in the file appears in at least one pass -- nothing
+//      in the file is invisible;
+//   2. every stored index is in range;
+//   3. a component slot holds a channel whose OWN NAME ends in that component --
+//      the check that resolution is by identity and never by position, which is
+//      the assumption stage 0 recorded as a live defect;
+//   4. no two passes share a display name -- an ambiguity the UI could not
+//      express;
+//   5. a Colour pass has all three of R, G and B.
+static int runExrChannelsSelfTest() {
+    using namespace trace::core;
+    QTextStream out(stdout);
+    int failures = 0;
+
+    struct Expect {
+        const char* displayName;
+        const char* className;
+        const char* rawNames;   // joined with ',' -- empty means "do not check"
+    };
+    struct Case {
+        const char* name;
+        QStringList channels;
+        std::vector<Expect> expect;   // empty means invariants only
+    };
+
+    const std::vector<Case> cases = {
+        // The two files in the pool that are a plain render.
+        {"root RGB (Beauty_Only, R2_OP_Stacks)",
+         {"R", "G", "B"},
+         {{"(root)", "colour", "R,G,B"}}},
+
+        {"root RGBA",
+         {"R", "G", "B", "A"},
+         {{"(root)", "colour", "R,G,B,A"}}},
+
+        // The 27-channel Redshift file, channel for channel as OIIO presents it.
+        {"Redshift multilayer, 27 channels",
+         {"R", "G", "B",
+          "Beauty.red", "Beauty.green", "Beauty.blue",
+          "Cryptomatte.red", "Cryptomatte.green", "Cryptomatte.blue",
+          "DiffuseFilter.red", "DiffuseFilter.green", "DiffuseFilter.blue",
+          "GI.red", "GI.green", "GI.blue",
+          "P.red", "P.green", "P.blue",
+          "Reflections.red", "Reflections.green", "Reflections.blue",
+          "Shadows.red", "Shadows.green", "Shadows.blue",
+          "SpecularLighting.red", "SpecularLighting.green", "SpecularLighting.blue"},
+         {{"(root)", "colour", "R,G,B"},
+          {"Beauty", "colour", "Beauty.red,Beauty.green,Beauty.blue"},
+          {"Cryptomatte", "data", "Cryptomatte.red,Cryptomatte.green,Cryptomatte.blue"},
+          {"DiffuseFilter", "colour", ""},
+          {"GI", "colour", ""},
+          {"P", "position", "P.red,P.green,P.blue"},
+          {"Reflections", "colour", ""},
+          {"Shadows", "colour", ""},
+          {"SpecularLighting", "colour", ""}}},
+
+        // CONVENTION 3, which no file here has: upper-case, WITH alpha.
+        {"Cryptomatte upper-case with alpha (no file in the pool)",
+         {"CryptoMaterial.R", "CryptoMaterial.G", "CryptoMaterial.B", "CryptoMaterial.A"},
+         {{"CryptoMaterial", "data",
+           "CryptoMaterial.R,CryptoMaterial.G,CryptoMaterial.B,CryptoMaterial.A"}}},
+
+        // Case is not meaningful in a component suffix.
+        {"mixed case suffixes",
+         {"Beauty.Red", "Beauty.GREEN", "Beauty.blue", "Beauty.Alpha"},
+         {{"Beauty", "colour", "Beauty.Red,Beauty.GREEN,Beauty.blue,Beauty.Alpha"}}},
+
+        // THE POSITIONAL ASSUMPTION, WRITTEN AS A TEST. Stored out of order in
+        // the file; a grouper resolving by position would put blue in red.
+        {"components out of order in the file",
+         {"foo.B", "foo.A", "foo.R", "foo.G"},
+         {{"foo", "colour", "foo.R,foo.G,foo.B,foo.A"}}},
+
+        // A layer whose name is a class keyword, and the substring trap: neither
+        // "Specular" (contains p) nor "Reflections" (contains n) may be caught.
+        {"class keywords and the substring trap",
+         {"Z", "N.red", "N.green", "N.blue",
+          "Specular.red", "Specular.green", "Specular.blue"},
+         {{"Z", "depth", "Z,Z,Z"},
+          {"N", "normal", "N.red,N.green,N.blue"},
+          {"Specular", "colour", "Specular.red,Specular.green,Specular.blue"}}},
+
+        {"nested layer name",
+         {"diffuse.light1.R", "diffuse.light1.G", "diffuse.light1.B"},
+         {{"diffuse.light1", "colour", "diffuse.light1.R,diffuse.light1.G,diffuse.light1.B"}}},
+
+        // A bare data channel becomes its own pass and is replicated across RGB
+        // so it draws as grey rather than as a red-only picture.
+        {"bare data channels",
+         {"R", "G", "B", "Z", "materialId"},
+         {{"(root)", "colour", "R,G,B"},
+          {"Z", "depth", "Z,Z,Z"},
+          {"materialId", "data", "materialId,materialId,materialId"}}},
+
+        // EDGE CASES WITH NO EXPECTATION TABLE: the invariants alone decide, and
+        // these are the shapes most likely to be malformed in the wild.
+        // An alpha-only layer replicates alpha across RGB. Without it the loader
+        // draws a black frame with an alpha nothing reads: present, selectable
+        // and invisible.
+        {"alpha-only layer", {"mask.A"},
+         {{"mask", "data", "mask.A,mask.A,mask.A,mask.A"}}},
+
+        // A bare `Z` and a `Z.*` layer are DIFFERENT passes. Merged, the three
+        // layer channels were dropped entirely.
+        {"layer name colliding with a bare channel", {"Z", "Z.R", "Z.G", "Z.B"},
+         {{"Z", "depth", "Z,Z,Z"},
+          {"Z (layer)", "depth", "Z.R,Z.G,Z.B"}}},
+
+        // The loser of a slot contest is recorded, not discarded.
+        {"duplicate component in one layer", {"foo.R", "foo.R", "foo.G", "foo.B"},
+         {{"foo", "colour", "foo.R,foo.G,foo.B"}}},
+        {"two channels only", {"uv.R", "uv.G"}, {}},
+        {"single bare channel", {"Y"}, {}},
+    };
+
+    for (const Case& c : cases) {
+        const std::vector<ExrPass> passes = groupExrChannels(c.channels);
+        out << "-- " << c.name << "  (" << c.channels.size() << " channels -> "
+            << static_cast<int>(passes.size()) << " passes)\n";
+
+        for (const ExrPass& p : passes) {
+            out << QString("     %1  %2  [%3]  ch %4,%5,%6,%7%8\n")
+                       .arg(p.displayName, -22)
+                       .arg(passClassName(p.cls), -9)
+                       .arg(p.rawNames.join(QLatin1Char(',')))
+                       .arg(p.channel[0]).arg(p.channel[1])
+                       .arg(p.channel[2]).arg(p.channel[3])
+                       .arg(p.ambiguous.isEmpty()
+                                ? QString()
+                                : QStringLiteral("  ambiguous:")
+                                      + p.ambiguous.join(QLatin1Char(',')));
+        }
+
+        const auto fail = [&](const QString& why) {
+            out << "     FAIL: " << why << "\n";
+            ++failures;
+        };
+
+        // (1) and (2): nothing in the file is invisible, nothing is out of range.
+        std::vector<bool> seen(static_cast<std::size_t>(c.channels.size()), false);
+        for (const ExrPass& p : passes) {
+            for (int k = 0; k < 4; ++k) {
+                const int idx = p.channel[k];
+                if (idx < 0) continue;
+                if (idx >= c.channels.size()) {
+                    fail(QString("pass %1 slot %2 holds out-of-range index %3")
+                             .arg(p.displayName).arg(k).arg(idx));
+                    continue;
+                }
+                seen[static_cast<std::size_t>(idx)] = true;
+            }
+            // A channel recorded as ambiguous is ACCOUNTED FOR: it cannot be
+            // shown, because its component slot was already filled, but it has
+            // not vanished. Silently disappearing is the failure this invariant
+            // exists for; being named as unplaceable is the correct answer for a
+            // malformed file.
+            for (const QString& amb : p.ambiguous) {
+                for (int i = 0; i < c.channels.size(); ++i)
+                    if (c.channels.at(i) == amb) seen[static_cast<std::size_t>(i)] = true;
+            }
+        }
+        for (int i = 0; i < c.channels.size(); ++i) {
+            if (!seen[static_cast<std::size_t>(i)])
+                fail(QString("channel %1 (%2) is in no pass and is not recorded as ambiguous")
+                         .arg(i).arg(c.channels.at(i)));
+        }
+
+        // (3) RESOLUTION IS BY IDENTITY, NOT POSITION. A slot must hold a
+        // channel whose own name ends in that component.
+        static const char* kSuffix[4][2] = {{"r", "red"}, {"g", "green"},
+                                            {"b", "blue"}, {"a", "alpha"}};
+        for (const ExrPass& p : passes) {
+            for (int k = 0; k < 4; ++k) {
+                const int idx = p.channel[k];
+                if (idx < 0 || idx >= c.channels.size()) continue;
+                const QString raw = c.channels.at(idx);
+                const int dot = raw.lastIndexOf(QLatin1Char('.'));
+                const QString suffix = (dot > 0 ? raw.mid(dot + 1) : raw).toLower();
+                const bool isComponent = (suffix == QLatin1String(kSuffix[k][0]) ||
+                                          suffix == QLatin1String(kSuffix[k][1]));
+                // A replicated data channel legitimately sits in all three
+                // colour slots under its own name; that is not a mis-resolution.
+                const bool replicated = (p.channel[0] == p.channel[1] &&
+                                         p.channel[1] == p.channel[2]);
+                if (!isComponent && !replicated)
+                    fail(QString("pass %1 slot %2 holds \"%3\", whose name is not that component")
+                             .arg(p.displayName).arg(k).arg(raw));
+            }
+        }
+
+        // (4) no two passes share a display name.
+        for (std::size_t i = 0; i < passes.size(); ++i)
+            for (std::size_t j = i + 1; j < passes.size(); ++j)
+                if (passes[i].displayName == passes[j].displayName)
+                    fail(QString("two passes share the display name \"%1\"")
+                             .arg(passes[i].displayName));
+
+        // (5) a colour pass has all three colour components.
+        for (const ExrPass& p : passes) {
+            if (p.cls != PassClass::Colour) continue;
+            if (p.channel[0] < 0 || p.channel[1] < 0 || p.channel[2] < 0)
+                fail(QString("colour pass %1 is missing a component").arg(p.displayName));
+        }
+
+        // The expectation table, where there is one.
+        if (!c.expect.empty()) {
+            if (passes.size() != c.expect.size()) {
+                fail(QString("expected %1 passes, got %2")
+                         .arg(static_cast<int>(c.expect.size()))
+                         .arg(static_cast<int>(passes.size())));
+            } else {
+                for (std::size_t i = 0; i < passes.size(); ++i) {
+                    const Expect& e = c.expect[i];
+                    if (passes[i].displayName != QLatin1String(e.displayName))
+                        fail(QString("pass %1: expected name \"%2\", got \"%3\"")
+                                 .arg(static_cast<int>(i)).arg(e.displayName, passes[i].displayName));
+                    if (passClassName(passes[i].cls) != QLatin1String(e.className))
+                        fail(QString("pass %1 (%2): expected class %3, got %4")
+                                 .arg(static_cast<int>(i)).arg(passes[i].displayName)
+                                 .arg(e.className, passClassName(passes[i].cls)));
+                    const QString rn = QString::fromLatin1(e.rawNames);
+                    if (!rn.isEmpty() && passes[i].rawNames.join(QLatin1Char(',')) != rn)
+                        fail(QString("pass %1 (%2): expected raw names \"%3\", got \"%4\"")
+                                 .arg(static_cast<int>(i)).arg(passes[i].displayName)
+                                 .arg(rn, passes[i].rawNames.join(QLatin1Char(','))));
+                }
+            }
+        }
+    }
+
+    if (failures == 0) {
+        out << QString("trace-exr-channels: OK - %1 channel layouts\n")
+                   .arg(static_cast<int>(cases.size()));
+        out.flush();
+        return 0;
+    }
+    out << QString("trace-exr-channels: FAIL - %1 assertions\n").arg(failures);
+    out.flush();
+    return 5;
 }
 
 // `Trace.exe --window-shape-selftest`: drive spec section 4's opening-geometry
@@ -323,11 +831,26 @@ int main(int argc, char* argv[]) {
         return runRendererSelfTest(eq < 0 ? QString() : arg.mid(eq + 1));
     }
 
+    // Needs no widget, no renderer and no window -- and no colour config on
+    // disk either, which is what lets CI run it.
+    for (const QString& arg : app.arguments()) {
+        if (!arg.startsWith(QStringLiteral("--ocio-selftest"))) continue;
+        const qsizetype eq = arg.indexOf(QLatin1Char('='));
+        return runOcioSelfTest(eq < 0 ? QString() : arg.mid(eq + 1));
+    }
+
     // Pure arithmetic: no widget, no renderer, no window. It runs anywhere the
     // binary does, which is what lets CI check the DPI matrix this machine
     // cannot.
     for (const QString& arg : app.arguments()) {
         if (arg == QStringLiteral("--window-shape-selftest")) return runWindowShapeSelfTest();
+    }
+
+    // Pure logic over a channel-name list: no file, no OpenImageIO, no window.
+    // Runs anywhere the binary does, which is what lets CI check the naming
+    // convention the asset set has no file for.
+    for (const QString& arg : app.arguments()) {
+        if (arg == QStringLiteral("--exr-channels-selftest")) return runExrChannelsSelfTest();
     }
 
     // `Trace.exe --scrub-selftest=<clip>` (or `--scrub-selftest <clip>`): the

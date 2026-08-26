@@ -13,7 +13,9 @@
 #include "core/MediaItem.h"
 #include "core/ViewState.h"
 #include "core/PlaybackController.h"
+#include "core/ImageSequenceFrameSource.h"
 #include "core/StillImageLoader.h"
+#include "core/ColorTransform.h"
 #include "core/FrameCache.h"
 #include "core/VideoDecoderFFmpeg.h"
 #include "core/FrameSource.h"
@@ -139,6 +141,17 @@ private:
     // needs shortcuts_ populated and therefore runs from the constructor rather
     // than from setupMenus().
     void warnOnDuplicateMnemonics() const;
+    // A BARE KEY THAT IS ALSO THE KEY HALF OF A MODIFIER'D SHORTCUT.
+    //
+    // Separate from warnOnDuplicateMnemonics() because it catches a different
+    // failure, and one that is MASKED rather than visible: ShortcutTable's
+    // dispatcher matches on the key and IGNORES MODIFIERS (its own header says
+    // so, and Shift+Right stepping a frame is that rule working). So a
+    // table-dispatched row for `C` would also fire on Ctrl+C -- unless Qt's
+    // shortcut map happens to consume Ctrl+C first, which it does today for
+    // every modifier'd action in Trace. A collision that is only hidden by
+    // dispatch order is exactly the kind that ships.
+    void warnOnShortcutCollisions() const;
     // Runs the shortcut table for one key event and reveals the transport if it
     // did. Shared by keyPressEvent and the menu bar's event filter.
     bool dispatchShortcutKey(QKeyEvent* event);
@@ -320,6 +333,13 @@ private:
     bool loadCurrentFrame(QString& error, trace::core::VideoDecoderFFmpeg::RequestMode mode = trace::core::VideoDecoderFFmpeg::RequestMode::Playback);
     QString sequenceFramePath(long long frameIndex) const;
     void prefetchNeighbors();
+    void prefetchFrameIntoCache(long long frameIndex);
+    void noteSequenceStride();
+    void resetSequenceStride();
+    void resetSequencePrefetchCounters();
+    // The prefetch policy's own state, for the image-sequence HUD. Const and
+    // pure: it formats members and asks the two knobs, and touches nothing.
+    QString sequencePrefetchHudLine() const;
     void togglePlayPause();
     // Starts a playback run: request mode, audio, clocks and the whole set of
     // cadence/telemetry counters, then the timer. The caller puts playback_ into
@@ -402,6 +422,13 @@ private:
     void queueVideoScrubFrame(long long frameIndex);
     void flushVideoScrub(bool forceExact);
     trace::core::VideoFrameSource* videoFrameSource();
+    // The other frames-from-files source. Needed because the frame-handoff path
+    // has to ask what the file's real channel count and pass list were, and only
+    // the loader behind this source knows.
+    trace::core::ImageSequenceFrameSource* imageSequenceSource();
+    void syncDisplayMapForActivePass();
+    QString exrHudSuffix() const;
+    QString displayMapHudText() const;
     void prepareVideoRequest(trace::core::VideoDecoderFFmpeg::RequestMode mode, int direction = 1, bool clearQueue = false);
     // Audio drives playback timing when it is running, so these decide whether
     // this playback run is audio-clocked and stop the device the moment it
@@ -482,6 +509,26 @@ private:
     // Present accounting for one presented frame, shared by forward playback
     // and the reverse shuttle so both are measured by one instrument.
     void notePresentedPlaybackFrame(double frameDurationMs);
+
+    // How far past its armed deadline a presentation landed. Shared by the video
+    // branch and the image-sequence branch of the playback tick, for the same
+    // one-instrument reason as the line above.
+    void notePresentLatency(double frameDurationMs);
+
+    // The three cadence HUD lines, built once for every timed media kind.
+    //
+    // Until 2026-08-24 these were built inline inside refreshHud()'s VideoFile
+    // branch, so an image sequence accumulated every counter on them and showed
+    // none -- which made "EXR playback is fine" and "EXR playback has never been
+    // measured" the same observation. `rateIsNominal` is true when the rate is
+    // Trace's own 24.0 assumption rather than a container's, and the line says
+    // so; see the definition for why that word is not decoration.
+    struct CadenceHudLines {
+        QString presented;
+        QString sched;
+        QString cadence;
+    };
+    CadenceHudLines cadenceHudLines(double rateFps, bool rateIsNominal) const;
 
     // The whole of what a shuttle press does, in the one order that works.
     //
@@ -966,6 +1013,72 @@ private:
     trace::core::ViewState viewState_;
     trace::core::StillImageLoader stillLoader_;
     trace::core::FrameCache frameCache_{1};
+
+    // STRIDE-AWARE PREFETCH STATE. THE POLICY IS THE SHIPPING DEFAULT as of
+    // 2026-08-25, and TRACE_SEQ_PREFETCH_STRIDE=0 is the rollback to the fixed
+    // +-1 window.
+    //
+    // This comment read "TRACE_SEQ_PREFETCH_STRIDE=1, default off" until
+    // 2026-08-25 -- stale from the commit that flipped the default, while the
+    // .cpp beside the knob was correct throughout. Two statements of the same
+    // fact, and the one nobody was reading went wrong; the HUD field below is
+    // the answer to that, because it is read off the running build.
+    //
+    // How far the playhead actually moved between consecutive PRESENTED frames.
+    // On a sequence that holds its budget this is exactly 1 and the +1
+    // neighbour is the frame wanted next; on one that is over budget the
+    // scheduler skips and it is not, which is what makes a fixed +-1 window
+    // decode frames that are never shown.
+    //
+    // Reset on media open and on any non-playback move, so a step or a seek can
+    // never be read as a playback stride.
+    // CONSECUTIVE unit strides, not an average of strides. An average near 1
+    // is not the same claim: on a file whose strides alternate 1,2,1,2 the mean
+    // sits around 1.5 but wanders inside any tolerance of 1.0 after a couple of
+    // unit steps, and each prediction it then issues costs a whole synchronous
+    // load. A run counter cannot do that -- one skip resets it.
+    int seqUnitRun_ = 0;
+    int seqUnitDir_ = 0;
+    long long seqLastPresentedFrame_ = -1;
+    int seqStrideSamples_ = 0;
+
+    // WHAT THE POLICY IS ACTUALLY DOING, ON THE HUD, IN THE SHIPPING CONFIG.
+    //
+    // These duplicate five seqprofile stages deliberately. seqprofile is off in
+    // every shipping path by design -- it samples clocks and writes a table --
+    // so reading it would report zero on the configuration anyone actually
+    // runs. That is the `stalls 0 of 0` shape: a counter that reads clean
+    // because it was never fed, which hid a 512ms stall here for a dozen runs
+    // and cost two wrong hypotheses.
+    //
+    // They are plain increments with no clock and no allocation, on a path that
+    // already performs a synchronous EXR decode, and they are OBSERVATION ONLY:
+    // nothing below is read by prefetchNeighbors(), so the gate cannot change
+    // behaviour because the HUD is looking at it.
+    //
+    // Zeroed by resetSequencePrefetchCounters(), from media open and from
+    // beginPlaybackTimeline() -- the same boundary the cadence counters take,
+    // so this line and the three cadence lines beside it describe ONE run and
+    // can be compared without asking how long each was accumulating.
+    long long seqCacheHits_ = 0;
+    long long seqCacheMisses_ = 0;
+    long long seqPrefetchIssued_ = 0;
+    long long seqPrefetchDeclined_ = 0;
+    long long seqPrefetchLegacy_ = 0;
+    // REAL loader calls made speculatively -- incremented only after
+    // stillLoader_.load() has actually run and succeeded, never at the
+    // decision. prefetchFrameIntoCache() early-returns when the frame is
+    // already cached, so `issued x 1 + legacy x 2` is an UPPER BOUND on the
+    // work done, and publishing that as "loads per frame" would overstate
+    // the cost of the policy the HUD exists to judge. The presented frame's
+    // own load needs no counter: a cache MISS is exactly that load.
+    long long seqPrefetchLoads_ = 0;
+    // The last jump the gate saw between presented frames, signed. A file
+    // holding its budget reads +1; the DWAA sequence over budget reads +3 or
+    // +4, which is the single number that says WHY a fixed +-1 window was
+    // decoding frames that were never shown. Discontinuities (|jump| > 32) are
+    // not strides and leave this at 0, matching what the gate itself does.
+    int seqLastStride_ = 0;
     trace::core::VideoDecoderFFmpeg videoDecoder_;
     // Declared after the decoder so it is destroyed BEFORE it: the worker holds
     // a pointer to the decoder, and a member destroyed in the other order could
@@ -1044,6 +1157,21 @@ private:
     long long playbackDroppedFrames_ = 0;
     long long playbackDropTicks_ = 0;
     long long maxDropRun_ = 0;
+
+    // The image-sequence path's equivalent, counted SEPARATELY because it is a
+    // different mechanism reaching the same outcome.
+    //
+    // realtimeDropSteps() is never called on that branch. What happens there is
+    // that `steps` is floor(accumulator / period) with a floor of 1, so a frame
+    // that misses its budget banks the shortfall and the next tick's target is
+    // two or more frames on -- frames never loaded and never presented. Sharing
+    // `playbackDroppedFrames_` would claim the owner's 2026-08-13 real-time-drop
+    // policy is running on a path where it is not, so the HUD says `skip` there
+    // and `drop` on the video branch. All three read 0 on a sequence that keeps
+    // up, exactly as the drop trio does on a video that keeps up.
+    long long seqSkippedFrames_ = 0;
+    long long seqSkipTicks_ = 0;
+    long long maxSeqSkipRun_ = 0;
     // Reference interval for the jitter metric: the deadline the wake was armed
     // for, so jitter measures the scheduler against its own intent rather than
     // against a nominal rate. Still an int for the HUD's benefit.
@@ -1641,6 +1769,76 @@ private:
     // one of.
     QAction* lockAspectAction_ = nullptr;
     static constexpr const char* kLockAspectKey = "view/lockWindowToMediaAspect";
+
+    // ---- Colour transform (stage 1) ---------------------------------------
+    //
+    // FOUR ACTIONS OVER ONE STAGE. colorTransformAction_ is the master bypass
+    // and nothing else: it never touches the configuration, which is what makes
+    // "disable, then re-enable" restore instantly instead of reloading.
+    QAction* colorTransformAction_ = nullptr;        // checkable: the bypass
+    QAction* colorTransformConfigAction_ = nullptr;  // "Color Transform..."
+    QAction* loadLutAction_ = nullptr;               // "Load LUT..."
+    QAction* resetColorTransformAction_ = nullptr;   // back to raw
+    QAction* prevPassAction_ = nullptr;               // EXR pass cycling, `[`
+    QMenu* passMenu_ = nullptr;                       // View > EXR Pass
+    QActionGroup* passGroup_ = nullptr;
+    QString passMenuKey_;                             // what passMenu_ was built from
+    QAction* nextPassAction_ = nullptr;               // EXR pass cycling, `]`
+
+    // Persisted so a session's transform survives a restart. A configuration
+    // that no longer resolves on reopen falls back to BYPASS, says so once, and
+    // must never stop the media opening -- assessment item 5.
+    static constexpr const char* kColorTransformEnabledKey = "color/transformEnabled";
+    static constexpr const char* kColorTransformKindKey    = "color/transformKind";
+    static constexpr const char* kColorTransformLutKey     = "color/lutPath";
+    // Kind::DisplayView, stage 3. The config string is stored RESOLVED -- a
+    // concrete file path or an ocio:// URI, never empty meaning "the default" --
+    // so a saved transform cannot change meaning because $OCIO was set or unset
+    // between sessions.
+    static constexpr const char* kColorConfigKey  = "color/configPath";
+    static constexpr const char* kColorInputKey   = "color/inputSpace";
+    static constexpr const char* kColorDisplayKey = "color/display";
+    static constexpr const char* kColorViewKey    = "color/view";
+
+    void setupColorTransformActions(QMenu* viewMenu);
+    void syncColorTransformActions();
+
+    // EXR pass cycling (stage 2 part 2), beside the colour-transform methods
+    // because that is the group it belongs to -- and deliberately NOT beside
+    // warnOnShortcutCollisions(), where it first went. Two separately-revertable
+    // commits must not touch adjacent lines: git can only see that they touch,
+    // so reverting either conflicts on whichever landed second.
+    //
+    // Both commands are QActions for the same reason `C` is: Qt's shortcut map
+    // resolves them before the menu bar sees the key, and a disabled QAction
+    // declines its own shortcut, so [ and ] fall through harmlessly on media
+    // that has no passes.
+    void setupExrPassActions(QMenu* viewMenu);
+    void syncExrPassActions();
+    void cycleExrPass(int delta);
+    // The one place a pass change happens. `[`, `]` and every row of the View
+    // submenu route through it, so the reload, the cache clear, the overlay and
+    // the tick cannot disagree about which pass is showing.
+    void applyExrPass(int index, const char* reason);
+    // Rebuilt only when the pass LIST changes, never per refresh: the key is the
+    // joined display names, so a 97-frame sequence builds the menu once.
+    void rebuildExrPassMenu();
+    // Pushes the stage to the viewer and re-delivers the CURRENT frame, so
+    // toggling is visible immediately on a paused picture without reopening
+    // media. `reason` reaches the HUD.
+    void applyColorTransformChange(const char* reason);
+    void loadLutFromDialog();
+    // Opens the Color Transform... dialog and applies its result. The same
+    // single stage "Load LUT..." fills in, with a Kind::DisplayView
+    // configuration instead of a Kind::Lut one.
+    void openColorTransformDialog();
+    // Writes a compiled configuration to the settings home. One place, so the
+    // LUT path and the display/view path cannot persist to disagreeing shapes.
+    void persistColorTransform();
+    void restoreColorTransformFromSettings();
+    void resetColorTransform();
+
+    trace::core::ColorTransform colorTransform_;
     // Spec phase 14, through the same one home. (Loop's key, "playback/loop",
     // is GONE: owner item 6, 2026-08-18, reversed the phase 14 persistence
     // decision -- Loop starts off every session and survives only a file

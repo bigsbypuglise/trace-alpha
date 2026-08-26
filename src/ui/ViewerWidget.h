@@ -8,6 +8,8 @@
 #include <QElapsedTimer>
 #include <memory>
 
+#include "core/ColorTransform.h"
+#include "core/DisplayMapping.h"
 #include "core/VideoFrame.h"
 #include "render/OverlayModel.h"
 #include "render/VideoRenderer.h"
@@ -62,11 +64,54 @@ public:
     void setFrame(const trace::core::VideoFrame& frame);
     void clearImage();
     const ViewerPerfStats& perfStats() const { return perfStats_; }
+
+    // THE DECODED SOURCE FRAME, AND DELIBERATELY NOT THE DISPLAYED ONE.
+    //
+    // The transformed buffer never enters frame_; it is handed straight to the
+    // renderer and held as displayFrame_. Keeping the two apart is what makes
+    // "which pixels does a given consumer want" an answerable question rather
+    // than a coincidence -- see displayedFrame() below for the other answer.
     const trace::core::VideoFrame& frame() const { return frame_; }
+
+    // WHAT IS ACTUALLY ON SCREEN: the transformed or mapped buffer when there
+    // is one, the source when there is not.
+    //
+    // Copy Current Frame reads THIS as of stage 2, by owner decision, and that
+    // is a deliberate behaviour change from stage 1 -- a reviewer copying a
+    // frame to send to someone wants what they are looking at. It is also the
+    // only thing that can be copied at all for an EXR, whose source frame is
+    // scene-referred float with no correct 8-bit reading of its own.
+    const trace::core::VideoFrame& displayedFrame() const {
+        return displayFrame_.isNull() ? frame_ : displayFrame_;
+    }
+
+    // THE DISPLAY TRANSFORM STAGE. Non-owning: MainWindow owns the state
+    // because the menu, the persistence and the HUD all live there, and the
+    // viewer only needs to ask "is this active" once per delivered frame.
+    // Null, or inactive, means setFrame() is exactly what it was before this
+    // existed -- a refcount bump and an update().
+    void setColorTransform(const trace::core::ColorTransform* transform);
+    // Re-runs the stage over the frame already on screen. This is what makes
+    // toggling the bypass visible on a PAUSED picture without going back to the
+    // decoder, and it is why ON/OFF never needs media reopened.
+    void refreshColorTransform();
     QString rendererName() const;
     // Whether the adopted backend can take Y/U/V planes and convert them
     // itself, so the decoder may skip swscale for full-resolution frames.
     bool rendererAcceptsPlanarYuv() const;
+
+    // HOW A FLOAT FRAME IS BEING MADE VISIBLE, and the range it was measured
+    // over. Null-ish for a frame that needed no mapping. Read by the HUD and
+    // the pass overlay, because a viewer that normalises silently is a viewer
+    // that cannot be trusted for review.
+    void setDisplayMap(trace::core::DisplayMap map);
+    // Drop the pinned Normalise range so the next float frame re-measures it.
+    // Called when the PASS or the MEDIA changes -- never per frame, which is
+    // what pinning exists to prevent.
+    void resetDisplayMapRange();
+    trace::core::DisplayMap displayMap() const { return displayMap_; }
+    const trace::core::DisplayMapResult& displayMapResult() const { return displayMapResult_; }
+    bool displayMapInUse() const { return displayMapInUse_; }
     // True when the backend TRACE_RENDERER selected failed to initialize and the
     // CPU backend was adopted in its place. rendererName() alone cannot answer
     // this: the D3D11 backend renames itself "d3d11 (warp)" when it lands on the
@@ -244,6 +289,19 @@ private:
     // Kept here as well as in the renderer so "which frame is displayed" is
     // answerable without asking the backend.
     trace::core::VideoFrame frame_;
+    // The transformed buffer handed to the renderer. Held only so it
+    // outlives the renderer's use of it; nothing else reads it, and it is
+    // null whenever the stage is inactive.
+    trace::core::VideoFrame displayFrame_;
+    const trace::core::ColorTransform* colorTransform_ = nullptr;
+    // Which mapping a float source is shown through, and what the last one
+    // measured. displayMapInUse_ is false for an ordinary 8-bit frame, so the
+    // HUD can tell "no mapping was needed" from "the default one ran".
+    trace::core::DisplayMap displayMap_ = trace::core::DisplayMap::Gamma22;
+    trace::core::DisplayMapResult displayMapResult_{};
+    trace::core::DisplayRange displayMapPin_{};
+    bool displayMapInUse_ = false;
+    void applyColorTransformToRenderer();
     ViewerPerfStats perfStats_{};
     // Single monotonic source for this widget, so update()->paint latency is
     // measured against one clock rather than two independent timers.

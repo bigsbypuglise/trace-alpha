@@ -35,6 +35,7 @@ void alignedFree(void* p) {
 int bytesPerPixel(PixelLayout layout) {
     switch (layout) {
         case PixelLayout::BGRA8: return 4;
+        case PixelLayout::RGBAF32: return 16;
         default: break;
     }
     return 0;
@@ -56,6 +57,11 @@ QImage::Format qtFormatFor(PixelLayout layout) {
         // to have the right byte count would show the luma plane as garbage
         // rather than failing. The CPU renderer never receives one; the check
         // is here so that stays true by construction.
+        //
+        // RGBAF32 declines for the same reason and one more: it is
+        // scene-referred, so there is no correct 8-bit reading of it without a
+        // display mapping being chosen. That choice belongs to the display
+        // stage, not to a format lookup.
         default: break;
     }
     return QImage::Format_Invalid;
@@ -97,7 +103,9 @@ std::shared_ptr<FrameBuffer> FrameBuffer::allocate(int width, int height, PixelL
     buffer->planeWidth_[0] = width;
     buffer->planeHeight_[0] = height;
     buffer->bytesPerLine_[0] = bytesPerLine;
-    buffer->bitDepth_ = 8;
+    // 32 names a float depth here rather than an integer one; nothing on the
+    // planar path reads it, and bytesPerSample() answers from the layout.
+    buffer->bitDepth_ = isFloatRgba(layout) ? 32 : 8;
     buffer->totalBytes_ = static_cast<long long>(bytesPerLine) * height;
     buffer->layout_ = layout;
     return buffer;

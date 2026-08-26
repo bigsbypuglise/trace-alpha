@@ -30,7 +30,28 @@ enum class PixelLayout {
     YUV420P,
     YUV422P,
     YUV444P,
+
+    // Four 32-bit floats per pixel, R,G,B,A order. SCENE-REFERRED: values are
+    // not clamped to 0..1 and routinely exceed it -- measured on the Redshift
+    // beauty pass, 48-66% of pixels are above 1.0 -- which is the entire reason
+    // this layout exists. Flattening to 8 bits before the colour stage threw
+    // that range away, so an ACEScg view transform had nothing left to tone-map.
+    //
+    // It is the EXR path's layout and nothing else's. Video is untouched and
+    // stays BGRA8 or planar YUV, and NEITHER RENDERER EVER RECEIVES ONE: the
+    // display stage in ViewerWidget converts float to BGRA8 before the frame
+    // reaches a backend, so the measured present path is unchanged by
+    // construction rather than by inspection. qtFormatFor() therefore declines
+    // it, which makes a float frame arriving at a renderer a visible failure
+    // rather than a silently wrong picture.
+    RGBAF32,
 };
+
+// True for the one float layout. A function rather than a comparison so adding
+// a second float layout cannot silently leave a call site behind.
+constexpr bool isFloatRgba(PixelLayout layout) {
+    return layout == PixelLayout::RGBAF32;
+}
 
 // True for the three planar YUV layouts above. Written as a function rather
 // than a range check so adding a layout cannot silently join or leave the set.
@@ -127,13 +148,17 @@ public:
     int planeHeight(int plane) const { return plane >= 0 && plane < planeCount_ ? planeHeight_[plane] : 0; }
     int planeCount() const { return planeCount_; }
     PixelLayout layout() const { return layout_; }
-    // 8 for BGRA8 and for 8-bit planar; 10 or 12 for high-bit-depth planar. This
+    // 8 for BGRA8 and for 8-bit planar; 10 or 12 for high-bit-depth planar; 32
+    // for RGBAF32, where it names a float rather than an integer depth. This
     // is the SOURCE depth, not the storage depth: above 8 the samples occupy the
     // low bits of a 16-bit word, which is what makes the shader's scale factor
     // 65535/(2^bitDepth - 1) rather than 1.
     int bitDepth() const { return bitDepth_; }
     // Bytes per sample in storage: 1 at 8 bits, 2 above.
-    int bytesPerSample() const { return bitDepth_ > 8 ? 2 : 1; }
+    int bytesPerSample() const {
+        if (isFloatRgba(layout_)) return 4;
+        return bitDepth_ > 8 ? 2 : 1;
+    }
 
     // Footprint for the frame cache's byte budget. Counts the allocation, not
     // width*height*4, so a padded stride is priced honestly -- and so a planar

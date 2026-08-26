@@ -10,7 +10,33 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets)
 # Audio output only. Optional so the app still builds and plays picture on a
 # toolchain without Qt Multimedia.
 find_package(Qt6 QUIET COMPONENTS Multimedia)
-find_package(OpenImageIO QUIET)
+# --- EXR + colour management (stage 0) --------------------------------------
+#
+# OpenImageIO is the EXR reader; OpenColorIO is the colour pipeline. Both are
+# QUIET/optional for the same reason FFmpeg and Qt Multimedia are: a toolchain
+# without them must still build a working player, just one that declines EXR.
+# The configure-time status lines below are what stop that degrading silently --
+# a build with no OIIO opens every other format and reports "EXR support not
+# enabled" only once someone tries one.
+#
+# OCIO IS FOUND DIRECTLY, NOT REACHED THROUGH OIIO. OIIO exposes a ColorConfig
+# wrapper, but the transform stage this dependency exists for needs the OCIO API
+# itself (Config, Processor, CPUProcessor, FileTransform). Requesting the
+# openimageio[opencolorio] feature is still what makes OIIO's exported CMake
+# config emit find_dependency(OpenColorIO), so the two are complementary rather
+# than redundant.
+#
+# THE VCPKG PIN CARRIES OCIO 2.5.2 AND MUST NOT MOVE BACKWARDS. 2.5.2 fixes
+# CVE-2026-42450 -- stack buffer overflows from unsafe sscanf in the .cube,
+# .spi1d, .spi3d and .lut parsers, affecting every prior 1.x and 2.x. This whole
+# feature is "let the user open an arbitrary .cube", so the pin is a security
+# constraint now and not only a reproducibility one.
+#
+# Two features are deliberately NOT requested. `viewer` pulls vcpkg's qtbase,
+# which is 6.11.1 -- a different Qt from the 6.11.2 that ships. `ffmpeg` asks for
+# a different FFmpeg feature set from the one pinned here and would rebuild it.
+find_package(OpenImageIO CONFIG QUIET)
+find_package(OpenColorIO CONFIG QUIET)
 
 # TRACE_FFMPEG_ROOT selects the minimal MinGW/GCC LGPL FFmpeg built by
 # scripts/build-ffmpeg/build-minimal-ffmpeg.ps1 instead of whatever the toolchain
@@ -25,6 +51,25 @@ set(TRACE_FFMPEG_ROOT "" CACHE PATH
     "Root of a prebuilt FFmpeg (bin/, include/, lib/) to use instead of the toolchain's")
 
 if(TRACE_FFMPEG_ROOT)
+  # THE CACHE IS CLEARED BEFORE SEARCHING, AND THAT IS NOT BELT-AND-BRACES.
+  # find_path/find_library write CACHE entries and return immediately when one
+  # is already set -- so a build tree first configured WITHOUT this flag keeps
+  # whatever it found on the default path (vcpkg) forever, and adding
+  # -DTRACE_FFMPEG_ROOT=... to a later configure silently changes nothing.
+  #
+  # Found on the dev box 2026-08-23: build/ carried
+  #   TRACE_FFMPEG_ROOT = C:/tw_ff9/out                     (the flag WAS set)
+  #   FFMPEG_AVCODEC_LIBRARY = C:/vcpkg/.../debug/lib/avcodec.lib
+  # i.e. it linked vcpkg's MSVC FFmpeg 8.1.2 -- and its DEBUG import library --
+  # while printing that it was using the minimal GCC 9.0.1 tree. The exe's
+  # import table read avcodec-62.dll against the control's avcodec-63.dll.
+  # That is the ~18%-slower decode toolchain, under a status line saying
+  # otherwise.
+  foreach(_v FFMPEG_INCLUDE_DIR FFMPEG_AVFORMAT_LIBRARY FFMPEG_AVCODEC_LIBRARY
+             FFMPEG_AVUTIL_LIBRARY FFMPEG_SWSCALE_LIBRARY FFMPEG_SWRESAMPLE_LIBRARY)
+    unset(${_v} CACHE)
+  endforeach()
+
   find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h
             PATHS "${TRACE_FFMPEG_ROOT}/include" NO_DEFAULT_PATH)
   foreach(_ff avformat avcodec avutil swscale swresample)
@@ -32,7 +77,14 @@ if(TRACE_FFMPEG_ROOT)
     find_library(FFMPEG_${_FF}_LIBRARY ${_ff}
                  PATHS "${TRACE_FFMPEG_ROOT}/lib" NO_DEFAULT_PATH)
   endforeach()
-  message(STATUS "Trace: FFmpeg from TRACE_FFMPEG_ROOT=${TRACE_FFMPEG_ROOT}")
+
+  # REPORT THE RESOLVED PATH, NOT THE REQUEST. The old line echoed the flag back,
+  # which is a claim that cannot fail -- it printed correctly throughout the fault
+  # above. What is printed now is what the linker will actually use, so the two
+  # cannot disagree without saying so. Same rule as the HUD's renderer/planar/font
+  # fields: a knob whose state cannot be read back is a knob you cannot trust a
+  # null result from.
+  message(STATUS "Trace: FFmpeg avcodec resolved to ${FFMPEG_AVCODEC_LIBRARY}")
 else()
   find_path(FFMPEG_INCLUDE_DIR libavformat/avformat.h)
   find_library(FFMPEG_AVFORMAT_LIBRARY avformat)
@@ -162,6 +214,8 @@ add_executable(Trace WIN32
   ../src/app/RecentFiles.cpp
   ../src/app/MovieInspector.h
   ../src/app/MovieInspector.cpp
+  ../src/app/ColorTransformDialog.h
+  ../src/app/ColorTransformDialog.cpp
   ../src/app/ShortcutsWindow.h
   ../src/app/ShortcutsWindow.cpp
   ../src/app/OverlayAccessibility.h
@@ -197,7 +251,15 @@ add_executable(Trace WIN32
   ../src/core/ViewState.h
   ../src/core/PlaybackController.h
   ../src/core/PlaybackController.cpp
+  ../src/core/ColorTransform.h
+  ../src/core/ColorTransform.cpp
+  ../src/core/DisplayMapping.h
+  ../src/core/DisplayMapping.cpp
+  ../src/core/ExrChannels.h
+  ../src/core/ExrChannels.cpp
+  ../src/core/ParallelBands.h
   ../src/core/StillImageLoader.h
+  ../src/core/SeqProfile.cpp
   ../src/core/StillImageLoader.cpp
   ../src/core/SequenceDescriptor.h
   ../src/core/SequenceParser.h
@@ -265,6 +327,17 @@ endif()
 if(OpenImageIO_FOUND)
   target_link_libraries(Trace PRIVATE OpenImageIO::OpenImageIO)
   target_compile_definitions(Trace PRIVATE TRACE_WITH_OIIO=1)
+  message(STATUS "Trace: OpenImageIO enabled (EXR reader) ${OpenImageIO_VERSION}")
+else()
+  message(STATUS "Trace: OpenImageIO DISABLED -- EXR will not open")
+endif()
+
+if(OpenColorIO_FOUND)
+  target_link_libraries(Trace PRIVATE OpenColorIO::OpenColorIO)
+  target_compile_definitions(Trace PRIVATE TRACE_WITH_OCIO=1)
+  message(STATUS "Trace: OpenColorIO enabled ${OpenColorIO_VERSION}")
+else()
+  message(STATUS "Trace: OpenColorIO DISABLED -- no colour transform stage")
 endif()
 
 if(TRACE_FFMPEG_FOUND)

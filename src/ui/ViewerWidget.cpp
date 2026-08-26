@@ -1,5 +1,9 @@
 #include "ui/ViewerWidget.h"
 
+#include "core/SeqProfile.h"
+
+#include <optional>
+
 #include <QDebug>
 #include <QMouseEvent>
 #include <QResizeEvent>
@@ -481,9 +485,131 @@ void ViewerWidget::leaveEvent(QEvent* event) {
     QWidget::leaveEvent(event);
 }
 
+// THE ONE PLACE THE DISPLAY STAGE RUNS.
+//
+// frame_ is the SOURCE and stays untouched (Copy Frame reads it). What reaches
+// the renderer is the transformed buffer when the stage is active, and the
+// source itself -- by refcount, no copy, no branch cost worth measuring -- when
+// it is not. Two properties follow structurally rather than by convention:
+// source pixels are never modified, and the whole feature is inert when off.
+void ViewerWidget::applyColorTransformToRenderer() {
+    if (!renderer_) return;
+
+    // A SCENE-REFERRED FLOAT SOURCE HAS NO CORRECT 8-BIT READING OF ITS OWN, so
+    // one of the two branches below MUST produce a display buffer for it. This
+    // is what keeps RGBAF32 off the renderers entirely: neither backend can draw
+    // it (qtFormatFor declines it, and the D3D11 upload takes BGRA8 or planes),
+    // so the guarantee that the measured present path is unchanged is a property
+    // of this function rather than something to remember at each call site.
+    const bool floatSource = !frame_.isNull() && frame_.buffer
+                             && trace::core::isFloatRgba(frame_.buffer->layout());
+
+    if (colorTransform_ && colorTransform_->isActive()) {
+        trace::core::VideoFrame transformed;
+        std::optional<trace::core::seqprofile::Scope> mapScope;
+        if (trace::core::seqprofile::enabled())
+            mapScope.emplace(trace::core::seqprofile::Stage::Map);
+        if (colorTransform_->apply(frame_, transformed)) {
+            mapScope.reset();
+            displayFrame_ = std::move(transformed);
+            displayMapInUse_ = floatSource;
+            // The range is deliberately NOT measured on this branch: it would be
+            // a second full pass over the frame every frame, purely to fill in a
+            // report, and OCIO is already the answer to "what happened to the
+            // highlights".
+            displayMapResult_ = trace::core::DisplayMapResult{};
+            displayMapResult_.map = trace::core::DisplayMap::Ocio;
+            {
+                trace::core::seqprofile::Scope u{trace::core::seqprofile::Stage::Upload};
+                renderer_->setFrame(displayFrame_);
+            }
+            return;
+        }
+        // apply() declines rather than throws for a layout it cannot take
+        // (planar YUV), and for a float source when the float processor failed
+        // to build. Falling through is the honest answer -- an untransformed
+        // picture, not a black one -- and MainWindow keeps planar output off
+        // whenever the stage is active so that is not a path a user lands on.
+    }
+
+    if (floatSource) {
+        trace::core::VideoFrame mapped;
+        trace::core::DisplayMapResult result;
+        std::optional<trace::core::seqprofile::Scope> mapScope2;
+        if (trace::core::seqprofile::enabled())
+            mapScope2.emplace(trace::core::seqprofile::Stage::Map);
+        const bool mappedOk = trace::core::mapFloatToDisplay(frame_, mapped, displayMap_,
+                                                             &result, &displayMapPin_);
+        mapScope2.reset();
+        if (mappedOk) {
+            // FIRST FRAME OF A PASS PINS THE RANGE FOR THE REST OF IT. Only
+            // Normalise has a range to pin; the others are already pure
+            // functions of the sample.
+            if (displayMap_ == trace::core::DisplayMap::Normalise && !displayMapPin_.valid) {
+                displayMapPin_.lo = result.inputLo;
+                displayMapPin_.hi = result.inputHi;
+                displayMapPin_.valid = true;
+            }
+            displayFrame_ = std::move(mapped);
+            displayMapResult_ = result;
+            displayMapInUse_ = true;
+            {
+                trace::core::seqprofile::Scope u{trace::core::seqprofile::Stage::Upload};
+                renderer_->setFrame(displayFrame_);
+            }
+            return;
+        }
+        // Nothing here can draw a float frame. Clearing is diagnosable -- the
+        // empty-state mark, with the HUD still naming the media -- where handing
+        // the renderer a buffer it will reject would be a black window with no
+        // statement about why.
+        displayFrame_ = trace::core::VideoFrame{};
+        displayMapInUse_ = false;
+        renderer_->clearFrame();
+        return;
+    }
+
+    displayFrame_ = trace::core::VideoFrame{};
+    displayMapInUse_ = false;
+    renderer_->setFrame(frame_);
+}
+
+// Changing the mapping does not touch the frame; it changes how the frame is
+// made visible. The caller re-runs the stage (refreshColorTransform) exactly as
+// it does for a bypass toggle, so a paused picture updates without the decoder.
+void ViewerWidget::resetDisplayMapRange() {
+    displayMapPin_ = trace::core::DisplayRange{};
+}
+
+void ViewerWidget::setDisplayMap(trace::core::DisplayMap map) {
+    // A CHANGED MAPPING DROPS THE PIN, but an unchanged one must not: this is
+    // called from syncDisplayMapForActivePass() on EVERY loaded frame, so
+    // clearing unconditionally would re-measure per frame and undo the whole
+    // point. A pass change that lands on the SAME mapping -- two position
+    // passes, say -- is handled by MainWindow calling resetDisplayMapRange()
+    // explicitly, because only it knows the pass moved.
+    if (displayMap_ != map) displayMapPin_ = trace::core::DisplayRange{};
+    displayMap_ = map;
+}
+
+void ViewerWidget::setColorTransform(const trace::core::ColorTransform* transform) {
+    colorTransform_ = transform;
+}
+
+void ViewerWidget::refreshColorTransform() {
+    if (frame_.isNull()) return;
+    applyColorTransformToRenderer();
+    updateRequestedNs_ = clock_.nsecsElapsed();
+    ++perfStats_.updateCount;
+    // repaint(), not update(): a paused picture is the case this exists for,
+    // and a merely scheduled repaint leaves the HUD reporting the previous
+    // state -- the repaint trap this project has now recorded eight times.
+    repaint();
+}
+
 void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
     frame_ = frame;
-    if (renderer_) renderer_->setFrame(frame);
+    applyColorTransformToRenderer();
     // Timestamp the repaint request so the queued update()->paintEvent latency
     // can be separated from paint cost itself.
     updateRequestedNs_ = clock_.nsecsElapsed();
@@ -493,6 +619,7 @@ void ViewerWidget::setFrame(const trace::core::VideoFrame& frame) {
 
 void ViewerWidget::clearImage() {
     frame_ = trace::core::VideoFrame{};
+    displayFrame_ = trace::core::VideoFrame{};
     if (renderer_) renderer_->clearFrame();
     update();
 }
