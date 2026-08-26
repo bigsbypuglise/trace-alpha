@@ -125,6 +125,36 @@ strongly supported attribution across two independent files, not a proof.
 
 ---
 
+## THE HAND TEST
+
+Launchers in `_handtest_260825/` (untracked -- they carry absolute paths), full
+procedure in `_handtest_260825/HAND-TEST.txt`. Recorded here so the procedure
+survives the folder.
+
+**Two rules first, or the result misleads.** MAXIMISE the window -- at the
+default size the new line is clipped by ~10px. And PLAY EVERYTHING TWICE,
+judging the second pass, because a cold first pass reads roughly half the warm
+rate.
+
+| test | what to do | expect |
+|---|---|---|
+| **1. headline** | DWAA, default then rollback, second pass each | **~15 fps (64-65%)** against **~7 fps (29-30%)**; `loads ~1.02` against `~2.7` |
+| **2. control** | PIZ, default then rollback | **99.9% both** -- the policy must not hurt the easy file |
+| **3. reverse** | PIZ, End then J | default **~90%**, rollback **~84%** |
+| **4. exactness** | paused, Right x5 then Left x5 | same frame AND same picture; `legacy` climbs, `issued` does not |
+
+**Wrong:** default stuttering more than rollback on any file; PIZ worse on
+default; stepping not returning; the HUD saying `stride` under a rollback
+launcher; `issued` climbing past a handful on DWAA; `loads/frame` above ~1.1 on
+default.
+
+**Not wrong, by design:** the two files behave oppositely -- PIZ issues, DWAA
+declines, and declining IS the win there. And **DWAA at ~65% looks like ~15 fps
+and is not meant to be real time yet**: a full load on that file is ~42.5ms
+against a 41.67ms budget, so the read alone is the whole budget.
+
+---
+
 ## STILL OPEN
 
 - **No owner hand-test.** Unchanged by this commit -- the HUD is what makes one
