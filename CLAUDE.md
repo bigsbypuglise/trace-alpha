@@ -1773,8 +1773,9 @@ here is scheduled or started.
 27-CHANNEL DWAA WORKING FILE *USABLE FOR REVIEW* (2026-08-25). THE FULL PANEL
 REGRESSION IS DONE AND FLAT. NO PRODUCT CODE CHANGED.** Record
 `docs/exr-panel-regression-260825.md`; user-facing wording ready to paste in
-`docs/exr-release-notes.md`. Still **NOT merged and no release cut** -- both are
-the owner's.
+`docs/exr-release-notes.md`. ~~Still **NOT merged and no release cut**~~ --
+**BOTH DONE 2026-08-25: merged at `a2cf79c` and shipped as `v0.4.0-beta.1`.
+See the block below.**
 
 - **THE VERDICT, AT ITS STATED WIDTH.** What is accepted is **this file class,
   at this rate, for review** -- the owner's stated grounds being that heavy
@@ -1854,6 +1855,96 @@ the owner's.
   22/22 when re-run serialized. `seqcadence.ps1` ends with
   `Stop-Process -Name Trace -Force`, so **measurement runs must be serialized**
   and a mid-sweep harness crash is contention until proven otherwise.
+
+**THE EXR + COLOUR PHASE IS MERGED TO `main` AND SHIPPED AS `v0.4.0-beta.1`
+(2026-08-25). THE MINOR MOVED, AND THAT WAS AN OWNER DECISION RATHER THAN A
+DEFAULT.** Merge `a2cf79c` (60 commits, 57 files, +13,100/-331), version
+`6ee2842`, release body `0b66c4d`, literal-count correction `f6744e6`. Tag at
+`f6744e6`. **EVERY "NOT merged" LINE IN THE EXR BLOCKS ABOVE IS SUPERSEDED BY
+THIS ONE** -- six of them remain as the record of what each stage's state was at
+the time it was written, and none of them describes the tree now.
+Prerelease at
+https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.4.0-beta.1
+
+- **THE VERSION QUESTION WAS PUT TO THE OWNER BEFORE ANYTHING WAS TOUCHED, and
+  the argument that won is CMakeLists' own test.** Its comment says the minor
+  moved to 0.3.0 *"because the shipping window is unrecognisable"* -- a UI
+  change with the engine unchanged. This release passes the same test in the
+  other direction: **0.3.0 changed how Trace LOOKS, 0.4.0 changes what Trace can
+  OPEN.** The counter-argument recorded and declined: continuity of a beta chain
+  eight releases long, and the risk that a lone `0.4.0-beta.1` with nothing after
+  it reads as abandoned. That is a statement about how the tag list looks, not
+  about what the release contains.
+- **THERE ARE FOUR STAGE LITERALS IN `MainWindow.cpp`, NOT THREE, AND BOTH THIS
+  FILE AND CMakeLists' COMMENT SAID THREE.** The fourth is the
+  **`--scrub-selftest` report header** (`build: Trace %1 (beta)`), added when
+  that selftest was built on 2026-08-19 and never added to the tally -- and it is
+  **inside the block a tester pastes back**, i.e. precisely the surface the rule
+  protects. A future `beta -> rc` move searching for three would ship an rc whose
+  selftest report calls itself a beta. The four: the mail SUBJECT,
+  `buildIdentity()`, the About dialog's small print (capital `Beta.`), and the
+  selftest header.
+- **THE TWO ENCODINGS DIFFER AND ONE SEARCH CANNOT FIND BOTH.** `tr()` literals
+  compile to **ASCII/UTF-8**; `QStringLiteral(TRACE_VERSION_STRING)` compiles to
+  **UTF-16LE**. An ASCII-only grep for the version number returns **zero on a
+  correct build**, which reads exactly like a version that failed to move.
+  Verified on the built binary: `0.4.0` present as UTF-16LE, **`0.3.0` absent in
+  both encodings**, all four stage literals present as ASCII -- and the probe was
+  proven able to distinguish first, by finding known ASCII literals in the same
+  pass.
+- **A FEATURE BRANCH'S GitHub CACHE IS NOT VISIBLE TO `main`, so the merge cost a
+  COLD ~40-MINUTE vcpkg BUILD** where the branch had been running warm at ~4 min.
+  Predicted before the run and confirmed at step 6 (`Install vcpkg dependencies
+  (only on cache miss)` executing rather than skipping). The tag build then hit
+  the cache `main` had just populated. **Budget for this on any future
+  long-branch merge; it is not a fault.**
+- **THE `%%` HUD DEFECT WAS ALREADY FIXED ON THE BRANCH** (`7369c29`, ten format
+  strings: `99.9%%`, `media 98.5%%`, `wasted 98%%`, `rev-hit 97.3%%`,
+  `supply 94%%`, `hit 96.8%%`, `seq 100.0%%`, two in the IO log). Confirmed by
+  COUNTING rather than by reading the message: `main` carried **7 live `%%`**
+  before the merge and **0** after, the three remaining hits being the comments
+  that explain the trap. No separate commit was needed.
+- **THE RELEASE BODY WAS BUILT ON `main`'s COPY, NOT THE BRANCH'S.** The branch's
+  was a release behind at beta.7 -- but it never *touched* the file since the
+  merge base, so git took main's beta.8 copy with no conflict to resolve. The
+  known-gaps edit is the substance: **"EXR does not open" removed**, replaced by
+  the measured limit with **both halves stated** -- ~15fps on a 27-channel 1080p
+  DWAA sequence, about two-thirds of real time, accepted for review on that file
+  class and NOT real time -- plus the explicit contrast that single-layer EXR and
+  PNG sequences hold real time at 99.9% and 100.0%, so the limit is not read as
+  covering all EXR. **Copy Current Frame got its own section rather than a
+  bullet**, because it changes behaviour for VIDEO as well as EXR.
+- **CI GREEN ON `main` AND ON THE TAG, EVERY STEP READ INDIVIDUALLY** rather than
+  off the summary: assets `derived: 33 embedded files` - ffmin `20.9 MB` with
+  `all DLLs import only Windows system libraries` - **`avcodec resolved to
+  D:/a/_temp/ffmin/out/lib/avcodec.lib`** (the ffmin tree, so the recorded vcpkg
+  substitution trap is not firing) - `OpenImageIO enabled 3.1.14.0` +
+  `OpenColorIO enabled 2.5.2` - package **`11 required files present, 118.4 MB`**
+  - OCIO selftest `version=2.5.2 ... moved=1` with `builtins=8 spaces=25
+  displays=8` and `differ=1` - **`renderer=d3d11 fellback=0 planar=1`**, the
+  HARDWARE path (the check accepts `d3d11 (warp)` by prefix, so a WARP pass looks
+  identical in the tick and different in that line) - `OK - 11 shapes x 4 scale
+  factors`. **`VCPKG_PIN` reads `17f35ad2418007a895ced8a4cece4ab34068a58d`
+  throughout: the pin did not move.**
+- **THE FOUR COMMITS WERE PROVEN INDEPENDENTLY REVERTABLE ON A SCRATCH BRANCH,
+  NOT ASSERTED** -- the three non-merge commits touch **disjoint files**
+  (`CMakeLists.txt`, `docs/release-body.md`, `CLAUDE.md`), so the phase-14
+  adjacency trap cannot apply, and the merge reverts cleanly with `-m 1`.
+- **THE DISPLAY WAS NOT THE PANEL AND IT DID NOT MATTER, WHICH IS THE POINT OF
+  CHECKING FIRST.** The active path was a **virtual 1920x1200 @ 59.999Hz** with
+  `parsecd` running, and the 4090's own panel read **5120x1440 @ 59Hz** rather
+  than 239.999Hz -- both of the configurations this file warns about, at once.
+  **No figure in this block is a cadence or smoothness measurement**: the merge
+  gate was the panel regression already recorded in
+  `docs/exr-panel-regression-260825.md`, taken at 239.999Hz before the merge.
+  Nothing here needed re-measuring, and nothing here may be quoted as a panel
+  baseline.
+- **`--exr-channels-selftest` IS STILL NOT A CI STEP.** It runs green locally
+  (`OK - 14 channel layouts`) and is pure logic with no file, no OpenImageIO and
+  no window, so it is CI-safe -- it was deliberately not added here because the
+  session was scoped to shipping, and adding a step to the release pipeline
+  immediately before a tag is the wrong moment. It remains the cheapest
+  outstanding CI addition.
 
 ### WHAT STAGE 2 PART 2 STILL OWES
 
