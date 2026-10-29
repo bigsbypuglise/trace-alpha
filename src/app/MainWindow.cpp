@@ -3273,13 +3273,41 @@ void MainWindow::promptGoToFrame() {
     // Zero-based, and the range is stated in the prompt rather than left to be
     // discovered by being rejected. `maxFrame` is the last valid INDEX, which is
     // what the transport bar has always printed.
+    //
+    // THE SPIN BOX'S RANGE IS DELIBERATELY WIDER THAN THE CLIP, and that is the
+    // fix for the review's F7. It used to be `0 .. maxFrame`, which sounds like
+    // the safe choice and is the opposite: a QSpinBox validator REJECTS THE
+    // KEYSTROKE that would take the text out of range, so on a 480-frame clip
+    // typing "900" left "90" in the field -- the third digit was simply
+    // swallowed -- and OK then landed the playhead on frame 90. No message, no
+    // refusal, and a mistype moved the picture somewhere the user did not ask
+    // for while looking exactly as though it had worked. Measured by the review
+    // harness, which asked for 900 and got 90.
+    //
+    // That is precisely what the Go To prompts' own rule forbids -- "validate
+    // before seeking and refuse rather than clamp" (spec phase 7) -- and the
+    // rule was implemented for the typed-text Go to Timecode below and bypassed
+    // here, not by a missing check but by the widget silently making the
+    // out-of-range value unrepresentable. A range the user cannot leave cannot
+    // report that they tried to.
+    //
+    // So the widget accepts any index an int can hold and the REFUSAL is ours,
+    // a few lines down, in the same shape as the timecode path. The cost is that
+    // the spinner's arrows no longer stop at the last frame; End is the control
+    // that goes there, and a refusal is a better answer than a silent landing.
     const int value = QInputDialog::getInt(
         this, tr("Go to Frame"),
         tr("Frame (0 - %1):").arg(maxFrame),
         static_cast<int>(playback_.state().currentFrame),
-        0, static_cast<int>(std::min<long long>(maxFrame, std::numeric_limits<int>::max())),
+        0, std::numeric_limits<int>::max(),
         1, &ok);
     if (!ok) return;
+    if (value > maxFrame) {
+        showTransientMessage(
+            tr("Frame %1 is outside this media (0 - %2).").arg(value).arg(maxFrame), 4000);
+        refreshHud("Go to Frame: rejected");
+        return;
+    }
     goToFrame(value, "Go to Frame");
 }
 
@@ -3856,15 +3884,32 @@ void MainWindow::toggleMovieInspector(bool show) {
 // backend that failed to initialize has already been replaced by the CPU one,
 // and an issue report naming the requested backend rather than the running one
 // would send every fallback investigation down the wrong path.
+// THE GPU AND THE DECODE PATH ARE ON IT TOO, as of the beta.2 multi-machine
+// round. Trace is on testers' machines now, and the two facts every report
+// about smoothness or a wrong picture turns on are which GPU drew it and which
+// decoder produced the frames -- neither of which a tester can reasonably be
+// asked to look up, and both of which are decided at runtime rather than by the
+// launcher. The adapter line is omitted entirely rather than printed empty when
+// the backend has no GPU to name, so a CPU-path report does not carry a blank
+// field that reads like a failed query.
 QString MainWindow::buildIdentity() const {
     QString renderer = tr("unknown");
-    if (viewer_) renderer = viewer_->rendererName();
-    return tr("Trace %1 (beta)\nQt %2\nRenderer: %3\nTransport: %4")
+    QString adapter;
+    if (viewer_) {
+        renderer = viewer_->rendererName();
+        adapter = viewer_->rendererAdapterName();
+    }
+    QString out = tr("Trace %1 (beta)\nQt %2\nRenderer: %3\nTransport: %4")
         .arg(QStringLiteral(TRACE_VERSION_STRING))
         .arg(QString::fromLatin1(qVersion()))
         .arg(renderer)
         .arg(trace::render::OverlayModel::enabledByEnvironment() ? tr("overlay")
                                                                  : tr("docked bar"));
+    if (!adapter.isEmpty()) out += tr("\nGPU: %1").arg(adapter);
+    // The decoder's own answer, so a file that declined hardware decode says so
+    // with its reason rather than being reported as whatever was requested.
+    out += tr("\nDecode: %1").arg(videoDecoder_.perfStats().decodePath);
+    return out;
 }
 
 void MainWindow::showAboutDialog() {
@@ -6453,8 +6498,41 @@ void MainWindow::syncPlanarOutput() {
     // swscale to BGRA, which is the pre-GATE-C cost and is the honest price of a
     // CPU display stage. The GPU stage is what removes it.
     const bool colorStageNeedsBgra = colorTransform_.isActive();
+    const bool rendererTakesPlanar = viewer_->rendererAcceptsPlanarYuv();
     videoDecoder_.setPlanarOutputEnabled(
-        allowed && !colorStageNeedsBgra && viewer_->rendererAcceptsPlanarYuv());
+        allowed && !colorStageNeedsBgra && rendererTakesPlanar);
+
+    // The reason, recorded HERE because this is where it is decided. Tested in
+    // the same order the conjunction above evaluates, so the string names the
+    // term that actually bound rather than the first one that happens to be
+    // true -- and with more than one false, the knob is the honest answer
+    // because it is the one the operator set.
+    if (!allowed)                   planarStandDownReason_ = QStringLiteral("env");
+    else if (colorStageNeedsBgra)   planarStandDownReason_ = QStringLiteral("color");
+    else if (!rendererTakesPlanar)  planarStandDownReason_ = QStringLiteral("renderer");
+    else                            planarStandDownReason_.clear();
+}
+
+// `planar on` / `planar off (color)` / `off (env)` / `off (renderer)`.
+//
+// THE STATE IS READ BACK OFF THE DECODER AND THE REASON OFF THE DECIDER, which
+// is the point of the split. Recomputing the state here from the same three
+// terms would make this field a second opinion that agrees by construction and
+// could never report a disagreement; asking the decoder what it is actually
+// doing means a stand-down that failed to reach it shows up as `on (color)` --
+// a contradiction on its face -- instead of as a confident `off`.
+//
+// The same rule as `renderer`, `font` and `strip`: a configuration that
+// degrades silently must be readable off the running build, not inferred from
+// the launch, because the launch does not decide it. Loading a LUT from the
+// View menu changes this field with no restart and no command line.
+QString MainWindow::planarHudText() const {
+    const bool on = videoDecoder_.planarOutputEnabled();
+    if (planarStandDownReason_.isEmpty()) return on ? QStringLiteral("on")
+                                                    : QStringLiteral("off");
+    return QStringLiteral("%1 (%2)")
+        .arg(on ? QStringLiteral("on") : QStringLiteral("off"))
+        .arg(planarStandDownReason_);
 }
 
 void MainWindow::syncTransportBar() {
@@ -10537,7 +10615,7 @@ void MainWindow::refreshHud(const QString& action) {
             // entirely for an 8-bit source, which is every video, so no existing
             // HUD capture changes shape.
             xform += displayMapHudText();
-            const QString l0 = QString("color %1%2 %3 range | xform %11 | display %4x%5 %6 | win %7x%8 | renderer %9%10")
+            const QString l0 = QString("color %1%2 %3 range | xform %11 | display %4x%5 %6 | win %7x%8 | renderer %9%10 | planar %12")
                 .arg(perf.colorMatrix)
                 .arg(perf.colorMatrixInferred ? "*" : "")
                 .arg(perf.srcFullRange ? "full" : "limited")
@@ -10561,6 +10639,12 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(viewer_->overlayEnabled() ? QStringLiteral(" +overlay")
                                                : QStringLiteral(" +bar"))
                 .arg(xform)
+                // Review F6. Beside `renderer` because it is the same kind of
+                // fact -- which path the pixels are actually taking -- and
+                // because the one state that matters, `off (color)`, is reached
+                // from the View menu rather than from the command line, so it
+                // cannot be inferred from how the build was launched.
+                .arg(planarHudText())
               // Spec phase 12's first experiment, on the line that already
               // carries `win` and `display`, because what it measures is what a
               // change to those two costs.
@@ -10659,7 +10743,7 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(drawPerf.avgUploadMs, 'f', 2))
                 .arg(drawPerf.textureCreates);
 
-            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | thr %20")
+            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | overshoot %21/%22 | thr %20")
                 .arg(perf.lastConvertCalls)
                 .arg(perf.lastCtxRebuilds)
                 .arg(perf.lastImageWasShared ? "yes" : "no")
@@ -10684,7 +10768,18 @@ void MainWindow::refreshHud(const QString& action) {
                 // so a `walk`/`seek` figure cannot be read without it.
                 .arg(QString("%1 x%2")
                          .arg(perf.threadTypeIsFrame ? "frame" : "slice")
-                         .arg(perf.threadCount));
+                         .arg(perf.threadCount))
+                // OPEN-GOP SEEK OVERSHOOT: re-seeks / unresolved. Beside
+                // `recov` because it is the same kind of counter -- a
+                // correctness backstop whose value is that it stays near zero
+                // -- and on this line because `seek`, `walk` and `stale-blocked`
+                // are the terms it has to be read against. The second figure
+                // must be 0: above it, a frame was delivered under its own
+                // index rather than the one asked for, and `delta` says so.
+                .arg(perf.seekOvershootReseekEnabled
+                         ? QString::number(perf.seekOvershootReseeks)
+                         : QStringLiteral("off"))
+                .arg(perf.seekOvershootUnresolved);
 
             // ONE instrument, shared with the image-sequence branch below.
             // vm.fps rather than frameSource_->fps() so this line stays byte
@@ -11801,7 +11896,15 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
             << selfTestFormat1(static_cast<double>(perf.cacheBytes) / (1024.0 * 1024.0))
             << "/"
             << selfTestFormat1(static_cast<double>(perf.cacheBudgetBytes) / (1024.0 * 1024.0))
-            << " MB) ins " << perf.cacheInserts << "\n";
+            << " MB) ins " << perf.cacheInserts
+            // Open-GOP seek overshoot. On this line because it is a seek fact,
+            // and in the report at all because the whole point of the selftest
+            // is to be pasted back from a machine nobody here can look at.
+            << " | overshoot "
+            << (perf.seekOvershootReseekEnabled
+                    ? QString::number(perf.seekOvershootReseeks)
+                    : QStringLiteral("off"))
+            << "/" << perf.seekOvershootUnresolved << "\n";
         rep << "hitch " << scrubPaintHitches_ << " (>" << selfTestFormat1(kScrubHitchMs)
             << "ms) | stalls " << scrubPaintStalls_ << " of " << scrubPaintGapSamples_
             << " (>" << selfTestFormat1(refreshMs * 2.0) << "ms) | paint gap "

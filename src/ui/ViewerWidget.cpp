@@ -384,6 +384,10 @@ QString ViewerWidget::rendererName() const {
     return renderer_ ? renderer_->name() : QStringLiteral("none");
 }
 
+QString ViewerWidget::rendererAdapterName() const {
+    return renderer_ ? renderer_->adapterName() : QString();
+}
+
 bool ViewerWidget::rendererAcceptsPlanarYuv() const {
     // Asked of whatever was ACTUALLY adopted, which after a failed GPU
     // initialize is the CPU backend. A cached answer taken from the requested

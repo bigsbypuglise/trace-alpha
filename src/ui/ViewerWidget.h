@@ -96,6 +96,9 @@ public:
     // decoder, and it is why ON/OFF never needs media reopened.
     void refreshColorTransform();
     QString rendererName() const;
+    // The GPU the adopted backend is running on, or empty on the CPU path.
+    // For the issue report, not the picture -- see VideoRenderer::adapterName.
+    QString rendererAdapterName() const;
     // Whether the adopted backend can take Y/U/V planes and convert them
     // itself, so the decoder may skip swscale for full-resolution frames.
     bool rendererAcceptsPlanarYuv() const;

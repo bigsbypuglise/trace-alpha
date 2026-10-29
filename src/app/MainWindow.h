@@ -418,6 +418,10 @@ private:
     // Tells the decoder whether the installed renderer can take Y/U/V planes
     // (GATE C). Asked of the adopted renderer, not of TRACE_RENDERER.
     void syncPlanarOutput();
+    // The HUD's `planar` field. The STATE is read back off the decoder and the
+    // REASON comes from the one function that decided it, so the two cannot
+    // drift apart -- see planarStandDownReason_.
+    QString planarHudText() const;
     bool isVideoScrubActive() const;
     void queueVideoScrubFrame(long long frameIndex);
     void flushVideoScrub(bool forceExact);
@@ -1839,6 +1843,21 @@ private:
     void resetColorTransform();
 
     trace::core::ColorTransform colorTransform_;
+    // WHY the planar upload path is or is not in force, written by
+    // syncPlanarOutput() -- the single function that decides it -- and read by
+    // the HUD. A string rather than an enum because it has exactly one consumer
+    // and the thing that must not drift is the wording against the decision,
+    // which sharing one assignment site gives.
+    //
+    // It exists because of the review's F6: loading a LUT on an MP4 silently
+    // reverts full-resolution frames from GATE C's planar upload to
+    // swscale-to-BGRA and adds a per-frame CPU colour stage, so a reviewer with
+    // a LUT loaded is on a measurably different playback path from every figure
+    // recorded in this repo (`handoff` 0.76ms off against 13.27-14.13ms on at
+    // 4K H.264) and NOTHING ON SCREEN SAID SO. `dst` eventually shows BGRA, but
+    // that is the conversion's outcome after the fact and it does not
+    // distinguish the three ways of getting there.
+    QString planarStandDownReason_;
     // Spec phase 14, through the same one home. (Loop's key, "playback/loop",
     // is GONE: owner item 6, 2026-08-18, reversed the phase 14 persistence
     // decision -- Loop starts off every session and survives only a file

@@ -213,6 +213,18 @@ public:
     // designing against.
     virtual QString name() const = 0;
     virtual const RenderStats& stats() const = 0;
+
+    // The GPU this backend is actually running on, as the driver names it, or
+    // empty when the backend has no GPU to name (the CPU path) or could not ask.
+    //
+    // It exists for the issue report rather than for the picture. Trace is now
+    // on several testers' machines, and the two questions every report about
+    // smoothness or a wrong picture turns on -- which GPU, and which decode path
+    // -- are precisely the two a tester cannot be expected to look up. Asked of
+    // the adopted renderer for the same reason `name()` is: a d3d11 build that
+    // fell back to the CPU path has no adapter, and reporting one anyway would
+    // send a fallback investigation after a driver.
+    virtual QString adapterName() const { return {}; }
 };
 
 // The host widget's size in device pixels, and the fitted destination rect

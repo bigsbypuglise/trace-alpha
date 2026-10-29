@@ -65,6 +65,7 @@ public:
     void setHostFullscreen(bool fullscreen) override { hostFullscreen_ = fullscreen; }
 
     QString name() const override { return name_; }
+    QString adapterName() const override { return adapterName_; }
     const RenderStats& stats() const override { return stats_; }
 
 private:
@@ -212,6 +213,8 @@ private:
     // Reports "d3d11" or "d3d11 (warp)". The distinction matters on CI, which
     // has no GPU, and in any report where the numbers look wrong for hardware.
     QString name_ = QStringLiteral("d3d11");
+    // Read once in createSwapChain, where the IDXGIAdapter already exists.
+    QString adapterName_;
     RenderStats stats_{};
 };
 

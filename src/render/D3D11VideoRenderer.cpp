@@ -371,6 +371,15 @@ bool D3D11VideoRenderer::createSwapChain(void* hwnd, QSize pixelSize, QString& e
     hr = dxgiDevice->GetAdapter(&adapter);
     if (FAILED(hr)) { error = hrText("IDXGIDevice::GetAdapter", hr); return false; }
 
+    // The adapter's own name, for the issue report. Taken here because this is
+    // the one place that already holds the IDXGIAdapter, and a failure to read
+    // it is NOT fatal: an empty adapter name costs a line in a mail body, and
+    // refusing to create the swapchain over it would cost the picture.
+    DXGI_ADAPTER_DESC adapterDesc = {};
+    if (SUCCEEDED(adapter->GetDesc(&adapterDesc))) {
+        adapterName_ = QString::fromWCharArray(adapterDesc.Description).trimmed();
+    }
+
     ComPtr<IDXGIFactory2> factory;
     hr = adapter->GetParent(IID_PPV_ARGS(&factory));
     if (FAILED(hr)) { error = hrText("IDXGIAdapter::GetParent(IDXGIFactory2)", hr); return false; }

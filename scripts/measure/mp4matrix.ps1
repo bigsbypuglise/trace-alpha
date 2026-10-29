@@ -19,7 +19,22 @@ param(
     [string]$LogDir = '',
     # Extra clips outside the corpus (real-world files with no burn-in cannot be
     # checked this way, so this is for additional burn-in clips only).
-    [string[]]$Extra = @()
+    [string[]]$Extra = @(),
+    # Clips whose BURNED numbers are not their own index, by file stem.
+    #
+    # `h264_1080p_editlist` is trimmed 2s (48 frames) into an already-burned
+    # source, so its first frame carries the number 48 and `displayed ==
+    # requested + 48` is CORRECT edit-list handling. Without this the file
+    # reports 17 mismatches at a dead-constant delta of 48 and a later session
+    # reads a by-design result as a regression -- which is exactly what the
+    # offset being a parameter of the CALLER rather than of the harness cost
+    # the first time round.
+    #
+    # It is still declared rather than inferred: a harness that worked out its
+    # own offset from the first frame would absorb a genuine 48-frame landing
+    # bug into it. Declaring it HERE, once, is the difference between a known
+    # constant and a guess.
+    [hashtable]$BurnInOffsets = @{ 'h264_1080p_editlist' = 48 }
 )
 
 $ErrorActionPreference = 'Continue'
@@ -42,6 +57,10 @@ foreach ($c in $clips) {
     Write-Host "=== $name ===" -ForegroundColor Cyan
     $a = @{ Clip = $c }
     if ($Exe) { $a.Exe = $Exe }
+    if ($BurnInOffsets.ContainsKey($name)) {
+        $a.BurnInOffset = [int]$BurnInOffsets[$name]
+        Write-Host ("    burn-in offset {0} declared for this clip" -f $a.BurnInOffset)
+    }
     $out = & "$PSScriptRoot\mp4accuracy.ps1" @a 2>&1
     $code = $LASTEXITCODE
 
