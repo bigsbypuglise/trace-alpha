@@ -154,7 +154,7 @@ produced it at, at the downscale a window capture gives):
 | `h264_1080p_24_gop48_b3` (corpus regression) | 480 | **0** | 0 |
 | `h264_1080p_vfr_subframe` | 500 | **0** | 0 |
 
-**1873 frames, nothing wrong.** Proven able to fail, seven controls: no plate →
+**1873 frames, nothing wrong.** Proven able to fail, ten controls: no plate →
 refused; a doctored MSB → **525** (= 13 + 512) exactly as predicted; the plate's
 right-hand end occluded → refused; contaminated height at three severities and
 from both directions → all refused by the new guards; a half-filled cell →

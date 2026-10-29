@@ -1981,7 +1981,7 @@ burn-in reader.**
   stop EARLY), and a per-cell uniformity test is the backstop the aspect check
   used to be. **Validated on 1873 frames across four clips with 0 mismatches**
   by the new `checkburnin.py`, which decodes a clip frame by frame with Trace
-  absent; **seven negative controls**, including grey painted flush against the
+  absent; **ten negative controls**, including grey painted flush against the
   plate's right edge. **The lesson is the opposite of the one that file already
   carried**: a formula cannot notice it has drifted, AND a measurement cannot
   notice it has been contaminated. Measure what the picture can tell you
