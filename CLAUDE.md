@@ -2094,6 +2094,33 @@ burn-in reader.**
   `Decode: software`), from the `IDXGIAdapter` the D3D11 backend already holds,
   asked of the ADOPTED renderer, and omitted rather than printed empty on the
   CPU path.
+- **SHIPPED AS `v0.4.0-beta.2` (2026-10-29, tag at `1cbf5d5`, run `40974774001`
+  green, asset `trace-windows-x64.zip` 49.3 MB, prerelease at
+  https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.4.0-beta.2).**
+  Version UNCHANGED at `0.4.0` -- beta.1 to beta.2 is the tag, not the number --
+  and all four stage literals confirmed in the built exe with `0.3.0` and
+  `0.2.0` absent in both encodings. **Every verification step read individually
+  on the TAG build rather than trusted from its tick**: `derived: 33 embedded
+  files` - `all DLLs import only Windows system libraries` - **`avcodec resolved
+  to D:/a/_temp/ffmin/out/lib/avcodec.lib`** (the ffmin tree, so the vcpkg
+  substitution trap is not firing) - `OpenImageIO enabled (EXR reader) 3.1.14.0`
+  + `OpenColorIO enabled 2.5.2` - `FFmpeg detected` + `Audio dependencies
+  detected` - `11 required files present, 118.4 MB total` - **`renderer=d3d11
+  fellback=0 planar=1`** (the HARDWARE path; the check accepts `d3d11 (warp)` by
+  prefix, so a WARP pass looks identical in the tick and different in that line)
+  - `OK - 11 shapes x 4 scale factors` - OCIO `version=2.5.2 ... moved=1` -
+  `release ZIP: dist	race-windows-x64.zip (49.3 MB)`, matching the published
+  asset. **`VCPKG_PIN` reads `17f35ad2418007a895ced8a4cece4ab34068a58d`: the pin
+  did not move.**
+- **TWO CI LESSONS FROM THIS RELEASE.** **main's vcpkg cache had aged out** (the
+  7-day idle expiry; main last built in August), so the first run was a ~40
+  minute cold install -- budget for that on any release after a quiet period.
+  And **pushing to a ref CANCELS that ref's in-flight run**, so a push made
+  while CI was mid-install killed it with the cache unwritten and the next run
+  started cold again. Tag FIRST and push follow-up commits after: a tag is a
+  different ref, so the tag build cannot be cancelled by a push to main, and it
+  ran warm off the cache the main run had just written (`Install vcpkg
+  dependencies` SKIPPED).
 - **`mp4matrix.ps1` GAINED PER-CLIP BURN-IN OFFSETS AND A COUNT FIX.**
   `h264_1080p_editlist` is trimmed 48 frames into an already-burned source, so
   `displayed == requested + 48` is CORRECT and a plain run reported 17
