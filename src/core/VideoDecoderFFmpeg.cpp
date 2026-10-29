@@ -2620,16 +2620,35 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     // retried from progressively further back, and the walk forward from there
     // is the ordinary exact-landing mechanism doing its ordinary job.
     //
-    // The schedule starts at 1 because that is usually enough -- the landing is
-    // one keyframe's leading-picture run away -- and grows past any plausible
-    // GOP so a coarse or damaged index cannot defeat it in a bounded number of
-    // tries. Measured on the iPhone material this was found on: the first step
-    // resolves every case, so the common cost is one extra seek on exactly the
-    // landings that were wrong before, and zero on every landing that was not.
+    // THE SCHEDULE STARTS AT 8, AND THE FIRST VERSION STARTING AT 1 WAS
+    // MEASURED WASTEFUL RATHER THAN REASONED INTO SHAPE.
     //
-    // Bounded, because an unbounded retry on a pathological file is a hang, and
-    // a hang in a review tool is worse than a visibly wrong frame.
-    static constexpr long long kOvershootBackoff[] = {1, 8, 32, 128};
+    // 1 looks right: the landing is only one or two frames past the target, so
+    // ask for one frame earlier. It is right for a Go to Frame -- measured
+    // resolving at the first attempt -- and WRONG for continuous reverse
+    // playback, where it resolved nothing. A reverse run over open-GOP HEVC
+    // overshoots once per GOP, and every one of them needed TWO attempts:
+    //
+    //   overshoot requested=359 landedOn=360 attempt=0 backoff=1
+    //   overshoot requested=359 landedOn=360 attempt=1 backoff=8
+    //   overshoot requested=335 landedOn=336 attempt=0 backoff=1
+    //   overshoot requested=335 landedOn=336 attempt=1 backoff=8   ... every 24
+    //
+    // 29 re-seeks against 21 real seeks, i.e. three seeks where one would do,
+    // on the one playback mode that is already seek-bound.
+    //
+    // The reason is geometric and is why 1 cannot work in general: the seek
+    // landed on a keyframe because that keyframe's own index entry is at or
+    // before the target. Asking for `target - 1` is still at or after it, so
+    // the same keyframe is found again. To get BEFORE it the backoff has to
+    // clear the keyframe's leading-picture run, which is 3 frames here and a
+    // handful anywhere. 8 clears it with margin while staying well inside a
+    // GOP, so the extra walk is a few frames rather than a few dozen.
+    //
+    // 32 then clears a typical GOP and 128 a long one. Bounded, because an
+    // unbounded retry on a pathological file is a hang, and a hang in a review
+    // tool is worse than a visibly wrong frame.
+    static constexpr long long kOvershootBackoff[] = {8, 32, 128, 512};
     static constexpr int kOvershootAttempts =
         static_cast<int>(sizeof(kOvershootBackoff) / sizeof(kOvershootBackoff[0]));
     for (int attempt = 0; walk == WalkResult::Overshot && attempt < kOvershootAttempts; ++attempt) {
