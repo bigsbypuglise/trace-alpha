@@ -409,16 +409,18 @@ and is read by neither `frameFromPts` nor `seekToFrame`.
 
 ### 6.2 The synthetic corpus — the no-regression gate, and a second finding
 
-**Sixteen of the review's eighteen files pass outright with `worst delta 0`**, and
-the other two are the two the review already accounted for:
+One command, on the shipping binary: **`FILES 19 | PASS 17 | FAIL 2`**, and both
+failures are accounted for.
 
 | file | result | account |
 |---|---|---|
-| the 16 others | **PASS**, 17 legs, worst delta 0 | — |
-| `h264_1080p_editlist` | **PASS** with its declared 48-frame offset | the fixture is trimmed 48 frames into an already-burned source, so `displayed == requested + 48` is correct edit-list handling. Now declared in the harness. |
+| the other 17, including `h264_1080p_editlist` | **PASS**, 17 legs, worst delta 0 | the edit-list fixture now passes in the plain run because its 48-frame offset is declared in the harness (section 6.7). It is trimmed 48 frames into an already-burned source, so `displayed == requested + 48` is correct edit-list handling. |
 | `h264_1080p_rot90` | **unreadable, 17 legs** | by design: the bit strip is MSB-first left-to-right and the reader refuses a rotated capture rather than returning a confidently reversed number. Answered by the review's byte-identical-stream argument instead. |
+| `h264_1080p_vfr_subframe` | **13 mismatches, worst delta 395** | new fixture, never run before, and it fails identically before and after the seek change. See below. |
 
-**So there is no regression**, which is the gate this had to clear.
+**So there is no regression on the eighteen files the review measured**, which is
+the gate this had to clear. Run twice: once on the binary before the backoff
+correction and once after, with the same result on every row.
 
 #### The nineteenth file is new, and it fails — demonstrating F3
 
