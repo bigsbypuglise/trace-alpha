@@ -482,7 +482,45 @@ factors` · `OK - 14 channel layouts` · OCIO `version=2.5.2 … moved=1` ·
 with exit 4 and "expected renderer 'cpu' but 'd3d11' is presenting" — the check
 working, not the build.)*
 
-### 6.5 The iPhone originals open, and play the right audio track
+### 6.5 What the fix costs on the scrub path, A/B'd on one binary
+
+`--scrub-selftest` on the open-GOP iPhone clip, with the knob and without it —
+which is what the knob is for, since the fault is file-dependent and the pool
+does not contain it.
+
+| leg | | fix on | fix off |
+|---|---|---|---|
+| 1 forward sweep | overshoot / delta | 0/0 · **0** | off/0 · **0** |
+| 2 reversal drag | overshoot / delta | **1**/0 · **0** | off/0 · **0** |
+| | seeks · rev-hit | 9 · 90.7% | 9 · 89.4% |
+| 3 slow forward | overshoot / delta | 0/0 · **0** | off/0 · **0** |
+| 4 rapid back-and-forth | overshoot / delta | **2**/0 · **0** | off/0 · **0** |
+| | seeks · rev-hit · ra-walk · walk max | 11 · 78.4% · 9.20f · 19f | 11 · 74.3% · 1.71f · 8f |
+
+**All four legs PASS with `delta 0` in both configurations**, so the drag path's
+exactness is unchanged either way — the release landing is a separate exact Step
+and was always correct.
+
+**The overshoot fires three times across four legs and resolves every time**
+(`unresolved 0`). It is rare even on the material that produces it.
+
+**Its cost is visible and is the mechanism, not a surprise:** on the rapid leg
+`ra-walk` goes 1.71 → 9.20 frames per seek and `walk max` 8 → 19, because
+instead of accepting the keyframe it landed on, the decoder seeks back and walks
+forward. That is the fix doing exactly what it is for. `rev-hit` is *higher*
+with it on (78.4% against 74.3%, and 90.7% against 89.4%), so the cache is not
+being hurt.
+
+**`overshoot off/0` rather than `0/0` when the knob is down** — the field
+refusing to let "nothing overshot" and "the thing that would have noticed is
+switched off" read alike, working as designed.
+
+**Release latency differed between the two columns and is deliberately not
+quoted** (section 0.1). It is the one term here that is display-dependent, and
+it is the thing to look at first if this fix is ever suspected of costing scrub
+feel on a machine in its recorded mode.
+
+### 6.6 The iPhone originals open, and play the right audio track
 
 Both, with `TRACE_OPEN_LOG=1`. They carry eight streams each — video, stereo
 AAC, a 4-channel `apple_apac` spatial track, and five `mebx` metadata tracks
@@ -505,7 +543,7 @@ bitrate-or-channel-count heuristic would have chosen it.
 `rotation=-90`: `av_display_rotation_get` reports counter-clockwise and Trace
 stores clockwise.
 
-### 6.6 Harness changes, and one trap removed
+### 6.7 Harness changes, and one trap removed
 
 - **`make_iphone_burnin.ps1`** (new) — the burn-in copies, with the PTS
   assertion.
@@ -538,6 +576,13 @@ stores clockwise.
    rather than returning a confidently reversed number. The copy exists for the
    rotated path, for opening and for the eye.
 5. **mpv** as a reference, and **open time**. Both carried from the review.
-6. **Whether the overshoot affects reverse playback or shuttle** beyond what the
-   regression in section 6 covers. The counter is on the HUD, so it is visible if
-   it does.
+6. **Whether the overshoot affects continuous REVERSE PLAYBACK or the shuttle.**
+   Section 6.5 covers the scrub and drag gestures on open-GOP material and finds
+   three re-seeks across four legs, all resolved, with exactness unchanged. What
+   it does not cover is a continuous reverse run or a shuttle ladder on that
+   material, where seeks are far more frequent. The counter is on the HUD and in
+   the selftest report, so it is visible if it bites.
+7. **The release-latency cost of the overshoot re-seek.** Observed to differ
+   between the two configurations on the rapid-throw leg and NOT quoted, because
+   it is the one term in that comparison that depends on the display. First thing
+   to measure on the panel.
