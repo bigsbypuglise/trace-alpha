@@ -22,6 +22,21 @@ centres from the plate it measured. That is the same rule the overlay harnesses
 in this repo already follow, and the reason is the same: a formula cannot notice
 it has drifted.
 
+WITH ONE EXCEPTION, ADDED 2026-10-29, AND IT IS THE OPPOSITE LESSON. The plate's
+RIGHT EDGE is no longer measured -- it is derived from the measured height and
+the design's own 1110:130 ratio. Measuring it meant scanning rightward until the
+grey ran out, which silently assumes the picture beside the plate is not itself
+neutral grey. On synthetic testsrc2 footage that holds. On real video it does
+not: a street scene panning onto ASPHALT continued the run past the plate, the
+box came out too wide, the ten cell centres were spread over it, and the reader
+returned confident wrong numbers for a content-dependent subset of frames --
+which is indistinguishable from a landing bug, and was read as one until the
+frames were pulled out of the file and looked at. See _find_plate.
+
+The general rule survives and is sharpened: measure what the picture can tell
+you reliably, derive what it cannot, and make the thing you no longer measure
+into a GUARD rather than discarding it.
+
 The geometry constants below mirror make_mp4_corpus.ps1's Get-BurnIn. They are
 expressed as FRACTIONS OF THE PLATE, so they survive any scaling between the
 encoded frame and the screenshot.
@@ -113,21 +128,54 @@ def _find_plate(img):
     if cols.size == 0:
         raise BurnInError("plate rows found but no plate columns")
     x0 = int(cols[0])
-    x1 = x0
+    scanned_x1 = x0
     for c in cols:
-        if c - x1 > 2:
+        if c - scanned_x1 > 2:
             break
-        x1 = int(c)
-    x1 += 1
+        scanned_x1 = int(c)
+    scanned_x1 += 1
+
+    # THE RIGHT EDGE IS DERIVED FROM THE HEIGHT, NOT SCANNED FOR, AND THAT IS
+    # THE FIX FOR REAL FOOTAGE.
+    #
+    # Scanning right until the plate-like run breaks works perfectly on the
+    # synthetic corpus and FAILS SILENTLY on real video, because it assumes the
+    # picture beside the plate is not itself neutral grey. Asphalt is. Measured
+    # on IMG_0516 (a street scene that pans onto a road): the run continued past
+    # the plate's true right edge into the road surface, the box came out too
+    # wide, the ten cell centres were spread across it, and the reader returned
+    # 504 for a frame whose plate -- confirmed by eye from the same capture's
+    # human-readable `F 510` and by counting its eight lit cells -- says 510.
+    # Frames 0..257 read correctly because the camera was pointed elsewhere, so
+    # the failures were a content-dependent subset with no visible pattern:
+    # EXACTLY what a landing bug looks like, and it was read as one until the
+    # frames were pulled out of the file with ffmpeg and looked at.
+    #
+    # The old aspect guard could not catch it. Widening 2220 -> ~2900 takes the
+    # aspect from 0.117 to ~0.090, which is inside the 0.6-1.6x tolerance that
+    # same guard needs in order to survive scaling.
+    #
+    # The height is reliable where the width is not: the row test demands >90%
+    # plate-like across the LEFT HALF OF THE PICTURE, which content has to work
+    # much harder to satisfy than a single column does. So the width comes from
+    # the height and the design's own ratio, and nothing is scanned into.
+    expected_ratio = _PLATE_W_UNITS / _PLATE_H_UNITS
+    x1 = x0 + int(round((y1 - y0) * expected_ratio))
     if (x1 - x0) < 40:
         raise BurnInError(f"plate too narrow ({x1 - x0}px) -- picture too small to read")
-
-    aspect = (y1 - y0) / float(x1 - x0)
-    expected = _PLATE_H_UNITS / _PLATE_W_UNITS
-    if not (expected * 0.6 <= aspect <= expected * 1.6):
+    if x1 > w:
         raise BurnInError(
-            f"plate aspect {aspect:.3f} is not the design's {expected:.3f} "
-            f"(box {x0},{y0}-{x1},{y1}) -- plate mislocated, refusing to guess"
+            f"plate derived as {x0}..{x1} but the image is only {w}px wide "
+            f"-- plate mislocated, refusing to guess"
+        )
+    # The scan is kept as the OCCLUSION guard, which is the one thing it is good
+    # at: something covering the plate's right-hand end makes the run stop
+    # EARLY, and no amount of grey content can fake that. Trace's own
+    # edge-to-edge transport strip is the recorded case.
+    if scanned_x1 < x0 + 0.9 * (x1 - x0):
+        raise BurnInError(
+            f"plate runs out at {scanned_x1} but the design needs {x1} "
+            f"(box {x0},{y0}-{x1},{y1}) -- plate occluded, refusing to guess"
         )
     return x0, y0, x1, y1
 
@@ -175,6 +223,31 @@ def read_frame_number(path, debug=False):
         if mx1 <= mx0 or my1 <= my0:
             raise BurnInError("bit cell collapsed -- picture too small to read")
         cell = a[my0:my1, mx0:mx1]
+        # EVERY CELL MUST BE OF ONE COLOUR, and this is the guard that replaces
+        # what the aspect test used to be doing.
+        #
+        # A correctly located cell is a solid fill -- the generator draws it with
+        # drawbox t=fill -- so it is either all grey plate or all white bit. A
+        # MISLOCATED one straddles a boundary and is a mixture, which is the
+        # visible signature of the plate having been found in the wrong place.
+        # Checked per cell rather than on the box as a whole because a box can
+        # be the right size and the wrong shape, and because this is the only
+        # test that sees where the samples ACTUALLY landed.
+        #
+        # It catches the vertical case specifically, which the derived width
+        # cannot: a plate whose measured height is short (occluded, or a
+        # contaminated row run) yields a proportionally narrow box that still
+        # sits entirely inside the real plate and passes every box-level test,
+        # while the cells are sampled from rows above or below the bits.
+        cspread = cell.max(axis=2) - cell.min(axis=2)
+        clevel = cell.mean(axis=2)
+        cgrey = float(((cspread <= 24) & (np.abs(clevel - 128) <= 26)).mean())
+        cwhite = float(((cspread <= 30) & (clevel > 200)).mean())
+        if max(cgrey, cwhite) < 0.90:
+            raise BurnInError(
+                f"bit cell {i} is not a solid fill (grey {cgrey:.2f}, white "
+                f"{cwhite:.2f}) -- plate mislocated, refusing to guess"
+            )
         lvl = float(cell.mean())
         levels.append(lvl)
         bits.append(lvl)
