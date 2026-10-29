@@ -244,11 +244,38 @@ first thing it has found that the decoder's own accounting could not.
 The clamp is replaced by a fourth walk outcome, `Overshot`, returned to the
 caller — because the seek is the caller's, and retrying inside a function whose
 contract is "decode forward from where you are" would hide a second seek in it.
-The caller re-seeks with a growing backoff (1, 8, 32, 128 frames) while still
+The caller re-seeks with a growing backoff (8, 32, 128, 512 frames) while still
 aiming at the original target, and the walk forward from the earlier keyframe is
 the ordinary exact-landing mechanism doing its ordinary job. Landing earlier is
 always safe; it costs the frames between, and only on the landings that were
 wrong before.
+
+**The schedule starts at 8, and the first version starting at 1 was measured
+wasteful rather than reasoned into shape.** 1 looks right — the landing is only
+a frame or two past the target — and it *is* right for a Go to Frame, which
+resolved at the first attempt. It resolved nothing on continuous reverse
+playback, where every overshoot needed two attempts:
+
+```
+overshoot requested=359 landedOn=360 attempt=0 backoff=1
+overshoot requested=359 landedOn=360 attempt=1 backoff=8
+overshoot requested=335 landedOn=336 attempt=0 backoff=1
+overshoot requested=335 landedOn=336 attempt=1 backoff=8    ... every 24
+```
+
+29 re-seeks against 21 real seeks — three seeks where one would do, on the one
+playback mode that is already seek-bound. **The reason is geometric and is why 1
+cannot work in general:** the seek landed on that keyframe *because* its index
+entry is at or before the target, so asking for `target - 1` is still at or
+after it and finds the same keyframe. Clearing it means clearing the keyframe's
+leading-picture run — 3 frames here, a handful anywhere. 8 clears it with margin
+while staying well inside a GOP; 32 then clears a typical GOP and 128 a long one.
+
+Re-measured on the same gesture: **re-seeks 29 → 15, and every overshoot now
+resolves on the first attempt**, `unresolved` still 0. **Found only because the
+seek log records the attempt number and the backoff** rather than just counting
+re-seeks — a bare counter would have read "29 re-seeks, all resolved" and looked
+like success.
 
 **The last attempt delivers the landed frame under its OWN index**, so a file
 that defeats all four backoffs shows a non-zero `delta` instead of a quiet lie. A
@@ -576,13 +603,21 @@ stores clockwise.
    rather than returning a confidently reversed number. The copy exists for the
    rotated path, for opening and for the eye.
 5. **mpv** as a reference, and **open time**. Both carried from the review.
-6. **Whether the overshoot affects continuous REVERSE PLAYBACK or the shuttle.**
-   Section 6.5 covers the scrub and drag gestures on open-GOP material and finds
-   three re-seeks across four legs, all resolved, with exactness unchanged. What
-   it does not cover is a continuous reverse run or a shuttle ladder on that
-   material, where seeks are far more frequent. The counter is on the HUD and in
-   the selftest report, so it is visible if it bites.
+6. **The accelerated SHUTTLE ladder on open-GOP material.** The scrub and drag
+   gestures are covered (section 6.5: three re-seeks across four legs, all
+   resolved, exactness unchanged) and so is continuous reverse at 1x and the
+   first rungs (section 3.3: 15 re-seeks over a ~14s run, one per GOP boundary,
+   each resolving at the first attempt). What is *not* covered is the 5x/10x/30x
+   ladder, where the stride means most targets are not adjacent to the last one.
+   The counter is on the HUD and in the selftest report, so it is visible if it
+   bites.
 7. **The release-latency cost of the overshoot re-seek.** Observed to differ
    between the two configurations on the rapid-throw leg and NOT quoted, because
    it is the one term in that comparison that depends on the display. First thing
    to measure on the panel.
+8. **What the reverse-playback re-seeks cost in TIME.** Section 3.3 measures
+   their count (15 over a ~14s reverse run, one per GOP boundary, each resolving
+   at the first attempt) and that count is display-independent. What a seek plus
+   a short walk costs against the reverse shuttle's own budget is a pacing
+   figure, so it was not taken. `TRACE_SEEK_OVERSHOOT_RESEEK=0` is the A/B for
+   it on one binary.

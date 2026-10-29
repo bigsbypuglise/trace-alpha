@@ -2016,10 +2016,20 @@ burn-in reader.**
 - **THE FIX: seek further back, never rename.** A fourth walk outcome,
   `Overshot`, returned to the caller -- the seek is the caller's, and retrying
   inside a function whose contract is "decode forward from where you are" would
-  hide a second seek in it. The caller re-seeks with a backoff of 1, 8, 32 then
-  128 frames while still aiming at the ORIGINAL target, and the walk forward
-  from the earlier keyframe is the ordinary exact-landing mechanism. The first
-  step resolves every case on this material. **The last attempt delivers the
+  hide a second seek in it. The caller re-seeks with a backoff of 8, 32, 128
+  then 512 frames while still aiming at the ORIGINAL target, and the walk
+  forward from the earlier keyframe is the ordinary exact-landing mechanism.
+  **THE SCHEDULE STARTING AT 1 WAS MEASURED USELESS AND THAT IS WORTH
+  KEEPING**: 1 resolves a Go to Frame at the first attempt and resolves
+  NOTHING on continuous reverse playback, where every overshoot took two
+  attempts (29 re-seeks against 21 real seeks -- three seeks where one would
+  do, on the mode that is already seek-bound). The seek landed on that
+  keyframe BECAUSE its index entry is at or before the target, so `target-1`
+  finds it again; the backoff has to clear the leading-picture run, 3 frames
+  here. At 8: re-seeks **29 -> 15** and every one resolves on the FIRST
+  attempt. Found only because the seek log records the attempt number and
+  backoff -- a bare counter would have read "29 re-seeks, all resolved" and
+  looked like success. **The last attempt delivers the
   landed frame under its OWN index**, so a file that beats all four shows a
   non-zero `delta` rather than a quiet lie -- a review tool may show the wrong
   frame when the file defeats it, and may not call it the right one.
