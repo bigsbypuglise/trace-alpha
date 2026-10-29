@@ -597,18 +597,18 @@ struct VideoDecoderFFmpeg::Impl {
     // were taken in Aug 2026 and did not reproduce when re-measured: at the
     // same gesture on the same file, default against TRACE_SCRUB_FILL_MS=240
     // read `rev-hit 94.0 vs 94.2%`, `seeks 6 vs 6`, `ins 124 vs 124`,
-    // `hitch 4 vs 4`. Re-swept on 2026-10-29 across the whole budget range it
-    // is flat again -- see docs/mp4-phase2.md for the table. What changed under
-    // it is the ASYNC SCRUB BATCH (2026-08-14): one request now covers up to
-    // four consecutive frames, so a backward drag's cache is filled by the
-    // batch walking frames it was going to decode anyway, and the speculative
-    // fill this budget pays for has far less left to buy. The sweep that chose
-    // 240 predates that mechanism.
+    // `hitch 4 vs 4`. A plausible reason it stopped mattering is the ASYNC
+    // SCRUB BATCH (2026-08-14): one request now covers up to four consecutive
+    // frames, so a backward drag's cache is filled by the batch walking frames
+    // it was going to decode anyway, and the speculative fill this budget pays
+    // for has less left to buy. The sweep that chose 240 predates that
+    // mechanism. THAT IS AN EXPLANATION, NOT A MEASUREMENT, and is marked as
+    // one.
     //
     // So 60 is kept because it is what every recorded figure in this repo was
-    // measured on and because the larger value buys nothing measurable, not
-    // because it was already there. The sweep is the reason, and it is written
-    // down rather than assumed.
+    // taken on and because the larger value did not reproduce a win, not
+    // because it happened to be there. `scripts/measure/fillsweep.ps1` is the
+    // sweep; its result is in docs/mp4-phase2.md.
     static constexpr double kScrubWalkCacheBudgetMsDefault = 60.0;
     double scrubWalkCacheBudgetMs = kScrubWalkCacheBudgetMsDefault;
     // Size the viewer draws at, or 0 when unknown. Used only as a *ceiling* on
