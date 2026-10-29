@@ -109,7 +109,13 @@ foreach ($c in $clips) {
 Write-Output ""
 $results | Format-Table -AutoSize | Out-String | Write-Output
 
-$pass = ($results | Where-Object { $_.verdict -eq 'PASS' }).Count
+# @() ROUND THE Where-Object, AND IT IS NOT DECORATION. Without it a filtered
+# run that matches exactly ONE file gives Where-Object a scalar rather than a
+# collection, `.Count` comes back empty, and the summary printed
+# "FILES 1 | PASS  | FAIL 1" directly under a table whose only row said PASS --
+# a verdict contradicting its own evidence, which is worse than either answer
+# alone. Observed on `-Filter editlist`.
+$pass = @($results | Where-Object { $_.verdict -eq 'PASS' }).Count
 Write-Output ("FILES {0} | PASS {1} | FAIL {2}" -f $results.Count, $pass, ($results.Count - $pass))
 if ($Csv) {
     $results | Export-Csv -NoTypeInformation -Path $Csv
