@@ -605,10 +605,20 @@ struct VideoDecoderFFmpeg::Impl {
     // mechanism. THAT IS AN EXPLANATION, NOT A MEASUREMENT, and is marked as
     // one.
     //
-    // So 60 is kept because it is what every recorded figure in this repo was
-    // taken on and because the larger value did not reproduce a win, not
-    // because it happened to be there. `scripts/measure/fillsweep.ps1` is the
-    // sweep; its result is in docs/mp4-phase2.md.
+    // RE-SWEPT 2026-10-29 AND IT IS FLAT. `scripts/measure/fillsweep.ps1`,
+    // 4K H.264, --scrub-selftest, budgets 30 / 60 (default) / 120 / 240, two
+    // reps each. On the REVERSAL leg -- the gesture this budget exists for --
+    // every column is the same at every budget: `seeks 4`, `rev-hit
+    // 97.8-97.9%`, `ins 264-267`, `walk max 11f`, `hitch 3`, `dec 166-168 f/s`,
+    // `delta 0`. The forward leg is flat too and reads `rev-hit 0.0%`, which is
+    // the control working: a forward drag never leaves the walked run, so there
+    // is nothing for the fill to buy there.
+    //
+    // So 60 is kept because the larger value buys nothing measurable, not
+    // because it happened to be there. The table is in docs/mp4-phase2.md.
+    // (Display-independent: these are decode-side and cache-side counters. The
+    // latency columns from the same runs are not quoted -- that box's panel was
+    // not in its recorded mode.)
     static constexpr double kScrubWalkCacheBudgetMsDefault = 60.0;
     double scrubWalkCacheBudgetMs = kScrubWalkCacheBudgetMsDefault;
     // Size the viewer draws at, or 0 when unknown. Used only as a *ceiling* on

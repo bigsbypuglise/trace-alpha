@@ -1877,7 +1877,7 @@ https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.4.0-beta.1
   about what the release contains.
 - **THERE ARE FOUR STAGE LITERALS IN `MainWindow.cpp`, NOT THREE, AND BOTH THIS
   FILE AND CMakeLists' COMMENT SAID THREE.** The fourth is the
-  **`--scrub-selftest` report header** (`build: Trace %1 (beta)`), added when
+  **`--scrub-selftest` report header** (STREAMED, not a format string: `"build: Trace " << TRACE_VERSION_STRING << " (beta) | Qt "` -- so a binary search for `build: Trace %1 (beta)` finds NOTHING on a correct build and reads as a missing literal; search for `" (beta) | Qt "`), added when
   that selftest was built on 2026-08-19 and never added to the tally -- and it is
   **inside the block a tester pastes back**, i.e. precisely the surface the rule
   protects. A future `beta -> rc` move searching for three would ship an rc whose
@@ -1945,6 +1945,145 @@ https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.4.0-beta.1
   session was scoped to shipping, and adding a step to the release pipeline
   immediately before a tag is the wrong moment. It remains the cheapest
   outstanding CI addition.
+
+**THE MP4 PHASE-2 SESSION FOUND A REAL EXACTNESS BUG ON REAL FOOTAGE, AND THE
+INSTRUMENT HAD TO BE FIXED BEFORE IT COULD BE BELIEVED (2026-10-29, branch
+`mp4-phase2`). Record `docs/mp4-phase2.md`; the review it carries out is
+`docs/mp4-playback-review.md`. READ BOTH before touching the seek path or the
+burn-in reader.**
+
+- **THE DISPLAY WAS WRONG IN BOTH WAYS AGAIN** -- active path a **1920x1200 @
+  60Hz Parsec virtual display**, the 4090's own panel at **1024x768 @ 60Hz**,
+  `parsecd` running. **No cadence, drop, drag-latency or smoothness figure was
+  taken and none is estimated.** Everything measured is frame identity, read
+  from the frame's own pixels, which does not depend on the panel. The stale
+  FFmpeg 7.x DLLs were deleted from `build/app/Release`.
+- **THE REVIEW'S STEP 4 IS CLOSED: the shipped minimal LGPL FFmpeg HAS D3D11VA**
+  (`--enable-d3d11va --enable-d3d12va --enable-dxva2`; the `h264_`/`hevc_`/
+  `av1_`/`vp9_d3d11va` hwaccels are all in `avcodec-63.dll`, NVDEC is not and
+  does not matter -- D3D11VA is the Windows route on NVIDIA too). Confirmed
+  against the DLL with a control search run first. **Hardware decode was still
+  NOT started** -- see the decision below.
+- **THE BURN-IN READER WAS WRONG BEFORE TRACE WAS, AND IT ACCUSED A CORRECT
+  BUILD WITH A WORST DELTA OF 247.** `readburnin.py` located the plate by
+  scanning rightward until the grey run broke, which assumes the picture beside
+  the plate is not itself neutral grey. Synthetic `testsrc2` satisfies that; **a
+  street scene panning onto ASPHALT does not.** The box came out too wide, the
+  ten cell centres were spread over it, and it returned CONFIDENT WRONG NUMBERS
+  for a content-dependent subset of frames -- indistinguishable from a landing
+  bug, and read as one until the frames were pulled out of the file with ffmpeg
+  and LOOKED AT (frame 510's plate shows `F 510` and eight lit cells; the reader
+  said 504). **The old aspect guard could not catch it**: widening 2220 ->
+  ~2900px moves the aspect 0.117 -> ~0.090, inside the 0.6-1.6x tolerance that
+  guard needs to survive scaling. **The right edge is DERIVED from the measured
+  height and the design's 1110:130 ratio now**, the scan survives as the
+  OCCLUSION guard (the one thing it is good at -- no grey content can make a run
+  stop EARLY), and a per-cell uniformity test is the backstop the aspect check
+  used to be. **Validated on 1873 frames across four clips with 0 mismatches**
+  by the new `checkburnin.py`, which decodes a clip frame by frame with Trace
+  absent; **seven negative controls**, including grey painted flush against the
+  plate's right edge. **The lesson is the opposite of the one that file already
+  carried**: a formula cannot notice it has drifted, AND a measurement cannot
+  notice it has been contaminated. Measure what the picture can tell you
+  reliably, derive what it cannot, and turn what you stop measuring into a
+  guard.
+- **F2 IS ANSWERED AND IT COSTS NOTHING.** On real variable-rate iPhone footage
+  -- re-encoded with the plate over it by the new `make_iphone_burnin.ps1`,
+  which ASSERTS that all 511/382/511 pts ticks survive element by element --
+  **ordinal position equals the pts-derived index on 0 of 511 and 0 of 382
+  frames**, under either candidate rate. The nominal-rate index model is exact
+  on footage using 62% of the half-frame rounding budget. **`-enc_time_base` is
+  load-bearing and was proven so**: omitting it, every other term unchanged,
+  moves 43 of 74 ticks on a probe, and the first dozen match either way, so a
+  spot check of the head of the file passes on the broken configuration.
+- **THE ACTUAL BUG: AN OPEN-GOP SEEK LANDS PAST ITS TARGET AND THE CODE RENAMED
+  THE FRAME.** Both iPhone clips are open-GOP HEVC (15 of 16 and 21 of 22
+  keyframes carry LEADING PICTURES -- frames after the keyframe in decode order
+  and before it in presentation order). A seek to a leading picture lands on the
+  keyframe, the leading pictures cannot be decoded from it and are discarded,
+  and the keyframe is the first frame out -- with an index PAST the target. One
+  line then clamped that index down to the requested frame. **Measured: Go to
+  Frame 286 displayed frame 288 while the HUD read `target 286 | shown 286 |
+  delta 0 | walk 0f` and `F:286`.** Every bad landing is exactly a keyframe's
+  presentation index (288, 192, 384), and it happens ONLY when the move needs a
+  SEEK -- approached by single steps the same indices are exact, twice over.
+  **This is the July 2026 scrub bug's exact shape and it survived for the same
+  reason: the telemetry asserted its own correctness instead of measuring it.**
+  It is the first thing the burn-in has found that the decoder's own accounting
+  could not. **THE SYNTHETIC CORPUS COULD NOT HAVE FOUND IT**: its HEVC rows
+  have GOP 250, so ~1.2% of frames are leading pictures against ~12.5% at the
+  iPhone's GOP 24.
+- **THE FIX: seek further back, never rename.** A fourth walk outcome,
+  `Overshot`, returned to the caller -- the seek is the caller's, and retrying
+  inside a function whose contract is "decode forward from where you are" would
+  hide a second seek in it. The caller re-seeks with a backoff of 1, 8, 32 then
+  128 frames while still aiming at the ORIGINAL target, and the walk forward
+  from the earlier keyframe is the ordinary exact-landing mechanism. The first
+  step resolves every case on this material. **The last attempt delivers the
+  landed frame under its OWN index**, so a file that beats all four shows a
+  non-zero `delta` rather than a quiet lie -- a review tool may show the wrong
+  frame when the file defeats it, and may not call it the right one.
+  **`TRACE_SEEK_OVERSHOOT_RESEEK=0` restores the clamp** and is the control for
+  every figure taken before this; the HUD and the `--scrub-selftest` report
+  carry `overshoot <reseeks>/<unresolved>` beside `recov`, printing **`off`**
+  rather than `0` when the knob is down, because "nothing overshot" and "the
+  thing that would have noticed is switched off" must not read alike.
+- **HARDWARE DECODE DID NOT START, BY THE BRIEF'S OWN RULE** -- "if real footage
+  loses or mislabels frames, hardware decode does not start this session". Real
+  footage mislabelled frames. The cause was not F2's index model but a
+  seek-landing clamp, and the trigger fired either way. **Unstarted and
+  unblocked:** the per-codec/per-pixel-format gate, per-file fallback with a
+  logged reason, the `dec hw d3d11va` HUD field, the `av_hwframe_transfer_data`
+  copy-back first cut, and the colour gate against software output.
+- **A SECOND FINDING, FROM A FIXTURE THAT HAD NEVER BEEN RUN: F3 DOES BITE.**
+  `h264_1080p_vfr_subframe` fails 13 of 17 legs at worst delta **395**, and the
+  arithmetic predicts it exactly. Its `r_frame_rate` is **120/1** against a real
+  rate near 24, so the pts-derived index range is **0..2396** while `maxFrame`
+  is **499** -- the review's F3 ("the two numbers are computed by unrelated
+  means and nothing asserts they agree"), which that document could only call a
+  hazard in principle. **Not a regression** (the fixture is new) and **not
+  fixed** -- the fix is the same container-frame-table rework as F2's. **It is
+  not purely synthetic either**: `r_frame_rate` is `timescale / gcd(durations)`,
+  so irregular durations with a small gcd inflate it, which is what screen
+  capture and some AI export pipelines produce.
+- **AND THE FIXTURE ITSELF IS A THIRD ONE THAT DOES NOT TEST WHAT ITS NAME
+  SAYS.** It carries genuine sub-frame timing (durations 8/10/12 at a 1/240
+  base) and *cannot* carry a correct nominal rate: for `r_frame_rate` to equal
+  the nominal rate every duration must be a multiple of a frame period, which is
+  exactly what sub-frame jitter rules out. **A synthetic file cannot have both.**
+  The iPhone files escape it because 506 of their 511 durations are identical
+  and ffmpeg's rate estimator latches on. Keep it as the "inflated nominal rate"
+  case; the case it was built for is covered by real footage now, which is
+  better.
+- **F6 IS ON THE HUD**: `planar on` / `off (color)` / `off (env)` /
+  `off (renderer)` beside `renderer`. The STATE is read back off the decoder and
+  the REASON off the function that decided it, so a stand-down that failed to
+  reach the decoder reads `on (color)` -- a contradiction on its face -- rather
+  than a confident `off`.
+- **F7 IS CLOSED BOTH WAYS, AND THE FILL BUDGET WAS SWEPT RATHER THAN ASSUMED.**
+  `scrubWalkCacheBudgetMs` had a dead `240.0` initialiser overwritten at every
+  open by `envInt(..., 60)`; there is ONE named constant now. **Re-swept
+  (`scripts/measure/fillsweep.ps1`, 4K H.264, budgets 30/60/120/240, two reps):
+  completely flat** -- on the reversal leg `seeks 4`, `rev-hit 97.8-97.9%`,
+  `ins 264-267`, `walk max 11f`, `hitch 3`, `dec 166-168 f/s` at every budget,
+  and the forward leg reads `rev-hit 0.0%` throughout, which is the control
+  working. **60 stays, measured.** And **Go to Frame refuses out-of-range input**
+  instead of letting the `QSpinBox` validator swallow the keystroke -- typing 900
+  on a 480-frame clip used to land on 90, silently. A range the user cannot
+  leave cannot report that they tried to.
+- **THE ISSUE REPORT CARRIES THE GPU AND THE DECODE PATH** (`GPU: <adapter>`,
+  `Decode: software`), from the `IDXGIAdapter` the D3D11 backend already holds,
+  asked of the ADOPTED renderer, and omitted rather than printed empty on the
+  CPU path.
+- **`mp4matrix.ps1` GAINED PER-CLIP BURN-IN OFFSETS AND A COUNT FIX.**
+  `h264_1080p_editlist` is trimmed 48 frames into an already-burned source, so
+  `displayed == requested + 48` is CORRECT and a plain run reported 17
+  mismatches at a dead-constant delta of 48 -- a by-design result that reads
+  exactly like a regression. Declared in the harness now, still declared rather
+  than inferred. Separately, a one-file filtered run printed **"FILES 1 | PASS |
+  FAIL 1" under a table whose only row said PASS**: `Where-Object` returning a
+  single object gives a scalar and `.Count` came back empty. `@()` round the
+  pipeline; proven by re-running the same command to exit 0.
 
 ### WHAT STAGE 2 PART 2 STILL OWES
 
@@ -5786,7 +5925,7 @@ Scrubbing is throttled in `MainWindow` (12 ms single-shot `scrubTimer_` coalesce
   literals in `src/app/MainWindow.cpp`: `buildIdentity()`'s `Trace %1 (beta)`, the About
   dialog's small print (**capital `Beta.`, so a lower-case-only search misses it**), the
   **Report an Issue mail subject**, and — the one the recorded count omitted — the
-  **`--scrub-selftest` report header** (`build: Trace %1 (beta)`), added when that selftest was
+  **`--scrub-selftest` report header** (STREAMED, not a format string: `"build: Trace " << TRACE_VERSION_STRING << " (beta) | Qt "` -- so a binary search for `build: Trace %1 (beta)` finds NOTHING on a correct build and reads as a missing literal; search for `" (beta) | Qt "`), added when that selftest was
   built in 2026-08-19 and never added to the tally. **That fourth one is inside the block a
   tester pastes back**, i.e. exactly the place this rule exists to protect. Missing one leaves
   the number looking right while the build names the wrong stage in the one place a tester
@@ -6410,7 +6549,7 @@ builds. **Read the HUD's `xform` field rather than the command line**: it prints
 `n/a` / `none` / `bypass <lut>` / `ON <lut>`, and `off` and `bypass` are different
 facts that the picture cannot distinguish. Harness:
 `scripts/measure/colortransform.ps1`),
-**`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
+**`TRACE_SEEK_OVERSHOOT_RESEEK=0`** (2026-10-29: back to clamping a seek that lands PAST its target down to the requested index -- which did not move the picture, it RENAMED it. The control for every landing figure taken before the open-GOP fix, and the rollback. **Read the HUD's `overshoot` field rather than the command line**: it prints `off` rather than `0` when the knob is down, because a run where nothing overshot and a run where the thing that would have noticed is switched off must not read alike), **`TRACE_SEEK_LOG=1`** (one structured line per seek to `%TEMP%	race_seeklog.txt`, including an `overshoot` line per re-seek naming what was landed on -- the instrument that settled the open-GOP diagnosis), **`TRACE_SETTINGS_FILE`** and **`TRACE_SETTINGS_LOG=1`** (spec phase 11: point the settings
 home at a scratch INI, and print which home won. The first exists so a measurement of the
 recent list does not edit the machine it runs on and can start from a known list; the second
 because which of the three homes is in force is a *path*, and a path is the thing a 15px HUD

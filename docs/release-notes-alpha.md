@@ -47,16 +47,19 @@ the GitHub release body (`body_path` in `.github/workflows/windows-release.yml`)
 cutting a release.
 
 **It must name the known gaps plainly.** A prerelease with honest limits gets useful bug
-reports; one without gets reports about things already known. As of `v0.2.0-beta.1` those are:
+reports; one without gets reports about things already known. As of `v0.4.0-beta.2` those are:
 8K ProRes 4444 XQ does not reach real time and is understood rather than unsolved (13.64 fps
-full-quality, decode alone is 94% of the frame budget), EXR does not open, HDR/BT.2020 has no
-tonemap, 10-bit *output* is unsupported (distinct from the high-bit-depth *processing* that does
-work), multi-monitor DPI is validated at 100%/150% only, and cold LucidLink delivery is
-~600-800 Mbps so multi-Gbps plates will not stream.
+full-quality, decode alone is 94% of the frame budget), heavy multilayer EXR plays at about
+two-thirds of real time (the paragraph below), **a container stating a wildly wrong nominal
+frame rate leaves part of the clip unreachable by Go to Frame and End** (the paragraph after
+it), HDR/BT.2020 has no tonemap, 10-bit *output* is unsupported (distinct from the
+high-bit-depth *processing* that does work), multi-monitor DPI is validated at 100%/150% only,
+and cold LucidLink delivery is ~600-800 Mbps so multi-Gbps plates will not stream.
 
-**Pending for the EXR milestone (branch `exr-stage0-dependencies`, not yet merged or
-released).** When EXR support ships, the line reading *"EXR does not open"* is replaced by a
-measured gap, not deleted: **a 27-channel multilayer DWAA EXR sequence at 1920x1080 plays at
+**The EXR milestone SHIPPED in `v0.4.0-beta.1`** (merged `a2cf79c`), so the line that used to
+read *"EXR does not open"* is replaced by a measured gap rather than deleted, exactly as this
+section required while it was still pending: **a 27-channel multilayer DWAA EXR sequence at
+1920x1080 plays at
 roughly 15 fps -- about two-thirds of real time** (63.6-65.1% of 24fps across four warm passes,
 2026-08-25, physical panel). The owner hand-tested this on 2026-08-25 and **ruled it usable for
 review on this file class**, so it ships as an accepted limit rather than as a blocker -- but it
@@ -65,6 +68,19 @@ hold real time. The rollback knob is `TRACE_SEQ_PREFETCH_STRIDE=0`. Ready-to-pas
 `docs/exr-release-notes.md`. **Do not describe the DWAA figure as real time, and do not drop it
 to a footnote** -- it is the EXR milestone's headline limitation the way 8K ProRes 4444 XQ is the
 video path's.
+
+**The frame-index gap, added at `v0.4.0-beta.2` and stated with the file shape that produces
+it.** Trace maps "frame N" to a timestamp through the rate the container states. When that rate
+is a large multiple of the real one -- which happens when frame durations are irregular, because
+ffmpeg derives `r_frame_rate` as `timescale / gcd(durations)` -- the index arithmetic spans far
+more indices than the clip has frames, while `maxFrame` comes from the frame COUNT. The two are
+computed by unrelated means and nothing asserts they agree. Measured on a deliberately
+pathological fixture whose stated rate is five times its real one: index range 0..2396 against a
+reachable 0..499, so `Go to Frame 498` displays the 104th frame. **No real file in the pool has
+this shape**, and affected clips are identifiable -- duration, frame count and stated frame rate
+do not agree. This is the review's F3, which that document could only call a hazard in principle
+for want of a file that showed it. **Say which files it affects, not just that it exists**: a
+gap a reader cannot test for is a gap they will assume applies to them.
 
 **A gap that has been measured must be stated as measured, with the number.** `v0.2.0-alpha.1`
 listed mixed-monitor DPI as unvalidated, which was true and was the named reason that release
