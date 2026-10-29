@@ -34,11 +34,27 @@ one that ships.
 consolation prize: frame identity is read from the pixels of the frame, and the
 burn-in says what it says whatever the panel is doing.
 
-The stale FFmpeg 7.x DLLs (`avcodec-61`, `avformat-61`, `avutil-59`,
-`swscale-8`, `swresample-5`) were deleted from `build/app/Release`. They were
-inert — the import table names `avcodec-63` — but they are a trap for anyone
-who reads a directory listing instead of an import table, and hardware-decode
-debugging is exactly where that would mislead.
+The FFmpeg 7.x DLLs (`avcodec-61`, `avformat-61`, `avutil-59`, `swscale-8`,
+`swresample-5`) were deleted from `build/app/Release`, as the brief asked.
+
+**THEY ARE NOT STALE LEFTOVERS, AND THE REVIEW AND THE BRIEF BOTH CALLED THEM
+THAT.** The CI log settles it: `windeployqt` prints `Updating avcodec-61.dll`,
+`Updating avutil-59.dll`, `Updating swresample-5.dll`, `Updating swscale-8.dll`
+on a clean runner that has never held an old build. **They are Qt Multimedia's
+own FFmpeg**, deployed beside Trace's every time the app is deployed. So:
+
+* deleting them locally is **safe** — Trace's import table names `avcodec-63`,
+  and its audio goes through `QAudioSink` on WASAPI with Trace's own FFmpeg for
+  decoding. Verified after the deletion rather than assumed: a clip with sound
+  plays with the HUD reading `audio aac 48000Hz 2ch … MASTER … proc 5126ms …
+  clk 5.026s`, `under 0`, `skip 0`;
+* they **come back** on the next `windeployqt`, and CI ships them in every
+  package. A future session that deletes them again and expects them to stay
+  gone will be surprised, and one that reads their presence as evidence of a
+  stale build will be wrong.
+
+The directory listing was never the trap. Believing a directory listing tells
+you which DLLs a binary loads is the trap, and it points both ways.
 
 ### 0.2 Hardware decode: the review's step 4 is closed, and the answer is yes
 

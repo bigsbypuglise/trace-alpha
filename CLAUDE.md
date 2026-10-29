@@ -1956,8 +1956,17 @@ burn-in reader.**
   60Hz Parsec virtual display**, the 4090's own panel at **1024x768 @ 60Hz**,
   `parsecd` running. **No cadence, drop, drag-latency or smoothness figure was
   taken and none is estimated.** Everything measured is frame identity, read
-  from the frame's own pixels, which does not depend on the panel. The stale
-  FFmpeg 7.x DLLs were deleted from `build/app/Release`.
+  from the frame's own pixels, which does not depend on the panel.
+- **THE "STALE" FFmpeg 7.x DLLs IN `build/app/Release` ARE QT MULTIMEDIA'S, NOT
+  LEFTOVERS, AND BOTH THE REVIEW AND THE PHASE-2 BRIEF CALLED THEM STALE.** The
+  CI log is what settles it: `windeployqt` prints `Updating avcodec-61.dll`,
+  `avutil-59`, `swresample-5`, `swscale-8` on a clean runner that has never held
+  an old build. Deleting them locally is SAFE -- Trace's import table names
+  `avcodec-63` and its audio is `QAudioSink` on WASAPI with Trace's own FFmpeg
+  for decoding, verified after the deletion (`MASTER`, `proc 5126ms`,
+  `clk 5.026s`, `under 0`) rather than assumed -- but **they come back on the
+  next `windeployqt` and CI ships them in every package**. Do not read their
+  presence as a stale build, and do not expect a deletion to stick.
 - **THE REVIEW'S STEP 4 IS CLOSED: the shipped minimal LGPL FFmpeg HAS D3D11VA**
   (`--enable-d3d11va --enable-d3d12va --enable-dxva2`; the `h264_`/`hevc_`/
   `av1_`/`vp9_d3d11va` hwaccels are all in `avcodec-63.dll`, NVDEC is not and
