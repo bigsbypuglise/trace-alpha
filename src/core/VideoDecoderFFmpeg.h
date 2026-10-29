@@ -260,6 +260,41 @@ struct VideoPerfStats {
     // moving currentFrame_ without moving the decoder.
     long long recoveredDecodeFailures = 0;
 
+    // OPEN-GOP SEEK OVERSHOOT, which is the counter this file most needed and
+    // did not have.
+    //
+    // A backward seek can land PAST its target. On open-GOP HEVC -- which is
+    // what every iPhone writes -- a keyframe is a CRA picture whose LEADING
+    // pictures follow it in decode order and precede it in presentation order;
+    // they reference frames before the CRA, so after a seek to it they cannot
+    // be decoded and are discarded. If the target was one of them, the first
+    // frame out of the decoder is the keyframe ITSELF, which is later than the
+    // frame that was asked for.
+    //
+    // What used to happen there was a one-line clamp -- "a backward seek should
+    // never land past the target; if a broken index puts us there, clamp so the
+    // UI stays put" -- which RELABELLED the landed frame with the requested
+    // index. Measured on real footage: Go to Frame 286 displayed frame 288
+    // while the HUD read `target 286 | shown 286 | delta 0 | walk 0f`, i.e. the
+    // picture was two frames wrong and every counter said it was exact. That is
+    // the July 2026 scrub bug's exact shape (`delta 0` over a frame most of a
+    // GOP away), and it survived for the same reason: telemetry asserting its
+    // own correctness instead of measuring it.
+    //
+    // `seekOvershootReseeks` counts the re-seeks that now happen instead.
+    // `seekOvershootUnresolved` counts the times even that failed and the frame
+    // was delivered under its OWN index -- which makes `delta` non-zero and
+    // visible, because showing the wrong frame loudly beats showing it quietly.
+    // It should stay 0; anything above it is a file worth looking at.
+    long long seekOvershootReseeks = 0;
+    long long seekOvershootUnresolved = 0;
+    // Whether the re-seek is in force at all (TRACE_SEEK_OVERSHOOT_RESEEK=0
+    // restores the clamp). Reported because without it the two counters above
+    // read 0/0 both when nothing overshot and when the mechanism that would
+    // have noticed is switched off -- which is the same silent-degradation
+    // class `renderer` and `planar` are reported for.
+    bool seekOvershootReseekEnabled = true;
+
     // Which threading mode the decoder opened in. Constant for the life of a
     // media open -- see the four-cell table at kPlaybackForwardWalkLimit for why
     // it is not switched per request mode.
@@ -321,6 +356,16 @@ struct VideoPerfStats {
 
     QString srcPixelFormat;
     QString dstPixelFormat;
+    // WHICH DECODE PATH THIS MEDIA IS ON, and why it is not the other one.
+    // "software" on every build before hardware decode existed and on every
+    // file hardware decode declines, in which case the reason is appended --
+    // because "hardware decode is off" and "hardware decode was asked for and
+    // this file could not take it" are different facts and the second is the
+    // one an issue report needs. Reported on the HUD and in the issue mail for
+    // the same reason `renderer` and `planar` are: a GPU path that quietly
+    // never engages looks identical, from everything else on screen, to one
+    // that was never asked for.
+    QString decodePath = QStringLiteral("software");
     // YUV->RGB matrix and range actually used for conversion, so a wrong-looking
     // image can be checked against what the file claims rather than guessed at.
     QString colorMatrix;

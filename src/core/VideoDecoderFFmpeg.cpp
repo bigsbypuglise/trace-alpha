@@ -227,6 +227,14 @@ bool seekLogEnabled() {
     return on;
 }
 
+// The open-GOP seek-overshoot re-seek (default ON). 0 restores the clamp that
+// shipped before it -- which did not move the picture, it RENAMED it. See
+// VideoPerfStats::seekOvershootReseeks.
+bool seekOvershootReseekEnabled() {
+    static const bool on = qgetenv("TRACE_SEEK_OVERSHOOT_RESEEK") != "0";
+    return on;
+}
+
 void seekLogLine(const QString& line) {
     static QFile* f = [] {
         auto* file = new QFile(QDir::tempPath() + "/trace_seeklog.txt");
@@ -570,7 +578,39 @@ struct VideoDecoderFFmpeg::Impl {
     // bytes rather than by this budget -- nothing is halved at 1080p, so 24
     // full-res entries fill the budget. The win is where previews are small
     // enough for the cache to hold a GOP's worth of them.
-    double scrubWalkCacheBudgetMs = 240.0;
+    //
+    // ----------------------------------------------------------------------
+    // THE SWEEP ABOVE IS A RECORD, NOT THE SHIPPING VALUE, AND FOR A WHILE
+    // NEITHER WAS THIS INITIALISER. It read 240.0 while open() overwrote it
+    // unconditionally on every media open with `envInt("TRACE_SCRUB_FILL_MS",
+    // 60)` -- so 240 was DEAD, 60 shipped, and the comment above described a
+    // configuration no user has ever run. CLAUDE.md carried it as a
+    // documentation-versus-code discrepancy and the MP4 review carried it as
+    // F7; it survived because two numbers in two files can disagree quietly.
+    //
+    // There is ONE number now, named here and used by open()'s env default, so
+    // the initialiser and the shipping default cannot drift apart again
+    // whatever value is chosen. Changing the shipping behaviour is changing
+    // this line, which is the property that was missing.
+    //
+    // WHY IT IS 60 AND NOT THE 240 THE SWEEP ABOVE ARGUES FOR. The 240 figures
+    // were taken in Aug 2026 and did not reproduce when re-measured: at the
+    // same gesture on the same file, default against TRACE_SCRUB_FILL_MS=240
+    // read `rev-hit 94.0 vs 94.2%`, `seeks 6 vs 6`, `ins 124 vs 124`,
+    // `hitch 4 vs 4`. Re-swept on 2026-10-29 across the whole budget range it
+    // is flat again -- see docs/mp4-phase2.md for the table. What changed under
+    // it is the ASYNC SCRUB BATCH (2026-08-14): one request now covers up to
+    // four consecutive frames, so a backward drag's cache is filled by the
+    // batch walking frames it was going to decode anyway, and the speculative
+    // fill this budget pays for has far less left to buy. The sweep that chose
+    // 240 predates that mechanism.
+    //
+    // So 60 is kept because it is what every recorded figure in this repo was
+    // measured on and because the larger value buys nothing measurable, not
+    // because it was already there. The sweep is the reason, and it is written
+    // down rather than assumed.
+    static constexpr double kScrubWalkCacheBudgetMsDefault = 60.0;
+    double scrubWalkCacheBudgetMs = kScrubWalkCacheBudgetMsDefault;
     // Size the viewer draws at, or 0 when unknown. Used only as a *ceiling* on
     // scrub preview conversion, never as a floor: a preview is never made
     // larger than half resolution, and never larger than it will be shown.
@@ -1171,7 +1211,12 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
     impl_->inputEofReached = false;
     impl_->drainPacketSent = false;
     impl_->decoderFullyDrained = false;
-    impl_->scrubWalkCacheBudgetMs = std::max(0, envInt("TRACE_SCRUB_FILL_MS", 60));
+    // The default comes from the one named constant beside the member, so this
+    // line can no longer disagree with the initialiser it overwrites (F7).
+    perfStats_.seekOvershootReseekEnabled = seekOvershootReseekEnabled();
+    impl_->scrubWalkCacheBudgetMs = std::max(
+        0, envInt("TRACE_SCRUB_FILL_MS",
+                  static_cast<int>(Impl::kScrubWalkCacheBudgetMsDefault)));
     // Clamped at the USE site, not here. Clamping at open pinned it to a count
     // derived from the seed footprint -- the BGRA one -- so asking for a
     // 30-frame fill at 4K silently got 11 and the experiment that asked for it
@@ -2033,8 +2078,15 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     // because the failure path needs it too: a decode that fails without having
     // seeked can be recovered by seeking and retrying, and duplicating the
     // flush-and-reset sequence is how the drain flags would drift apart.
-    auto seekToFrame = [&](long long target) -> bool {
-        const int64_t relTs = av_rescale_q(target, frameTb, impl_->streamTimeBase);
+    // `backoffFrames` seeks EARLIER than the target while still aiming at it:
+    // the timestamp moves back, `seekTargetFrame` does not. It exists for the
+    // open-GOP overshoot (see VideoPerfStats::seekOvershootReseeks) -- landing
+    // earlier is always safe, because the walk forward from a keyframe is the
+    // mechanism that makes every seek frame-exact in the first place. It costs
+    // the frames between, and only on the landings that need it.
+    auto seekToFrame = [&](long long target, long long backoffFrames = 0) -> bool {
+        const long long seekFrame = std::max<long long>(0, target - backoffFrames);
+        const int64_t relTs = av_rescale_q(seekFrame, frameTb, impl_->streamTimeBase);
         const int64_t targetTs = impl_->streamStartTs + relTs;
 
         QElapsedTimer seekTimer;
@@ -2070,7 +2122,20 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     // longer wanted" look identical to a bool and are completely different
     // things: only the first is a decode failure, and only the first should
     // provoke the recovery seek.
-    enum class WalkResult { Produced, Exhausted, Abandoned };
+    // FOUR outcomes now. `Overshot` is "the seek landed past the frame that was
+    // asked for" -- not a failure, not an abandonment, and emphatically not
+    // something to paper over by renaming the frame. It is a request to try
+    // again from further back, and it is the caller's to act on because only
+    // the caller owns the seek.
+    enum class WalkResult { Produced, Exhausted, Abandoned, Overshot };
+    // Set when Overshot is returned, so the caller can report what was landed
+    // on rather than describing the failure in the abstract.
+    long long overshotLandedFrame = -1;
+    // Last resort, set by the caller before its final attempt: deliver the
+    // landed frame under its OWN index instead of re-seeking again. Never
+    // under the requested one -- a review tool may show the wrong frame when a
+    // file defeats it, and may not call it the right one.
+    bool acceptOvershoot = false;
     // How long the walk goes between consecutive chances to notice a
     // cancellation. This is the decoder's contribution to cancellation
     // latency, and it is the number that says whether the checkpoint is at the
@@ -2174,9 +2239,34 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
                     impl_->seekResolvePending = false;
                     decodedFrame = (pts != AV_NOPTS_VALUE) ? frameFromPts(pts)
                                                            : impl_->seekTargetFrame;
-                    // A backward seek should never land past the target; if a
-                    // broken index puts us there, clamp so the UI stays put.
-                    if (decodedFrame > impl_->seekTargetFrame) decodedFrame = impl_->seekTargetFrame;
+                    // LANDED PAST THE TARGET. This used to clamp the index down
+                    // to the requested frame, which did not move the picture --
+                    // it renamed it. See VideoPerfStats::seekOvershootReseeks
+                    // for the measurement that found it (Go to Frame 286 showing
+                    // frame 288 under `delta 0`).
+                    //
+                    // The walk forward from a keyframe is what makes seeks
+                    // exact, so the answer is to start it from further back.
+                    // Reported to the caller rather than retried here, because
+                    // the seek is the caller's and doing it here would hide a
+                    // second seek inside a function whose contract is "decode
+                    // forward from where you are".
+                    //
+                    // TRACE_SEEK_OVERSHOOT_RESEEK=0 restores the clamp, which
+                    // is the control for every figure taken before this and the
+                    // rollback if the re-seek ever costs more than it is worth.
+                    // It is a knob rather than a build because the difference
+                    // has to be A/B-able on one binary on a tester's machine:
+                    // the fault is file-dependent and nobody here has their
+                    // files.
+                    if (decodedFrame > impl_->seekTargetFrame) {
+                        if (!seekOvershootReseekEnabled()) {
+                            decodedFrame = impl_->seekTargetFrame;
+                        } else if (!acceptOvershoot) {
+                            overshotLandedFrame = decodedFrame;
+                            return WalkResult::Overshot;
+                        }
+                    }
                     if (decodedFrame < 0) decodedFrame = 0;
                 } else {
                     decodedFrame = frameFromPts(pts);
@@ -2514,7 +2604,51 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         cacheWindow = std::clamp(affordable, 1, entriesThatFit(producesPreviewRes));
     }
 
-    const WalkResult walk = decodeUntilTarget(frameIndex);
+    WalkResult walk = decodeUntilTarget(frameIndex);
+
+    // THE OVERSHOOT RE-SEEK. An open-GOP seek that landed past its target is
+    // retried from progressively further back, and the walk forward from there
+    // is the ordinary exact-landing mechanism doing its ordinary job.
+    //
+    // The schedule starts at 1 because that is usually enough -- the landing is
+    // one keyframe's leading-picture run away -- and grows past any plausible
+    // GOP so a coarse or damaged index cannot defeat it in a bounded number of
+    // tries. Measured on the iPhone material this was found on: the first step
+    // resolves every case, so the common cost is one extra seek on exactly the
+    // landings that were wrong before, and zero on every landing that was not.
+    //
+    // Bounded, because an unbounded retry on a pathological file is a hang, and
+    // a hang in a review tool is worse than a visibly wrong frame.
+    static constexpr long long kOvershootBackoff[] = {1, 8, 32, 128};
+    static constexpr int kOvershootAttempts =
+        static_cast<int>(sizeof(kOvershootBackoff) / sizeof(kOvershootBackoff[0]));
+    for (int attempt = 0; walk == WalkResult::Overshot && attempt < kOvershootAttempts; ++attempt) {
+        // The last attempt accepts whatever it lands on, under the landed
+        // frame's own index, so the failure is visible in `delta` rather than
+        // hidden by a rename.
+        acceptOvershoot = (attempt == kOvershootAttempts - 1);
+        ++perfStats_.seekOvershootReseeks;
+#ifdef TRACE_WITH_FFMPEG
+        if (seekLogEnabled()) {
+            seekLogLine(QString("overshoot req#%1 requested=%2 landedOn=%3 attempt=%4 backoff=%5 accept=%6")
+                .arg(impl_->requestCounter)
+                .arg(frameIndex)
+                .arg(overshotLandedFrame)
+                .arg(attempt)
+                .arg(kOvershootBackoff[attempt])
+                .arg(acceptOvershoot ? 1 : 0));
+        }
+#endif
+        if (!seekToFrame(frameIndex, kOvershootBackoff[attempt])) break;
+        walk = decodeUntilTarget(frameIndex);
+    }
+    if (walk == WalkResult::Overshot) {
+        // Fell out of the loop still overshooting -- either the seek itself
+        // failed or the walk was cancelled. Counted and reported honestly.
+        ++perfStats_.seekOvershootUnresolved;
+    }
+    acceptOvershoot = false;
+
     perfStats_.maxCheckpointGapMs =
         std::max(perfStats_.maxCheckpointGapMs, maxCheckpointGapMs);
 
