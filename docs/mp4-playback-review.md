@@ -916,6 +916,27 @@ material cannot.
 
 ### F1. No hardware decode exists, and software decode is on the UI thread
 
+> **CLOSED 2026-10-31 BY MEASUREMENT, AND THE PREMISE BELOW IS HALF WRONG.
+> Record: `docs/mp4-hwdec-f1.md`. Read that first; what follows is the record of
+> what was proposed, not of what is true.**
+>
+> D3D11VA decode is built behind `TRACE_HWDEC=d3d11va`, default off, and the
+> recommendation is that it stays off. Its pixels are bit-identical to software
+> decode (0 of 43127 px, max channel delta 0, under a controlled substitution of
+> the conversion route), and it costs **~19ms per 4K frame**: on the one pool
+> clip with no headroom — 4K H.264 at 60fps — it goes from **100.0% of real time
+> to 63.8% with `drop 57`**.
+>
+> **Why the premise fails: decode is DISPATCHED on the UI thread and PERFORMED
+> on frame-threading workers.** The tick pays the handoff, not the decode —
+> `dec` averages **0.37ms** on 4K H.264 at 60fps and **0.39ms** on 4K HEVC, with
+> the whole handler at 2.33ms of 41.71ms. There was nothing to win.
+>
+> **And it is structural: every pool file that misses its budget is ProRes, and
+> ProRes has no D3D11VA path at all.** The hardware decoder covers exactly the
+> class that does not need it. Zero-copy is recommended against as well, with
+> its ceiling computed in §6 of the record.
+
 **Impact: this is the ceiling on every heavy MP4, and it is a consistency
 problem rather than only a speed one.**
 
@@ -1188,6 +1209,16 @@ other's measurements.
 **F4 is explicitly last**, and conditional: if F1 lands, a hardware-decoded frame
 needs no conversion stage, and most of the two-stage design's reason goes with
 it. Building F4 first would be building the stage that F1 deletes.
+
+> **2026-10-31: that conditional resolved, and it resolved the other way.** F1
+> did not land — it is built, measured and recommended off — so **F4 is no
+> longer blocked by it**, and the stage F1 would have deleted is still there.
+> Note what the F1 measurement says about F4 before anyone picks it up: on 4K
+> H.264 at 60fps the whole handler is **2.0ms of a 16.67ms budget**, so there is
+> nothing on the long-GOP class for a pipeline to buy either. F4's case rests
+> entirely on the ProRes files, which is where CLAUDE.md's checkpoint-2 record
+> already left it — +10% measured against +22% predicted, and stage two not
+> justified by the measured margin.
 
 
 ---

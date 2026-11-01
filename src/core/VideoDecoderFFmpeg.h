@@ -229,6 +229,15 @@ struct VideoPerfStats {
     bool lastImageWasShared = false;
     double lastSwsScaleMs = 0.0;
     double avgSwsScaleMs = 0.0;
+    // THE COST OF A HARDWARE-DECODED FRAME THAT IS NOT DECODE. A D3D11VA frame
+    // is a GPU texture, and every stage downstream of the decoder in this file
+    // reads CPU memory, so the copy-back is the price of the first cut and it
+    // belongs on its own line rather than inside `dec`. Folding it into decode
+    // time would report the readback as a decode win, which is the shape of the
+    // mistake `ffmpeg -f null` already made once in this project: a benchmark
+    // that hides the work around the thing being measured.
+    double lastHwTransferMs = 0.0;
+    double avgHwTransferMs = 0.0;
     double lastMemcpyMs = 0.0;
     double avgMemcpyMs = 0.0;
     double lastHandoffMs = 0.0;
@@ -366,6 +375,14 @@ struct VideoPerfStats {
     // never engages looks identical, from everything else on screen, to one
     // that was never asked for.
     QString decodePath = QStringLiteral("software");
+    // HOW MANY FRAMES ACTUALLY CAME BACK OFF THE GPU, because `decodePath` is a
+    // statement about SETUP and this is the statement about FRAMES. A build that
+    // created the device, opened the codec and then never got a hardware frame
+    // reads "d3d11va" on both the HUD and the issue mail with nothing behind it,
+    // which is this project's recorded failure mode (`stalls 0 of 0` on frames
+    // carrying `period max 512ms`). The pair is the instrument; neither half is.
+    long long hwFramesTransferred = 0;
+    long long hwTransferFailures = 0;
     // YUV->RGB matrix and range actually used for conversion, so a wrong-looking
     // image can be checked against what the file claims rather than guessed at.
     QString colorMatrix;
@@ -503,6 +520,13 @@ public:
     void cancelOutstandingIo();
 
 private:
+    // Everything from alloc_context3 to avcodec_open2, in ONE place, because
+    // hardware decode needs it twice: once at open, and again when a file turns
+    // out not to be decodable on the GPU after all. Two copies of this block
+    // would be two threading policies, two colour-parameter transfers and two
+    // sets of the comments that explain them, and the fallback would quietly
+    // stop matching the real open.
+    bool openCodecContext(bool allowHw, QString& error);
     struct Impl;
     Impl* impl_ = nullptr;
     VideoMetadata metadata_;

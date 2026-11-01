@@ -1946,6 +1946,89 @@ https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.4.0-beta.1
   immediately before a tag is the wrong moment. It remains the cheapest
   outstanding CI addition.
 
+**F1 (HARDWARE DECODE) IS BUILT, MEASURED AND CLOSED AS A NET LOSS ON THIS
+MACHINE (2026-10-31, branch `mp4-hwdec`). `TRACE_HWDEC=d3d11va` SHIPS OFF AND
+THE RECOMMENDATION IS THAT IT STAYS OFF -- and DO NOT build the zero-copy
+stage.** Record `docs/mp4-hwdec-f1.md`; read it before re-proposing any of this.
+
+- **DISPLAY, AGAIN WRONG IN BOTH WAYS**: active path a **1920x1200 @ 60Hz Parsec
+  virtual display**, the 4090's own panel at **1024x768 @ 60Hz**, `parsecd`
+  running. **No cadence, smoothness, drag-latency or pacing figure was taken.**
+  The per-frame cost terms and the pixel comparisons below ARE valid -- every
+  A/B pair ran at `win 936x891` / `display 936x527` on one binary -- and the
+  `presented` columns are quoted as within-pair deltas, never as baselines.
+- **IT WORKS, AND ON THE RIGHT GPU.** H.264 8-bit, HEVC 8-bit and **HEVC 10-bit**
+  (`yuv420p10le` -> P010) all decode on the GPU; the selftest `media:` line
+  reads `dec-path d3d11va hwf <n> | gpu NVIDIA GeForce RTX 4090` -- **not the
+  Parsec virtual adapter**, which was the specific hazard of measuring this
+  while Parsec held the display, since a D3D11 device on a virtual adapter has
+  no NVDEC behind it and "slow" and "wrong GPU" read identically everywhere else.
+- **THE COLOUR GATE PASSES AS AN EXACT ZERO, AND THE THIRD ROW IS THE PROOF.**
+  Frame 0, iPhone 4K HEVC, video band, tolerance 2: sw+swscale vs **hw+swscale
+  0 of 43127 px, max channel delta 0**; sw+planar vs hw 24.82% / max 94;
+  **sw+planar vs sw+swscale 24.82% / max 94 -- the identical figure, with no
+  hardware decode in it.** So the whole difference is the conversion route and
+  none of it is the decoder. **Frame identity was read off the burn-in plate
+  (both `F 0`), not assumed** -- max delta 94 is the recorded different-frame
+  signature and the first reading looked like a colour fault.
+- **THE COST, two files, one binary, same window. 4K HEVC 24fps: `handler`
+  2.33 -> 15.83ms, 6.8x.** `dec` 0.39 -> 0.82, `hwxfer` 0.00 -> **7.23**, `sws`
+  1.21 -> **6.18**. **4K H.264 60fps, the 16.67ms budget and the strongest case
+  F1 had: 100.0% of real time -> 63.8%, `drop 0 -> 57`, `handler>budget 0 of 161
+  -> 58 of 104`.** ~19ms added against **0.9ms of decode SAVED, which is itself
+  negative** -- hardware decode made decode dearer.
+- **THE PREMISE WAS HALF WRONG AND THAT HALF IS DECISIVE.** F1 reads "decode ...
+  runs inside the tick handler on the UI thread -- this is the ceiling". Decode
+  is DISPATCHED there and **performed on `thread_count` frame-threading
+  workers**, so the tick pays the handoff: **`dec` averages 0.37ms on 4K H.264
+  at 60fps and 0.39ms on 4K HEVC**, with the whole handler at 2.33 of 41.71ms.
+  This file already records the mechanism from the other direction ("with frame
+  threading the next frame decodes underneath all of that"); what nobody had
+  done was read it forward to F1.
+- **AND IT IS STRUCTURAL: every pool file that misses its budget is ProRes, and
+  ProRes has no D3D11VA path at all.** The 8K 4444 XQ plate and the 4K 4444 clip
+  are intra-only; the selftest reads **`software (d3d11va: this build's prores
+  decoder has no d3d11va path)` hwf 0** on them, which is also the decline path
+  proving it can fire, on real media.
+- **ZERO-COPY DOES NOT RESCUE IT AND THE CEILING IS COMPUTABLE.** It would remove
+  the readback and restore GATE C, but `dec` went **0.37 -> 1.27ms** because
+  `avcodec_receive_frame` on a hardware decoder is a GPU sync point -- so a
+  PERFECT zero-copy is still **~0.9ms/frame worse than software here**, and
+  **exactly zero on ProRes**. Stated as an estimate with its basis.
+- **THE COPY-BACK ALSO FORFEITS STEP 9's DOWNSCALE FILTER, not just GATE C.** NV12
+  is not a layout `planarLayoutFor` recognises, so the path falls to swscale+BGRA
+  -- and the box-average reduction lives in the YUV shader only. The HUD says so:
+  **`filtered x3` software against `filtered x1` hardware.** A cost AND a picture
+  regression on a decision signed off 2026-08-10.
+- **WHEN THE KNOB WOULD EARN ITS KEEP, as arithmetic rather than a guess:** a
+  machine whose software 4K decode costs **more than ~9.5ms in the handler** --
+  the measured copy-back -- and even there it arrives without GATE C and without
+  step 9. Tester-facing knob, never a default.
+- **TWO FIELDS, BECAUSE NEITHER IS THE INSTRUMENT ALONE.** `dec-path` is a
+  statement about SETUP and `hwf <n>` is the statement about FRAMES; a build that
+  created the device and never got a frame would print `d3d11va` with nothing
+  behind it, which is this project's `stalls 0 of 0` failure in a new costume.
+  `hwxfer` sits BESIDE `dec` and not inside it -- folding a PCIe readback into
+  decode time reports the readback as a decode win.
+- **Regression, knob off (the shipping config; the real risk is the
+  `openCodecContext` extraction every open now goes through):** `scrubbar.ps1`
+  full pool **PASS -- 22 files, 88 legs, `delta 0` throughout**, exit 0; four
+  selftests green (`d3d11 fellback=0 planar=1`, 11 shapes x 4, 14 channel
+  layouts, OCIO `moved=1`); the 19-file corpus matrix recorded with the run.
+- **A PUSH TO A REF CANCELS THAT REF'S IN-FLIGHT RUN, AND THIS SESSION WALKED
+  INTO IT ONE DAY AFTER RECORDING IT.** The branch push started a build; a
+  docs-only push eight minutes later killed it at `Configure CMake`. The beta.2
+  entry below already carries this, with the remedy phrased as "tag FIRST and
+  push follow-up commits after" -- **which reads as a release-day instruction
+  and is a general one**: batch the pushes, or do not push again until the run
+  you care about has finished. A trap written down is not a trap recognised in
+  a new costume.
+- **A HARNESS SLIP WORTH CARRYING: a loop that only assigns on success reports
+  the LAST SUCCESS, not a failure.** A codec-class sweep reused its previous
+  `$line` when a run produced no output and printed an "8K ProRes" row that was
+  the 4K ProRes row -- caught only because the dimensions in it read
+  `4096x2304`. The row was discarded.
+
 **THE MP4 PHASE-2 SESSION FOUND A REAL EXACTNESS BUG ON REAL FOOTAGE, AND THE
 INSTRUMENT HAD TO BE FIXED BEFORE IT COULD BE BELIEVED (2026-10-29, branch
 `mp4-phase2`). Record `docs/mp4-phase2.md`; the review it carries out is
@@ -6519,6 +6602,19 @@ FFmpeg's automatic count, **which caps at 16 and leaves half a 32-thread box idl
 `=32` is worth +21% on the 8K plate — `dec 61.11 -> 45.08ms`, 44.7 -> 54.2% of real
 time — and is **not** the fix, so the default is unchanged until the FFmpeg build
 question is settled and a default can be set once from the build that ships),
+**`TRACE_HWDEC=d3d11va`** (2026-10-31: D3D11VA hardware decode, **DEFAULT OFF and
+recommended to stay off** -- measured a net loss of ~19ms per 4K frame, taking the
+4K 60fps clip from 100.0% of real time to 63.8% with `drop 57`. The value is a
+DEVICE NAME parsed by `av_hwdevice_find_type_by_name`, not a flag, so a typo
+cannot silently mean "on"; unset, `0` and `off` are software. **Read the HUD's
+`dec-path` field or the selftest's `media:` line rather than the command line**,
+because the gate is per codec and a file the GPU cannot take decodes in software
+with the reason printed -- `software (d3d11va: this build's prores decoder has no
+d3d11va path)` on every ProRes file, which is also how the decline path is proven
+able to fire. **`hwf <n>` beside it is the half that can fail**: `d3d11va` is a
+statement about setup and the frame count is the statement about frames.
+`hwxfer` on HUD line 2 is the copy-back cost, beside `dec` and deliberately not
+inside it. Record `docs/mp4-hwdec-f1.md`),
 **`TRACE_RT_DROP=0`** (2026-08-13, `35d976b`: never drop a playback frame, i.e. the
 pre-owner-decision behaviour where a heavy source plays the whole movie slowly
 instead of holding media time. The control for anything about the drop, and the
