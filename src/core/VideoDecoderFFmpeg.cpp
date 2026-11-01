@@ -15,6 +15,12 @@ extern "C" {
 // av_cpu_count(): the decode thread default is the machine's logical CPU count
 // on intra-only sources, not FFmpeg's automatic count, which caps at 16.
 #include <libavutil/cpu.h>
+// Hardware decode (F1): av_hwdevice_ctx_create, av_hwframe_transfer_data and
+// the AVCodecHWConfig list that says per codec whether D3D11VA is even an
+// option. Only the GENERIC hwcontext header is needed -- nothing here touches
+// an ID3D11Device, because this first cut copies the frame back to CPU memory
+// and therefore does not care which device decoded it.
+#include <libavutil/hwcontext.h>
 }
 #endif
 
@@ -280,6 +286,67 @@ int envInt(const char* name, int fallback) {
     return ok ? parsed : fallback;
 }
 
+// HARDWARE DECODE (F1), OFF BY DEFAULT. TRACE_HWDEC=d3d11va asks for it;
+// anything else, including unset, is software.
+//
+// It is spelled as a device NAME rather than a flag because D3D11VA is one of
+// several hardware paths FFmpeg knows and the name is what the eventual second
+// one would be selected by. `av_hwdevice_find_type_by_name` is the parser, so
+// the accepted spellings are FFmpeg's own and a typo cannot silently mean "on".
+AVHWDeviceType hwdecTypeRequested() {
+    static const AVHWDeviceType type = [] {
+        const QByteArray v = qgetenv("TRACE_HWDEC");
+        if (v.isEmpty() || v == "0" || v.compare("off", Qt::CaseInsensitive) == 0) {
+            return AV_HWDEVICE_TYPE_NONE;
+        }
+        return av_hwdevice_find_type_by_name(v.constData());
+    }();
+    return type;
+}
+
+// WHETHER THIS CODEC CAN BE DECODED BY THIS DEVICE TYPE IS FFMPEG'S QUESTION TO
+// ANSWER, NOT A LIST OF CODEC NAMES TO MAINTAIN. avcodec_get_hw_config
+// enumerates what the decoder was built with, so a build without D3D11VA, or a
+// codec the build has no hardware path for, declines here rather than failing
+// later with something harder to attribute. Returns the hardware pixel format
+// the decoder will hand out, or AV_PIX_FMT_NONE.
+AVPixelFormat hwPixelFormatFor(const AVCodec* dec, AVHWDeviceType type) {
+    if (!dec || type == AV_HWDEVICE_TYPE_NONE) return AV_PIX_FMT_NONE;
+    for (int i = 0;; ++i) {
+        const AVCodecHWConfig* cfg = avcodec_get_hw_config(dec, i);
+        if (!cfg) return AV_PIX_FMT_NONE;
+        if ((cfg->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX)
+            && cfg->device_type == type) {
+            return cfg->pix_fmt;
+        }
+    }
+}
+
+// The decoder asks which of several formats it should produce. Hand back the
+// hardware format when it is on offer and the FIRST entry otherwise.
+//
+// THAT ELSE BRANCH IS THE PER-FILE FALLBACK AND IT IS WHY MOST OF THIS COSTS
+// NOTHING. A profile or pixel format the GPU cannot take -- 4:2:2 10-bit on
+// every current NVDEC, which is a real file in this project's own corpus --
+// never appears in the offered list, so returning the first software format
+// here means the decoder simply decodes in software. Returning the hardware
+// format regardless is what turns that case into a decode failure, and it is
+// the obvious implementation.
+//
+// `opaque` carries a pointer to the hardware format rather than to the decoder,
+// so this stays a free function with no knowledge of Impl.
+AVPixelFormat chooseHwFormat(AVCodecContext* ctx, const AVPixelFormat* offered) {
+    const AVPixelFormat want =
+        ctx && ctx->opaque ? *static_cast<const AVPixelFormat*>(ctx->opaque)
+                           : AV_PIX_FMT_NONE;
+    if (want != AV_PIX_FMT_NONE) {
+        for (const AVPixelFormat* p = offered; p && *p != AV_PIX_FMT_NONE; ++p) {
+            if (*p == want) return *p;
+        }
+    }
+    return offered ? offered[0] : AV_PIX_FMT_NONE;
+}
+
 } // namespace
 #endif
 
@@ -292,6 +359,22 @@ struct VideoDecoderFFmpeg::Impl {
     AVPacket* pkt = nullptr;
     int streamIndex = -1;
     AVPixelFormat dstPixFmt = AV_PIX_FMT_BGRA;
+
+    // Hardware decode (F1). `hwPixFmt` is both the request and the test: it is
+    // what chooseHwFormat hands the decoder, and it is what a received frame's
+    // format is compared against to know whether a copy-back is due. One value,
+    // so the two cannot disagree -- a second "is hardware on" bool is exactly
+    // how a path ends up believed-on and actually-off.
+    AVBufferRef* hwDeviceCtx = nullptr;
+    AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
+    // The copy-back target. Long-lived and unreffed per use rather than
+    // allocated per frame: at 4K P010 this is ~24MB a frame.
+    AVFrame* hwTransferFrame = nullptr;
+    // Set by the copy-back when it fails, cleared by the retry that acts on it.
+    // A flag rather than an immediate reopen, because the failure is noticed
+    // deep inside the decode walk where the codec is mid-packet and freeing it
+    // there would pull the context out from under the loop that is reading it.
+    bool hwFallbackPending = false;
 
     // Instrumented, read-only file access behind FFmpeg. Owns the AVIOContext.
     MediaIoSource io;
@@ -890,12 +973,18 @@ void VideoDecoderFFmpeg::close() {
 
     if (impl_->frame) av_frame_free(&impl_->frame);
     if (impl_->pkt) av_packet_free(&impl_->pkt);
+    if (impl_->hwTransferFrame) av_frame_free(&impl_->hwTransferFrame);
 
     for (auto& s : impl_->swsSlots) s.reset();
     impl_->swsUseClock = 0;
     impl_->swsRebuilds = 0;
 
     if (impl_->codec) avcodec_free_context(&impl_->codec);
+    // After the codec, not before: the context holds its own ref to the device,
+    // and the decoder may touch it while being torn down.
+    av_buffer_unref(&impl_->hwDeviceCtx);
+    impl_->hwPixFmt = AV_PIX_FMT_NONE;
+    impl_->hwFallbackPending = false;
     // AVFMT_FLAG_CUSTOM_IO means avformat_close_input leaves ->pb alone, so the
     // I/O source owns and frees it. Order matters: close the format context
     // first, since it may still read through pb while shutting down.
@@ -919,108 +1008,18 @@ void VideoDecoderFFmpeg::close() {
     perfStats_ = {};
 }
 
-bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
-#ifdef TRACE_WITH_FFMPEG
-    close();
-
-    QElapsedTimer openTimer;
-    openTimer.start();
-
-    // Media is read through our own AVIOContext rather than FFmpeg's file
-    // protocol. Measurement first: the buffer size matches FFmpeg's own default
-    // exactly, so this describes the read pattern Trace already had. It exists
-    // so the pattern can be seen at all -- with the built-in protocol, read
-    // count, read size and seek behaviour are invisible from outside FFmpeg.
-    if (!impl_->io.open(path, error)) {
-        return false;
-    }
-
-    impl_->fmt = avformat_alloc_context();
-    if (!impl_->fmt) {
-        error = "FFmpeg: alloc format context failed";
-        impl_->io.close();
-        return false;
-    }
-    impl_->fmt->pb = impl_->io.avio();
-    // Tells avformat_close_input not to free a pb it did not create.
-    impl_->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
-
-    // Probe limits. Left at FFmpeg's defaults unless overridden, because
-    // shrinking them trades metadata certainty for open speed and that trade
-    // has to be validated per format, not assumed. Env knobs exist so the
-    // comparison matrix can be run without a rebuild per value:
-    //   TRACE_PROBESIZE=<bytes>  TRACE_ANALYZEDURATION=<microseconds>
-    if (const int probeOverride = envInt("TRACE_PROBESIZE", 0); probeOverride > 0) {
-        av_opt_set_int(impl_->fmt, "probesize", probeOverride, 0);
-    }
-    if (const int analyzeOverride = envInt("TRACE_ANALYZEDURATION", 0); analyzeOverride > 0) {
-        av_opt_set_int(impl_->fmt, "analyzeduration", analyzeOverride, 0);
-    }
-
-    // The path is still passed so the demuxer can be probed by extension as
-    // well as by content; the bytes come from pb.
-    QElapsedTimer demuxTimer;
-    demuxTimer.start();
-    if (avformat_open_input(&impl_->fmt, path.toUtf8().constData(), nullptr, nullptr) < 0) {
-        error = "FFmpeg: unable to open file";
-        // On failure avformat_open_input frees the context it was given.
-        impl_->fmt = nullptr;
-        impl_->io.close();
-        return false;
-    }
-    const double demuxMs = static_cast<double>(demuxTimer.nsecsElapsed()) / 1'000'000.0;
-
-    // Probing is the dominant term in open time everywhere it has been
-    // measured, so its I/O is captured as a delta rather than guessed at.
-    const IoPhaseStats beforeProbe = impl_->io.stats(IoPhase::Open);
-
-    QElapsedTimer streamInfoTimer;
-    streamInfoTimer.start();
-    if (avformat_find_stream_info(impl_->fmt, nullptr) < 0) {
-        error = "FFmpeg: unable to read stream info";
-        close();
-        return false;
-    }
-    const double streamInfoMs = static_cast<double>(streamInfoTimer.nsecsElapsed()) / 1'000'000.0;
-
-    const IoPhaseStats afterProbe = impl_->io.stats(IoPhase::Open);
-    perfStats_.probeReads = afterProbe.reads - beforeProbe.reads;
-    perfStats_.probeBytes = afterProbe.bytes - beforeProbe.bytes;
-    perfStats_.probeSeeks = afterProbe.seeks - beforeProbe.seeks;
-    perfStats_.streamCount = static_cast<int>(impl_->fmt->nb_streams);
-    {
-        int64_t v = 0;
-        if (av_opt_get_int(impl_->fmt, "probesize", 0, &v) >= 0) perfStats_.probeSizeLimit = v;
-        if (av_opt_get_int(impl_->fmt, "analyzeduration", 0, &v) >= 0) perfStats_.analyzeDurationUs = v;
-    }
-
-    impl_->streamIndex = av_find_best_stream(impl_->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
-    if (impl_->streamIndex < 0) {
-        error = "FFmpeg: no video stream";
-        close();
-        return false;
-    }
-
-    AVStream* stream = impl_->fmt->streams[impl_->streamIndex];
-    const AVCodecParameters* par = stream->codecpar;
-
-    impl_->codecDef = avcodec_find_decoder(par->codec_id);
-    if (!impl_->codecDef) {
-        error = "FFmpeg: unsupported codec";
-        close();
-        return false;
-    }
+bool VideoDecoderFFmpeg::openCodecContext(bool allowHw, QString& error) {
+    const AVCodecParameters* par = impl_->fmt->streams[impl_->streamIndex]->codecpar;
 
     impl_->codec = avcodec_alloc_context3(impl_->codecDef);
     if (!impl_->codec) {
         error = "FFmpeg: alloc codec context failed";
-        close();
         return false;
     }
 
     if (avcodec_parameters_to_context(impl_->codec, par) < 0) {
         error = "FFmpeg: codec params init failed";
-        close();
+        avcodec_free_context(&impl_->codec);
         return false;
     }
 
@@ -1116,8 +1115,175 @@ bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
         : FF_THREAD_SLICE;
     metadata_.intraOnly = intraOnly;
 
+    // HARDWARE DECODE, AND EVERY WAY IT CAN DECLINE SAYS SO. `decodePath` is
+    // read by the HUD and by the issue-report mail, and "hardware decode is off"
+    // and "hardware decode was asked for and this file could not take it" are
+    // different facts that must not render alike.
+    //
+    // All of this happens BEFORE avcodec_open2 because hw_device_ctx and
+    // get_format cannot be set on an open codec -- which is the whole reason this
+    // block is a function the fallback can call again rather than inline code.
+    QString decodePath = QStringLiteral("software");
+    const AVHWDeviceType hwType = allowHw ? hwdecTypeRequested() : AV_HWDEVICE_TYPE_NONE;
+    if (!allowHw && hwdecTypeRequested() != AV_HWDEVICE_TYPE_NONE) {
+        decodePath = QStringLiteral("software (hardware decode declined for this file)");
+    } else if (hwType != AV_HWDEVICE_TYPE_NONE) {
+        const char* typeName = av_hwdevice_get_type_name(hwType);
+        const QString typeStr = QString::fromLatin1(typeName ? typeName : "unknown");
+        const AVPixelFormat hwFmt = hwPixelFormatFor(impl_->codecDef, hwType);
+        if (hwFmt == AV_PIX_FMT_NONE) {
+            decodePath = QStringLiteral("software (%1: this build's %2 decoder has no %1 path)")
+                             .arg(typeStr, QString::fromLatin1(impl_->codecDef->name));
+        } else {
+            AVBufferRef* dev = nullptr;
+            const int devRes = av_hwdevice_ctx_create(&dev, hwType, nullptr, nullptr, 0);
+            if (devRes < 0 || !dev) {
+                char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+                av_strerror(devRes, errbuf, sizeof(errbuf));
+                decodePath = QStringLiteral("software (%1: device create failed: %2)")
+                                 .arg(typeStr, QString::fromUtf8(errbuf));
+            } else {
+                av_buffer_unref(&impl_->hwDeviceCtx);
+                impl_->hwDeviceCtx = dev;
+                impl_->hwPixFmt = hwFmt;
+                impl_->codec->hw_device_ctx = av_buffer_ref(impl_->hwDeviceCtx);
+                impl_->codec->opaque = &impl_->hwPixFmt;
+                impl_->codec->get_format = chooseHwFormat;
+                decodePath = typeStr;
+            }
+        }
+    }
+    // Allocated only on the hardware path, so the software build pays nothing
+    // at all for this -- not even a frame header per media open. With the knob
+    // unset the whole feature costs one cached getenv at open and one int
+    // compare per received frame.
+    if (impl_->hwPixFmt != AV_PIX_FMT_NONE && !impl_->hwTransferFrame) {
+        impl_->hwTransferFrame = av_frame_alloc();
+    }
+
+    // SAID OUT LOUD ONCE PER OPEN, and only when hardware decode was ASKED for.
+    // The same convention the renderer fallback follows: a path that was
+    // requested and silently did not engage is the thing worth announcing, and
+    // a tester running from a console has no HUD to read it off. Through
+    // fprintf rather than qWarning -- in this WIN32-subsystem build Qt's
+    // handler does not reliably reach an attached console's stderr, which this
+    // project has already been caught by once.
+    if (hwdecTypeRequested() != AV_HWDEVICE_TYPE_NONE) {
+        fprintf(stderr, "trace-hwdec: %s\n", decodePath.toUtf8().constData());
+        fflush(stderr);
+    }
+
     if (avcodec_open2(impl_->codec, impl_->codecDef, nullptr) < 0) {
         error = "FFmpeg: codec open failed";
+        avcodec_free_context(&impl_->codec);
+        av_buffer_unref(&impl_->hwDeviceCtx);
+        impl_->hwPixFmt = AV_PIX_FMT_NONE;
+        return false;
+    }
+
+    // Reported from the context AFTER the open, not from what was asked for.
+    // avcodec_open2 is free to change thread_count, and for a hardware decoder
+    // the threading policy above is largely moot -- the GPU does the work. Both
+    // facts are things to read off the run rather than infer from this source.
+    perfStats_.threadCount = impl_->codec->thread_count;
+    perfStats_.threadTypeIsFrame = impl_->threadTypeIsFrame;
+    perfStats_.decodePath = decodePath;
+    return true;
+}
+
+bool VideoDecoderFFmpeg::open(const QString& path, QString& error) {
+#ifdef TRACE_WITH_FFMPEG
+    close();
+
+    QElapsedTimer openTimer;
+    openTimer.start();
+
+    // Media is read through our own AVIOContext rather than FFmpeg's file
+    // protocol. Measurement first: the buffer size matches FFmpeg's own default
+    // exactly, so this describes the read pattern Trace already had. It exists
+    // so the pattern can be seen at all -- with the built-in protocol, read
+    // count, read size and seek behaviour are invisible from outside FFmpeg.
+    if (!impl_->io.open(path, error)) {
+        return false;
+    }
+
+    impl_->fmt = avformat_alloc_context();
+    if (!impl_->fmt) {
+        error = "FFmpeg: alloc format context failed";
+        impl_->io.close();
+        return false;
+    }
+    impl_->fmt->pb = impl_->io.avio();
+    // Tells avformat_close_input not to free a pb it did not create.
+    impl_->fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+
+    // Probe limits. Left at FFmpeg's defaults unless overridden, because
+    // shrinking them trades metadata certainty for open speed and that trade
+    // has to be validated per format, not assumed. Env knobs exist so the
+    // comparison matrix can be run without a rebuild per value:
+    //   TRACE_PROBESIZE=<bytes>  TRACE_ANALYZEDURATION=<microseconds>
+    if (const int probeOverride = envInt("TRACE_PROBESIZE", 0); probeOverride > 0) {
+        av_opt_set_int(impl_->fmt, "probesize", probeOverride, 0);
+    }
+    if (const int analyzeOverride = envInt("TRACE_ANALYZEDURATION", 0); analyzeOverride > 0) {
+        av_opt_set_int(impl_->fmt, "analyzeduration", analyzeOverride, 0);
+    }
+
+    // The path is still passed so the demuxer can be probed by extension as
+    // well as by content; the bytes come from pb.
+    QElapsedTimer demuxTimer;
+    demuxTimer.start();
+    if (avformat_open_input(&impl_->fmt, path.toUtf8().constData(), nullptr, nullptr) < 0) {
+        error = "FFmpeg: unable to open file";
+        // On failure avformat_open_input frees the context it was given.
+        impl_->fmt = nullptr;
+        impl_->io.close();
+        return false;
+    }
+    const double demuxMs = static_cast<double>(demuxTimer.nsecsElapsed()) / 1'000'000.0;
+
+    // Probing is the dominant term in open time everywhere it has been
+    // measured, so its I/O is captured as a delta rather than guessed at.
+    const IoPhaseStats beforeProbe = impl_->io.stats(IoPhase::Open);
+
+    QElapsedTimer streamInfoTimer;
+    streamInfoTimer.start();
+    if (avformat_find_stream_info(impl_->fmt, nullptr) < 0) {
+        error = "FFmpeg: unable to read stream info";
+        close();
+        return false;
+    }
+    const double streamInfoMs = static_cast<double>(streamInfoTimer.nsecsElapsed()) / 1'000'000.0;
+
+    const IoPhaseStats afterProbe = impl_->io.stats(IoPhase::Open);
+    perfStats_.probeReads = afterProbe.reads - beforeProbe.reads;
+    perfStats_.probeBytes = afterProbe.bytes - beforeProbe.bytes;
+    perfStats_.probeSeeks = afterProbe.seeks - beforeProbe.seeks;
+    perfStats_.streamCount = static_cast<int>(impl_->fmt->nb_streams);
+    {
+        int64_t v = 0;
+        if (av_opt_get_int(impl_->fmt, "probesize", 0, &v) >= 0) perfStats_.probeSizeLimit = v;
+        if (av_opt_get_int(impl_->fmt, "analyzeduration", 0, &v) >= 0) perfStats_.analyzeDurationUs = v;
+    }
+
+    impl_->streamIndex = av_find_best_stream(impl_->fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    if (impl_->streamIndex < 0) {
+        error = "FFmpeg: no video stream";
+        close();
+        return false;
+    }
+
+    AVStream* stream = impl_->fmt->streams[impl_->streamIndex];
+    const AVCodecParameters* par = stream->codecpar;
+
+    impl_->codecDef = avcodec_find_decoder(par->codec_id);
+    if (!impl_->codecDef) {
+        error = "FFmpeg: unsupported codec";
+        close();
+        return false;
+    }
+
+    if (!openCodecContext(hwdecTypeRequested() != AV_HWDEVICE_TYPE_NONE, error)) {
         close();
         return false;
     }
@@ -1746,6 +1912,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     long long convertCalls = 0;
     qint64 swsScaleNs = 0;
     qint64 memcpyNs = 0;
+    qint64 hwTransferNs = 0;
 
     auto updatePerfStats = [&]() {
         const double decodeMs = static_cast<double>(decodeNs) / 1'000'000.0;
@@ -1758,6 +1925,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         const double wrapMs = static_cast<double>(convertWrapNs) / 1'000'000.0;
         const double swsMs = static_cast<double>(swsScaleNs) / 1'000'000.0;
         const double memcpyMs = static_cast<double>(memcpyNs) / 1'000'000.0;
+        const double hwXferMs = static_cast<double>(hwTransferNs) / 1'000'000.0;
 
         perfStats_.threadTypeIsFrame = impl_->threadTypeIsFrame;
         // Read back off the codec context rather than recomputed from the env,
@@ -1771,6 +1939,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         perfStats_.lastConvertWrapMs = wrapMs;
         perfStats_.lastSwsScaleMs = swsMs;
         perfStats_.lastMemcpyMs = memcpyMs;
+        perfStats_.lastHwTransferMs = hwXferMs;
         const double ctxRebuildMs = static_cast<double>(ctxRebuildNs) / 1'000'000.0;
         const double detachMs = static_cast<double>(detachNs) / 1'000'000.0;
         perfStats_.lastCtxRebuildMs = ctxRebuildMs;
@@ -1791,6 +1960,7 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
         perfStats_.avgCtxRebuildMs += (ctxRebuildMs - perfStats_.avgCtxRebuildMs) / n;
         perfStats_.avgDetachMs += (detachMs - perfStats_.avgDetachMs) / n;
         perfStats_.avgSwsScaleMs += (swsMs - perfStats_.avgSwsScaleMs) / n;
+        perfStats_.avgHwTransferMs += (hwXferMs - perfStats_.avgHwTransferMs) / n;
         perfStats_.avgMemcpyMs += (memcpyMs - perfStats_.avgMemcpyMs) / n;
     };
 
@@ -2236,6 +2406,58 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
                 if (recvRes != 0) break;
                 if (impl_->drainPacketSent) ++perfStats_.drainFramesRecovered;
 
+                // A HARDWARE-DECODED FRAME IS A GPU TEXTURE, NOT PIXELS, AND IT
+                // IS SWAPPED FOR CPU MEMORY HERE AND NOWHERE ELSE. Everything
+                // downstream -- the planar handoff, swscale, the reverse cache,
+                // the burn-in the corpus reads -- walks impl_->frame->data as
+                // addressable memory, so the copy-back has to happen before any
+                // of it. There is exactly one avcodec_receive_frame in this file,
+                // which is what makes "before any of it" a single statement
+                // rather than an invariant to maintain at a dozen call sites.
+                //
+                // Timed into its own term. It is a PCIe readback of a whole
+                // frame -- ~24MB at 4K P010 -- and whether this cut is worth
+                // anything is decided by that number against the decode time it
+                // replaces, so charging it to `dec` would report the readback as
+                // a decode win.
+                if (impl_->hwPixFmt != AV_PIX_FMT_NONE
+                    && impl_->frame->format == impl_->hwPixFmt) {
+                    QElapsedTimer xfer;
+                    xfer.start();
+                    AVFrame* sw = impl_->hwTransferFrame;
+                    bool transferred = false;
+                    if (sw) {
+                        av_frame_unref(sw);
+                        if (av_hwframe_transfer_data(sw, impl_->frame, 0) >= 0) {
+                            // Props carry pts, colour and the keyframe flag.
+                            // transfer_data copies pixels only, so without this
+                            // the frame arrives with no timestamp and
+                            // frameFromPts indexes it as if it were frame 0.
+                            av_frame_copy_props(sw, impl_->frame);
+                            av_frame_unref(impl_->frame);
+                            av_frame_move_ref(impl_->frame, sw);
+                            transferred = true;
+                        }
+                    }
+                    hwTransferNs += xfer.nsecsElapsed();
+                    if (transferred) {
+                        ++perfStats_.hwFramesTransferred;
+                    } else {
+                        // The frame cannot be read, so it cannot be presented.
+                        // Counted and reported rather than substituted for:
+                        // leaving the previous frame in impl_->frame and
+                        // labelling it with this index is the failure e76eabb
+                        // exists to prevent, and it is worse than a gap.
+                        ++perfStats_.hwTransferFailures;
+                        perfStats_.decodePath =
+                            QStringLiteral("software (%1: frame copy-back failed)")
+                                .arg(QString::fromLatin1(
+                                    av_hwdevice_get_type_name(hwdecTypeRequested())));
+                        impl_->hwFallbackPending = true;
+                        break;
+                    }
+                }
+
                 const int64_t pts = (impl_->frame->best_effort_timestamp != AV_NOPTS_VALUE)
                                         ? impl_->frame->best_effort_timestamp
                                         : impl_->frame->pts;
@@ -2615,6 +2837,55 @@ bool VideoDecoderFFmpeg::decodeFrameAt(long long frameIndex, VideoFrame& outFram
     }
 
     WalkResult walk = decodeUntilTarget(frameIndex);
+
+    // THE PER-FILE HARDWARE FALLBACK. Reached only when a frame decoded on the
+    // GPU could not be read back, which is the one hardware failure mode that
+    // does NOT resolve itself: a profile or pixel format the GPU cannot take
+    // never reaches here at all, because chooseHwFormat hands the decoder a
+    // software format and the file simply decodes in software from the first
+    // frame. So this path is rare, and it is the reason the brief asked for a
+    // fallback rather than a capability check.
+    //
+    // Reopening means the codec context is destroyed and rebuilt, so the
+    // decoder has no position any more. The re-seek and re-walk are therefore
+    // not optional cleanup -- they are how the request gets answered at all --
+    // and they are the same two calls the overshoot loop below makes, for the
+    // same reason.
+    //
+    // Once per media. A second failure after the codec has been reopened
+    // without hardware cannot be the hardware, so retrying again would be a
+    // loop with no new information in it.
+    if (impl_->hwFallbackPending) {
+        impl_->hwFallbackPending = false;
+        const QString reason = perfStats_.decodePath;
+        QString reopenError;
+        avcodec_free_context(&impl_->codec);
+        av_buffer_unref(&impl_->hwDeviceCtx);
+        impl_->hwPixFmt = AV_PIX_FMT_NONE;
+        impl_->lastDecodedFrame = -1;
+        impl_->inputEofReached = false;
+        impl_->drainPacketSent = false;
+        impl_->decoderFullyDrained = false;
+        if (!openCodecContext(/*allowHw=*/false, reopenError)) {
+            // The codec context is gone and could not be rebuilt, so there is
+            // no decoder left to run the overshoot loop below -- which would
+            // hand avcodec_flush_buffers a null pointer. Report and leave.
+            // Vanishingly unlikely (an alloc or an open failing on a codec that
+            // opened seconds ago), which is exactly why it needs the guard: it
+            // is the branch nothing will ever exercise by accident.
+            error = reopenError.isEmpty()
+                        ? QStringLiteral("FFmpeg: software fallback reopen failed")
+                        : reopenError;
+            return false;
+        }
+        // openCodecContext writes its own decodePath; put back the one that
+        // says WHY, because "declined for this file" is weaker than the
+        // measured truth and this is the only place that knows it.
+        perfStats_.decodePath = reason;
+        if (seekToFrame(frameIndex, 0)) {
+            walk = decodeUntilTarget(frameIndex);
+        }
+    }
 
     // THE OVERSHOOT RE-SEEK. An open-GOP seek that landed past its target is
     // retried from progressively further back, and the walk forward from there
