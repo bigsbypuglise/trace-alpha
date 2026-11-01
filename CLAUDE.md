@@ -1947,9 +1947,10 @@ https://github.com/bigsbypuglise/trace-alpha/releases/tag/v0.4.0-beta.1
   outstanding CI addition.
 
 **F1 (HARDWARE DECODE) IS BUILT, MEASURED AND CLOSED AS A NET LOSS ON THIS
-MACHINE (2026-10-31, branch `mp4-hwdec`). `TRACE_HWDEC=d3d11va` SHIPS OFF AND
-THE RECOMMENDATION IS THAT IT STAYS OFF -- and DO NOT build the zero-copy
-stage.** Record `docs/mp4-hwdec-f1.md`; read it before re-proposing any of this.
+MACHINE (2026-10-31, branch `mp4-hwdec`, MERGED to `main` at `5821fce`).
+`TRACE_HWDEC=d3d11va` SHIPS OFF AND THE RECOMMENDATION IS THAT IT STAYS OFF --
+and DO NOT build the zero-copy stage.** Record `docs/mp4-hwdec-f1.md`; read it
+before re-proposing any of this.
 
 - **DISPLAY, AGAIN WRONG IN BOTH WAYS**: active path a **1920x1200 @ 60Hz Parsec
   virtual display**, the 4090's own panel at **1024x768 @ 60Hz**, `parsecd`
