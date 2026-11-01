@@ -328,3 +328,12 @@ Stated so none of it reads as cleared.
   burn-in plate is what settled it. On a clip without one, a colour comparison
   needs the frame index established some other way before any of its numbers
   mean anything.
+* **A push to a ref cancels that ref's in-flight CI run, and this session walked
+  into it one day after recording it.** The branch push started a build; a
+  docs-only push eight minutes later killed it at `Configure CMake` and started
+  a second from scratch. CLAUDE.md already carries this from the beta.2 release
+  (where it cost a cold ~40-minute vcpkg install) with the remedy stated as "tag
+  first, push follow-ups after" — **which reads as a release-day instruction and
+  is actually a general one**: batch the pushes, or do not push again until the
+  run you care about has finished. Writing a trap down is not the same as
+  recognising it in a new costume.

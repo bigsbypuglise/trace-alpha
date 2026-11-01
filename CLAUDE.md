@@ -2015,6 +2015,14 @@ stage.** Record `docs/mp4-hwdec-f1.md`; read it before re-proposing any of this.
   full pool **PASS -- 22 files, 88 legs, `delta 0` throughout**, exit 0; four
   selftests green (`d3d11 fellback=0 planar=1`, 11 shapes x 4, 14 channel
   layouts, OCIO `moved=1`); the 19-file corpus matrix recorded with the run.
+- **A PUSH TO A REF CANCELS THAT REF'S IN-FLIGHT RUN, AND THIS SESSION WALKED
+  INTO IT ONE DAY AFTER RECORDING IT.** The branch push started a build; a
+  docs-only push eight minutes later killed it at `Configure CMake`. The beta.2
+  entry below already carries this, with the remedy phrased as "tag FIRST and
+  push follow-up commits after" -- **which reads as a release-day instruction
+  and is a general one**: batch the pushes, or do not push again until the run
+  you care about has finished. A trap written down is not a trap recognised in
+  a new costume.
 - **A HARNESS SLIP WORTH CARRYING: a loop that only assigns on success reports
   the LAST SUCCESS, not a failure.** A codec-class sweep reused its previous
   `$line` when a run produced no output and printed an "8K ProRes" row that was
