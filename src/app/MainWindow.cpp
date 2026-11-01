@@ -10722,7 +10722,7 @@ void MainWindow::refreshHud(const QString& action) {
             // count that stops after the first frame of a source means the reuse
             // is already there and the remaining per-frame cost is the transfer
             // itself, which is a copy that has to happen somewhere.
-            const QString l2 = QString("dec %1/%2 | sws %3/%4 | ctx %5/%6 | detach %7/%8 | alloc %9 | memcpy %10 | handoff %11 | upload %15/%16 tex %17 | draw %12 | total %13 | budget %14ms")
+            const QString l2 = QString("dec %1/%2 | hwxfer %18/%19 | sws %3/%4 | ctx %5/%6 | detach %7/%8 | alloc %9 | memcpy %10 | handoff %11 | upload %15/%16 tex %17 | draw %12 | total %13 | budget %14ms")
                 .arg(QString::number(perf.lastDecodeMs, 'f', 2))
                 .arg(QString::number(perf.avgDecodeMs, 'f', 2))
                 .arg(QString::number(perf.lastSwsScaleMs, 'f', 2))
@@ -10741,9 +10741,17 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(QString::number(budgetMs, 'f', 2))
                 .arg(QString::number(drawPerf.lastUploadMs, 'f', 2))
                 .arg(QString::number(drawPerf.avgUploadMs, 'f', 2))
-                .arg(drawPerf.textureCreates);
+                .arg(drawPerf.textureCreates)
+                // THE COPY-BACK, BESIDE `dec` AND NOT INSIDE IT. On the
+                // software path both figures read 0.00, which is the honest
+                // answer rather than a gap; on the hardware path this is what
+                // `dec` fell by minus what it cost to get the frame back, and
+                // the whole question of whether the first cut is worth anything
+                // is that subtraction.
+                .arg(QString::number(perf.lastHwTransferMs, 'f', 2))
+                .arg(QString::number(perf.avgHwTransferMs, 'f', 2));
 
-            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | overshoot %21/%22 | thr %20")
+            const QString l3 = QString("cvt/req %1 | ctx-rebuilds %2 | shared %3 | sws %4 | %5 | rev-hit %6% (%7/%8) | late %9 | walk %10f cache %11cv/%12ms | seek %13/%14 n=%15 | drain %16pk/%17f stale-blocked %18 recov %19 | overshoot %21/%22 | thr %20 | dec-path %23")
                 .arg(perf.lastConvertCalls)
                 .arg(perf.lastCtxRebuilds)
                 .arg(perf.lastImageWasShared ? "yes" : "no")
@@ -10779,7 +10787,25 @@ void MainWindow::refreshHud(const QString& action) {
                 .arg(perf.seekOvershootReseekEnabled
                          ? QString::number(perf.seekOvershootReseeks)
                          : QStringLiteral("off"))
-                .arg(perf.seekOvershootUnresolved);
+                .arg(perf.seekOvershootUnresolved)
+                // WHICH DECODE PATH, AND HOW MANY FRAMES CAME OFF IT. The two
+                // halves are together because neither is the instrument on its
+                // own: `d3d11va` is a statement about setup, and a build that
+                // created the device and then never received a hardware frame
+                // would print it with nothing behind it -- which is this
+                // project's own recorded failure (`stalls 0 of 0` on frames
+                // carrying `period max 512ms`). The frame count is what can
+                // fail. On the software path there is no count to print, and
+                // the reason the path is software is printed instead.
+                .arg(perf.hwFramesTransferred > 0
+                         ? QString("%1 %2f")
+                               .arg(perf.decodePath)
+                               .arg(perf.hwFramesTransferred)
+                         : (perf.hwTransferFailures > 0
+                                ? QString("%1 xfer-fail %2")
+                                      .arg(perf.decodePath)
+                                      .arg(perf.hwTransferFailures)
+                                : perf.decodePath));
 
             // ONE instrument, shared with the image-sequence branch below.
             // vm.fps rather than frameSource_->fps() so this line stays byte
@@ -11848,7 +11874,20 @@ int MainWindow::runScrubSelfTest(const QString& clipPath) {
             << (videoDecoder_.metadata().intraOnly ? "intra-only" : "long-GOP")
             << " | thr " << (perf.threadTypeIsFrame ? "frame" : "slice") << " x"
             << perf.threadCount << " | renderer " << viewer_->rendererName()
-            << (viewer_->overlayEnabled() ? " +overlay" : " +bar") << "\n";
+            << (viewer_->overlayEnabled() ? " +overlay" : " +bar")
+            // THE DECODE PATH AND THE GPU IT IS ON, ON THE LINE A TESTER PASTES
+            // BACK. The selftest resolves no window, so it is the one instrument
+            // here that cannot be voided by the tooltip trap -- which makes it
+            // the right place for a question whose answer must not depend on the
+            // harness. The adapter matters because this box has a Parsec virtual
+            // display adapter in its list: a D3D11 device created on that has no
+            // NVDEC behind it, and "hardware decode is slow" and "hardware
+            // decode is on the wrong GPU" look identical from everything else.
+            << " | dec-path " << perf.decodePath
+            << " hwf " << perf.hwFramesTransferred
+            << " | gpu " << (viewer_->rendererAdapterName().isEmpty()
+                                 ? QStringLiteral("n/a")
+                                 : viewer_->rendererAdapterName()) << "\n";
         rep << "win " << static_cast<int>(std::lround(width() * dpr)) << "x"
             << static_cast<int>(std::lround(height() * dpr)) << " | display "
             << drawPerf.lastDrawSize.width() << "x" << drawPerf.lastDrawSize.height()
